@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+.dark-mode .bg-white {
+  background-color: #111827 !important;
+}
+
+.dark-mode .bg-slate-50 {
+  background-color: #0f172a !important;
+}
+
+.dark-mode .bg-slate-100 {
+  background-color: #1f2937 !important;
+}
+
+.dark-mode .bg-slate-200 {
+  background-color: #1f2937 !important;
+}
+
+.dark-mode .bg-slate-900 {
+  background-color: #0f172a !important;
+}
+
+.dark-mode .bg-slate-800 {
+  background-color: #111827 !important;
+}
+
+.dark-mode .text-slate-900,
+.dark-mode .text-slate-800 {
+  color: #f8fafc !important;
+}
+
+.dark-mode .text-slate-700,
+.dark-mode .text-slate-600,
+.dark-mode .text-slate-500,
+.dark-mode .text-slate-400 {
+  color: #cbd5e1 !important;
+}
+
+.dark-mode .border-slate-200,
+.dark-mode .border-slate-300,
+.dark-mode .border-slate-100,
+.dark-mode .ring-slate-200 {
+  border-color: #334155 !important;
+  box-shadow: none !important;
+}
+
+.dark-mode .hover\:bg-slate-50:hover {
+  background-color: #1f2937 !important;
+}
