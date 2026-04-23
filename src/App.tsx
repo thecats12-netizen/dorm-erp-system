@@ -832,6 +832,29 @@ function formatNumber(n: number) {
   return new Intl.NumberFormat("ko-KR").format(n || 0);
 }
 
+function formatDateOnly(value: string) {
+  if (!value) return "";
+  return value.slice(0, 10);
+}
+
+function parseExcelDate(value: unknown) {
+  if (typeof value === "number") {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (!parsed || !parsed.y) return "";
+    const month = String(parsed.m).padStart(2, "0");
+    const day = String(parsed.d).padStart(2, "0");
+    return `${parsed.y}-${month}-${day}`;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    const date = new Date(trimmed);
+    if (!Number.isNaN(date.valueOf())) return date.toISOString().slice(0, 10);
+    return trimmed;
+  }
+  return "";
+}
+
 function daysDiff(dateText: string) {
   if (!dateText) return Number.POSITIVE_INFINITY;
   const target = new Date(dateText).getTime();
@@ -1498,26 +1521,32 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
     const workbook = XLSX.read(buffer, { type: "array" });
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
-    const mapped = rows.map((r) => ({
+    const mapped = rows.map((r) => {
+      const address = String(r["도로명주소"] || r["주소"] || r["address"] || "").trim();
+      const matchedDorm = dorms.find(
+        (d) => d.address === address || `${d.address} ${d.dong} ${d.roomHo}`.trim() === address || `${d.address}${d.dong}${d.roomHo}` === address
+      );
+      return {
       id: crypto.randomUUID(),
       site: String(r["지역"] || r["site"] || "평택") as Site,
       gender: String(r["성별"] || r["gender"] || "남") as Gender,
       name: String(r["이름"] || r["name"] || ""),
       phone: String(r["연락처"] || r["phone"] || ""),
-      dormId: String(r["기숙사ID"] || r["dormId"] || ""),
-      buildingName: String(r["건물명"] || r["buildingName"] || ""),
-      dong: String(r["동"] || ""),
-      roomHo: String(r["호수"] || r["호"] || r["roomHo"] || ""),
-      moveInDate: String(r["입실일"] || r["moveInDate"] || ""),
-      moveOutDate: String(r["퇴실일"] || r["moveOutDate"] || ""),
+      dormId: matchedDorm?.id || String(r["기숙사ID"] || r["dormId"] || ""),
+      buildingName: String(r["건물명"] || r["buildingName"] || matchedDorm?.buildingName || ""),
+      dong: String(r["동"] || matchedDorm?.dong || ""),
+      roomHo: String(r["호수"] || r["호"] || r["roomHo"] || matchedDorm?.roomHo || ""),
+      moveInDate: parseExcelDate(r["입실일"] || r["moveInDate"] || ""),
+      moveOutDate: parseExcelDate(r["퇴실일"] || r["moveOutDate"] || ""),
       residenceStatus: String(r["거주상태"] || r["status"] || "거주중") as NewHireResidenceStatus,
       previousResidenceId: String(r["이전거주ID"] || r["previousResidenceId"] || ""),
       moveInType: String(r["입주유형"] || r["moveInType"] || "신규") as MoveInType,
       extensionReason: String(r["연장사유"] || r["extensionReason"] || ""),
       notes: String(r["특이사항 메모"] || r["notes"] || ""),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }));
+      createdAt: new Date().toISOString().slice(0,10),
+      updatedAt: new Date().toISOString().slice(0,10),
+    };
+    });
     setNewHires((prev) => [...mapped, ...prev]);
   };
 
@@ -1647,25 +1676,28 @@ const exportExcel = () => {
     }));
     fileName = "기숙사계약현황.xlsx";
   } else if (activeTab === "newHires") {
-    rows = visibleNewHires.map((h) => ({
-      지역: h.site,
-      성별: h.gender,
-      이름: h.name,
-      연락처: h.phone,
-      기숙사ID: h.dormId,
-      건물명: h.buildingName,
-      동: h.dong,
-      호수: h.roomHo,
-      입실일: h.moveInDate,
-      퇴실일: h.moveOutDate,
-      거주상태: h.residenceStatus,
-      이전거주ID: h.previousResidenceId,
-      입주유형: h.moveInType,
-      연장사유: h.extensionReason,
-      "특이사항 메모": h.notes,
-      등록일: h.createdAt,
-      수정일: h.updatedAt,
-    }));
+    rows = visibleNewHires.map((h) => {
+      const dorm = dorms.find((d) => d.id === h.dormId);
+      return {
+        지역: h.site,
+        성별: h.gender,
+        이름: h.name,
+        연락처: h.phone,
+        도로명주소: dorm?.address || h.dormId,
+        건물명: h.buildingName,
+        동: h.dong,
+        호수: h.roomHo,
+        입실일: h.moveInDate,
+        퇴실일: h.moveOutDate,
+        거주상태: h.residenceStatus,
+        이전거주ID: h.previousResidenceId,
+        입주유형: h.moveInType,
+        연장사유: h.extensionReason,
+        "특이사항 메모": h.notes,
+        등록일: formatDateOnly(h.createdAt),
+        수정일: formatDateOnly(h.updatedAt),
+      };
+    });
     fileName = "신입사원명단.xlsx";
   } else if (activeTab === "sales") {
     rows = sales.map((s) => ({
@@ -2359,8 +2391,8 @@ const exportExcel = () => {
                     <th className="px-2 py-2 whitespace-nowrap text-xs">성별</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">이름</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">연락</th>
-                    <th className="px-2 py-2 whitespace-nowrap text-xs">기숙사</th>
-                    <th className="px-2 py-2 whitespace-nowrap text-xs">건물</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">도로명주소</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">건물명</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">동</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">호</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">입실</th>
@@ -2399,7 +2431,7 @@ const exportExcel = () => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.gender}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.name}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.phone}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.dormId}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{dorms.find((d) => d.id === h.dormId)?.address || h.dormId}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.buildingName}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.dong}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.roomHo}</td>
@@ -2410,8 +2442,8 @@ const exportExcel = () => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveInType}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.extensionReason || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.notes || "-"}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.createdAt}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.updatedAt}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.createdAt)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.updatedAt)}</td>
                     </tr>
                   ))}
                   {visibleNewHires.length === 0 && (
@@ -3442,11 +3474,21 @@ const exportExcel = () => {
             <Input label="이름" value={newHireForm.name} onChange={(v) => setNewHireForm((f) => ({ ...f, name: v }))} />
             <Input label="연락처" value={newHireForm.phone} onChange={(v) => setNewHireForm((f) => ({ ...f, phone: v }))} />
             <SearchableSelect
-              label="기숙사ID"
+              label="도로명주소"
               value={newHireForm.dormId}
-              onChange={(v) => setNewHireForm((f) => ({ ...f, dormId: v }))}
+              onChange={(v) => {
+                const selected = dorms.find((d) => d.id === v);
+                setNewHireForm((f) => ({
+                  ...f,
+                  dormId: v,
+                  site: selected?.site || f.site,
+                  buildingName: selected?.buildingName || f.buildingName,
+                  dong: selected?.dong || f.dong,
+                  roomHo: selected?.roomHo || f.roomHo,
+                }));
+              }}
               options={dorms.filter((d) => !newHireForm.site || d.site === newHireForm.site).map((d) => d.id)}
-              displayOptions={dorms.filter((d) => !newHireForm.site || d.site === newHireForm.site).map((d) => d.buildingName)}
+              displayOptions={dorms.filter((d) => !newHireForm.site || d.site === newHireForm.site).map((d) => d.address || d.buildingName)}
             />
             <Input label="건물명" value={newHireForm.buildingName} onChange={(v) => setNewHireForm((f) => ({ ...f, buildingName: v }))} />
             <Input label="동" value={newHireForm.dong} onChange={(v) => setNewHireForm((f) => ({ ...f, dong: v }))} />
