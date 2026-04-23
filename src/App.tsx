@@ -174,7 +174,7 @@ type LeaseContract = {
   gender: "남" | "여";
 };
 
-type DormContractStatus = "진행중" | "종료" | "연장" | "해지";
+type DormContractStatus = "진행중" | "종료" | "연장" | "해지" | "공실" | "만료예정";
 type ContractType = "신규" | "연장" | "변경";
 
 type DormContract = {
@@ -184,6 +184,11 @@ type DormContract = {
   buildingName: string;
   dong: string;
   roomHo: string;
+  pyeong: string;
+  landlordName: string;
+  landlordPhone: string;
+  realEstateName: string;
+  realEstatePhone: string;
   contractStart: string;
   contractEnd: string;
   contractStatus: DormContractStatus;
@@ -191,16 +196,16 @@ type DormContract = {
   prepaymentDeposit: string;
   deposit: string;
   monthlyRentOrMaintenance: string;
-  previousContractId: string;
   contractType: ContractType;
+  notes: string;
   registeredBy: string;
   modifiedBy: string;
   createdAt: string;
   updatedAt: string;
 };
 
-type NewHireResidenceStatus = "거주중" | "퇴실" | "연장";
-type MoveInType = "신규" | "재입주" | "연장";
+type NewHireResidenceStatus = "거주중" | "퇴실" | "연장" | "만료예정" | "대기중";
+type MoveInType = "대기자" | "신규" | "재입주" | "연장";
 
 type NewHireEmployee = {
   id: string;
@@ -208,14 +213,18 @@ type NewHireEmployee = {
   gender: Gender;
   name: string;
   phone: string;
+  department: string;
   dormId: string;
   buildingName: string;
   dong: string;
   roomHo: string;
+  expectedMoveInDate: string;
   moveInDate: string;
+  expectedMoveOutDate: string;
   moveOutDate: string;
+  actualMoveOutDate: string;
+  cheonanMoveDate: string;
   residenceStatus: NewHireResidenceStatus;
-  previousResidenceId: string;
   moveInType: MoveInType;
   extensionReason: string;
   notes: string;
@@ -509,15 +518,20 @@ const demoDormContracts: DormContract[] = [
     buildingName: "소사벌리더스하임",
     dong: "109동",
     roomHo: "2002호",
-    contractStart: "2025-05-16",
-    contractEnd: "2027-05-16",
+    pyeong: "24",
+    landlordName: "김철수",
+    landlordPhone: "010-1234-5678",
+    realEstateName: "평택부동산",
+    realEstatePhone: "031-123-4567",
+    contractStart: "",
+    contractEnd: "",
     contractStatus: "진행중",
     contractAmount: "20,000,000",
     prepaymentDeposit: "2,000,000",
     deposit: "1,000,000",
     monthlyRentOrMaintenance: "120,000",
-    previousContractId: "",
     contractType: "신규",
+    notes: "계약 완료",
     registeredBy: "총관리자",
     modifiedBy: "총관리자",
     createdAt: new Date().toISOString(),
@@ -532,14 +546,18 @@ const demoNewHires: NewHireEmployee[] = [
     gender: "남",
     name: "정승우",
     phone: "010-1111-2222",
+    department: "개발팀",
     dormId: demoDorms[0]?.id ?? "",
     buildingName: "소사벌리더스하임",
     dong: "109동",
     roomHo: "2002호",
-    moveInDate: "2025-06-01",
-    moveOutDate: "2026-06-01",
+    expectedMoveInDate: "",
+    moveInDate: "",
+    expectedMoveOutDate: "",
+    moveOutDate: "",
+    actualMoveOutDate: "",
+    cheonanMoveDate: "",
     residenceStatus: "거주중",
-    previousResidenceId: "",
     moveInType: "신규",
     extensionReason: "",
     notes: "",
@@ -683,15 +701,20 @@ function dormContractTemplate(): Omit<DormContract, "id"> {
     buildingName: "",
     dong: "",
     roomHo: "",
-    contractStart: today,
-    contractEnd: today,
+    pyeong: "",
+    landlordName: "",
+    landlordPhone: "",
+    realEstateName: "",
+    realEstatePhone: "",
+    contractStart: "",
+    contractEnd: "",
     contractStatus: "진행중",
     contractAmount: "",
     prepaymentDeposit: "",
     deposit: "",
     monthlyRentOrMaintenance: "",
-    previousContractId: "",
     contractType: "신규",
+    notes: "",
     registeredBy: "",
     modifiedBy: "",
     createdAt: today,
@@ -706,14 +729,18 @@ function newHireTemplate(): Omit<NewHireEmployee, "id"> {
     gender: "남",
     name: "",
     phone: "",
+    department: "",
     dormId: "",
     buildingName: "",
     dong: "",
     roomHo: "",
-    moveInDate: today,
-    moveOutDate: today,
+    expectedMoveInDate: "",
+    moveInDate: "",
+    expectedMoveOutDate: "",
+    moveOutDate: "",
+    actualMoveOutDate: "",
+    cheonanMoveDate: "",
     residenceStatus: "거주중",
-    previousResidenceId: "",
     moveInType: "신규",
     extensionReason: "",
     notes: "",
@@ -1046,7 +1073,7 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
       if (dormContractSiteFilter !== "전체" && c.site !== dormContractSiteFilter) return false;
       if (dormContractStatusFilter !== "전체" && c.contractStatus !== dormContractStatusFilter) return false;
       if (dormContractSearch) {
-        const text = `${c.site} ${c.address} ${c.buildingName} ${c.dong} ${c.roomHo} ${c.contractStart} ${c.contractEnd} ${c.contractStatus} ${c.contractAmount} ${c.prepaymentDeposit} ${c.deposit} ${c.monthlyRentOrMaintenance} ${c.previousContractId} ${c.contractType} ${c.registeredBy} ${c.modifiedBy}`.toLowerCase();
+        const text = `${c.site} ${c.address} ${c.buildingName} ${c.dong} ${c.roomHo} ${c.pyeong} ${c.landlordName} ${c.landlordPhone} ${c.realEstateName} ${c.realEstatePhone} ${c.contractStart} ${c.contractEnd} ${c.contractStatus} ${c.contractAmount} ${c.prepaymentDeposit} ${c.deposit} ${c.monthlyRentOrMaintenance} ${c.contractType} ${c.notes} ${c.registeredBy} ${c.modifiedBy}`.toLowerCase();
         return text.includes(dormContractSearch.toLowerCase());
       }
       return true;
@@ -1058,7 +1085,7 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
       if (newHireSiteFilter !== "전체" && h.site !== newHireSiteFilter) return false;
       if (newHireGenderFilter !== "전체" && h.gender !== newHireGenderFilter) return false;
       if (newHireSearch) {
-        const text = `${h.site} ${h.gender} ${h.name} ${h.phone} ${h.dormId} ${h.buildingName} ${h.dong} ${h.roomHo} ${h.moveInDate} ${h.moveOutDate} ${h.residenceStatus} ${h.previousResidenceId} ${h.moveInType} ${h.extensionReason} ${h.notes}`.toLowerCase();
+        const text = `${h.site} ${h.gender} ${h.name} ${h.phone} ${h.department} ${h.dormId} ${h.buildingName} ${h.dong} ${h.roomHo} ${h.expectedMoveInDate} ${h.moveInDate} ${h.expectedMoveOutDate} ${h.moveOutDate} ${h.actualMoveOutDate} ${h.cheonanMoveDate} ${h.residenceStatus} ${h.moveInType} ${h.extensionReason} ${h.notes}`.toLowerCase();
         return text.includes(newHireSearch.toLowerCase());
       }
       return true;
@@ -1498,6 +1525,11 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
       buildingName: String(r["건물명"] || r["buildingName"] || ""),
       dong: String(r["동"] || ""),
       roomHo: String(r["호수"] || r["호"] || r["roomHo"] || ""),
+      pyeong: String(r["평수"] || r["pyeong"] || ""),
+      landlordName: String(r["임대인명"] || r["landlordName"] || ""),
+      landlordPhone: String(r["임대인연락처"] || r["landlordPhone"] || ""),
+      realEstateName: String(r["부동산명"] || r["realEstateName"] || ""),
+      realEstatePhone: String(r["부동산연락처"] || r["realEstatePhone"] || ""),
       contractStart: String(r["계약시작일"] || r["계약시작"] || ""),
       contractEnd: String(r["계약종료일"] || r["계약종료"] || ""),
       contractStatus: String(r["계약상태"] || r["status"] || "진행중") as DormContractStatus,
@@ -1505,8 +1537,8 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
       prepaymentDeposit: String(r["선납금"] || r["prepaymentDeposit"] || ""),
       deposit: String(r["보증금"] || r["deposit"] || ""),
       monthlyRentOrMaintenance: String(r["월세 or 관리비"] || r["월세/관리비"] || r["monthlyRentOrMaintenance"] || ""),
-      previousContractId: String(r["이전계약ID"] || r["previousContractId"] || ""),
       contractType: String(r["계약유형"] || r["contractType"] || "신규") as ContractType,
+      notes: String(r["비고"] || r["notes"] || ""),
       registeredBy: String(r["등록자"] || r["registeredBy"] || currentUser?.displayName || ""),
       modifiedBy: String(r["수정자"] || r["modifiedBy"] || currentUser?.displayName || ""),
       createdAt: new Date().toISOString(),
@@ -1532,14 +1564,18 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
       gender: String(r["성별"] || r["gender"] || "남") as Gender,
       name: String(r["이름"] || r["name"] || ""),
       phone: String(r["연락처"] || r["phone"] || ""),
+      department: String(r["부서"] || r["department"] || ""),
       dormId: matchedDorm?.id || String(r["기숙사ID"] || r["dormId"] || ""),
       buildingName: String(r["건물명"] || r["buildingName"] || matchedDorm?.buildingName || ""),
       dong: String(r["동"] || matchedDorm?.dong || ""),
       roomHo: String(r["호수"] || r["호"] || r["roomHo"] || matchedDorm?.roomHo || ""),
+      expectedMoveInDate: parseExcelDate(r["예상입실일"] || r["expectedMoveInDate"] || ""),
       moveInDate: parseExcelDate(r["입실일"] || r["moveInDate"] || ""),
+      expectedMoveOutDate: parseExcelDate(r["예상퇴실일"] || r["expectedMoveOutDate"] || ""),
       moveOutDate: parseExcelDate(r["퇴실일"] || r["moveOutDate"] || ""),
+      actualMoveOutDate: parseExcelDate(r["실제퇴실일"] || r["actualMoveOutDate"] || ""),
+      cheonanMoveDate: parseExcelDate(r["천안이동일"] || r["cheonanMoveDate"] || ""),
       residenceStatus: String(r["거주상태"] || r["status"] || "거주중") as NewHireResidenceStatus,
-      previousResidenceId: String(r["이전거주ID"] || r["previousResidenceId"] || ""),
       moveInType: String(r["입주유형"] || r["moveInType"] || "신규") as MoveInType,
       extensionReason: String(r["연장사유"] || r["extensionReason"] || ""),
       notes: String(r["특이사항 메모"] || r["notes"] || ""),
@@ -1661,6 +1697,11 @@ const exportExcel = () => {
       건물명: c.buildingName,
       동: c.dong,
       호수: c.roomHo,
+      평수: c.pyeong,
+      임대인명: c.landlordName,
+      임대인연락처: c.landlordPhone,
+      부동산명: c.realEstateName,
+      부동산연락처: c.realEstatePhone,
       계약시작일: c.contractStart,
       계약종료일: c.contractEnd,
       계약상태: c.contractStatus,
@@ -1668,8 +1709,8 @@ const exportExcel = () => {
       선납금: c.prepaymentDeposit,
       보증금: c.deposit,
       "월세/관리비": c.monthlyRentOrMaintenance,
-      이전계약ID: c.previousContractId,
       계약유형: c.contractType,
+      비고: c.notes,
       등록일: c.createdAt,
       수정일: c.updatedAt,
       등록자: c.registeredBy,
@@ -1683,14 +1724,18 @@ const exportExcel = () => {
         성별: h.gender,
         이름: h.name,
         연락처: h.phone,
+        부서: h.department,
         도로명주소: dorm?.address || h.dormId,
         건물명: h.buildingName,
         동: h.dong,
         호수: h.roomHo,
+        예상입실일: h.expectedMoveInDate,
         입실일: h.moveInDate,
+        예상퇴실일: h.expectedMoveOutDate,
         퇴실일: h.moveOutDate,
+        실제퇴실일: h.actualMoveOutDate,
+        천안이동일: h.cheonanMoveDate,
         거주상태: h.residenceStatus,
-        이전거주ID: h.previousResidenceId,
         입주유형: h.moveInType,
         연장사유: h.extensionReason,
         "특이사항 메모": h.notes,
@@ -2180,7 +2225,10 @@ const exportExcel = () => {
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold">기숙사 계약현황</h2>
-                <p className="text-sm text-slate-500">지역 / 상태 필터와 검색으로 계약 정보를 확인하세요.</p>
+                <p className="text-sm text-slate-500">
+                  지역 / 상태 필터와 검색으로 계약 정보를 확인하세요.
+                  {selectedDormContractIds.length > 0 && ` 선택된 ${selectedDormContractIds.length}개`}
+                </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <FilterSelect
@@ -2245,11 +2293,17 @@ const exportExcel = () => {
                         />
                       </th>
                     )}
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">구분</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">지역</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">주소</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">건물</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">동</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">호</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">평수</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">임대인명</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">임대인연락처</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">부동산명</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">부동산연락처</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">시작</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">종료</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">상태</th>
@@ -2257,15 +2311,15 @@ const exportExcel = () => {
                     <th className="px-2 py-2 whitespace-nowrap text-xs">선납</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">보증</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">월세</th>
-                    <th className="px-2 py-2 whitespace-nowrap text-xs">이전ID</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">유형</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">비고</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">등록</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">수정</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">등록자</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleDormContracts.map((c) => (
+                  {visibleDormContracts.map((c, index) => (
                     <tr
                       key={c.id}
                       onClick={(e) => handleRowClick(e, () => openDormContractEdit(c))}
@@ -2285,11 +2339,17 @@ const exportExcel = () => {
                           />
                         </td>
                       )}
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{index + 1}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.site}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.address}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.buildingName}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.dong}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.roomHo}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.pyeong}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.landlordName}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.landlordPhone}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.realEstateName}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.realEstatePhone}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractStart}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractEnd}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractStatus}</td>
@@ -2297,8 +2357,8 @@ const exportExcel = () => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.prepaymentDeposit}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.deposit}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.monthlyRentOrMaintenance}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.previousContractId || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractType}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.notes}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.createdAt}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.updatedAt}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.registeredBy}</td>
@@ -2306,7 +2366,7 @@ const exportExcel = () => {
                   ))}
                   {visibleDormContracts.length === 0 && (
                     <tr>
-                      <td colSpan={canEditData(currentUser) ? 18 : 17} className="px-4 py-12 text-center text-slate-400">
+                      <td colSpan={canEditData(currentUser) ? 24 : 23} className="px-4 py-12 text-center text-slate-400">
                         기숙사 계약 정보가 없습니다.
                       </td>
                     </tr>
@@ -2322,7 +2382,10 @@ const exportExcel = () => {
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold">신입사원 명단</h2>
-                <p className="text-sm text-slate-500">지역 / 성별 필터와 검색으로 입주 정보를 관리하세요.</p>
+                <p className="text-sm text-slate-500">
+                  지역 / 성별 필터와 검색으로 입주 정보를 관리하세요.
+                  {selectedNewHireIds.length > 0 && ` 선택된 ${selectedNewHireIds.length}개`}
+                </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <FilterSelect
@@ -2387,18 +2450,23 @@ const exportExcel = () => {
                         />
                       </th>
                     )}
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">구분</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">지역</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">성별</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">이름</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">연락</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">부서</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">도로명주소</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">건물명</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">동</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">호</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">예상입실</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">입실</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">예상퇴실</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">퇴실</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">실제퇴실</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">천안이동</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">상태</th>
-                    <th className="px-2 py-2 whitespace-nowrap text-xs">이전ID</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">유형</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">사유</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">메모</th>
@@ -2407,7 +2475,7 @@ const exportExcel = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleNewHires.map((h) => (
+                  {visibleNewHires.map((h, index) => (
                     <tr
                       key={h.id}
                       onClick={(e) => handleRowClick(e, () => openNewHireEdit(h))}
@@ -2427,18 +2495,23 @@ const exportExcel = () => {
                           />
                         </td>
                       )}
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{index + 1}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.site}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.gender}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.name}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.phone}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.department}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{dorms.find((d) => d.id === h.dormId)?.address || h.dormId}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.buildingName}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.dong}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.roomHo}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.expectedMoveInDate}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveInDate}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.expectedMoveOutDate}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveOutDate}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.actualMoveOutDate}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.cheonanMoveDate}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.residenceStatus}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.previousResidenceId || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveInType}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.extensionReason || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.notes || "-"}</td>
@@ -2448,7 +2521,7 @@ const exportExcel = () => {
                   ))}
                   {visibleNewHires.length === 0 && (
                     <tr>
-                      <td colSpan={canEditData(currentUser) ? 18 : 17} className="px-4 py-12 text-center text-slate-400">
+                      <td colSpan={canEditData(currentUser) ? 23 : 22} className="px-4 py-12 text-center text-slate-400">
                         신입사원 명단이 없습니다.
                       </td>
                     </tr>
@@ -3448,15 +3521,20 @@ const exportExcel = () => {
             <Input label="건물명" value={dormContractForm.buildingName} onChange={(v) => setDormContractForm((f) => ({ ...f, buildingName: v }))} />
             <Input label="동" value={dormContractForm.dong} onChange={(v) => setDormContractForm((f) => ({ ...f, dong: v }))} />
             <Input label="호수" value={dormContractForm.roomHo} onChange={(v) => setDormContractForm((f) => ({ ...f, roomHo: v }))} />
+            <Input label="평수" value={dormContractForm.pyeong} onChange={(v) => setDormContractForm((f) => ({ ...f, pyeong: v }))} />
+            <Input label="임대인명" value={dormContractForm.landlordName} onChange={(v) => setDormContractForm((f) => ({ ...f, landlordName: v }))} />
+            <Input label="임대인연락처" value={dormContractForm.landlordPhone} onChange={(v) => setDormContractForm((f) => ({ ...f, landlordPhone: v }))} />
+            <Input label="부동산명" value={dormContractForm.realEstateName} onChange={(v) => setDormContractForm((f) => ({ ...f, realEstateName: v }))} />
+            <Input label="부동산연락처" value={dormContractForm.realEstatePhone} onChange={(v) => setDormContractForm((f) => ({ ...f, realEstatePhone: v }))} />
             <Input label="계약시작일" type="date-text" value={dormContractForm.contractStart} onChange={(v) => setDormContractForm((f) => ({ ...f, contractStart: v }))} />
             <Input label="계약종료일" type="date-text" value={dormContractForm.contractEnd} onChange={(v) => setDormContractForm((f) => ({ ...f, contractEnd: v }))} />
-            <SelectInput label="계약상태" value={dormContractForm.contractStatus} onChange={(v) => setDormContractForm((f) => ({ ...f, contractStatus: v as DormContractStatus }))} options={["진행중", "종료", "연장", "해지"]} />
+            <SelectInput label="계약상태" value={dormContractForm.contractStatus} onChange={(v) => setDormContractForm((f) => ({ ...f, contractStatus: v as DormContractStatus }))} options={["진행중", "종료", "연장", "해지", "공실", "만료예정"]} />
             <Input label="계약금액" value={dormContractForm.contractAmount} onChange={(v) => setDormContractForm((f) => ({ ...f, contractAmount: v }))} />
             <Input label="선납금" value={dormContractForm.prepaymentDeposit} onChange={(v) => setDormContractForm((f) => ({ ...f, prepaymentDeposit: v }))} />
             <Input label="보증금" value={dormContractForm.deposit} onChange={(v) => setDormContractForm((f) => ({ ...f, deposit: v }))} />
             <Input label="월세/관리비" value={dormContractForm.monthlyRentOrMaintenance} onChange={(v) => setDormContractForm((f) => ({ ...f, monthlyRentOrMaintenance: v }))} />
-            <Input label="이전계약ID" value={dormContractForm.previousContractId} onChange={(v) => setDormContractForm((f) => ({ ...f, previousContractId: v }))} />
             <SelectInput label="계약유형" value={dormContractForm.contractType} onChange={(v) => setDormContractForm((f) => ({ ...f, contractType: v as ContractType }))} options={["신규", "연장", "변경"]} />
+            <Input label="비고" value={dormContractForm.notes} onChange={(v) => setDormContractForm((f) => ({ ...f, notes: v }))} />
             <Input label="등록자" value={dormContractForm.registeredBy} onChange={(v) => setDormContractForm((f) => ({ ...f, registeredBy: v }))} />
             <Input label="등록일" type="date-text" value={dormContractForm.createdAt} onChange={(v) => setDormContractForm((f) => ({ ...f, createdAt: v }))} />
             <Input label="수정일" type="date-text" value={dormContractForm.updatedAt} onChange={(v) => setDormContractForm((f) => ({ ...f, updatedAt: v }))} />
@@ -3473,6 +3551,7 @@ const exportExcel = () => {
             <SelectInput label="성별" value={newHireForm.gender} onChange={(v) => setNewHireForm((f) => ({ ...f, gender: v as Gender }))} options={["남", "여"]} />
             <Input label="이름" value={newHireForm.name} onChange={(v) => setNewHireForm((f) => ({ ...f, name: v }))} />
             <Input label="연락처" value={newHireForm.phone} onChange={(v) => setNewHireForm((f) => ({ ...f, phone: v }))} />
+            <Input label="부서" value={newHireForm.department} onChange={(v) => setNewHireForm((f) => ({ ...f, department: v }))} />
             <SearchableSelect
               label="도로명주소"
               value={newHireForm.dormId}
@@ -3493,11 +3572,14 @@ const exportExcel = () => {
             <Input label="건물명" value={newHireForm.buildingName} onChange={(v) => setNewHireForm((f) => ({ ...f, buildingName: v }))} />
             <Input label="동" value={newHireForm.dong} onChange={(v) => setNewHireForm((f) => ({ ...f, dong: v }))} />
             <Input label="호수" value={newHireForm.roomHo} onChange={(v) => setNewHireForm((f) => ({ ...f, roomHo: v }))} />
+            <Input label="예상입실일" type="date-text" value={newHireForm.expectedMoveInDate} onChange={(v) => setNewHireForm((f) => ({ ...f, expectedMoveInDate: v }))} />
             <Input label="입실일" type="date-text" value={newHireForm.moveInDate} onChange={(v) => setNewHireForm((f) => ({ ...f, moveInDate: v }))} />
+            <Input label="예상퇴실일" type="date-text" value={newHireForm.expectedMoveOutDate} onChange={(v) => setNewHireForm((f) => ({ ...f, expectedMoveOutDate: v }))} />
             <Input label="퇴실일" type="date-text" value={newHireForm.moveOutDate} onChange={(v) => setNewHireForm((f) => ({ ...f, moveOutDate: v }))} />
-            <SelectInput label="거주상태" value={newHireForm.residenceStatus} onChange={(v) => setNewHireForm((f) => ({ ...f, residenceStatus: v as NewHireResidenceStatus }))} options={["거주중", "퇴실", "연장"]} />
-            <Input label="이전거주ID" value={newHireForm.previousResidenceId} onChange={(v) => setNewHireForm((f) => ({ ...f, previousResidenceId: v }))} />
-            <SelectInput label="입주유형" value={newHireForm.moveInType} onChange={(v) => setNewHireForm((f) => ({ ...f, moveInType: v as MoveInType }))} options={["신규", "재입주", "연장"]} />
+            <Input label="실제퇴실일" type="date-text" value={newHireForm.actualMoveOutDate} onChange={(v) => setNewHireForm((f) => ({ ...f, actualMoveOutDate: v }))} />
+            <Input label="천안이동일" type="date-text" value={newHireForm.cheonanMoveDate} onChange={(v) => setNewHireForm((f) => ({ ...f, cheonanMoveDate: v }))} />
+            <SelectInput label="거주상태" value={newHireForm.residenceStatus} onChange={(v) => setNewHireForm((f) => ({ ...f, residenceStatus: v as NewHireResidenceStatus }))} options={["대기중", "거주중", "퇴실", "연장", "만료예정"]} />
+            <SelectInput label="입주유형" value={newHireForm.moveInType} onChange={(v) => setNewHireForm((f) => ({ ...f, moveInType: v as MoveInType }))} options={["대기자", "신규", "재입주", "연장"]} />
             <Input label="연장사유" value={newHireForm.extensionReason} onChange={(v) => setNewHireForm((f) => ({ ...f, extensionReason: v }))} />
             <Input label="특이사항 메모" value={newHireForm.notes} onChange={(v) => setNewHireForm((f) => ({ ...f, notes: v }))} />
             <Input label="등록일" type="date-text" value={newHireForm.createdAt} onChange={(v) => setNewHireForm((f) => ({ ...f, createdAt: v }))} />
@@ -3539,7 +3621,20 @@ const exportExcel = () => {
         {showInventoryForm && modalWrap(
           "비품 등록/수정",
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <SelectInput label="기숙사" value={inventoryForm.dormId} onChange={(v) => setInventoryForm((f) => ({ ...f, dormId: v }))} options={dorms.map((d) => d.id)} />
+            <SearchableSelect
+              label="기숙사"
+              value={inventoryForm.dormId}
+              onChange={(v) => {
+                const selected = dorms.find((d) => d.id === v);
+                setInventoryForm((f) => ({
+                  ...f,
+                  dormId: v,
+                  dormAddress: selected?.address || f.dormAddress,
+                }));
+              }}
+              options={dorms.map((d) => d.id)}
+              displayOptions={dorms.map((d) => d.address)}
+            />
             <Input label="관리자명" value={inventoryForm.managerName} onChange={(v) => setInventoryForm((f) => ({ ...f, managerName: v }))} />
             <Input label="계약일" type="date-text" value={inventoryForm.contractStart} onChange={(v) => setInventoryForm((f) => ({ ...f, contractStart: v }))} />
             <Input label="만료일" type="date-text" value={inventoryForm.contractEnd} onChange={(v) => setInventoryForm((f) => ({ ...f, contractEnd: v }))} />
