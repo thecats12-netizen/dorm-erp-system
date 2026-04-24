@@ -175,7 +175,12 @@ type LeaseContract = {
 };
 
 type DormContractStatus = "진행중" | "종료" | "연장" | "해지" | "공실" | "만료예정";
-type ContractType = "신규" | "연장" | "변경";
+type ContractType = "신규" | "연장" | "재계약" | "변경" | "해지후신규";
+
+type DormContractFormState = Omit<DormContract, "id" | "contractStatus" | "contractType"> & {
+  contractStatus: DormContractStatus | "자동선택";
+  contractType: ContractType | "자동선택";
+};
 
 type DormContract = {
   id: string;
@@ -197,6 +202,7 @@ type DormContract = {
   deposit: string;
   monthlyRentOrMaintenance: string;
   contractType: ContractType;
+  gender: Gender;
   notes: string;
   registeredBy: string;
   modifiedBy: string;
@@ -531,6 +537,7 @@ const demoDormContracts: DormContract[] = [
     deposit: "1,000,000",
     monthlyRentOrMaintenance: "120,000",
     contractType: "신규",
+    gender: "남",
     notes: "계약 완료",
     registeredBy: "총관리자",
     modifiedBy: "총관리자",
@@ -693,7 +700,7 @@ function occupantTemplate(): Omit<Occupant, "id" | "createdAt" | "updatedAt"> {
   };
 }
 
-function dormContractTemplate(): Omit<DormContract, "id"> {
+function dormContractTemplate(): DormContractFormState {
   const today = new Date().toISOString().slice(0, 10);
   return {
     site: "평택",
@@ -708,12 +715,13 @@ function dormContractTemplate(): Omit<DormContract, "id"> {
     realEstatePhone: "",
     contractStart: "",
     contractEnd: "",
-    contractStatus: "진행중",
+    contractStatus: "자동선택",
     contractAmount: "",
     prepaymentDeposit: "",
     deposit: "",
     monthlyRentOrMaintenance: "",
-    contractType: "신규",
+    contractType: "자동선택",
+    gender: "남",
     notes: "",
     registeredBy: "",
     modifiedBy: "",
@@ -722,7 +730,22 @@ function dormContractTemplate(): Omit<DormContract, "id"> {
   };
 }
 
-function newHireTemplate(): Omit<NewHireEmployee, "id"> {
+type NewHireFormState = Omit<NewHireEmployee, "id" | "residenceStatus" | "moveInType"> & {
+  residenceStatus: NewHireResidenceStatus | "자동선택";
+  moveInType: MoveInType | "자동선택";
+};
+
+type DormContractFormLike = Omit<Partial<DormContract>, "contractStatus" | "contractType"> & {
+  contractStatus?: DormContractStatus | "자동선택";
+  contractType?: ContractType | "자동선택";
+};
+
+type NewHireFormLike = Omit<Partial<NewHireEmployee>, "residenceStatus" | "moveInType"> & {
+  residenceStatus?: NewHireResidenceStatus | "자동선택";
+  moveInType?: MoveInType | "자동선택";
+};
+
+function newHireTemplate(): NewHireFormState {
   const today = new Date().toISOString().slice(0, 10);
   return {
     site: "평택",
@@ -740,8 +763,8 @@ function newHireTemplate(): Omit<NewHireEmployee, "id"> {
     moveOutDate: "",
     actualMoveOutDate: "",
     cheonanMoveDate: "",
-    residenceStatus: "거주중",
-    moveInType: "신규",
+    residenceStatus: "자동선택",
+    moveInType: "자동선택",
     extensionReason: "",
     notes: "",
     createdAt: today,
@@ -889,6 +912,115 @@ function daysDiff(dateText: string) {
   return Math.ceil((target - now) / (1000 * 60 * 60 * 24));
 }
 
+function calculateDormContractStatus(contract: DormContractFormLike, dorms: Dorm[], occupants: Occupant[]): DormContractStatus {
+  const today = new Date().toISOString().slice(0, 10);
+  const contractStart = contract.contractStart || "";
+  const contractEnd = contract.contractEnd || "";
+
+  const dorm = dorms.find(
+    (d) =>
+      d.address === contract.address &&
+      d.buildingName === contract.buildingName &&
+      d.dong === contract.dong &&
+      d.roomHo === contract.roomHo
+  );
+
+  const occupantCount = dorm
+    ? occupants.filter(
+        (o) =>
+          o.dormId === dorm.id && ["거주중", "만료예정", "신규입주"].includes(o.status)
+      ).length
+    : 0;
+
+  if (contractEnd && daysDiff(contractEnd) <= 30) return "만료예정";
+  if (!contractStart) return occupantCount > 0 ? "진행중" : "공실";
+  if (contractStart <= today) return occupantCount > 0 ? "진행중" : "공실";
+  return occupantCount > 0 ? "진행중" : "공실";
+}
+
+function calculateNewHireResidenceStatus(employee: NewHireFormLike): NewHireResidenceStatus {
+  const today = new Date().toISOString().slice(0, 10);
+  const moveInDate = employee.moveInDate || "";
+  const moveOutDate = employee.moveOutDate || "";
+  const actualMoveOutDate = employee.actualMoveOutDate || "";
+  const hasAddressInfo = Boolean(employee.buildingName?.trim() && employee.dong?.trim() && employee.roomHo?.trim());
+
+  if (!hasAddressInfo) return "대기중";
+  if (actualMoveOutDate) return "퇴실";
+  if (!moveInDate) return "대기중";
+  if (moveInDate > today) return "대기중";
+  if (moveOutDate && moveOutDate < today && !actualMoveOutDate) return "연장";
+  if (moveOutDate && daysDiff(moveOutDate) <= 30) return "만료예정";
+  return "거주중";
+}
+
+function calculateMoveInType(
+  employee: NewHireFormLike,
+  allEmployees: NewHireEmployee[]
+): MoveInType {
+  const hasAddressInfo = Boolean(employee.buildingName?.trim() && employee.dong?.trim() && employee.roomHo?.trim());
+  if (!hasAddressInfo) return "대기자";
+
+  const previousRecords = allEmployees.filter(
+    (e) => e.id !== employee.id && e.name === employee.name && e.phone === employee.phone
+  );
+  if (previousRecords.length === 0) return "신규";
+
+  const moveOutDate = employee.moveOutDate || "";
+  const actualMoveOutDate = employee.actualMoveOutDate || "";
+  const today = new Date().toISOString().slice(0, 10);
+  if (moveOutDate && moveOutDate < today && !actualMoveOutDate) return "연장";
+
+  return "재입주";
+}
+
+function addDays(dateText: string, days: number) {
+  if (!dateText) return "";
+  const date = new Date(dateText);
+  if (Number.isNaN(date.valueOf())) return "";
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function calculateDormContractType(
+  contract: DormContractFormLike,
+  dormContracts: DormContract[],
+  editingId: string | null
+): ContractType {
+  const sameContracts = dormContracts
+    .filter(
+      (c) =>
+        c.id !== editingId &&
+        c.address === contract.address &&
+        c.buildingName === contract.buildingName &&
+        c.dong === contract.dong &&
+        c.roomHo === contract.roomHo
+    )
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  if (sameContracts.length === 0) return "신규";
+  const last = sameContracts[sameContracts.length - 1];
+  if (!contract.contractStart) return "신규";
+  const lastEnd = last.contractEnd || "";
+
+  if (last.contractStatus === "해지" && contract.contractStart > lastEnd) return "해지후신규";
+
+  const sameTerms =
+    last.landlordName === contract.landlordName &&
+    last.landlordPhone === contract.landlordPhone &&
+    last.realEstateName === contract.realEstateName &&
+    last.realEstatePhone === contract.realEstatePhone &&
+    last.contractAmount === contract.contractAmount &&
+    last.prepaymentDeposit === contract.prepaymentDeposit &&
+    last.deposit === contract.deposit &&
+    last.monthlyRentOrMaintenance === contract.monthlyRentOrMaintenance;
+
+  const contiguous = contract.contractStart === addDays(lastEnd, 1);
+  if (contiguous && sameTerms) return "연장";
+  if (!sameTerms) return "재계약";
+  return "변경";
+}
+
 function daysBetween(start: string, end: string) {
   if (!start || !end) return 0;
   const startDate = new Date(start);
@@ -995,8 +1127,8 @@ export default function App() {
 
   const [dormForm, setDormForm] = useState(dormTemplate());
   const [occupantForm, setOccupantForm] = useState(occupantTemplate());
-  const [dormContractForm, setDormContractForm] = useState(dormContractTemplate());
-  const [newHireForm, setNewHireForm] = useState(newHireTemplate());
+  const [dormContractForm, setDormContractForm] = useState<DormContractFormState>(dormContractTemplate());
+  const [newHireForm, setNewHireForm] = useState<NewHireFormState>(newHireTemplate());
   const [inventoryForm, setInventoryForm] = useState(inventoryTemplate());
   const [leaseForm, setLeaseForm] = useState(leaseTemplate());
   const [saleForm, setSaleForm] = useState(saleTemplate());
@@ -1352,9 +1484,21 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
       alert("건물명과 도로명주소는 필수입니다.");
       return;
     }
+
+    const actualStatus =
+      dormContractForm.contractStatus === "자동선택"
+        ? calculateDormContractStatus(dormContractForm, dorms, occupants)
+        : dormContractForm.contractStatus;
+    const actualType =
+      dormContractForm.contractType === "자동선택"
+        ? calculateDormContractType(dormContractForm, dormContracts, editingDormContractId)
+        : dormContractForm.contractType;
+
     const payload: DormContract = {
       id: editingDormContractId || crypto.randomUUID(),
       ...dormContractForm,
+      contractStatus: actualStatus,
+      contractType: actualType,
       registeredBy: dormContractForm.registeredBy || currentUser?.displayName || "",
       modifiedBy: currentUser?.displayName || dormContractForm.modifiedBy || "",
       createdAt: editingDormContractId ? dormContracts.find((c) => c.id === editingDormContractId)?.createdAt || dormContractForm.createdAt : dormContractForm.createdAt || new Date().toISOString().slice(0, 10),
@@ -1372,10 +1516,22 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
       alert("이름은 필수입니다.");
       return;
     }
+
     const dorm = newHireForm.dormId ? dorms.find((d) => d.id === newHireForm.dormId) : null;
+    const actualResidenceStatus =
+      newHireForm.residenceStatus === "자동선택"
+        ? calculateNewHireResidenceStatus(newHireForm)
+        : newHireForm.residenceStatus;
+    const actualMoveInType =
+      newHireForm.moveInType === "자동선택"
+        ? calculateMoveInType(newHireForm, newHires)
+        : newHireForm.moveInType;
+
     const payload: NewHireEmployee = {
       id: editingNewHireId || crypto.randomUUID(),
       ...newHireForm,
+      residenceStatus: actualResidenceStatus,
+      moveInType: actualMoveInType,
       site: newHireForm.site || dorm?.site || "평택",
       createdAt: editingNewHireId ? newHires.find((h) => h.id === editingNewHireId)?.createdAt || newHireForm.createdAt : newHireForm.createdAt || new Date().toISOString().slice(0, 10),
       updatedAt: new Date().toISOString().slice(0, 10),
@@ -1538,6 +1694,7 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
       deposit: String(r["보증금"] || r["deposit"] || ""),
       monthlyRentOrMaintenance: String(r["월세 or 관리비"] || r["월세/관리비"] || r["monthlyRentOrMaintenance"] || ""),
       contractType: String(r["계약유형"] || r["contractType"] || "신규") as ContractType,
+      gender: String(r["성별"] || r["gender"] || "남") as Gender,
       notes: String(r["비고"] || r["notes"] || ""),
       registeredBy: String(r["등록자"] || r["registeredBy"] || currentUser?.displayName || ""),
       modifiedBy: String(r["수정자"] || r["modifiedBy"] || currentUser?.displayName || ""),
@@ -1710,6 +1867,7 @@ const exportExcel = () => {
       보증금: c.deposit,
       "월세/관리비": c.monthlyRentOrMaintenance,
       계약유형: c.contractType,
+      성별: c.gender,
       비고: c.notes,
       등록일: c.createdAt,
       수정일: c.updatedAt,
@@ -1866,14 +2024,14 @@ const exportExcel = () => {
 
   const openDormContractEdit = (c: DormContract) => {
     const { id: _id, ...rest } = c;
-    setDormContractForm(rest);
+    setDormContractForm({ ...rest, contractStatus: "자동선택", contractType: "자동선택" });
     setEditingDormContractId(c.id);
     setShowDormContractForm(true);
   };
 
   const openNewHireEdit = (h: NewHireEmployee) => {
     const { id: _id, ...rest } = h;
-    setNewHireForm(rest);
+    setNewHireForm({ ...rest, residenceStatus: "자동선택", moveInType: "자동선택" });
     setEditingNewHireId(h.id);
     setShowNewHireForm(true);
   };
@@ -2241,7 +2399,7 @@ const exportExcel = () => {
                   label="상태"
                   value={dormContractStatusFilter}
                   onChange={(v) => setDormContractStatusFilter(v as DormContractStatus | "전체")}
-                  options={["전체", "진행중", "종료", "연장", "해지"]}
+                  options={["전체", "공실", "진행중", "만료예정", "연장", "종료", "해지"]}
                 />
                 <input
                   type="text"
@@ -2295,6 +2453,7 @@ const exportExcel = () => {
                     )}
                     <th className="px-2 py-2 whitespace-nowrap text-xs">구분</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">지역</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">성별</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">주소</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">건물</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">동</th>
@@ -2341,6 +2500,7 @@ const exportExcel = () => {
                       )}
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{index + 1}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.site}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.gender}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.address}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.buildingName}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.dong}</td>
@@ -2366,7 +2526,7 @@ const exportExcel = () => {
                   ))}
                   {visibleDormContracts.length === 0 && (
                     <tr>
-                      <td colSpan={canEditData(currentUser) ? 24 : 23} className="px-4 py-12 text-center text-slate-400">
+                      <td colSpan={canEditData(currentUser) ? 25 : 24} className="px-4 py-12 text-center text-slate-400">
                         기숙사 계약 정보가 없습니다.
                       </td>
                     </tr>
@@ -3500,6 +3660,7 @@ const exportExcel = () => {
           "기숙사 계약 등록/수정",
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <SelectInput label="지역" value={dormContractForm.site} onChange={(v) => setDormContractForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
+            <SelectInput label="성별" value={dormContractForm.gender} onChange={(v) => setDormContractForm((f) => ({ ...f, gender: v as Gender }))} options={["남", "여"]} />
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400">도로명주소</label>
@@ -3528,12 +3689,32 @@ const exportExcel = () => {
             <Input label="부동산연락처" value={dormContractForm.realEstatePhone} onChange={(v) => setDormContractForm((f) => ({ ...f, realEstatePhone: v }))} />
             <Input label="계약시작일" type="date-text" value={dormContractForm.contractStart} onChange={(v) => setDormContractForm((f) => ({ ...f, contractStart: v }))} />
             <Input label="계약종료일" type="date-text" value={dormContractForm.contractEnd} onChange={(v) => setDormContractForm((f) => ({ ...f, contractEnd: v }))} />
-            <SelectInput label="계약상태" value={dormContractForm.contractStatus} onChange={(v) => setDormContractForm((f) => ({ ...f, contractStatus: v as DormContractStatus }))} options={["진행중", "종료", "연장", "해지", "공실", "만료예정"]} />
+            <SelectInput
+              label="계약상태"
+              value={dormContractForm.contractStatus}
+              onChange={(v) => setDormContractForm((f) => ({ ...f, contractStatus: v as DormContractStatus | "자동선택" }))}
+              options={["자동선택", "공실", "진행중", "만료예정", "연장", "종료", "해지"]}
+            />
+            {dormContractForm.contractStatus === "자동선택" && (
+              <div className="col-span-full text-xs text-slate-500">
+                자동계산: {calculateDormContractStatus(dormContractForm, dorms, occupants)}
+              </div>
+            )}
             <Input label="계약금액" value={dormContractForm.contractAmount} onChange={(v) => setDormContractForm((f) => ({ ...f, contractAmount: v }))} />
             <Input label="선납금" value={dormContractForm.prepaymentDeposit} onChange={(v) => setDormContractForm((f) => ({ ...f, prepaymentDeposit: v }))} />
             <Input label="보증금" value={dormContractForm.deposit} onChange={(v) => setDormContractForm((f) => ({ ...f, deposit: v }))} />
             <Input label="월세/관리비" value={dormContractForm.monthlyRentOrMaintenance} onChange={(v) => setDormContractForm((f) => ({ ...f, monthlyRentOrMaintenance: v }))} />
-            <SelectInput label="계약유형" value={dormContractForm.contractType} onChange={(v) => setDormContractForm((f) => ({ ...f, contractType: v as ContractType }))} options={["신규", "연장", "변경"]} />
+            <SelectInput
+              label="계약유형"
+              value={dormContractForm.contractType}
+              onChange={(v) => setDormContractForm((f) => ({ ...f, contractType: v as ContractType | "자동선택" }))}
+              options={["자동선택", "신규", "연장", "재계약", "변경", "해지후신규"]}
+            />
+            {dormContractForm.contractType === "자동선택" && (
+              <div className="col-span-full text-xs text-slate-500">
+                자동계산: {calculateDormContractType(dormContractForm, dormContracts, editingDormContractId)}
+              </div>
+            )}
             <Input label="비고" value={dormContractForm.notes} onChange={(v) => setDormContractForm((f) => ({ ...f, notes: v }))} />
             <Input label="등록자" value={dormContractForm.registeredBy} onChange={(v) => setDormContractForm((f) => ({ ...f, registeredBy: v }))} />
             <Input label="등록일" type="date-text" value={dormContractForm.createdAt} onChange={(v) => setDormContractForm((f) => ({ ...f, createdAt: v }))} />
@@ -3578,8 +3759,28 @@ const exportExcel = () => {
             <Input label="퇴실일" type="date-text" value={newHireForm.moveOutDate} onChange={(v) => setNewHireForm((f) => ({ ...f, moveOutDate: v }))} />
             <Input label="실제퇴실일" type="date-text" value={newHireForm.actualMoveOutDate} onChange={(v) => setNewHireForm((f) => ({ ...f, actualMoveOutDate: v }))} />
             <Input label="천안이동일" type="date-text" value={newHireForm.cheonanMoveDate} onChange={(v) => setNewHireForm((f) => ({ ...f, cheonanMoveDate: v }))} />
-            <SelectInput label="거주상태" value={newHireForm.residenceStatus} onChange={(v) => setNewHireForm((f) => ({ ...f, residenceStatus: v as NewHireResidenceStatus }))} options={["대기중", "거주중", "퇴실", "연장", "만료예정"]} />
-            <SelectInput label="입주유형" value={newHireForm.moveInType} onChange={(v) => setNewHireForm((f) => ({ ...f, moveInType: v as MoveInType }))} options={["대기자", "신규", "재입주", "연장"]} />
+            <SelectInput
+              label="거주상태"
+              value={newHireForm.residenceStatus}
+              onChange={(v) => setNewHireForm((f) => ({ ...f, residenceStatus: v as NewHireResidenceStatus | "자동선택" }))}
+              options={["자동선택", "대기중", "거주중", "만료예정", "연장", "퇴실"]}
+            />
+            {newHireForm.residenceStatus === "자동선택" && (
+              <div className="col-span-full text-xs text-slate-500">
+                자동계산: {calculateNewHireResidenceStatus(newHireForm)}
+              </div>
+            )}
+            <SelectInput
+              label="입주유형"
+              value={newHireForm.moveInType}
+              onChange={(v) => setNewHireForm((f) => ({ ...f, moveInType: v as MoveInType | "자동선택" }))}
+              options={["자동선택", "대기자", "신규", "연장", "재입주"]}
+            />
+            {newHireForm.moveInType === "자동선택" && (
+              <div className="col-span-full text-xs text-slate-500">
+                자동계산: {calculateMoveInType(newHireForm, newHires)}
+              </div>
+            )}
             <Input label="연장사유" value={newHireForm.extensionReason} onChange={(v) => setNewHireForm((f) => ({ ...f, extensionReason: v }))} />
             <Input label="특이사항 메모" value={newHireForm.notes} onChange={(v) => setNewHireForm((f) => ({ ...f, notes: v }))} />
             <Input label="등록일" type="date-text" value={newHireForm.createdAt} onChange={(v) => setNewHireForm((f) => ({ ...f, createdAt: v }))} />
