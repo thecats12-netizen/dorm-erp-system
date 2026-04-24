@@ -175,7 +175,7 @@ type LeaseContract = {
 };
 
 type DormContractStatus = "진행중" | "종료" | "연장" | "해지" | "공실" | "만료예정";
-type ContractType = "신규" | "연장" | "재계약" | "변경" | "해지후신규";
+type ContractType = "신규" | "연장" | "재계약" | "해지후신규";
 
 type DormContractFormState = Omit<DormContract, "id" | "contractStatus" | "contractType"> & {
   contractStatus: DormContractStatus | "자동선택";
@@ -932,26 +932,37 @@ function calculateDormContractStatus(contract: DormContractFormLike, dorms: Dorm
       ).length
     : 0;
 
+  if (contract.contractStatus === "해지") return "해지";
+  if (contract.contractStatus === "종료") return "종료";
+  if (contractEnd && contractEnd < today) return "연장";
   if (contractEnd && daysDiff(contractEnd) <= 30) return "만료예정";
-  if (!contractStart) return occupantCount > 0 ? "진행중" : "공실";
-  if (contractStart <= today) return occupantCount > 0 ? "진행중" : "공실";
-  return occupantCount > 0 ? "진행중" : "공실";
+  if (contractStart && contractStart <= today) return occupantCount > 0 ? "진행중" : "공실";
+  return "공실";
+}
+
+function getDormContractDisplayStatus(contract: DormContract, dorms: Dorm[], occupants: Occupant[]): DormContractStatus {
+  if (contract.contractStatus === "해지" || contract.contractStatus === "종료") {
+    return contract.contractStatus;
+  }
+  return calculateDormContractStatus(contract, dorms, occupants);
 }
 
 function calculateNewHireResidenceStatus(employee: NewHireFormLike): NewHireResidenceStatus {
   const today = new Date().toISOString().slice(0, 10);
   const moveInDate = employee.moveInDate || "";
   const moveOutDate = employee.moveOutDate || "";
+  const expectedMoveOutDate = employee.expectedMoveOutDate || "";
   const actualMoveOutDate = employee.actualMoveOutDate || "";
   const hasAddressInfo = Boolean(employee.buildingName?.trim() && employee.dong?.trim() && employee.roomHo?.trim());
 
-  if (!hasAddressInfo) return "대기중";
-  if (actualMoveOutDate) return "퇴실";
-  if (!moveInDate) return "대기중";
-  if (moveInDate > today) return "대기중";
-  if (moveOutDate && moveOutDate < today && !actualMoveOutDate) return "연장";
-  if (moveOutDate && daysDiff(moveOutDate) <= 30) return "만료예정";
-  return "거주중";
+  const endDate = moveOutDate || expectedMoveOutDate;
+
+  if (!hasAddressInfo || !moveInDate) return "대기중";
+  if (actualMoveOutDate && actualMoveOutDate <= today) return "퇴실";
+  if (endDate && endDate < today && !actualMoveOutDate) return "연장";
+  if (endDate && daysDiff(endDate) <= 30) return "만료예정";
+  if (moveInDate && moveInDate <= today) return "거주중";
+  return "대기중";
 }
 
 function calculateMoveInType(
@@ -961,15 +972,26 @@ function calculateMoveInType(
   const hasAddressInfo = Boolean(employee.buildingName?.trim() && employee.dong?.trim() && employee.roomHo?.trim());
   if (!hasAddressInfo) return "대기자";
 
-  const previousRecords = allEmployees.filter(
-    (e) => e.id !== employee.id && e.name === employee.name && e.phone === employee.phone
-  );
+  const previousRecords = allEmployees
+    .filter((e) => e.id !== employee.id && e.name === employee.name && e.phone === employee.phone)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
   if (previousRecords.length === 0) return "신규";
 
-  const moveOutDate = employee.moveOutDate || "";
-  const actualMoveOutDate = employee.actualMoveOutDate || "";
-  const today = new Date().toISOString().slice(0, 10);
-  if (moveOutDate && moveOutDate < today && !actualMoveOutDate) return "연장";
+  const last = previousRecords[previousRecords.length - 1];
+  const currentMoveInDate = employee.moveInDate || "";
+  const lastEndDate = last.moveOutDate || last.expectedMoveOutDate || "";
+
+  if (!currentMoveInDate) return "재입주";
+  if (
+    lastEndDate &&
+    currentMoveInDate === addDays(lastEndDate, 1) &&
+    employee.buildingName === last.buildingName &&
+    employee.dong === last.dong &&
+    employee.roomHo === last.roomHo
+  ) {
+    return "연장";
+  }
 
   return "재입주";
 }
@@ -1018,7 +1040,7 @@ function calculateDormContractType(
   const contiguous = contract.contractStart === addDays(lastEnd, 1);
   if (contiguous && sameTerms) return "연장";
   if (!sameTerms) return "재계약";
-  return "변경";
+  return "재계약";
 }
 
 function daysBetween(start: string, end: string) {
@@ -1203,14 +1225,15 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const visibleDormContracts = useMemo(() => {
     return dormContracts.filter((c) => {
       if (dormContractSiteFilter !== "전체" && c.site !== dormContractSiteFilter) return false;
-      if (dormContractStatusFilter !== "전체" && c.contractStatus !== dormContractStatusFilter) return false;
+      const status = getDormContractDisplayStatus(c, dorms, occupants);
+      if (dormContractStatusFilter !== "전체" && status !== dormContractStatusFilter) return false;
       if (dormContractSearch) {
-        const text = `${c.site} ${c.address} ${c.buildingName} ${c.dong} ${c.roomHo} ${c.pyeong} ${c.landlordName} ${c.landlordPhone} ${c.realEstateName} ${c.realEstatePhone} ${c.contractStart} ${c.contractEnd} ${c.contractStatus} ${c.contractAmount} ${c.prepaymentDeposit} ${c.deposit} ${c.monthlyRentOrMaintenance} ${c.contractType} ${c.notes} ${c.registeredBy} ${c.modifiedBy}`.toLowerCase();
+        const text = `${c.site} ${c.address} ${c.buildingName} ${c.dong} ${c.roomHo} ${c.pyeong} ${c.landlordName} ${c.landlordPhone} ${c.realEstateName} ${c.realEstatePhone} ${c.contractStart} ${c.contractEnd} ${status} ${c.contractAmount} ${c.prepaymentDeposit} ${c.deposit} ${c.monthlyRentOrMaintenance} ${c.contractType} ${c.notes} ${c.registeredBy} ${c.modifiedBy}`.toLowerCase();
         return text.includes(dormContractSearch.toLowerCase());
       }
       return true;
     });
-  }, [dormContracts, dormContractSearch, dormContractSiteFilter, dormContractStatusFilter]);
+  }, [dormContracts, dormContractSearch, dormContractSiteFilter, dormContractStatusFilter, dorms, occupants]);
 
   const visibleNewHires = useMemo(() => {
     return newHires.filter((h) => {
@@ -2420,6 +2443,45 @@ const exportExcel = () => {
                     <Plus className="h-4 w-4" /> 기숙사 추가
                   </button>
                 )}
+                {canEditData(currentUser) && selectedDormContractIds.length === 1 && (
+                  <button
+                    onClick={() => {
+                      const selected = dormContracts.find((c) => c.id === selectedDormContractIds[0]);
+                      if (!selected) return;
+                      setDormContractForm({
+                        site: selected.site,
+                        address: selected.address,
+                        buildingName: selected.buildingName,
+                        dong: selected.dong,
+                        roomHo: selected.roomHo,
+                        pyeong: selected.pyeong,
+                        landlordName: selected.landlordName,
+                        landlordPhone: selected.landlordPhone,
+                        realEstateName: selected.realEstateName,
+                        realEstatePhone: selected.realEstatePhone,
+                        contractStart: "",
+                        contractEnd: "",
+                        contractStatus: "자동선택",
+                        contractAmount: selected.contractAmount,
+                        prepaymentDeposit: selected.prepaymentDeposit,
+                        deposit: selected.deposit,
+                        monthlyRentOrMaintenance: selected.monthlyRentOrMaintenance,
+                        contractType: "자동선택",
+                        gender: selected.gender,
+                        notes: selected.notes,
+                        registeredBy: currentUser?.displayName || selected.registeredBy,
+                        modifiedBy: currentUser?.displayName || selected.modifiedBy,
+                        createdAt: new Date().toISOString().slice(0, 10),
+                        updatedAt: new Date().toISOString().slice(0, 10),
+                      });
+                      setEditingDormContractId(null);
+                      setShowDormContractForm(true);
+                    }}
+                    className="inline-flex items-center gap-2 rounded-2xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-500"
+                  >
+                    계약 갱신 등록
+                  </button>
+                )}
                 {canEditData(currentUser) && selectedDormContractIds.length > 0 && (
                   <button
                     onClick={() => {
@@ -2512,7 +2574,7 @@ const exportExcel = () => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.realEstatePhone}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractStart}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractEnd}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractStatus}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{getDormContractDisplayStatus(c, dorms, occupants)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractAmount}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.prepaymentDeposit}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.deposit}</td>
@@ -2577,6 +2639,42 @@ const exportExcel = () => {
                     className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-white hover:bg-slate-800"
                   >
                     <Plus className="h-4 w-4" /> 입주자 추가
+                  </button>
+                )}
+                {canEditData(currentUser) && selectedNewHireIds.length === 1 && (
+                  <button
+                    onClick={() => {
+                      const selected = newHires.find((h) => h.id === selectedNewHireIds[0]);
+                      if (!selected) return;
+                      setNewHireForm({
+                        site: selected.site,
+                        gender: selected.gender,
+                        name: selected.name,
+                        phone: selected.phone,
+                        department: selected.department,
+                        dormId: selected.dormId,
+                        buildingName: selected.buildingName,
+                        dong: selected.dong,
+                        roomHo: selected.roomHo,
+                        expectedMoveInDate: "",
+                        moveInDate: "",
+                        expectedMoveOutDate: "",
+                        moveOutDate: "",
+                        actualMoveOutDate: "",
+                        cheonanMoveDate: "",
+                        residenceStatus: "자동선택",
+                        moveInType: "자동선택",
+                        extensionReason: selected.extensionReason,
+                        notes: selected.notes,
+                        createdAt: new Date().toISOString().slice(0, 10),
+                        updatedAt: new Date().toISOString().slice(0, 10),
+                      });
+                      setEditingNewHireId(null);
+                      setShowNewHireForm(true);
+                    }}
+                    className="inline-flex items-center gap-2 rounded-2xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-500"
+                  >
+                    거주 갱신 등록
                   </button>
                 )}
                 {canEditData(currentUser) && selectedNewHireIds.length > 0 && (
@@ -2671,7 +2769,7 @@ const exportExcel = () => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveOutDate}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.actualMoveOutDate}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.cheonanMoveDate}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.residenceStatus}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{calculateNewHireResidenceStatus(h)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveInType}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.extensionReason || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.notes || "-"}</td>
