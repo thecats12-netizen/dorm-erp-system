@@ -15,7 +15,6 @@ import {
   LogOut,
   Moon,
   Package,
-  Palette,
   Plus,
   Search,
   ShieldCheck,
@@ -247,6 +246,369 @@ type SaleRecord = {
   totalAmount: number;
   buyerCompany: string;
   notes: string;
+};
+
+type CustomTemplate = {
+  id: string;
+  name: string;
+  tableType: "dormContract" | "newHire" | "dorm" | "occupant" | "inventory" | "sale";
+  headers: string[];
+  fileName: string;
+  fileData: string;
+  createdAt: string;
+};
+
+type TableType = CustomTemplate["tableType"];
+
+const TABLE_TYPE_BY_TAB: Record<TabKey, TableType | null> = {
+  dashboard: null,
+  dorms: "dorm",
+  occupants: "occupant",
+  simulation: null,
+  inventory: "inventory",
+  leases: null,
+  sales: "sale",
+  dormContracts: "dormContract",
+  newHires: "newHire",
+  defects: null,
+  users: null,
+};
+
+const normalizeHeaderName = (value: string) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^0-9a-zㄱ-ㅎㅏ-ㅣ가-힣]/g, "");
+
+const HEADER_ALIASES: Record<TableType, Record<string, string>> = {
+  dorm: {
+    [normalizeHeaderName("지역")]: "지역",
+    [normalizeHeaderName("site")]: "지역",
+    [normalizeHeaderName("성별")]: "성별",
+    [normalizeHeaderName("gender")]: "성별",
+    [normalizeHeaderName("기숙사명")]: "건물명",
+    [normalizeHeaderName("건물명")]: "건물명",
+    [normalizeHeaderName("주소")]: "주소",
+    [normalizeHeaderName("기숙사주소")]: "주소",
+    [normalizeHeaderName("dong")]: "동",
+    [normalizeHeaderName("동")]: "동",
+    [normalizeHeaderName("호수")]: "호수",
+    [normalizeHeaderName("호")]: "호수",
+    [normalizeHeaderName("roomho")]: "호수",
+    [normalizeHeaderName("평수")]: "평수",
+    [normalizeHeaderName("계약일")]: "계약시작",
+    [normalizeHeaderName("계약시작")]: "계약시작",
+    [normalizeHeaderName("만료일")]: "계약종료",
+    [normalizeHeaderName("계약종료")]: "계약종료",
+    [normalizeHeaderName("계약금액")]: "계약금액",
+    [normalizeHeaderName("상태")]: "상태",
+    [normalizeHeaderName("leaseStatus")]: "상태",
+    [normalizeHeaderName("선납계약금")]: "선납계약금",
+    [normalizeHeaderName("부동산명")]: "부동산명",
+    [normalizeHeaderName("realestatename")]: "부동산명",
+    [normalizeHeaderName("잔금일")]: "잔금일",
+    [normalizeHeaderName("비고")]: "비고",
+  },
+  occupant: {
+    [normalizeHeaderName("지역")]: "지역",
+    [normalizeHeaderName("site")]: "지역",
+    [normalizeHeaderName("기숙사")]: "기숙사",
+    [normalizeHeaderName("건물명")]: "기숙사",
+    [normalizeHeaderName("이름")]: "이름",
+    [normalizeHeaderName("사원명")]: "이름",
+    [normalizeHeaderName("성별")]: "성별",
+    [normalizeHeaderName("gender")]: "성별",
+    [normalizeHeaderName("부서")]: "부서",
+    [normalizeHeaderName("department")]: "부서",
+    [normalizeHeaderName("연락처")]: "연락처",
+    [normalizeHeaderName("phone")]: "연락처",
+    [normalizeHeaderName("입실일")]: "입실일",
+    [normalizeHeaderName("퇴실일")]: "퇴실일",
+    [normalizeHeaderName("예상입실일")]: "예상입실일",
+    [normalizeHeaderName("예상퇴실일")]: "예상퇴실일",
+    [normalizeHeaderName("실제퇴실일")]: "실제퇴실일",
+    [normalizeHeaderName("상태")]: "상태",
+    [normalizeHeaderName("거주상태")]: "상태",
+    [normalizeHeaderName("메모")]: "비고",
+    [normalizeHeaderName("notes")]: "비고",
+  },
+  dormContract: {
+    [normalizeHeaderName("지역")]: "지역",
+    [normalizeHeaderName("site")]: "지역",
+    [normalizeHeaderName("도로명주소")]: "도로명주소",
+    [normalizeHeaderName("주소")]: "도로명주소",
+    [normalizeHeaderName("address")]: "도로명주소",
+    [normalizeHeaderName("건물명")]: "건물명",
+    [normalizeHeaderName("동")]: "동",
+    [normalizeHeaderName("dong")]: "동",
+    [normalizeHeaderName("호수")]: "호수",
+    [normalizeHeaderName("호")]: "호수",
+    [normalizeHeaderName("roomho")]: "호수",
+    [normalizeHeaderName("평수")]: "평수",
+    [normalizeHeaderName("임대인명")]: "임대인명",
+    [normalizeHeaderName("landlordname")]: "임대인명",
+    [normalizeHeaderName("임대인연락처")]: "임대인연락처",
+    [normalizeHeaderName("landlordphone")]: "임대인연락처",
+    [normalizeHeaderName("부동산명")]: "부동산명",
+    [normalizeHeaderName("realestatename")]: "부동산명",
+    [normalizeHeaderName("부동산연락처")]: "부동산연락처",
+    [normalizeHeaderName("realestatephone")]: "부동산연락처",
+    [normalizeHeaderName("계약시작일")]: "계약시작일",
+    [normalizeHeaderName("계약시작")]: "계약시작일",
+    [normalizeHeaderName("계약종료일")]: "계약종료일",
+    [normalizeHeaderName("계약종료")]: "계약종료일",
+    [normalizeHeaderName("계약상태")]: "계약상태",
+    [normalizeHeaderName("status")]: "계약상태",
+    [normalizeHeaderName("계약금액")]: "계약금액",
+    [normalizeHeaderName("선납금")]: "선납금",
+    [normalizeHeaderName("보증금")]: "보증금",
+    [normalizeHeaderName("월세")]: "월세/관리비",
+    [normalizeHeaderName("월세관리비")]: "월세/관리비",
+    [normalizeHeaderName("월세or관리비")]: "월세/관리비",
+    [normalizeHeaderName("contracttype")]: "계약유형",
+    [normalizeHeaderName("계약유형")]: "계약유형",
+    [normalizeHeaderName("성별")]: "성별",
+    [normalizeHeaderName("gender")]: "성별",
+    [normalizeHeaderName("비고")]: "비고",
+    [normalizeHeaderName("등록자")]: "등록자",
+    [normalizeHeaderName("modifiedby")]: "수정자",
+    [normalizeHeaderName("등록자")]: "등록자",
+    [normalizeHeaderName("수정자")]: "수정자",
+  },
+  newHire: {
+    [normalizeHeaderName("지역")]: "지역",
+    [normalizeHeaderName("site")]: "지역",
+    [normalizeHeaderName("성별")]: "성별",
+    [normalizeHeaderName("gender")]: "성별",
+    [normalizeHeaderName("이름")]: "이름",
+    [normalizeHeaderName("name")]: "이름",
+    [normalizeHeaderName("연락처")]: "연락처",
+    [normalizeHeaderName("phone")]: "연락처",
+    [normalizeHeaderName("부서")]: "부서",
+    [normalizeHeaderName("department")]: "부서",
+    [normalizeHeaderName("도로명주소")]: "도로명주소",
+    [normalizeHeaderName("주소")]: "도로명주소",
+    [normalizeHeaderName("address")]: "도로명주소",
+    [normalizeHeaderName("건물명")]: "건물명",
+    [normalizeHeaderName("동")]: "동",
+    [normalizeHeaderName("호수")]: "호수",
+    [normalizeHeaderName("호")]: "호수",
+    [normalizeHeaderName("roomho")]: "호수",
+    [normalizeHeaderName("예상입실일")]: "예상입실일",
+    [normalizeHeaderName("입실일")]: "입실일",
+    [normalizeHeaderName("예상퇴실일")]: "예상퇴실일",
+    [normalizeHeaderName("퇴실일")]: "퇴실일",
+    [normalizeHeaderName("실제퇴실일")]: "실제퇴실일",
+    [normalizeHeaderName("천안이동일")]: "천안이동일",
+    [normalizeHeaderName("거주상태")]: "거주상태",
+    [normalizeHeaderName("status")]: "거주상태",
+    [normalizeHeaderName("입주유형")]: "입주유형",
+    [normalizeHeaderName("moveintype")]: "입주유형",
+    [normalizeHeaderName("연장사유")]: "연장사유",
+    [normalizeHeaderName("notes")]: "특이사항 메모",
+    [normalizeHeaderName("특이사항메모")]: "특이사항 메모",
+  },
+  inventory: {
+    [normalizeHeaderName("관리자명")]: "관리자명",
+    [normalizeHeaderName("contractstart")]: "계약일",
+    [normalizeHeaderName("계약일")]: "계약일",
+    [normalizeHeaderName("만료일")]: "만료일",
+    [normalizeHeaderName("기숙사주소")]: "기숙사주소",
+    [normalizeHeaderName("비품명")]: "비품명",
+    [normalizeHeaderName("수량")]: "수량",
+    [normalizeHeaderName("모델명")]: "모델명",
+    [normalizeHeaderName("메이커")]: "메이커",
+    [normalizeHeaderName("구매액")]: "구매액",
+    [normalizeHeaderName("지급일")]: "지급일",
+    [normalizeHeaderName("매각일")]: "매각일",
+    [normalizeHeaderName("비고")]: "비고",
+  },
+  sale: {
+    [normalizeHeaderName("판매날짜")]: "판매날짜",
+    [normalizeHeaderName("아이템")]: "아이템",
+    [normalizeHeaderName("단가")]: "단가",
+    [normalizeHeaderName("수량")]: "수량",
+    [normalizeHeaderName("총금액")]: "총금액",
+    [normalizeHeaderName("구매사")]: "구매사",
+    [normalizeHeaderName("비고")]: "비고",
+  },
+};
+
+const getHeaderAlias = (type: TableType, header: string) => {
+  const normalized = normalizeHeaderName(header);
+  return HEADER_ALIASES[type][normalized] || header;
+};
+
+const normalizeExcelRow = (row: Record<string, unknown>, type: TableType) => {
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    normalized[getHeaderAlias(type, key)] = value;
+  }
+  return normalized;
+};
+
+const getWorksheetHeaders = (worksheet: XLSX.WorkSheet) => {
+  const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1");
+  const headerRow: string[] = [];
+  for (let col = range.s.c; col <= range.e.c; col += 1) {
+    const cell = worksheet[XLSX.utils.encode_cell({ r: range.s.r, c: col })];
+    headerRow.push(cell ? String(cell.v) : "");
+  }
+  return headerRow.filter((header) => header.trim() !== "");
+};
+
+const clearWorksheetRowsAfterHeader = (worksheet: XLSX.WorkSheet, headerRowIndex = 0) => {
+  const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1");
+  if (range.e.r <= headerRowIndex) return;
+  for (let row = headerRowIndex + 1; row <= range.e.r; row += 1) {
+    for (let col = range.s.c; col <= range.e.c; col += 1) {
+      delete worksheet[XLSX.utils.encode_cell({ r: row, c: col })];
+    }
+  }
+  worksheet["!ref"] = XLSX.utils.encode_range({ s: { r: range.s.r, c: range.s.c }, e: { r: headerRowIndex, c: range.e.c } });
+};
+
+const buildDefaultExportRow = (row: Record<string, unknown>, type: TableType): Record<string, unknown> => {
+  switch (type) {
+    case "dorm":
+      return {
+        지역: row["지역"],
+        성별: row["성별"],
+        기숙사: row["건물명"],
+        주소: row["주소"],
+        동: row["동"],
+        호수: row["호수"],
+        평수: row["평수"],
+        계약시작: row["계약시작"],
+        계약종료: row["계약종료"],
+        계약금액: row["계약금액"],
+        상태: row["상태"],
+        선납계약금: row["선납계약금"],
+        부동산명: row["부동산명"],
+        잔금일: row["잔금일"],
+        비고: row["비고"],
+      };
+    case "occupant":
+      return {
+        지역: row["지역"],
+        기숙사: row["기숙사"],
+        이름: row["이름"],
+        성별: row["성별"],
+        부서: row["부서"],
+        연락처: row["연락처"],
+        입실일: row["입실일"],
+        퇴실일: row["퇴실일"],
+        예상입실일: row["예상입실일"],
+        예상퇴실일: row["예상퇴실일"],
+        실제퇴실일: row["실제퇴실일"],
+        상태: row["상태"],
+        비고: row["비고"],
+      };
+    case "dormContract":
+      return {
+        지역: row["지역"],
+        도로명주소: row["도로명주소"],
+        건물명: row["건물명"],
+        동: row["동"],
+        호수: row["호수"],
+        평수: row["평수"],
+        임대인명: row["임대인명"],
+        임대인연락처: row["임대인연락처"],
+        부동산명: row["부동산명"],
+        부동산연락처: row["부동산연락처"],
+        계약시작일: row["계약시작일"],
+        계약종료일: row["계약종료일"],
+        계약상태: row["계약상태"],
+        계약금액: row["계약금액"],
+        선납금: row["선납금"],
+        보증금: row["보증금"],
+        "월세/관리비": row["월세/관리비"],
+        계약유형: row["계약유형"],
+        성별: row["성별"],
+        비고: row["비고"],
+        등록자: row["등록자"],
+        수정자: row["수정자"],
+      };
+    case "newHire":
+      return {
+        지역: row["지역"],
+        성별: row["성별"],
+        이름: row["이름"],
+        연락처: row["연락처"],
+        부서: row["부서"],
+        도로명주소: row["도로명주소"],
+        건물명: row["건물명"],
+        동: row["동"],
+        호수: row["호수"],
+        예상입실일: row["예상입실일"],
+        입실일: row["입실일"],
+        예상퇴실일: row["예상퇴실일"],
+        퇴실일: row["퇴실일"],
+        실제퇴실일: row["실제퇴실일"],
+        천안이동일: row["천안이동일"],
+        거주상태: row["거주상태"],
+        입주유형: row["입주유형"],
+        연장사유: row["연장사유"],
+        "특이사항 메모": row["특이사항 메모"],
+      };
+    case "inventory":
+      return {
+        관리자명: row["관리자명"],
+        계약일: row["계약일"],
+        만료일: row["만료일"],
+        기숙사주소: row["기숙사주소"],
+        비품명: row["비품명"],
+        수량: row["수량"],
+        모델명: row["모델명"],
+        메이커: row["메이커"],
+        구매액: row["구매액"],
+        지급일: row["지급일"],
+        매각일: row["매각일"],
+        비고: row["비고"],
+      };
+    case "sale":
+      return {
+        판매날짜: row["판매날짜"],
+        아이템: row["아이템"],
+        단가: row["단가"],
+        수량: row["수량"],
+        총금액: row["총금액"],
+        구매사: row["구매사"],
+        비고: row["비고"],
+      };
+    default:
+      return row;
+  }
+};
+
+const mapRowToTemplateHeaders = (row: Record<string, unknown>, type: TableType, headers: string[]) => {
+  const defaultRow = buildDefaultExportRow(row, type);
+  const aliasMap = HEADER_ALIASES[type];
+  return headers.reduce((acc: Record<string, unknown>, header) => {
+    const key = aliasMap[normalizeHeaderName(header)] || header;
+    acc[header] = defaultRow[key] ?? "";
+    return acc;
+  }, {});
+};
+
+const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return window.btoa(binary);
+};
+
+const base64ToArrayBuffer = (base64: string) => {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
 };
 
 type DefectRequest = {
@@ -1135,7 +1497,13 @@ export default function App() {
   const [showSaleForm, setShowSaleForm] = useState(false);
   const [showDefectForm, setShowDefectForm] = useState(false);
   const [showUserForm, setShowUserForm] = useState(false);
-  const [showTheme, setShowTheme] = useState(false);
+  const [showExcelTemplate, setShowExcelTemplate] = useState(false);
+  const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>(() => {
+    const saved = localStorage.getItem("customTemplates");
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [templateUploadName, setTemplateUploadName] = useState("");
+  const [templateUploadType, setTemplateUploadType] = useState<"dormContract" | "newHire" | "dorm" | "occupant" | "inventory" | "sale">("dormContract");
 
   const [editingDormId, setEditingDormId] = useState<string | null>(null);
   const [editingOccupantId, setEditingOccupantId] = useState<string | null>(null);
@@ -1158,8 +1526,13 @@ export default function App() {
   const [userForm, setUserForm] = useState(userTemplate());
 
   const defectRequestPhotoInputRef = useRef<HTMLInputElement | null>(null);
-const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const excelInputRef = useRef<HTMLInputElement | null>(null);
+  const templateInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem("customTemplates", JSON.stringify(customTemplates));
+  }, [customTemplates]);
 
   useEffect(() => {
     const savedTheme = localStorage.getItem(THEME_KEY);
@@ -1203,6 +1576,20 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
   }, [currentUser]);
 
   const visibleDorms = useMemo(() => {
+    const getContractKey = (site: string, address: string, buildingName: string, dong: string, roomHo: string) =>
+      `${site?.trim().toLowerCase()}|${address?.trim().toLowerCase()}|${buildingName?.trim().toLowerCase()}|${dong?.trim().toLowerCase()}|${roomHo?.trim().toLowerCase()}`;
+
+    const latestContractByDorm = new Map<string, DormContract>();
+    dormContracts.forEach((contract) => {
+      const key = getContractKey(contract.site, contract.address, contract.buildingName, contract.dong, contract.roomHo);
+      const existing = latestContractByDorm.get(key);
+      const currentUpdatedAt = contract.updatedAt ? Date.parse(contract.updatedAt) : 0;
+      const existingUpdatedAt = existing?.updatedAt ? Date.parse(existing.updatedAt) : 0;
+      if (!existing || currentUpdatedAt >= existingUpdatedAt) {
+        latestContractByDorm.set(key, contract);
+      }
+    });
+
     return dorms.filter((d) => {
       if (currentUser?.role === "viewer" || currentUser?.role === "maintenance_reporter") {
         if (currentUser.siteAccess !== "전체" && d.site !== currentUser.siteAccess) return false;
@@ -1216,9 +1603,14 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
         if (!text.includes(dormSearch.toLowerCase())) return false;
       }
 
-      return true;
+      const key = getContractKey(d.site, d.address, d.buildingName, d.dong, d.roomHo);
+      const contract = latestContractByDorm.get(key);
+      if (!contract) return false;
+      if (contract.contractStatus === "종료" || contract.contractStatus === "해지") return false;
+      if (["공실", "진행중", "만료예정", "연장"].includes(contract.contractStatus)) return true;
+      return false;
     });
-  }, [dorms, currentUser, siteFilter, dormSearch, dormSiteFilter, dormGenderFilter]);
+  }, [dorms, currentUser, siteFilter, dormSearch, dormSiteFilter, dormGenderFilter, dormContracts]);
 
   const visibleDormIds = useMemo(() => new Set(visibleDorms.map((d) => d.id)), [visibleDorms]);
 
@@ -1665,20 +2057,20 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
     const buffer = await file.arrayBuffer();
     const workbook = XLSX.read(buffer, { type: "array" });
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "dorm"));
     const mappedDorms: Dorm[] = rows.map((r) => ({
       id: crypto.randomUUID(),
-      site: String(r["지역"] || r["site"] || "평택") as Site,
-      gender: String(r["성별"] || r["gender"] || "남") as "남" | "여",
-      buildingName: String(r["건물명"] || r["기숙사명"] || ""),
-      address: String(r["주소"] || r["기숙사주소"] || ""),
+      site: String(r["지역"] || "평택") as Site,
+      gender: String(r["성별"] || "남") as "남" | "여",
+      buildingName: String(r["건물명"] || ""),
+      address: String(r["주소"] || ""),
       dong: String(r["동"] || ""),
       roomHo: String(r["호수"] || r["호"] || ""),
       pyeong: String(r["평수"] || ""),
       capacity: 6,
       managerUserId: undefined,
-      contractStart: String(r["계약일"] || r["계약시작"] || ""),
-      contractEnd: String(r["만료일"] || r["계약종료"] || ""),
+      contractStart: String(r["계약시작"] || String(r["계약일"] || "")),
+      contractEnd: String(r["계약종료"] || String(r["만료일"] || "")),
       contractAmount: String(r["계약금액"] || ""),
       leaseStatus: String(r["상태"] || "사용중") as Dorm["leaseStatus"],
       prepaymentDeposit: Number(r["선납계약금"] || 0),
@@ -1696,29 +2088,29 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
     const buffer = await file.arrayBuffer();
     const workbook = XLSX.read(buffer, { type: "array" });
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "dormContract"));
     const mapped = rows.map((r) => ({
       id: crypto.randomUUID(),
-      site: String(r["지역"] || r["site"] || "평택") as Site,
-      address: String(r["도로명주소"] || r["주소"] || r["address"] || ""),
-      buildingName: String(r["건물명"] || r["buildingName"] || ""),
+      site: String(r["지역"] || "평택") as Site,
+      address: String(r["도로명주소"] || r["주소"] || ""),
+      buildingName: String(r["건물명"] || ""),
       dong: String(r["동"] || ""),
-      roomHo: String(r["호수"] || r["호"] || r["roomHo"] || ""),
-      pyeong: String(r["평수"] || r["pyeong"] || ""),
-      landlordName: String(r["임대인명"] || r["landlordName"] || ""),
-      landlordPhone: String(r["임대인연락처"] || r["landlordPhone"] || ""),
-      realEstateName: String(r["부동산명"] || r["realEstateName"] || ""),
-      realEstatePhone: String(r["부동산연락처"] || r["realEstatePhone"] || ""),
-      contractStart: String(r["계약시작일"] || r["계약시작"] || ""),
-      contractEnd: String(r["계약종료일"] || r["계약종료"] || ""),
+      roomHo: String(r["호수"] || r["호"] || ""),
+      pyeong: String(r["평수"] || ""),
+      landlordName: String(r["임대인명"] || ""),
+      landlordPhone: String(r["임대인연락처"] || ""),
+      realEstateName: String(r["부동산명"] || ""),
+      realEstatePhone: String(r["부동산연락처"] || ""),
+      contractStart: String(r["계약시작일"] || String(r["계약시작"] || "")),
+      contractEnd: String(r["계약종료일"] || String(r["계약종료"] || "")),
       contractStatus: String(r["계약상태"] || r["status"] || "진행중") as DormContractStatus,
       contractAmount: String(r["계약금액"] || r["contractAmount"] || ""),
       prepaymentDeposit: String(r["선납금"] || r["prepaymentDeposit"] || ""),
       deposit: String(r["보증금"] || r["deposit"] || ""),
-      monthlyRentOrMaintenance: String(r["월세 or 관리비"] || r["월세/관리비"] || r["monthlyRentOrMaintenance"] || ""),
+      monthlyRentOrMaintenance: String(r["월세/관리비"] || r["월세 or 관리비"] || r["monthlyRentOrMaintenance"] || ""),
       contractType: String(r["계약유형"] || r["contractType"] || "신규") as ContractType,
-      gender: String(r["성별"] || r["gender"] || "남") as Gender,
-      notes: String(r["비고"] || r["notes"] || ""),
+      gender: String(r["성별"] || "남") as Gender,
+      notes: String(r["비고"] || ""),
       registeredBy: String(r["등록자"] || r["registeredBy"] || currentUser?.displayName || ""),
       modifiedBy: String(r["수정자"] || r["modifiedBy"] || currentUser?.displayName || ""),
       createdAt: new Date().toISOString(),
@@ -1732,19 +2124,19 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
     const buffer = await file.arrayBuffer();
     const workbook = XLSX.read(buffer, { type: "array" });
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "newHire"));
     const mapped = rows.map((r) => {
-      const address = String(r["도로명주소"] || r["주소"] || r["address"] || "").trim();
+      const address = String(r["도로명주소"] || r["주소"] || "").trim();
       const matchedDorm = dorms.find(
         (d) => d.address === address || `${d.address} ${d.dong} ${d.roomHo}`.trim() === address || `${d.address}${d.dong}${d.roomHo}` === address
       );
       return {
       id: crypto.randomUUID(),
-      site: String(r["지역"] || r["site"] || "평택") as Site,
-      gender: String(r["성별"] || r["gender"] || "남") as Gender,
-      name: String(r["이름"] || r["name"] || ""),
-      phone: String(r["연락처"] || r["phone"] || ""),
-      department: String(r["부서"] || r["department"] || ""),
+      site: String(r["지역"] || "평택") as Site,
+      gender: String(r["성별"] || "남") as Gender,
+      name: String(r["이름"] || ""),
+      phone: String(r["연락처"] || ""),
+      department: String(r["부서"] || ""),
       dormId: matchedDorm?.id || String(r["기숙사ID"] || r["dormId"] || ""),
       buildingName: String(r["건물명"] || r["buildingName"] || matchedDorm?.buildingName || ""),
       dong: String(r["동"] || matchedDorm?.dong || ""),
@@ -1778,9 +2170,38 @@ const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
     }
     await uploadDormExcel(file);
   };
+
+  const uploadTemplateExcel = async (file: File) => {
+    if (!canManageUsers(currentUser)) return;
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+    const headers = getWorksheetHeaders(worksheet);
+    if (headers.length === 0) {
+      alert("첫 번째 행에서 헤더를 찾을 수 없습니다. 올바른 엑셀파일을 업로드해주세요.");
+      return;
+    }
+
+    const newTemplate: CustomTemplate = {
+      id: crypto.randomUUID(),
+      name: templateUploadName.trim() || file.name.replace(/\.(xlsx|xls)$/i, ""),
+      tableType: templateUploadType,
+      headers,
+      fileName: file.name,
+      fileData: arrayBufferToBase64(buffer),
+      createdAt: new Date().toISOString(),
+    };
+
+    setCustomTemplates((prev) => [newTemplate, ...prev]);
+    setTemplateUploadName("");
+    setTemplateUploadType("dormContract");
+    if (templateInputRef.current) templateInputRef.current.value = "";
+  };
+
 const exportExcel = () => {
   let rows: Record<string, unknown>[] = [];
   let fileName = "export.xlsx";
+  let tableType: TableType | null = TABLE_TYPE_BY_TAB[activeTab];
 
   if (activeTab === "dorms") {
     rows = visibleDorms.map((d) => ({
@@ -1892,8 +2313,8 @@ const exportExcel = () => {
       계약유형: c.contractType,
       성별: c.gender,
       비고: c.notes,
-      등록일: c.createdAt,
-      수정일: c.updatedAt,
+      등록일: formatDateOnly(c.createdAt),
+      수정일: formatDateOnly(c.updatedAt),
       등록자: c.registeredBy,
     }));
     fileName = "기숙사계약현황.xlsx";
@@ -1946,8 +2367,8 @@ const exportExcel = () => {
       호수: d.ho,
       도로명주소: d.roadAddress,
       상세주소: d.detailAddress,
-      공동현관: d.공동현관,
-      세대현관: d.세대현관,
+      공동현관: d["공동현관"],
+      세대현관: d["세대현관"],
       상황: d.defectStatus,
       하자신청내용: d.requestText,
       점검자: d.inspectorName,
@@ -1967,6 +2388,30 @@ const exportExcel = () => {
       상태: d.leaseStatus,
     }));
     fileName = "대시보드데이터.xlsx";
+  }
+
+  const template = tableType
+    ? [...customTemplates]
+        .filter((templateItem) => templateItem.tableType === tableType)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    : null;
+
+  if (template?.fileData) {
+    try {
+      const templateWorkbook = XLSX.read(base64ToArrayBuffer(template.fileData), { type: "array", cellStyles: true });
+      const sheetName = templateWorkbook.SheetNames[0];
+      const worksheet = templateWorkbook.Sheets[sheetName];
+      const headers = getWorksheetHeaders(worksheet);
+      if (headers.length > 0) {
+        clearWorksheetRowsAfterHeader(worksheet, 0);
+        const convertedRows = rows.map((row) => mapRowToTemplateHeaders(row, tableType as TableType, headers));
+        XLSX.utils.sheet_add_json(worksheet, convertedRows, { skipHeader: true, origin: { r: 1, c: 0 }, header: headers });
+        XLSX.writeFile(templateWorkbook, fileName, { bookType: "xlsx", cellStyles: true });
+        return;
+      }
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   const worksheet = XLSX.utils.json_to_sheet(rows);
@@ -2176,13 +2621,13 @@ const exportExcel = () => {
                </button>
               )}
 
-             {currentUser.role !== "maintenance_reporter" && (
+             {currentUser.role === "admin" && (
                <button
-                 onClick={() => setShowTheme((v) => !v)}
+                 onClick={() => setShowExcelTemplate((v) => !v)}
                 className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 hover:bg-slate-50"
                >
-                  <Palette className="h-4 w-4" /> 색상 설정
-                </button>
+                  <FileSpreadsheet className="h-4 w-4" /> 양식 설정
+               </button>
              )}
 
              <button
@@ -2261,12 +2706,175 @@ const exportExcel = () => {
   </div>
 </section>
 
-        {showTheme && (
+
+
+        {showExcelTemplate && currentUser?.role === "admin" && (
           <section className="mb-6 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-            <div className="mb-4 text-lg font-semibold">색상 설정</div>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <ColorEditor label="강조 색상" value={theme.accentColor} onChange={(v) => setTheme((s) => ({ ...s, accentColor: v }))} />
-              <ColorEditor label="브랜드 색상" value={theme.brandColor} onChange={(v) => setTheme((s) => ({ ...s, brandColor: v }))} />
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold">엑셀 양식 설정</h2>
+              <p className="text-sm text-slate-500">각 항목별 엑셀 등록/내보내기 양식을 다운로드하고 맞춤 양식을 추가할 수 있습니다.</p>
+            </div>
+            
+            <div className="mb-6 rounded-2xl bg-slate-50 p-4">
+              <h3 className="mb-4 font-semibold">기본 양식 다운로드</h3>
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+                <button
+                  onClick={() => {
+                    const ws = XLSX.utils.aoa_to_sheet([
+                      ["지역", "도로명주소", "건물명", "동", "호수", "평수", "임대인명", "임대인연락처", "부동산명", "부동산연락처", "계약시작일", "계약종료일", "계약상태", "계약금액", "선납금", "보증금", "월세/관리비", "계약유형", "성별", "비고", "등록일", "수정일", "등록자"],
+                      ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+                    ]);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "기숙사계약현황");
+                    XLSX.writeFile(wb, "기숙사계약현황_양식.xlsx");
+                  }}
+                  className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold hover:bg-slate-50"
+                >
+                  📋 기숙사 계약현황
+                </button>
+                <button
+                  onClick={() => {
+                    const ws = XLSX.utils.aoa_to_sheet([
+                      ["지역", "성별", "이름", "연락처", "부서", "도로명주소", "건물명", "동", "호수", "예상입실일", "입실일", "예상퇴실일", "퇴실일", "실제퇴실일", "천안이동일", "거주상태", "입주유형", "연장사유", "특이사항 메모", "등록일", "수정일"],
+                      ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+                    ]);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "신입사원명단");
+                    XLSX.writeFile(wb, "신입사원명단_양식.xlsx");
+                  }}
+                  className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold hover:bg-slate-50"
+                >
+                  📋 신입사원명단
+                </button>
+                <button
+                  onClick={() => {
+                    const ws = XLSX.utils.aoa_to_sheet([
+                      ["지역", "성별", "건물명", "주소", "동", "호수", "평수", "계약시작", "계약종료", "계약금액", "상태", "선납계약금", "부동산명", "잔금일", "비고"],
+                      ["", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+                    ]);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "기숙사");
+                    XLSX.writeFile(wb, "기숙사_양식.xlsx");
+                  }}
+                  className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold hover:bg-slate-50"
+                >
+                  📋 기숙사
+                </button>
+                <button
+                  onClick={() => {
+                    const ws = XLSX.utils.aoa_to_sheet([
+                      ["지역", "기숙사", "이름", "성별", "부서", "연락처", "입실일", "잔여일", "예상입실일", "예상퇴실일", "실제퇴실일", "상태", "비고"],
+                      ["", "", "", "", "", "", "", "", "", "", "", "", ""],
+                    ]);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "입주자");
+                    XLSX.writeFile(wb, "입주자_양식.xlsx");
+                  }}
+                  className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold hover:bg-slate-50"
+                >
+                  📋 입주자
+                </button>
+                <button
+                  onClick={() => {
+                    const ws = XLSX.utils.aoa_to_sheet([
+                      ["관리자명", "계약일", "만료일", "기숙사주소", "비품명", "수량", "모델명", "메이커", "구매액", "지급일", "매각일", "비고"],
+                      ["", "", "", "", "", "", "", "", "", "", "", ""],
+                    ]);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "비품현황");
+                    XLSX.writeFile(wb, "비품현황_양식.xlsx");
+                  }}
+                  className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold hover:bg-slate-50"
+                >
+                  📋 비품현황
+                </button>
+                <button
+                  onClick={() => {
+                    const ws = XLSX.utils.aoa_to_sheet([
+                      ["일자", "품목", "단가", "수량", "합계", "매각업체", "비고"],
+                      ["", "", "", "", "", "", ""],
+                    ]);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "비품매각");
+                    XLSX.writeFile(wb, "비품매각_양식.xlsx");
+                  }}
+                  className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold hover:bg-slate-50"
+                >
+                  📋 비품매각
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <h3 className="mb-4 font-semibold">맞춤 양식 업로드</h3>
+              <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+                <input
+                  type="text"
+                  placeholder="양식명 (생략 시 파일명 사용)"
+                  value={templateUploadName}
+                  onChange={(e) => setTemplateUploadName(e.target.value)}
+                  className="rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-slate-400"
+                />
+                <select
+                  value={templateUploadType}
+                  onChange={(e) => setTemplateUploadType(e.target.value as "dormContract" | "newHire" | "dorm" | "occupant" | "inventory" | "sale")}
+                  className="rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-slate-400"
+                >
+                  <option value="dormContract">기숙사 계약현황</option>
+                  <option value="newHire">신입사원명단</option>
+                  <option value="dorm">기숙사</option>
+                  <option value="occupant">입주자</option>
+                  <option value="inventory">비품현황</option>
+                  <option value="sale">비품매각</option>
+                </select>
+                <button
+                  onClick={() => templateInputRef.current?.click()}
+                  className="rounded-2xl bg-slate-900 px-4 py-2 font-semibold text-white hover:bg-slate-800"
+                >
+                  템플릿 엑셀 업로드
+                </button>
+              </div>
+              <input
+                ref={templateInputRef}
+                type="file"
+                accept=".xlsx,.xls"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) uploadTemplateExcel(file);
+                  if (e.currentTarget) e.currentTarget.value = "";
+                }}
+              />
+              <p className="mb-4 text-sm text-slate-500">업로드된 템플릿은 선택한 항목에 맞추어 등록/내보내기 시 헤더를 기준으로 매핑됩니다.</p>
+              {customTemplates.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-sm font-semibold">저장된 맞춤 양식</h4>
+                  {customTemplates.map((template) => (
+                    <div key={template.id} className="grid gap-3 rounded-lg border border-slate-200 bg-white p-3 md:grid-cols-[1fr_auto_auto]">
+                      <div>
+                        <p className="font-medium">{template.name}</p>
+                        <p className="text-xs text-slate-500">{template.tableType}</p>
+                        <p className="text-xs text-slate-400">{template.fileName}</p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          const workbook = XLSX.read(base64ToArrayBuffer(template.fileData), { type: "array", cellStyles: true });
+                          XLSX.writeFile(workbook, template.fileName);
+                        }}
+                        className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                      >
+                        다운로드
+                      </button>
+                      <button
+                        onClick={() => setCustomTemplates((prev) => prev.filter((t) => t.id !== template.id))}
+                        className="rounded-lg bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-200"
+                      >
+                        삭제
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </section>
         )}
@@ -2581,8 +3189,8 @@ const exportExcel = () => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.monthlyRentOrMaintenance}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractType}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.notes}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.createdAt}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.updatedAt}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.createdAt)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.updatedAt)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.registeredBy}</td>
                     </tr>
                   ))}
@@ -4327,10 +4935,6 @@ function SearchableSelect({ label, value, onChange, options, displayOptions }: {
       )}
     </div>
   );
-}
-
-function ColorEditor({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
-  return <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 p-3"><div className="font-medium text-slate-700">{label}</div><div className="flex items-center gap-3"><div className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500">{value}</div><input type="color" value={value} onChange={(e) => onChange(e.target.value)} className="h-10 w-14 rounded-md border border-slate-300 bg-white" /></div></div>;
 }
 
 function Input({ label, value, onChange, type = "text", readOnly = false, placeholder }: { label: string; value: string; onChange: (v: string) => void; type?: string; readOnly?: boolean; placeholder?: string }) {
