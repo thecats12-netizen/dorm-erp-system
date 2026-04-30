@@ -1,18 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import {
-  AlertTriangle,
+  Bell,
   Building2,
-  CalendarClock,
   Camera,
   ChevronRight,
   ClipboardList,
   Download,
   Edit3,
-  Eye,
   FileSpreadsheet,
+  HelpCircle,
   Home,
   LogOut,
+  MessageSquare,
   Moon,
   Package,
   Plus,
@@ -248,6 +248,56 @@ type SaleRecord = {
   notes: string;
 };
 
+type MilitaryPersonnel = {
+  id: string;
+  name: string;
+  rank: string;
+  serviceBranch: string;
+  unit: string;
+  phone: string;
+  enlistmentDate: string;
+  dischargeDate: string;
+  status: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type TrainingRecord = {
+  id: string;
+  subject: string;
+  trainingDate: string;
+  location: string;
+  attendees: number;
+  status: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type MilitaryNotice = {
+  id: string;
+  title: string;
+  category: string;
+  publishedDate: string;
+  expiresDate: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type MilitaryReport = {
+  id: string;
+  title: string;
+  reportDate: string;
+  type: string;
+  author: string;
+  status: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type CustomTemplate = {
   id: string;
   name: string;
@@ -270,6 +320,17 @@ const TABLE_TYPE_BY_TAB: Record<TabKey, TableType | null> = {
   sales: "sale",
   dormContracts: "dormContract",
   newHires: "newHire",
+  settlementManagement: null,
+  notificationManagement: null,
+  documentManagement: null,
+  reportManagement: null,
+  settings: null,
+  militaryDashboard: null,
+  personnelManagement: null,
+  trainingRecords: null,
+  militaryNotices: null,
+  militaryReports: null,
+  militarySettings: null,
   defects: null,
   users: null,
 };
@@ -652,8 +713,19 @@ type TabKey =
   | "sales"
   | "dormContracts"
   | "newHires"
+  | "settlementManagement"
+  | "notificationManagement"
+  | "documentManagement"
+  | "reportManagement"
+  | "settings"
   | "defects"
-  | "users";
+  | "users"
+  | "militaryDashboard"
+  | "personnelManagement"
+  | "trainingRecords"
+  | "militaryNotices"
+  | "militaryReports"
+  | "militarySettings";
 
 const AUTH_KEY = "dorm-auth-v4";
 const USERS_KEY = "dorm-users-v4";
@@ -665,6 +737,11 @@ const SALES_KEY = "dorm-sales-v4";
 const DEFECTS_KEY = "dorm-defects-v4";
 const DORM_CONTRACTS_KEY = "dorm-contracts-v4";
 const NEW_HIRES_KEY = "dorm-new-hires-v4";
+const MILITARY_PERSONNEL_KEY = "military-personnel-v1";
+const MILITARY_TRAINING_KEY = "military-training-v1";
+const MILITARY_NOTICES_KEY = "military-notices-v1";
+const MILITARY_REPORTS_KEY = "military-reports-v1";
+const MILITARY_SETTINGS_KEY = "military-settings-v1";
 const THEME_KEY = "dorm-theme-v4";
 
 const themeDefault: ThemeSettings = {
@@ -1439,16 +1516,22 @@ export default function App() {
   const [newHires, setNewHires] = useState<NewHireEmployee[]>([]);
   const [sales, setSales] = useState<SaleRecord[]>([]);
   const [defects, setDefects] = useState<DefectRequest[]>([]);
+  const [militaryPersonnel, setMilitaryPersonnel] = useState<MilitaryPersonnel[]>([]);
+  const [militaryTrainingRecords, setMilitaryTrainingRecords] = useState<TrainingRecord[]>([]);
+  const [militaryNotices, setMilitaryNotices] = useState<MilitaryNotice[]>([]);
+  const [militaryReports, setMilitaryReports] = useState<MilitaryReport[]>([]);
+  const [militarySettings, setMilitarySettings] = useState<Record<string, string>>({});
   const [currentUser, setCurrentUser] = useState<LoginUser | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
+  const [expandedMenu, setExpandedMenu] = useState<string | null>("dashboard");
+  const [hoveredMenu, setHoveredMenu] = useState<string | null>(null);
 
   const [loginForm, setLoginForm] = useState({ username: "admin", password: "admin1234" });
   const [loginError, setLoginError] = useState("");
-  const [search, setSearch] = useState("");
+  const [_search, _setSearch] = useState("");
   const [userSearch, setUserSearch] = useState("");
-  const [siteFilter, setSiteFilter] = useState<Site | "전체">("전체");
+  const [_siteFilter, _setSiteFilter] = useState<Site | "전체">("전체");
   const [selectedDormId, setSelectedDormId] = useState<string>("");
-  const [selectedDashboardIds, setSelectedDashboardIds] = useState<string[]>([]);
   const [selectedDormIds, setSelectedDormIds] = useState<string[]>([]);
   const [selectedOccupantIds, setSelectedOccupantIds] = useState<string[]>([]);
   const [selectedDormContractIds, setSelectedDormContractIds] = useState<string[]>([]);
@@ -1478,6 +1561,10 @@ export default function App() {
   const [defectSearch, setDefectSearch] = useState("");
   const [dashboardSearch, setDashboardSearch] = useState("");
   const [dashboardSiteFilter, setDashboardSiteFilter] = useState<Site | "전체">("전체");
+  const [dashboardStatusFilter, setDashboardStatusFilter] = useState<string>("전체");
+  const [_simulationBaseDate, _setSimulationBaseDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [simulationYear, setSimulationYear] = useState<string>(new Date().getFullYear().toString());
+  const [simulationMonth, setSimulationMonth] = useState<string>((new Date().getMonth() + 1).toString().padStart(2, "0"));
   const [dormContractSearch, setDormContractSearch] = useState("");
   const [dormContractSiteFilter, setDormContractSiteFilter] = useState<Site | "전체">("전체");
   const [dormContractStatusFilter, setDormContractStatusFilter] = useState<DormContractStatus | "전체">("전체");
@@ -1497,7 +1584,7 @@ export default function App() {
   const [showSaleForm, setShowSaleForm] = useState(false);
   const [showDefectForm, setShowDefectForm] = useState(false);
   const [showUserForm, setShowUserForm] = useState(false);
-  const [showExcelTemplate, setShowExcelTemplate] = useState(false);
+  const [showExcelTemplate, _setShowExcelTemplate] = useState(false);
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>(() => {
     const saved = localStorage.getItem("customTemplates");
     return saved ? JSON.parse(saved) : [];
@@ -1544,6 +1631,11 @@ export default function App() {
     const savedNewHires = localStorage.getItem(NEW_HIRES_KEY);
     const savedSales = localStorage.getItem(SALES_KEY);
     const savedDefects = localStorage.getItem(DEFECTS_KEY);
+    const savedMilitaryPersonnel = localStorage.getItem(MILITARY_PERSONNEL_KEY);
+    const savedMilitaryTraining = localStorage.getItem(MILITARY_TRAINING_KEY);
+    const savedMilitaryNotices = localStorage.getItem(MILITARY_NOTICES_KEY);
+    const savedMilitaryReports = localStorage.getItem(MILITARY_REPORTS_KEY);
+    const savedMilitarySettings = localStorage.getItem(MILITARY_SETTINGS_KEY);
     const savedAuth = localStorage.getItem(AUTH_KEY);
 
     const dormSeed = savedDorms ? (JSON.parse(savedDorms) as Dorm[]) : demoDorms;
@@ -1557,6 +1649,11 @@ export default function App() {
     setNewHires(savedNewHires ? JSON.parse(savedNewHires) : demoNewHires);
     setSales(savedSales ? JSON.parse(savedSales) : []);
     setDefects(savedDefects ? JSON.parse(savedDefects) : []);
+    setMilitaryPersonnel(savedMilitaryPersonnel ? JSON.parse(savedMilitaryPersonnel) : []);
+    setMilitaryTrainingRecords(savedMilitaryTraining ? JSON.parse(savedMilitaryTraining) : []);
+    setMilitaryNotices(savedMilitaryNotices ? JSON.parse(savedMilitaryNotices) : []);
+    setMilitaryReports(savedMilitaryReports ? JSON.parse(savedMilitaryReports) : []);
+    setMilitarySettings(savedMilitarySettings ? JSON.parse(savedMilitarySettings) : {});
     setCurrentUser(savedAuth ? JSON.parse(savedAuth) : null);
   }, []);
 
@@ -1570,6 +1667,11 @@ export default function App() {
   useEffect(() => localStorage.setItem(NEW_HIRES_KEY, JSON.stringify(newHires)), [newHires]);
   useEffect(() => localStorage.setItem(SALES_KEY, JSON.stringify(sales)), [sales]);
   useEffect(() => localStorage.setItem(DEFECTS_KEY, JSON.stringify(defects)), [defects]);
+  useEffect(() => localStorage.setItem(MILITARY_PERSONNEL_KEY, JSON.stringify(militaryPersonnel)), [militaryPersonnel]);
+  useEffect(() => localStorage.setItem(MILITARY_TRAINING_KEY, JSON.stringify(militaryTrainingRecords)), [militaryTrainingRecords]);
+  useEffect(() => localStorage.setItem(MILITARY_NOTICES_KEY, JSON.stringify(militaryNotices)), [militaryNotices]);
+  useEffect(() => localStorage.setItem(MILITARY_REPORTS_KEY, JSON.stringify(militaryReports)), [militaryReports]);
+  useEffect(() => localStorage.setItem(MILITARY_SETTINGS_KEY, JSON.stringify(militarySettings)), [militarySettings]);
   useEffect(() => {
     if (currentUser) localStorage.setItem(AUTH_KEY, JSON.stringify(currentUser));
     else localStorage.removeItem(AUTH_KEY);
@@ -1610,9 +1712,7 @@ export default function App() {
       if (["공실", "진행중", "만료예정", "연장"].includes(contract.contractStatus)) return true;
       return false;
     });
-  }, [dorms, currentUser, siteFilter, dormSearch, dormSiteFilter, dormGenderFilter, dormContracts]);
-
-  const visibleDormIds = useMemo(() => new Set(visibleDorms.map((d) => d.id)), [visibleDorms]);
+  }, [dorms, currentUser, dormSearch, dormSiteFilter, dormGenderFilter, dormContracts]);
 
   const visibleDormContracts = useMemo(() => {
     return dormContracts.filter((c) => {
@@ -1642,14 +1742,14 @@ export default function App() {
   const visibleOccupants = useMemo(() => {
     return occupants.filter((o) => {
       const dorm = dorms.find((d) => d.id === o.dormId);
-      if (!dorm || !visibleDormIds.has(dorm.id)) return false;
+      if (!dorm) return false;
       if (occupantSiteFilter !== "전체" && dorm.site !== occupantSiteFilter) return false;
       if (occupantGenderFilter !== "전체" && o.gender !== occupantGenderFilter) return false;
       if (occupantStatusFilter !== "전체" && o.status !== occupantStatusFilter) return false;
       const text = `${o.employeeName} ${o.department} ${o.phone} ${o.status}`.toLowerCase();
       return !occupantSearch || text.includes(occupantSearch.toLowerCase());
     });
-  }, [occupants, dorms, visibleDormIds, occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter]);
+  }, [occupants, dorms, occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter]);
 
   const visibleUsers = useMemo(() => {
     return users.filter((u) => {
@@ -1736,51 +1836,97 @@ export default function App() {
       .slice(0, 10);
   }, [dorms]);
 
+  const parseDateValue = (value: string | undefined) => {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.valueOf()) ? null : date;
+  };
+
+  const isInMonth = (value: string | undefined, year: string, month: string) => {
+    const date = parseDateValue(value);
+    if (!date) return false;
+    return date.getFullYear() === Number(year) && date.getMonth() + 1 === Number(month);
+  };
+
   const simulationRows = useMemo(() => {
-    const build = (site: Site, gender: "남" | "여") => {
+    const monthStart = new Date(`${simulationYear}-${simulationMonth}-01`);
+    const monthEnd = new Date(monthStart);
+    monthEnd.setMonth(monthEnd.getMonth() + 1);
+    monthEnd.setDate(0);
+
+    const groups: Array<{ site: Site; gender: "남" | "여" }> = [
+      { site: "평택", gender: "남" },
+      { site: "평택", gender: "여" },
+      { site: "천안", gender: "남" },
+      { site: "천안", gender: "여" },
+    ];
+
+    return groups.map(({ site, gender }) => {
       const targetDorms = dorms.filter((d) => d.site === site && d.gender === gender);
+      const activeDorms = targetDorms.filter((d) => {
+        const start = parseDateValue(d.contractStart);
+        const end = parseDateValue(d.contractEnd);
+        const isActive = ["사용중", "만료예정", "공실", "연장"].includes(d.leaseStatus);
+        if (!start || !end || !isActive) return false;
+        return start <= monthEnd && end >= monthStart;
+      });
+      const residentTo = activeDorms.reduce((sum, d) => sum + (d.capacity || 0), 0);
+
       const targetOccupants = occupants.filter((o) => {
         const dorm = dorms.find((d) => d.id === o.dormId);
         return dorm?.site === site && dorm?.gender === gender;
       });
-      const to = targetDorms.reduce((sum, d) => sum + d.capacity, 0);
-      const current = targetOccupants.filter((o) => ["거주중", "만료예정", "신규입주"].includes(o.status)).length;
-      const expireResidents = targetOccupants.filter((o) => o.status === "만료예정").length;
-      const earlyDepartures = targetOccupants.filter((o) => o.status === "퇴실").length;
-      const cheonanMove = targetOccupants.filter((o) => o.status === "천안이동").length;
-      const newMoveIn = targetOccupants.filter((o) => o.status === "신규입주").length;
-      const shortage = to - current;
-      const expireBuildings = targetDorms.filter((d) => daysDiff(d.contractEnd) <= 60).length;
-      const terminated = targetDorms.filter((d) => d.leaseStatus === "해지").length;
-      const addLease = shortage > 0 ? Math.ceil(shortage / 6) : 0;
+      const currentResidents = targetOccupants.filter((o) => {
+        const moveIn = parseDateValue(o.moveInDate);
+        if (!moveIn || moveIn > monthEnd) return false;
+        const actualOut = parseDateValue(o.actualMoveOutDate || "");
+        const moveOutDue = parseDateValue(o.moveOutDueDate);
+        if (actualOut && actualOut <= monthEnd) return false;
+        if (moveOutDue && moveOutDue <= monthEnd) return false;
+        return true;
+      }).length;
+      const expiredResidents = targetOccupants.filter((o) => isInMonth(o.moveOutDueDate, simulationYear, simulationMonth)).length;
+      const earlyDepartures = targetOccupants.filter((o) => isInMonth(o.actualMoveOutDate || "", simulationYear, simulationMonth)).length;
+      const cheonanMove = targetOccupants.filter((o) =>
+        o.status === "천안이동" &&
+        (isInMonth(o.moveOutDueDate, simulationYear, simulationMonth) || isInMonth(o.actualMoveOutDate || "", simulationYear, simulationMonth))
+      ).length;
+      const newMoveIn = targetOccupants.filter((o) =>
+        isInMonth(o.moveInDate, simulationYear, simulationMonth) || isInMonth(o.expectedMoveInDate || "", simulationYear, simulationMonth)
+      ).length;
+      const expireBuildings = targetDorms.filter((d) => isInMonth(d.contractEnd, simulationYear, simulationMonth)).length;
+      const terminated = targetDorms.filter((d) => d.leaseStatus === "해지" && isInMonth(d.contractEnd, simulationYear, simulationMonth)).length;
+      const addLease = targetDorms.filter((d) => isInMonth(d.contractStart, simulationYear, simulationMonth)).length;
+
       return {
         key: `${site}-${gender}`,
         site,
         gender,
-        dormCount: targetDorms.length,
-        residentTo: to,
-        currentResidents: current,
-        expiredResidents: expireResidents,
+        dormCount: activeDorms.length,
+        residentTo,
+        currentResidents,
+        expiredResidents,
         earlyDepartures,
         cheonanMove,
         newMoveIn,
-        shortage,
+        shortage: residentTo - currentResidents,
         expireBuildings,
         terminated,
         addLease,
+        usageRate: residentTo ? Math.round((currentResidents / residentTo) * 100) : 0,
       };
-    };
-    return [build("평택", "남"), build("평택", "여"), build("천안", "남"), build("천안", "여")];
-  }, [dorms, occupants]);
+    });
+  }, [dorms, occupants, simulationYear, simulationMonth]);
 
   const visibleDashboard = useMemo(() => {
     return expiringDormsTop10.filter((d) => {
       if (dashboardSiteFilter !== "전체" && d.site !== dashboardSiteFilter) return false;
+      if (dashboardStatusFilter !== "전체" && d.leaseStatus !== dashboardStatusFilter) return false;
       const daysUntilExpiry = daysDiff(d.contractEnd);
       const text = `${d.site} ${d.buildingName} ${d.address} ${d.contractEnd} ${daysUntilExpiry}`.toLowerCase();
       return !dashboardSearch || text.includes(dashboardSearch.toLowerCase());
     });
-  }, [expiringDormsTop10, dashboardSearch, dashboardSiteFilter]);
+  }, [expiringDormsTop10, dashboardSearch, dashboardSiteFilter, dashboardStatusFilter]);
 
   const visibleSimulationRows = useMemo(() => {
     return simulationRows.filter((r) => {
@@ -1803,24 +1949,37 @@ export default function App() {
     return { dormCount, residentTo, expireBuildings, addLease, maleCount, femaleCount, usageRate };
   }, [dorms, occupants, simulationRows]);
 
-  const dashboardStats = useMemo(() => {
-    const activeDormIds = new Set(
-      dorms
-        .filter((d) => d.contractEnd && daysDiff(d.contractEnd) >= 0 && d.leaseStatus !== "해지")
-        .map((d) => d.id)
-    );
-    return {
-      dormCount: activeDormIds.size,
-      currentResidents: occupants.filter(
-        (o) =>
-          activeDormIds.has(o.dormId) &&
-          ["거주중", "만료예정", "신규입주"].includes(o.status)
-      ).length,
-      defectsOpen: defects.filter((d) => d.defectStatus !== "완료").length,
-      inventoryCount: inventory.length,
-      expiringSoon: expiringDormsTop10.length,
-    };
-  }, [dorms, occupants, defects, inventory.length, expiringDormsTop10.length]);
+  const dashboardAlerts = useMemo(() => {
+    const items: { id: string; title: string; detail: string; when: string; type: string }[] = [];
+    dorms.forEach((d) => {
+      const due = d.contractEnd;
+      const days = daysDiff(due);
+      if (due && days >= 0 && days <= 30) {
+        items.push({ id: d.id, title: "계약 만료 예정", detail: `${d.site} ${d.buildingName} ${d.dong} ${d.roomHo}`, when: `D-${days}`, type: "contract" });
+      }
+    });
+    defects.filter((d) => d.defectStatus !== "완료").forEach((d) => {
+      items.push({ id: d.id, title: "미완료 하자", detail: `${d.buildingName} ${d.dong}-${d.ho}`, when: d.receiptDate, type: "defect" });
+    });
+    return items.sort((a, b) => a.when.localeCompare(b.when)).slice(0, 5);
+  }, [dorms, defects]);
+
+  const dormSummary = useMemo(() => {
+    return dorms.map((d) => {
+      const current = occupancyCountByDorm.get(d.id) || 0;
+      return {
+        id: d.id,
+        site: d.site,
+        buildingName: d.buildingName,
+        address: `${d.address} ${d.dong} ${d.roomHo}`,
+        capacity: d.capacity,
+        currentResidents: current,
+        vacancy: Math.max(d.capacity - current, 0),
+        leaseStatus: d.leaseStatus,
+        contractEnd: d.contractEnd,
+      };
+    });
+  }, [dorms, occupancyCountByDorm]);
 
   const login = () => {
    const found = users.find(
@@ -2158,6 +2317,88 @@ export default function App() {
     setNewHires((prev) => [...mapped, ...prev]);
   };
 
+  const uploadMilitaryPersonnelExcel = async (file: File) => {
+    if (!canEditData(currentUser)) return;
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+    const mapped = rows.map((r) => ({
+      id: crypto.randomUUID(),
+      name: String(r["이름"] || r["name"] || ""),
+      rank: String(r["계급"] || r["rank"] || ""),
+      serviceBranch: String(r["군별"] || r["serviceBranch"] || ""),
+      unit: String(r["부대"] || r["unit"] || ""),
+      phone: String(r["연락처"] || r["phone"] || ""),
+      enlistmentDate: String(r["입대일"] || r["enlistmentDate"] || ""),
+      dischargeDate: String(r["전역일"] || r["dischargeDate"] || ""),
+      status: String(r["상태"] || r["status"] || ""),
+      notes: String(r["비고"] || r["notes"] || ""),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+    setMilitaryPersonnel((prev) => [...mapped, ...prev]);
+  };
+
+  const uploadMilitaryTrainingExcel = async (file: File) => {
+    if (!canEditData(currentUser)) return;
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+    const mapped = rows.map((r) => ({
+      id: crypto.randomUUID(),
+      subject: String(r["훈련명"] || r["subject"] || ""),
+      trainingDate: String(r["훈련일"] || r["trainingDate"] || ""),
+      location: String(r["위치"] || r["location"] || ""),
+      attendees: Number(r["참석인원"] || r["attendees"] || 0),
+      status: String(r["상태"] || r["status"] || ""),
+      notes: String(r["비고"] || r["notes"] || ""),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+    setMilitaryTrainingRecords((prev) => [...mapped, ...prev]);
+  };
+
+  const uploadMilitaryNoticesExcel = async (file: File) => {
+    if (!canEditData(currentUser)) return;
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+    const mapped = rows.map((r) => ({
+      id: crypto.randomUUID(),
+      title: String(r["제목"] || r["title"] || ""),
+      category: String(r["구분"] || r["category"] || ""),
+      publishedDate: String(r["게시일"] || r["publishedDate"] || ""),
+      expiresDate: String(r["만료일"] || r["expiresDate"] || ""),
+      content: String(r["내용"] || r["content"] || ""),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+    setMilitaryNotices((prev) => [...mapped, ...prev]);
+  };
+
+  const uploadMilitaryReportsExcel = async (file: File) => {
+    if (!canEditData(currentUser)) return;
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+    const mapped = rows.map((r) => ({
+      id: crypto.randomUUID(),
+      title: String(r["제목"] || r["title"] || ""),
+      reportDate: String(r["보고일"] || r["reportDate"] || ""),
+      type: String(r["종류"] || r["type"] || ""),
+      author: String(r["작성자"] || r["author"] || ""),
+      status: String(r["상태"] || r["status"] || ""),
+      notes: String(r["비고"] || r["notes"] || ""),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+    setMilitaryReports((prev) => [...mapped, ...prev]);
+  };
+
   const uploadExcel = async (file: File) => {
     if (!canEditData(currentUser)) return;
     if (activeTab === "dormContracts") {
@@ -2166,6 +2407,22 @@ export default function App() {
     }
     if (activeTab === "newHires") {
       await uploadNewHiresExcel(file);
+      return;
+    }
+    if (activeTab === "personnelManagement") {
+      await uploadMilitaryPersonnelExcel(file);
+      return;
+    }
+    if (activeTab === "trainingRecords") {
+      await uploadMilitaryTrainingExcel(file);
+      return;
+    }
+    if (activeTab === "militaryNotices") {
+      await uploadMilitaryNoticesExcel(file);
+      return;
+    }
+    if (activeTab === "militaryReports") {
+      await uploadMilitaryReportsExcel(file);
       return;
     }
     await uploadDormExcel(file);
@@ -2346,6 +2603,62 @@ const exportExcel = () => {
       };
     });
     fileName = "신입사원명단.xlsx";
+  } else if (activeTab === "personnelManagement") {
+    rows = militaryPersonnel.map((p) => ({
+      이름: p.name,
+      계급: p.rank,
+      군별: p.serviceBranch,
+      부대: p.unit,
+      연락처: p.phone,
+      입대일: p.enlistmentDate,
+      전역일: p.dischargeDate,
+      상태: p.status,
+      비고: p.notes,
+      등록일: formatDateOnly(p.createdAt),
+      수정일: formatDateOnly(p.updatedAt),
+    }));
+    fileName = "예비군_민방위_인원.xlsx";
+  } else if (activeTab === "trainingRecords") {
+    rows = militaryTrainingRecords.map((r) => ({
+      훈련명: r.subject,
+      훈련일: r.trainingDate,
+      위치: r.location,
+      참석인원: r.attendees,
+      상태: r.status,
+      비고: r.notes,
+      등록일: formatDateOnly(r.createdAt),
+      수정일: formatDateOnly(r.updatedAt),
+    }));
+    fileName = "예비군_민방위_훈련.xlsx";
+  } else if (activeTab === "militaryNotices") {
+    rows = militaryNotices.map((n) => ({
+      제목: n.title,
+      구분: n.category,
+      게시일: n.publishedDate,
+      만료일: n.expiresDate,
+      내용: n.content,
+      등록일: formatDateOnly(n.createdAt),
+      수정일: formatDateOnly(n.updatedAt),
+    }));
+    fileName = "예비군_민방위_공지.xlsx";
+  } else if (activeTab === "militaryReports") {
+    rows = militaryReports.map((r) => ({
+      제목: r.title,
+      보고일: r.reportDate,
+      종류: r.type,
+      작성자: r.author,
+      상태: r.status,
+      비고: r.notes,
+      등록일: formatDateOnly(r.createdAt),
+      수정일: formatDateOnly(r.updatedAt),
+    }));
+    fileName = "예비군_민방위_보고서.xlsx";
+  } else if (activeTab === "militarySettings") {
+    rows = Object.entries(militarySettings).map(([key, value]) => ({
+      항목: key,
+      값: value,
+    }));
+    fileName = "예비군_민방위_설정.xlsx";
   } else if (activeTab === "sales") {
     rows = sales.map((s) => ({
       일자: s.saleDate,
@@ -2459,37 +2772,6 @@ const exportExcel = () => {
     }));
   };
 
-  const openDormEdit = (d: Dorm) => {
-    setDormForm({
-      site: d.site,
-      gender: d.gender,
-      buildingName: d.buildingName,
-      address: d.address,
-      dong: d.dong,
-      roomHo: d.roomHo,
-      pyeong: d.pyeong,
-      capacity: 6,
-      managerUserId: d.managerUserId || "",
-      contractStart: d.contractStart,
-      contractEnd: d.contractEnd,
-      contractAmount: d.contractAmount,
-      leaseStatus: d.leaseStatus,
-      prepaymentDeposit: d.prepaymentDeposit,
-      realEstateName: d.realEstateName,
-      balanceDate: d.balanceDate,
-      notes: d.notes,
-    });
-    setEditingDormId(d.id);
-    setShowDormForm(true);
-  };
-
-  const openOccupantEdit = (o: Occupant) => {
-    const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = o;
-    setOccupantForm(rest);
-    setEditingOccupantId(o.id);
-    setShowOccupantForm(true);
-  };
-
   const openDormContractEdit = (c: DormContract) => {
     const { id: _id, ...rest } = c;
     setDormContractForm({ ...rest, contractStatus: "자동선택", contractType: "자동선택" });
@@ -2555,6 +2837,154 @@ const exportExcel = () => {
     setActiveTab("occupants");
   };
 
+  const menuGroupForTab: Record<TabKey, string> = {
+    dashboard: "dashboard",
+    dorms: "dormManagement",
+    occupants: "occupantManagement",
+    simulation: "simulation",
+    inventory: "inventory",
+    leases: "leaseManagement",
+    sales: "salesManagement",
+    dormContracts: "dormManagement",
+    newHires: "occupantManagement",
+    settlementManagement: "settlementManagement",
+    notificationManagement: "notificationManagement",
+    documentManagement: "documentManagement",
+    reportManagement: "reportManagement",
+    defects: "defects",
+    users: "users",
+    settings: "settings",
+    militaryDashboard: "militaryModule",
+    personnelManagement: "militaryModule",
+    trainingRecords: "militaryModule",
+    militaryNotices: "militaryModule",
+    militaryReports: "militaryModule",
+    militarySettings: "militaryModule",
+  };
+
+  const currentMenuGroup = menuGroupForTab[activeTab];
+  const isGroupOpen = (group: string) => group === currentMenuGroup || group === expandedMenu || group === hoveredMenu;
+  const isMenuActive = (group: string) => group === currentMenuGroup;
+
+  const menuItems = [
+    {
+      groupKey: "dashboard",
+      label: "대시보드",
+      icon: Home,
+      tab: "dashboard" as TabKey,
+      children: [],
+    },
+    {
+      groupKey: "dormManagement",
+      label: "기숙사 관리",
+      icon: Building2,
+      children: [
+        { tab: "dormContracts" as TabKey, label: "기숙사 등록/수정" },
+        { tab: "dorms" as TabKey, label: "기숙사" },
+      ],
+    },
+    {
+      groupKey: "occupantManagement",
+      label: "입주자 관리",
+      icon: Users,
+      children: [
+        { tab: "newHires" as TabKey, label: "신입사원 등록/수정" },
+        { tab: "occupants" as TabKey, label: "입주자" },
+      ],
+    },
+    {
+      groupKey: "militaryModule",
+      label: "예비군/민방위 관리 시스템",
+      icon: ShieldCheck,
+      children: [
+        { tab: "militaryDashboard" as TabKey, label: "모듈 대시보드" },
+        { tab: "personnelManagement" as TabKey, label: "인원 관리" },
+        { tab: "trainingRecords" as TabKey, label: "훈련/교육" },
+        { tab: "militaryNotices" as TabKey, label: "공지/알림" },
+        { tab: "militaryReports" as TabKey, label: "보고서" },
+        { tab: "militarySettings" as TabKey, label: "환경설정" },
+      ],
+    },
+    {
+      groupKey: "simulation",
+      label: "운영시뮬레이션",
+      icon: ClipboardList,
+      tab: "simulation" as TabKey,
+      children: [{ tab: "simulation" as TabKey, label: "운영시뮬레이션" }],
+    },
+    {
+      groupKey: "inventory",
+      label: "비품 관리",
+      icon: Package,
+      children: [{ tab: "inventory" as TabKey, label: "비품 관리" }],
+    },
+    {
+      groupKey: "leaseManagement",
+      label: "계약 관리",
+      icon: ClipboardList,
+      children: [{ tab: "leases" as TabKey, label: "계약 관리" }],
+    },
+    {
+      groupKey: "salesManagement",
+      label: "수납 관리",
+      icon: ClipboardList,
+      children: [{ tab: "sales" as TabKey, label: "수납 관리" }],
+    },
+    {
+      groupKey: "settlementManagement",
+      label: "정산 관리",
+      icon: ClipboardList,
+      children: [{ tab: "settlementManagement" as TabKey, label: "정산 관리" }],
+    },
+    {
+      groupKey: "notificationManagement",
+      label: "알림 관리",
+      icon: Bell,
+      children: [{ tab: "notificationManagement" as TabKey, label: "알림 관리" }],
+    },
+    {
+      groupKey: "documentManagement",
+      label: "문서 관리",
+      icon: Camera,
+      children: [{ tab: "documentManagement" as TabKey, label: "문서 관리" }],
+    },
+    {
+      groupKey: "reportManagement",
+      label: "통계 및 보고서",
+      icon: FileSpreadsheet,
+      children: [{ tab: "reportManagement" as TabKey, label: "통계 및 보고서" }],
+    },
+    {
+      groupKey: "defects",
+      label: "하자 접수",
+      icon: Wrench,
+      tab: "defects" as TabKey,
+      children: [],
+    },
+    {
+      groupKey: "users",
+      label: "계정관리",
+      icon: UserCog,
+      tab: "users" as TabKey,
+      children: [],
+    },
+    {
+      groupKey: "settings",
+      label: "설정",
+      icon: UserCog,
+      tab: "settings" as TabKey,
+      children: [],
+    },
+  ];
+
+  const dashboardStat = {
+    dormCount: dorms.filter((d) => d.leaseStatus === "사용중").length,
+    currentResidents: occupants.filter((o) => o.status !== "퇴실").length,
+    totalVacancy: dormSummary.reduce((sum, item) => sum + item.vacancy, 0),
+    openDefects: defects.filter((d) => d.defectStatus !== "완료").length,
+    inventoryCount: inventory.length,
+  };
+
   if (!currentUser) {
     return (
       <div className={`min-h-screen ${theme.darkMode ? "bg-slate-950 text-slate-100" : "bg-slate-100 text-slate-900"} p-6 flex items-center justify-center`}>
@@ -2583,128 +3013,244 @@ const exportExcel = () => {
     );
   }
 
-  return (
-    <div className={`min-h-screen ${theme.darkMode ? "dark-mode bg-slate-950 text-slate-100" : "bg-slate-50 text-slate-900"}`}>
-      <div className="mx-auto max-w-[1800px] p-4 md:p-6 lg:p-8">
-        <header className="mb-6 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-500"><Building2 className="h-4 w-4" /> 기숙사 운영 통합 시스템</div>
-              <h1 className="text-2xl font-bold tracking-tight md:text-3xl">운영관리 대시보드 v4</h1>
-              <p className="mt-1 text-sm text-slate-500">기숙사, 입주배정, 비품, 계약, 매각, 하자접수, 운영시뮬레이션까지 한 번에</p>
+    return (
+      <div className={`min-h-screen ${theme.darkMode ? "dark-mode bg-slate-950 text-slate-100" : "bg-slate-50 text-slate-900"}`}>
+        <aside className={`hidden xl:block fixed left-0 top-0 z-20 h-full w-72 border-r p-6 pt-8 shadow-sm ${theme.darkMode ? "border-slate-800 bg-slate-950" : "border-slate-200 bg-white"}`}>
+          <div className="mb-8">
+            <div className={`mb-4 flex h-14 w-14 items-center justify-center rounded-3xl ${theme.darkMode ? "bg-slate-800" : "bg-slate-100"}`}>
+              <Building2 className={`h-7 w-7 ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`} />
             </div>
-            <div className="flex flex-wrap gap-2">
-             <div className="inline-flex items-center gap-2 rounded-2xl bg-slate-100 px-4 py-2 text-sm text-slate-700">
-               {currentUser.role === "admin" ? (
-                 <ShieldCheck className="h-4 w-4" />
-               ) : (
-                <Eye className="h-4 w-4" />
-                )}
-               {currentUser.displayName} · {getRoleLabel(currentUser.role)}
-           </div>
-
-            {currentUser.role !== "maintenance_reporter" && canEditData(currentUser) && (
-               <button
-                onClick={() => excelInputRef.current?.click()}
-                className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 hover:bg-slate-50"
-               >
-                <Upload className="h-4 w-4" /> 엑셀등록
-              </button>
-             )}
-
-             {currentUser.role !== "maintenance_reporter" && (
-               <button
-                 onClick={exportExcel}
-                className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 hover:bg-slate-50"
-                >
-                  <Download className="h-4 w-4" /> 엑셀내보내기
-               </button>
-              )}
-
-             {currentUser.role === "admin" && (
-               <button
-                 onClick={() => setShowExcelTemplate((v) => !v)}
-                className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 hover:bg-slate-50"
-               >
-                  <FileSpreadsheet className="h-4 w-4" /> 양식 설정
-               </button>
-             )}
-
-             <button
-               onClick={() => setTheme((s) => ({ ...s, darkMode: !s.darkMode }))}
-               className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 hover:bg-slate-50"
-             >
-               <Moon className="h-4 w-4" /> {theme.darkMode ? "라이트모드" : "다크모드"}
-             </button>
-
-             <button
-                onClick={logout}
-              className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 hover:bg-slate-50"
-             >
-              <LogOut className="h-4 w-4" /> 로그아웃
-              </button>
-           </div>
+            <p className={`text-xs font-semibold uppercase tracking-[0.25em] ${theme.darkMode ? "text-slate-400" : "text-slate-400"}`}>기숙사 ERP CRM</p>
+            <h2 className={`mt-3 text-xl font-bold ${theme.darkMode ? "text-slate-100" : "text-slate-900"}`}>운영관리 대시보드</h2>
           </div>
-          <input ref={excelInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) uploadExcel(file); e.currentTarget.value = ""; }} />
-        </header>
+          <div className="space-y-3">
+            <div className="max-h-[70vh] overflow-y-auto pr-1">
+              <div className="space-y-3">
+                {menuItems.map((item) => {
+                  const open = isGroupOpen(item.groupKey);
+                  const mainActive = isMenuActive(item.groupKey);
+                  const hasChildren = item.children && item.children.length > 0;
+                  return (
+                    <div
+                      key={item.groupKey}
+                      className="rounded-3xl border border-slate-200 bg-slate-50 p-2"
+                      onMouseEnter={() => setHoveredMenu(item.groupKey)}
+                      onMouseLeave={() => setHoveredMenu(null)}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (hasChildren) {
+                            setExpandedMenu(item.groupKey);
+                            const currentTab = item.children.find((child) => child.tab === activeTab);
+                            if (!currentTab) setActiveTab(item.children[0].tab);
+                          } else if (item.tab) {
+                            setActiveTab(item.tab);
+                            setExpandedMenu(item.groupKey);
+                          }
+                        }}
+                        className={`w-full justify-start inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm ${mainActive || open ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}
+                      >
+                        <item.icon className="h-4 w-4" />
+                        {item.label}
+                      </button>
+                      {hasChildren && open && (
+                        <div className="mt-2 space-y-2 pl-4">
+                          {item.children.map((child) => (
+                            <button
+                              key={child.tab}
+                              type="button"
+                              onClick={() => {
+                                setActiveTab(child.tab);
+                                setExpandedMenu(item.groupKey);
+                              }}
+                              className={`w-full justify-start inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm ${activeTab === child.tab ? "bg-slate-900 text-white" : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"}`}
+                            >
+                              <span className="h-3 w-3 rounded-full bg-slate-300" />
+                              {child.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+          <div className={`mt-10 rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
+            <div className={`font-semibold ${theme.darkMode ? "text-slate-100" : "text-slate-900"}`}>현재 사용자</div>
+            <div className={`mt-2 ${theme.darkMode ? "text-slate-200" : "text-slate-700"}`}>{currentUser.displayName}</div>
+            <div className={`${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>{getRoleLabel(currentUser.role)}</div>
+          </div>
+        </aside>
+        <div className="mx-auto max-w-[1800px] pl-0 xl:pl-[280px] p-4 md:p-6 lg:p-8">
+          <header className="mb-6 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-500"><Building2 className="h-4 w-4" /> 기숙사 운영 통합 시스템</div>
+                <h1 className="text-2xl font-bold tracking-tight md:text-3xl">운영관리 대시보드 v4</h1>
+                <p className="mt-1 text-sm text-slate-500">기숙사, 입주배정, 비품, 계약, 매각, 하자접수, 운영시뮬레이션까지 한 번에</p>
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-3">
+                <button type="button" className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 hover:bg-slate-200">
+                  <Bell className="h-5 w-5" />
+                </button>
+                <button type="button" className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 hover:bg-slate-200">
+                  <MessageSquare className="h-5 w-5" />
+                </button>
+                <button type="button" className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 hover:bg-slate-200">
+                  <HelpCircle className="h-5 w-5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTheme((prev) => ({ ...prev, darkMode: !prev.darkMode }))}
+                  className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 hover:bg-slate-200"
+                >
+                  <Moon className="h-5 w-5" />
+                </button>
+                <button type="button" onClick={logout} className="inline-flex h-12 items-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+                  <LogOut className="h-4 w-4" /> 로그아웃
+                </button>
+              </div>
+            </div>
+            <input ref={excelInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) uploadExcel(file); e.currentTarget.value = ""; }} />
+            <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+                <div className="text-sm font-medium text-slate-500">기숙사 수(현재 사용중인 기숙사 수)</div>
+                <div className="mt-3 text-3xl font-bold">{dashboardStat.dormCount}</div>
+              </div>
+              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+                <div className="text-sm font-medium text-slate-500">현 거주자</div>
+                <div className="mt-3 text-3xl font-bold">{dashboardStat.currentResidents}</div>
+              </div>
+              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+                <div className="text-sm font-medium text-slate-500">남은공실</div>
+                <div className="mt-3 text-3xl font-bold">{dashboardStat.totalVacancy}</div>
+              </div>
+              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+                <div className="text-sm font-medium text-slate-500">하자 미완료</div>
+                <div className="mt-3 text-3xl font-bold">{dashboardStat.openDefects}</div>
+              </div>
+              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+                <div className="text-sm font-medium text-slate-500">비품 품목</div>
+                <div className="mt-3 text-3xl font-bold">{dashboardStat.inventoryCount}</div>
+              </div>
+            </div>
+          </header>
 
-          {currentUser.role !== "maintenance_reporter" && (
-            <section className="mb-6 grid grid-cols-2 gap-4 xl:grid-cols-5">
-              <StatCard icon={<Home className="h-5 w-5" />} label="기숙사 수" value={`${dashboardStats.dormCount}`} sub="전체 건물" />
-             <StatCard icon={<Users className="h-5 w-5" />} label="현 거주자" value={`${dashboardStats.currentResidents}`} sub="거주중+신규입주" />
-              <StatCard icon={<AlertTriangle className="h-5 w-5" />} label="하자 미완료" value={`${dashboardStats.defectsOpen}`} sub="접수/진행중" />
-             <StatCard icon={<Package className="h-5 w-5" />} label="비품 품목" value={`${dashboardStats.inventoryCount}`} sub="등록 기준" />
-             <StatCard icon={<CalendarClock className="h-5 w-5" />} label="만료 근접" value={`${dashboardStats.expiringSoon}`} sub="TOP 10 표시" />
-           </section>
-         )}
 
           <section className="mb-6 rounded-3xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-           <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-             {currentUser.role !== "maintenance_reporter" && (
-                <>
-                  <div className="relative lg:col-span-5">
-                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                    <input
-                      value={search}
-                     onChange={(e) => setSearch(e.target.value)}
-                     placeholder="건물명, 주소, 입주자, 부서, 비고 검색"
-                      className="w-full rounded-2xl border border-slate-300 bg-slate-50 py-3 pl-10 pr-4 outline-none focus:border-slate-400"
-                   />
-                 </div>
-
-                 <FilterSelect
-                    label="지역"
-                    value={siteFilter}
-                   onChange={(v) => setSiteFilter(v as Site | "전체")}
-                   options={["전체", "평택", "천안"]}
-                 />
-                </>
-             )}
-
-    <div className="lg:col-span-5 flex flex-wrap items-end gap-2">
-      {currentUser.role === "maintenance_reporter" ? (
-        <>
-          {tabButton(activeTab, setActiveTab, "defects", <Wrench className="h-4 w-4" />, "하자접수")}
-        </>
-      ) : (
-        <>
-          {tabButton(activeTab, setActiveTab, "dashboard", <FileSpreadsheet className="h-4 w-4" />, "대시보드")}
-          {tabButton(activeTab, setActiveTab, "dormContracts", <Building2 className="h-4 w-4" />, "기숙사 계약현황")}
-          {tabButton(activeTab, setActiveTab, "newHires", <Users className="h-4 w-4" />, "신입사원 명단")}
-          {tabButton(activeTab, setActiveTab, "dorms", <Building2 className="h-4 w-4" />, "기숙사")}
-          {tabButton(activeTab, setActiveTab, "occupants", <Users className="h-4 w-4" />, "입주자")}
-          {tabButton(activeTab, setActiveTab, "simulation", <ClipboardList className="h-4 w-4" />, "운영시뮬레이션")}
-          {tabButton(activeTab, setActiveTab, "inventory", <Package className="h-4 w-4" />, "비품현황")}
-          {tabButton(activeTab, setActiveTab, "leases", <CalendarClock className="h-4 w-4" />, "신규계약")}
-          {tabButton(activeTab, setActiveTab, "sales", <Download className="h-4 w-4" />, "비품매각")}
-          {tabButton(activeTab, setActiveTab, "defects", <Wrench className="h-4 w-4" />, "하자접수")}
-          {canManageUsers(currentUser) &&
-            tabButton(activeTab, setActiveTab, "users", <UserCog className="h-4 w-4" />, "계정관리")}
-        </>
-      )}
-    </div>
-  </div>
-</section>
+            <div className="grid gap-4 xl:grid-cols-[1.8fr_1fr]">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  value={dashboardSearch}
+                  onChange={(e) => setDashboardSearch(e.target.value)}
+                  placeholder="건물명, 주소, 입주자, 부서, 비고 검색"
+                  className="w-full rounded-2xl border border-slate-300 bg-slate-50 py-3 pl-11 pr-4 text-sm outline-none focus:border-slate-400"
+                />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <FilterSelect
+                  label="지역"
+                  value={dashboardSiteFilter}
+                  onChange={(v) => setDashboardSiteFilter(v as Site | "전체")}
+                  options={["전체", "평택", "천안"]}
+                />
+                <FilterSelect
+                  label="기숙사 상태"
+                  value={dashboardStatusFilter}
+                  onChange={setDashboardStatusFilter}
+                  options={["전체", "사용중", "만료예정", "공실", "연장", "종료", "해지"]}
+                />
+                <button
+                  type="button"
+                  onClick={() => setDashboardSearch(dashboardSearch.trim())}
+                  className="h-12 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-800"
+                >
+                  검색
+                </button>
+              </div>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {canEditData(currentUser) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDormContractForm(dormContractTemplate());
+                    setEditingDormContractId(null);
+                    setShowDormContractForm(true);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white hover:bg-blue-500"
+                >
+                  <Plus className="h-4 w-4" /> 기숙사 추가
+                </button>
+              )}
+              {canEditData(currentUser) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewHireForm(newHireTemplate());
+                    setEditingNewHireId(null);
+                    setShowNewHireForm(true);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  <Plus className="h-4 w-4" /> 입주자 추가
+                </button>
+              )}
+              {canEditData(currentUser) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInventoryForm(inventoryTemplate());
+                    setEditingInventoryId(null);
+                    setShowInventoryForm(true);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  비품 등록
+                </button>
+              )}
+              {canEditData(currentUser) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDefectForm(defectTemplate());
+                    setEditingDefectId(null);
+                    setShowDefectForm(true);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  유지보수 등록
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={exportExcel}
+                className="inline-flex items-center gap-2 rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-slate-700 border border-slate-300 hover:bg-slate-50"
+              >
+                <Download className="h-4 w-4" /> Excel 내보내기
+              </button>
+              {currentUser.role !== "maintenance_reporter" && canEditData(currentUser) && (
+                <button
+                  type="button"
+                  onClick={() => excelInputRef.current?.click()}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-slate-700 border border-slate-300 hover:bg-slate-50"
+                >
+                  <Upload className="h-4 w-4" /> Excel 등록
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="inline-flex items-center gap-2 rounded-2xl bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+              >
+                <FileSpreadsheet className="h-4 w-4" /> 보고서 생성
+              </button>
+            </div>
+          </section>
 
 
 
@@ -2880,133 +3426,352 @@ const exportExcel = () => {
         )}
 
         {activeTab === "dashboard" && (
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.25fr_0.75fr]">
-            <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-semibold">만료일 근접 기숙사 TOP 10</h2>
-                  <p className="text-sm text-slate-500">주소 기준으로 빠르게 확인</p>
+          <div className="space-y-6">
+            <div className="grid gap-6 xl:grid-cols-[1.4fr_0.95fr]">
+              <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold">최근 계약 만료 예정 TOP 10</h2>
+                    <p className="text-sm text-slate-500">계약 만료가 가까운 기숙사를 빠르게 확인하세요.</p>
+                  </div>
+                  <button className="text-sm font-semibold text-slate-500 hover:text-slate-900">더보기</button>
                 </div>
-                <div className="flex items-center gap-2">
-                  <FilterSelect
-                    label="지역"
-                    value={dashboardSiteFilter}
-                    onChange={(v) => setDashboardSiteFilter(v as Site | "전체")}
-                    options={["전체", "평택", "천안"]}
-                  />
-                  <input
-                    type="text"
-                    placeholder="검색..."
-                    value={dashboardSearch}
-                    onChange={(e) => setDashboardSearch(e.target.value)}
-                    className="rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"
-                  />
-                  {canEditData(currentUser) && selectedDashboardIds.length > 0 && (
-                    <button
-                      onClick={() => {
-                        setDorms((prev) => prev.filter((d) => !selectedDashboardIds.includes(d.id)));
-                        setSelectedDashboardIds([]);
-                      }}
-                      className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
-                    >
-                      선택 삭제
-                    </button>
-                  )}
-                  <span className="text-sm text-slate-400">최대 10건</span>
+                <div className="overflow-auto">
+                  <table className="w-full text-sm text-left">
+                    <thead className="bg-slate-100 text-slate-700">
+                      <tr>
+                        <th className="px-3 py-3">순번</th>
+                        <th className="px-3 py-3">지역</th>
+                        <th className="px-3 py-3">기숙사명</th>
+                        <th className="px-3 py-3">주소</th>
+                        <th className="px-3 py-3">만료일</th>
+                        <th className="px-3 py-3">D-Day</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleDashboard.map((d, index) => (
+                        <tr key={d.id} className="border-b border-slate-100 hover:bg-slate-50">
+                          <td className="px-3 py-4 font-semibold">{index + 1}</td>
+                          <td className="px-3 py-4">{d.site}</td>
+                          <td className="px-3 py-4">{d.buildingName}</td>
+                          <td className="px-3 py-4">{d.address} {d.dong} {d.roomHo}</td>
+                          <td className="px-3 py-4">{d.contractEnd || "-"}</td>
+                          <td className="px-3 py-4 text-blue-600 font-semibold">{daysDiff(d.contractEnd)}</td>
+                        </tr>
+                      ))}
+                      {visibleDashboard.length === 0 && (
+                        <tr>
+                          <td colSpan={6} className="px-3 py-12 text-center text-slate-400">검색 조건에 맞는 기숙사가 없습니다.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
-              </div>
+              </section>
 
+              <div className="space-y-6">
+                <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-lg font-semibold">신입사원 입주배정</h2>
+                      <p className="text-sm text-slate-500">신규 입주자의 배정 현황을 확인하세요.</p>
+                    </div>
+                    <button className="rounded-2xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200">더보기</button>
+                  </div>
+                  <div className="space-y-3">
+                    {occupants.filter((o) => o.isNewHireAssignment).map((o) => {
+                      const dorm = dorms.find((d) => d.id === o.dormId);
+                      return (
+                        <div key={o.id} className="rounded-2xl border border-slate-200 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="font-semibold">{o.employeeName}</div>
+                              <div className="text-sm text-slate-500">{o.department}</div>
+                              <div className="text-sm text-slate-500">{dorm ? `${dorm.buildingName} ${dorm.dong} ${dorm.roomHo}` : "미배정"}</div>
+                            </div>
+                            <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">{o.status}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {!occupants.some((o) => o.isNewHireAssignment) && (
+                      <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-400">현재 신입사원 배정 데이터가 없습니다.</div>
+                    )}
+                  </div>
+                </section>
+
+                <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-lg font-semibold">오늘의 일정 및 알림</h2>
+                      <p className="text-sm text-slate-500">계약 만료, 하자, 출입 일정 등을 한 곳에서 확인합니다.</p>
+                    </div>
+                    <button className="rounded-2xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200">모두 보기</button>
+                  </div>
+                  <div className="space-y-3">
+                    {dashboardAlerts.map((alert) => (
+                      <div key={alert.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="font-semibold">{alert.title}</p>
+                            <p className="text-sm text-slate-500">{alert.detail}</p>
+                          </div>
+                          <span className="text-sm font-semibold text-blue-700">{alert.when}</span>
+                        </div>
+                      </div>
+                    ))}
+                    {dashboardAlerts.length === 0 && (
+                      <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-400">현재 알림이 없습니다.</div>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
+
+            <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">기숙사별 현황 요약</h2>
+                  <p className="text-sm text-slate-500">기숙사별 입주 현황과 공실을 확인하세요.</p>
+                </div>
+                <button className="rounded-2xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200">엑셀다운</button>
+              </div>
               <div className="overflow-auto">
-                <table className="w-full text-sm text-center">
+                <table className="w-full min-w-[900px] text-sm text-left">
                   <thead className="bg-slate-100 text-slate-700">
                     <tr>
-                      <th className="px-3 py-2">
-                        <input
-                          type="checkbox"
-                          checked={visibleDashboard.length > 0 && selectedDashboardIds.length === visibleDashboard.length}
-                          onChange={(e) => {
-                            if (e.target.checked) setSelectedDashboardIds(visibleDashboard.map((d) => d.id));
-                            else setSelectedDashboardIds([]);
-                          }}
-                          className="h-5 w-5"
-                        />
-                      </th>
-                      <th className="px-3 py-2">순번</th>
-                      <th className="px-3 py-2">지역</th>
-                      <th className="px-3 py-2">건물명</th>
-                      <th className="px-3 py-2">주소</th>
-                      <th className="px-3 py-2">만료일</th>
-                      <th className="px-3 py-2">D-Day</th>
+                      <th className="px-3 py-3">기숙사</th>
+                      <th className="px-3 py-3">지역</th>
+                      <th className="px-3 py-3">총 정원</th>
+                      <th className="px-3 py-3">현 거주자</th>
+                      <th className="px-3 py-3">공실</th>
+                      <th className="px-3 py-3">상태</th>
+                      <th className="px-3 py-3">만료일</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleDashboard.map((d, index) => (
-                      <tr
-                        key={d.id}
-                        onClick={(e) => handleRowClick(e, () => openDormEdit(d))}
-                        className="cursor-pointer border-b border-slate-100 hover:bg-slate-50"
-                      >
-                        <td className="px-3 py-3">
-                          <input
-                            type="checkbox"
-                            checked={selectedDashboardIds.includes(d.id)}
-                            onChange={(e) =>
-                              e.target.checked
-                                ? setSelectedDashboardIds((prev) => [...prev, d.id])
-                                : setSelectedDashboardIds((prev) => prev.filter((id) => id !== d.id))
-                            }
-                            className="h-5 w-5"
-                          />
-                        </td>
-                        <td className="px-3 py-3 font-medium">{index + 1}</td>
-                        <td className="px-3 py-3">{d.site}</td>
-                        <td className="px-3 py-3">{d.buildingName}</td>
-                        <td className="px-3 py-3">{d.address} {d.dong} {d.roomHo}</td>
-                        <td className="px-3 py-3">{d.contractEnd || "-"}</td>
-                        <td className="px-3 py-3">{daysDiff(d.contractEnd)}</td>
+                    {dormSummary.map((row) => (
+                      <tr key={row.id} className="border-b border-slate-100 hover:bg-slate-50">
+                        <td className="px-3 py-3 font-semibold">{row.buildingName}</td>
+                        <td className="px-3 py-3">{row.site}</td>
+                        <td className="px-3 py-3">{row.capacity}</td>
+                        <td className="px-3 py-3">{row.currentResidents}</td>
+                        <td className="px-3 py-3">{row.vacancy}</td>
+                        <td className="px-3 py-3">{row.leaseStatus}</td>
+                        <td className="px-3 py-3">{row.contractEnd || "-"}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             </section>
-
-            <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-              <div className="mb-4 text-lg font-semibold">신입사원 입주배정</div>
-              <div className="space-y-3">
-                {occupants.filter((o) => o.isNewHireAssignment).map((o) => {
-                  const dorm = dorms.find((d) => d.id === o.dormId);
-                  return (
-                    <div key={o.id} className="rounded-2xl border border-slate-200 p-4">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="font-semibold">{o.employeeName}</div>
-                          <div className="text-sm text-slate-500">{o.department}</div>
-                        </div>
-                        <span
-                          className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 dark:text-white"
-                          style={{ backgroundColor: badgeColor(theme, o.status) }}
-                        >
-                          {o.status}
-                        </span>
-                      </div>
-                      <div className="mt-3 text-sm text-slate-600">
-                        {dorm
-                          ? `${dorm.site} · ${dorm.buildingName} · ${dorm.dong} ${dorm.roomHo}`
-                          : "미배정"}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {!occupants.some((o) => o.isNewHireAssignment) && (
-                  <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-400">
-                    현재 신입사원 배정 데이터가 없습니다.
-                  </div>
-                )}
-              </div>
-            </section>
           </div>
+        )}
+
+        {activeTab === "militaryDashboard" && (
+          <section className="space-y-6">
+            <div className="grid gap-6 xl:grid-cols-4">
+              {[
+                { title: "군인원", value: militaryPersonnel.length },
+                { title: "훈련 기록", value: militaryTrainingRecords.length },
+                { title: "공지 수", value: militaryNotices.length },
+                { title: "보고서", value: militaryReports.length },
+              ].map((item) => (
+                <div key={item.title} className="rounded-3xl border p-5 shadow-sm ring-1 ring-slate-200 bg-white">
+                  <div className="text-sm font-medium text-slate-500">{item.title}</div>
+                  <div className="mt-3 text-3xl font-bold text-slate-900">{item.value}</div>
+                </div>
+              ))}
+            </div>
+            <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+              <h2 className="text-lg font-semibold">예비군/민방위 모듈 요약</h2>
+              <p className="mt-2 text-sm text-slate-500">인원, 훈련, 공지, 보고서 현황을 한곳에서 확인하세요.</p>
+            </section>
+          </section>
+        )}
+
+        {activeTab === "personnelManagement" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">예비군/민방위 인원 관리</h2>
+                <p className="text-sm text-slate-500">인원 정보를 확인하고 엑셀로 내보낼 수 있습니다.</p>
+              </div>
+            </div>
+            <div className="overflow-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-100 text-slate-700">
+                  <tr>
+                    <th className="px-3 py-3">이름</th>
+                    <th className="px-3 py-3">계급</th>
+                    <th className="px-3 py-3">군별</th>
+                    <th className="px-3 py-3">부대</th>
+                    <th className="px-3 py-3">연락처</th>
+                    <th className="px-3 py-3">입대일</th>
+                    <th className="px-3 py-3">전역일</th>
+                    <th className="px-3 py-3">상태</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {militaryPersonnel.map((person) => (
+                    <tr key={person.id} className="border-b border-slate-100 hover:bg-slate-50">
+                      <td className="px-3 py-3">{person.name}</td>
+                      <td className="px-3 py-3">{person.rank}</td>
+                      <td className="px-3 py-3">{person.serviceBranch}</td>
+                      <td className="px-3 py-3">{person.unit}</td>
+                      <td className="px-3 py-3">{person.phone}</td>
+                      <td className="px-3 py-3">{person.enlistmentDate}</td>
+                      <td className="px-3 py-3">{person.dischargeDate}</td>
+                      <td className="px-3 py-3">{person.status}</td>
+                    </tr>
+                  ))}
+                  {militaryPersonnel.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="px-3 py-12 text-center text-slate-400">예비군/민방위 인원 데이터가 없습니다.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {activeTab === "trainingRecords" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold">훈련/교육 기록</h2>
+              <p className="text-sm text-slate-500">훈련 현황을 확인하고 관리하세요.</p>
+            </div>
+            <div className="overflow-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-100 text-slate-700">
+                  <tr>
+                    <th className="px-3 py-3">훈련명</th>
+                    <th className="px-3 py-3">훈련일</th>
+                    <th className="px-3 py-3">위치</th>
+                    <th className="px-3 py-3">참석인원</th>
+                    <th className="px-3 py-3">상태</th>
+                    <th className="px-3 py-3">비고</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {militaryTrainingRecords.map((record) => (
+                    <tr key={record.id} className="border-b border-slate-100 hover:bg-slate-50">
+                      <td className="px-3 py-3">{record.subject}</td>
+                      <td className="px-3 py-3">{record.trainingDate}</td>
+                      <td className="px-3 py-3">{record.location}</td>
+                      <td className="px-3 py-3">{record.attendees}</td>
+                      <td className="px-3 py-3">{record.status}</td>
+                      <td className="px-3 py-3">{record.notes}</td>
+                    </tr>
+                  ))}
+                  {militaryTrainingRecords.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-3 py-12 text-center text-slate-400">훈련 기록 데이터가 없습니다.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {activeTab === "militaryNotices" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold">공지/알림</h2>
+              <p className="text-sm text-slate-500">예비군 및 민방위 공지를 확인하세요.</p>
+            </div>
+            <div className="overflow-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-100 text-slate-700">
+                  <tr>
+                    <th className="px-3 py-3">제목</th>
+                    <th className="px-3 py-3">구분</th>
+                    <th className="px-3 py-3">게시일</th>
+                    <th className="px-3 py-3">만료일</th>
+                    <th className="px-3 py-3">내용</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {militaryNotices.map((notice) => (
+                    <tr key={notice.id} className="border-b border-slate-100 hover:bg-slate-50">
+                      <td className="px-3 py-3">{notice.title}</td>
+                      <td className="px-3 py-3">{notice.category}</td>
+                      <td className="px-3 py-3">{notice.publishedDate}</td>
+                      <td className="px-3 py-3">{notice.expiresDate}</td>
+                      <td className="px-3 py-3">{notice.content}</td>
+                    </tr>
+                  ))}
+                  {militaryNotices.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-12 text-center text-slate-400">공지/알림 데이터가 없습니다.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {activeTab === "militaryReports" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold">보고서</h2>
+              <p className="text-sm text-slate-500">예비군/민방위 보고서를 확인하세요.</p>
+            </div>
+            <div className="overflow-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-100 text-slate-700">
+                  <tr>
+                    <th className="px-3 py-3">제목</th>
+                    <th className="px-3 py-3">보고일</th>
+                    <th className="px-3 py-3">종류</th>
+                    <th className="px-3 py-3">작성자</th>
+                    <th className="px-3 py-3">상태</th>
+                    <th className="px-3 py-3">비고</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {militaryReports.map((report) => (
+                    <tr key={report.id} className="border-b border-slate-100 hover:bg-slate-50">
+                      <td className="px-3 py-3">{report.title}</td>
+                      <td className="px-3 py-3">{report.reportDate}</td>
+                      <td className="px-3 py-3">{report.type}</td>
+                      <td className="px-3 py-3">{report.author}</td>
+                      <td className="px-3 py-3">{report.status}</td>
+                      <td className="px-3 py-3">{report.notes}</td>
+                    </tr>
+                  ))}
+                  {militaryReports.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-3 py-12 text-center text-slate-400">보고서 데이터가 없습니다.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {activeTab === "militarySettings" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold">환경설정</h2>
+              <p className="text-sm text-slate-500">예비군/민방위 기본 설정 값을 확인하세요.</p>
+            </div>
+            <div className="space-y-2">
+              {Object.entries(militarySettings).map(([key, value]) => (
+                <div key={key} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-sm font-semibold">{key}</div>
+                  <div className="text-sm text-slate-500">{value}</div>
+                </div>
+              ))}
+              {Object.keys(militarySettings).length === 0 && (
+                <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-400">예비군/민방위 설정이 없습니다.</div>
+              )}
+            </div>
+          </section>
         )}
 
         {activeTab === "dormContracts" && (
@@ -3436,18 +4201,7 @@ const exportExcel = () => {
                     선택 삭제
                   </button>
                 )}
-                {canEditData(currentUser) && (
-                  <button
-                    onClick={() => {
-                      setDormForm(dormTemplate());
-                      setEditingDormId(null);
-                      setShowDormForm(true);
-                    }}
-                    className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-white"
-                  >
-                    <Plus className="h-4 w-4" /> 기숙사 추가
-                  </button>
-                )}
+                {/* 기숙사 등록/수정 기능 제외됨 */}
               </div>
             </div>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
@@ -3457,9 +4211,7 @@ const exportExcel = () => {
                 return (
                   <div
                     key={d.id}
-                    onClick={(e) => handleRowClick(e, () => openDormEdit(d))}
-                    role="button"
-                    className="rounded-2xl border border-slate-200 p-3 cursor-pointer hover:bg-slate-50"
+                    className="rounded-2xl border border-slate-200 p-3 bg-white"
                   >
                     <div className="mb-2 flex items-center justify-between gap-2">
                       <span className="font-medium text-xs">#{index + 1}</span>
@@ -3507,17 +4259,7 @@ const exportExcel = () => {
                       <CompactField label="부동산명" value={d.realEstateName || "-"} />
                     </div>
                     <div className="mt-2 flex flex-wrap justify-center gap-1">
-                      {canEditData(currentUser) && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openDormEdit(d);
-                          }}
-                          className="rounded-xl border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"
-                        >
-                          수정
-                        </button>
-                      )}
+                      {/* 기숙사 수정 기능 제외됨 */}
                       {canEditData(currentUser) && (
                         <button
                           onClick={(e) => {
@@ -3548,7 +4290,7 @@ const exportExcel = () => {
 
         {activeTab === "occupants" && (
           <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">기숙사별 인원 / 입실일</h2><p className="text-sm text-slate-500">선택된 기숙사 기준 입주자 상세 관리</p></div><div className="flex items-center gap-2"><FilterSelect label="지역" value={occupantSiteFilter} onChange={(v) => setOccupantSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} /><FilterSelect label="성별" value={occupantGenderFilter} onChange={(v) => setOccupantGenderFilter(v as Gender | "전체")} options={["전체", "남", "여", "기타"]} /><FilterSelect label="상태" value={occupantStatusFilter} onChange={setOccupantStatusFilter} options={["전체", "거주중", "만료예정", "퇴실", "천안이동", "신규입주"]} /><input type="text" placeholder="검색..." value={occupantSearch} onChange={(e) => setOccupantSearch(e.target.value)} className="rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400" />{canEditData(currentUser) && selectedOccupantIds.length > 0 && (<button onClick={() => { setOccupants((prev) => prev.filter((o) => !selectedOccupantIds.includes(o.id))); setSelectedOccupantIds([]); }} className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500">선택 삭제</button>)}{canEditData(currentUser) && <button onClick={() => { setOccupantForm(occupantTemplate()); setEditingOccupantId(null); setShowOccupantForm(true); }} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-white"><Plus className="h-4 w-4" /> 입주자 추가</button>}</div></div>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">기숙사별 인원 / 입실일</h2><p className="text-sm text-slate-500">선택된 기숙사 기준 입주자 상세 관리</p></div><div className="flex items-center gap-2"><FilterSelect label="지역" value={occupantSiteFilter} onChange={(v) => setOccupantSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} /><FilterSelect label="성별" value={occupantGenderFilter} onChange={(v) => setOccupantGenderFilter(v as Gender | "전체")} options={["전체", "남", "여", "기타"]} /><FilterSelect label="상태" value={occupantStatusFilter} onChange={setOccupantStatusFilter} options={["전체", "거주중", "만료예정", "퇴실", "천안이동", "신규입주"]} /><input type="text" placeholder="검색..." value={occupantSearch} onChange={(e) => setOccupantSearch(e.target.value)} className="rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400" />{canEditData(currentUser) && selectedOccupantIds.length > 0 && (<button onClick={() => { setOccupants((prev) => prev.filter((o) => !selectedOccupantIds.includes(o.id))); setSelectedOccupantIds([]); }} className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500">선택 삭제</button>)}</div></div>
             <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">{visibleDorms.map((d) => <button key={d.id} onClick={() => setSelectedDormId(d.id)} className={`rounded-2xl border px-4 py-3 text-left ${selectedDormId === d.id ? "border-blue-500 bg-blue-50" : "border-slate-200 bg-white"}`}><div className="font-semibold">{d.buildingName}</div><div className="text-sm text-slate-500">{d.dong} {d.roomHo}</div><div className="mt-2 text-xs text-slate-500">현재 {occupancyCountByDorm.get(d.id) || 0}/6명</div></button>)}</div>
             <div className="overflow-auto">
               <table className="w-full min-w-[1100px] text-sm text-center">
@@ -3591,8 +4333,7 @@ const exportExcel = () => {
                     return (
                       <tr
                         key={o.id}
-                        onClick={(e) => handleRowClick(e, () => openOccupantEdit(o))}
-                        className="cursor-pointer border-b border-slate-100 hover:bg-slate-50"
+                        className="border-b border-slate-100"
                       >
                         <td className="px-3 py-3">
                           <label className="inline-flex items-center justify-center gap-2">
@@ -3631,17 +4372,7 @@ const exportExcel = () => {
                         <td className="px-3 py-3">{o.notes}</td>
                         <td className="px-3 py-3">
                           <div className="flex justify-center gap-2">
-                            {canEditData(currentUser) && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openOccupantEdit(o);
-                                }}
-                                className="rounded-xl border border-slate-300 p-2 hover:bg-slate-50"
-                              >
-                                <Edit3 className="h-4 w-4" />
-                              </button>
-                            )}
+                            {/* 입주자 수정 기능 제외됨 */}
                             {canEditData(currentUser) && (
                               <button
                                 onClick={(e) => {
@@ -3673,15 +4404,105 @@ const exportExcel = () => {
 
         {activeTab === "simulation" && (
           <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">운영 시뮬레이션</h2><p className="text-sm text-slate-500">평택/천안 남녀별 및 전체 합계</p></div><div className="flex items-center gap-2"><FilterSelect label="지역" value={simulationSiteFilter} onChange={(v) => setSimulationSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} /><FilterSelect label="성별" value={simulationGenderFilter} onChange={(v) => setSimulationGenderFilter(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} /><input type="text" placeholder="검색..." value={simulationSearch} onChange={(e) => setSimulationSearch(e.target.value)} className="rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400" /></div></div>
-            <div className="overflow-auto"><table className="w-full min-w-[1400px] text-sm text-center"><thead className="bg-slate-100 text-slate-700"><tr><th className="px-3 py-2">구분</th><th className="px-3 py-2">기숙사수</th><th className="px-3 py-2">거주자(TO)</th><th className="px-3 py-2">현 거주자</th><th className="px-3 py-2">거주기한 만료자</th><th className="px-3 py-2">중도 퇴거자</th><th className="px-3 py-2">천안이동</th><th className="px-3 py-2">신규입주</th><th className="px-3 py-2">과부족</th><th className="px-3 py-2">임차만기(건물수)</th><th className="px-3 py-2">해지(건물수)</th><th className="px-3 py-2">추가임차(건물수)</th></tr></thead><tbody>{visibleSimulationRows.map((r) => <tr key={r.key} className="border-b border-slate-100"><td className="px-3 py-3 font-medium">{r.site}({r.gender})</td><td className="px-3 py-3">{r.dormCount}</td><td className="px-3 py-3">{r.residentTo}</td><td className="px-3 py-3">{r.currentResidents}</td><td className="px-3 py-3">{r.expiredResidents}</td><td className="px-3 py-3">{r.earlyDepartures}</td><td className="px-3 py-3">{r.cheonanMove}</td><td className="px-3 py-3">{r.newMoveIn}</td><td className="px-3 py-3">{r.shortage}</td><td className="px-3 py-3">{r.expireBuildings}</td><td className="px-3 py-3">{r.terminated}</td><td className="px-3 py-3">{r.addLease}</td></tr>)}<tr className="bg-slate-50 font-semibold"><td className="px-3 py-3">{simulationTotal.residentTo}</td><td className="px-3 py-3">-</td><td className="px-3 py-3">-</td><td className="px-3 py-3">-</td><td className="px-3 py-3">-</td><td className="px-3 py-3">-</td><td className="px-3 py-3">{simulationTotal.expireBuildings}</td><td className="px-3 py-3">-</td><td className="px-3 py-3">{simulationTotal.addLease}</td></tr></tbody></table></div>
-            <div className="mt-4 grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-6">
+            <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">월별 운영 시뮬레이션</h2>
+                <p className="text-sm text-slate-500">선택한 년/월 기준으로 운영 현황과 수요를 확인합니다.</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2">
+                  <span className="text-sm text-slate-500">기준년</span>
+                  <select
+                    value={simulationYear}
+                    onChange={(e) => setSimulationYear(e.target.value)}
+                    className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400"
+                  >
+                    {Array.from({ length: 5 }, (_, idx) => String(2023 + idx)).map((year) => (
+                      <option key={year} value={year}>{year}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2">
+                  <span className="text-sm text-slate-500">월</span>
+                  <select
+                    value={simulationMonth}
+                    onChange={(e) => setSimulationMonth(e.target.value)}
+                    className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400"
+                  >
+                    {Array.from({ length: 12 }, (_, idx) => String(idx + 1).padStart(2, "0")).map((month) => (
+                      <option key={month} value={month}>{month}</option>
+                    ))}
+                  </select>
+                </div>
+                <button className="rounded-2xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200">엑셀 다운로드</button>
+              </div>
+            </div>
+
+            <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3 xl:grid-cols-6">
               <MiniStat label="남자 총원" value={String(simulationTotal.maleCount)} />
               <MiniStat label="여자 총원" value={String(simulationTotal.femaleCount)} />
               <MiniStat label="사용률" value={`${simulationTotal.usageRate}%`} />
               <MiniStat label="전체 TO" value={String(simulationTotal.residentTo)} />
               <MiniStat label="임차만기 건물" value={String(simulationTotal.expireBuildings)} />
               <MiniStat label="추가임차 필요" value={String(simulationTotal.addLease)} />
+            </div>
+
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <FilterSelect label="지역" value={simulationSiteFilter} onChange={(v) => setSimulationSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
+                <FilterSelect label="성별" value={simulationGenderFilter} onChange={(v) => setSimulationGenderFilter(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
+              </div>
+              <input
+                type="text"
+                placeholder="검색..."
+                value={simulationSearch}
+                onChange={(e) => setSimulationSearch(e.target.value)}
+                className="rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"
+              />
+            </div>
+
+            <div className="overflow-auto">
+              <table className="w-full min-w-[1400px] text-sm text-center">
+                <thead className="bg-slate-100 text-slate-700">
+                  <tr>
+                    <th className="px-3 py-3">구분</th>
+                    <th className="px-3 py-3">기숙사수</th>
+                    <th className="px-3 py-3">거주자(TO)</th>
+                    <th className="px-3 py-3">현 거주자</th>
+                    <th className="px-3 py-3">만료자</th>
+                    <th className="px-3 py-3">중도퇴거</th>
+                    <th className="px-3 py-3">천안이동</th>
+                    <th className="px-3 py-3">신규입주</th>
+                    <th className="px-3 py-3">과부족</th>
+                    <th className="px-3 py-3">임차만기</th>
+                    <th className="px-3 py-3">해지</th>
+                    <th className="px-3 py-3">추가임차</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleSimulationRows.map((r) => (
+                    <tr key={r.key} className="border-b border-slate-100 hover:bg-slate-50">
+                      <td className="px-3 py-3 font-medium">{r.site} ({r.gender})</td>
+                      <td className="px-3 py-3">{r.dormCount}</td>
+                      <td className="px-3 py-3">{r.residentTo}</td>
+                      <td className="px-3 py-3">{r.currentResidents}</td>
+                      <td className="px-3 py-3">{r.expiredResidents}</td>
+                      <td className="px-3 py-3">{r.earlyDepartures}</td>
+                      <td className="px-3 py-3">{r.cheonanMove}</td>
+                      <td className="px-3 py-3">{r.newMoveIn}</td>
+                      <td className="px-3 py-3">{r.shortage}</td>
+                      <td className="px-3 py-3">{r.expireBuildings}</td>
+                      <td className="px-3 py-3">{r.terminated}</td>
+                      <td className="px-3 py-3">{r.addLease}</td>
+                    </tr>
+                  ))}
+                  {visibleSimulationRows.length === 0 && (
+                    <tr>
+                      <td colSpan={12} className="px-3 py-12 text-center text-slate-400">검색 조건에 맞는 데이터가 없습니다.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </section>
         )}
@@ -3977,6 +4798,98 @@ const exportExcel = () => {
                   )}
                 </tbody>
               </table>
+            </div>
+          </section>
+        )}
+
+        {activeTab === "settlementManagement" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">정산 관리</h2>
+                <p className="text-sm text-slate-500">계약, 수납 데이터를 바탕으로 정산 상태를 확인합니다.</p>
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <MiniStat label="등록된 수납 건수" value={`${sales.length}`} />
+              <MiniStat label="총 매각 금액" value={`${formatNumber(sales.reduce((sum, item) => sum + item.totalAmount, 0))}원`} />
+              <MiniStat label="정산 진행" value="준비중" />
+            </div>
+          </section>
+        )}
+
+        {activeTab === "notificationManagement" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">알림 관리</h2>
+                <p className="text-sm text-slate-500">계약 만료, 하자접수, 시스템 알림을 한 곳에서 확인합니다.</p>
+              </div>
+            </div>
+            <div className="space-y-3">
+              {dashboardAlerts.map((alert) => (
+                <div key={alert.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="font-semibold">{alert.title}</p>
+                      <p className="text-sm text-slate-500">{alert.detail}</p>
+                    </div>
+                    <span className="text-sm font-semibold text-blue-700">{alert.when}</span>
+                  </div>
+                </div>
+              ))}
+              {dashboardAlerts.length === 0 && (
+                <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-400">현재 등록된 알림이 없습니다.</div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {activeTab === "documentManagement" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">문서 관리</h2>
+                <p className="text-sm text-slate-500">계약서, 보고서, 등록 문서 양식을 관리합니다.</p>
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <MiniStat label="맞춤 양식" value={`${customTemplates.length}`} />
+              <MiniStat label="등록된 문서" value="준비중" />
+              <MiniStat label="최근 업로드" value="준비중" />
+            </div>
+          </section>
+        )}
+
+        {activeTab === "reportManagement" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">통계 및 보고서</h2>
+                <p className="text-sm text-slate-500">대시보드 보고서 생성을 위한 통계 요약과 출력 옵션을 제공합니다.</p>
+              </div>
+              <button onClick={() => window.print()} className="rounded-2xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200">프린트 보고서</button>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <MiniStat label="대시보드 조회" value="활성" />
+              <MiniStat label="생성 가능한 리포트" value="준비중" />
+              <MiniStat label="최근 생성" value="준비중" />
+            </div>
+          </section>
+        )}
+
+        {activeTab === "settings" && (
+          <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">설정</h2>
+                <p className="text-sm text-slate-500">시스템 환경과 계좌 설정, 테마를 구성합니다.</p>
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <MiniStat label="다크 모드" value={theme.darkMode ? "켜짐" : "꺼짐"} />
+              <MiniStat label="현재 사용자" value={currentUser.displayName} />
+              <MiniStat label="권한" value={getRoleLabel(currentUser.role)} />
             </div>
           </section>
         )}
@@ -4363,7 +5276,7 @@ const exportExcel = () => {
         )}
 
         {showDormContractForm && modalWrap(
-          "기숙사 계약 등록/수정",
+          "기숙사 등록/수정",
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <SelectInput label="지역" value={dormContractForm.site} onChange={(v) => setDormContractForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
             <SelectInput label="성별" value={dormContractForm.gender} onChange={(v) => setDormContractForm((f) => ({ ...f, gender: v as Gender }))} options={["남", "여"]} />
@@ -4842,10 +5755,6 @@ const exportExcel = () => {
   );
 }
 
-function tabButton(active: TabKey, setActive: (t: TabKey) => void, key: TabKey, icon: React.ReactNode, label: string) {
-  return <button onClick={() => setActive(key)} className={`inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm ${active === key ? "bg-slate-900 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}>{icon} {label}</button>;
-}
-
 function modalWrap(title: string, body: React.ReactNode, onClose: () => void, onSave: () => void, accentColor: string) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-sm">
@@ -4856,10 +5765,6 @@ function modalWrap(title: string, body: React.ReactNode, onClose: () => void, on
       </div>
     </div>
   );
-}
-
-function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub: string }) {
-  return <div className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200"><div className="mb-3 flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">{icon}</div><div className="text-sm text-slate-500">{label}</div><div className="mt-1 text-2xl font-bold tracking-tight">{value}</div><div className="mt-1 text-xs text-slate-400">{sub}</div></div>;
 }
 
 function MiniStat({ label, value }: { label: string; value: string }) {
