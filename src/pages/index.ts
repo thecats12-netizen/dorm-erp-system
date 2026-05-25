@@ -1,0 +1,13 @@
+export { default as DashboardPage } from "./DashboardPage";
+export { default as DormsPage } from "./DormsPage";
+export { default as OccupantsPage } from "./OccupantsPage";
+export { default as DormContractsPage } from "./DormContractsPage";
+export { default as NewHiresPage } from "./NewHiresPage";
+export { default as InventoryPage } from "./InventoryPage";
+export { default as CleaningReportsPage } from "./CleaningReportsPage";
+export { default as DefectsPage } from "./DefectsPage";
+export { default as MilitaryDashboardPage } from "./MilitaryDashboardPage";
+export { default as PersonnelManagementPage } from "./PersonnelManagementPage";
+export { default as TrainingRecordsPage } from "./TrainingRecordsPage";
+export { default as MilitaryReportsPage } from "./MilitaryReportsPage";
+export { default as SettingsPage } from "./SettingsPage";
