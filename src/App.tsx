@@ -7423,7 +7423,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       systemSettings.menus
         .filter((menu) => {
           if (!menu.isVisible || !menu.requiredRoles.includes(currentRole)) return false;
-          if (currentUser?.role === "maintenance_reporter") {
+          if (isMaintenanceAccessUser) {
             return menu.tabKey === "cleaningReports" || menu.tabKey === "defects";
           }
           return true;
@@ -7468,13 +7468,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const currentMenuGroup = menuGroupForTab[activeTab];
   const isViewer = currentUser?.role === "viewer";
+  const isMaintenanceAccessUser = currentUser?.role === "maintenance_reporter" || currentUser?.role === "dorm_manager";
   const isMaintenanceReporterWithDorm = currentUser?.role === "maintenance_reporter" && !!currentUser.dormId;
 
   useEffect(() => {
-    if (currentUser?.role === "maintenance_reporter" && activeTab !== "cleaningReports" && activeTab !== "defects") {
+    if (isMaintenanceAccessUser && activeTab !== "cleaningReports" && activeTab !== "defects") {
       setActiveTab("defects");
     }
-  }, [currentUser, activeTab]);
+  }, [isMaintenanceAccessUser, activeTab]);
 
   const isGroupOpen = (group: string) => group === currentMenuGroup || group === expandedMenu || group === hoveredMenu;
   const isMenuActive = (group: string) => group === currentMenuGroup;
@@ -10414,8 +10415,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3">{users.find((u) => u.id === dorm?.managerUserId)?.displayName || "미지정"}</td>
                         <td className="px-3 py-3">{dorm ? (isCleaningMissing(dorm) ? "미보고" : "정상") : "-"}</td>
                         <td className="px-3 py-3">{getOpenDefectCount(dorm?.id || "")}</td>
-                        <td className="px-3 py-3">{o.employeeName}</td>
-                        <td className="px-3 py-3">
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{o.employeeName}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">
                           <span
                             className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 dark:text-white"
                             style={{ backgroundColor: badgeColor(theme, o.status) }}
@@ -10423,9 +10424,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             {o.status}
                           </span>
                         </td>
-                        <td className="px-3 py-3">{formatDateOnly(o.moveInDate || "") || "-"}</td>
-                        <td translate="no" className="px-3 py-3 notranslate">{o.department}</td>
-                        <td className="px-3 py-3">{o.phone}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(o.moveInDate || "") || "-"}</td>
+                        <td translate="no" className="px-3 py-3 notranslate whitespace-nowrap overflow-hidden text-ellipsis max-w-[170px]">{o.department}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{o.phone}</td>
                         <td className="px-3 py-3">
                           <div className="flex justify-center gap-2">
                             {/* 입주자 수정 기능 제외됨 */}
@@ -12880,26 +12881,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     const manager = users.find((u) => u.id === dorm.managerUserId);
                     return (
                       <tr key={`${dorm.id}-${idx}`} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                        <td className="px-3 py-3">{idx + 1}</td>
-                        <td className="px-3 py-3">{dorm.site}</td>
-                        <td className="px-3 py-3">{dorm.gender}</td>
-                        <td className="px-3 py-3">{dorm.buildingName}</td>
-                        <td className="px-3 py-3">{dorm.address}</td>
-                        <td className="px-3 py-3">{dorm.dong}</td>
-                        <td className="px-3 py-3">{dorm.roomHo}</td>
-                        <td className="px-3 py-3">{dorm.공동현관 || "-"}</td>
-                        <td className="px-3 py-3">{dorm.세대현관 || "-"}</td>
-                        <td className="px-3 py-3">{occupant?.employeeName || "-"}</td>
-                        <td className="px-3 py-3">{occupant?.phone || "-"}</td>
-                        <td className="px-3 py-3">{formatDateOnly(occupant?.moveInDate || "") || "-"}</td>
-                        <td className="px-3 py-3">{formatDateOnly(occupant?.expectedMoveOutDate || occupant?.moveOutDueDate || "") || "-"}</td>
-                        <td className="px-3 py-3">{manager?.displayName || "미지정"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{idx + 1}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm.site}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm.gender}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{dorm.buildingName}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{dorm.address}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm.dong}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm.roomHo}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm.공동현관 || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm.세대현관 || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{occupant?.employeeName || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{occupant?.phone || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(occupant?.moveInDate || "") || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(occupant?.expectedMoveOutDate || occupant?.moveOutDueDate || "") || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{manager?.displayName || "미지정"}</td>
                         {[1, 2, 3, 4, 5].map((weekNo) => (
-                          <td key={weekNo} className="px-3 py-3">
+                          <td key={weekNo} className="px-3 py-3 whitespace-nowrap">
                             {getCleaningWeeklyStatus(dorm, weekNo)}
                           </td>
                         ))}
-                        <td className="px-3 py-3">
+                        <td className="px-3 py-3 whitespace-nowrap">
                           <button
                             onClick={() => openCleaningReportForm(undefined, dorm)}
                             className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-2xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}
@@ -12977,13 +12978,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <tbody>
                     {visibleCleaningReports.map((report) => (
                       <tr key={report.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                        <td className="px-3 py-3">{report.reportDate}</td>
-                        <td className="px-3 py-3">{`${report.buildingName} ${report.dong}-${report.roomHo}`}</td>
-                        <td className="px-3 py-3">{report.cleanStatus}</td>
-                        <td className="px-3 py-3">{report.managerName || "-"}</td>
-                        <td className="px-3 py-3">{report.cleanerName || "-"}</td>
-                        <td className="px-3 py-3">{report.beforePhotoDataUrls.length && report.afterPhotoDataUrls.length ? "완료" : "사진누락"}</td>
-                        <td className="px-3 py-3">
+                        <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(report.reportDate) || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{`${report.buildingName} ${report.dong}-${report.roomHo}`}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{report.cleanStatus}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{report.managerName || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{report.cleanerName || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{report.beforePhotoDataUrls.length && report.afterPhotoDataUrls.length ? "완료" : "사진누락"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">
                           <div className="flex gap-2">
                             {shouldShowMaintenanceControls(currentUser) && (
                               <button onClick={() => openCleaningReportEdit(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}>
@@ -14971,15 +14972,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           className="h-4 w-4"
                         />
                       </td>
-                      <td className="px-3 py-3 font-medium">{idx + 1}</td>
-                      <td className="px-3 py-3">{d.receiptDate}</td>
-                      <td className="px-3 py-3">{d.dormManagerName}</td>
-                      <td className="px-3 py-3">{d.buildingName}</td>
-                      <td className="px-3 py-3">{d.roadAddress}</td>
-                      <td className="px-3 py-3">{d.dong}</td>
-                      <td className="px-3 py-3">{d.ho}</td>
-                      <td className="px-3 py-3">{d.공동현관}</td>
-                      <td className="px-3 py-3">{d.세대현관}</td>
+                      <td className="px-3 py-3 whitespace-nowrap font-medium">{idx + 1}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(d.receiptDate) || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{d.dormManagerName}</td>
+                      <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{d.buildingName}</td>
+                      <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{d.roadAddress}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{d.dong}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{d.ho}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{d.공동현관}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{d.세대현관}</td>
                       <td className="px-3 py-3">
                         <span
                           className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 dark:text-white"
@@ -14988,12 +14989,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           {d.defectStatus}
                         </span>
                       </td>
-                      <td className="px-3 py-3">{d.requestText}</td>
+<td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[200px]">{d.requestText}</td>
 
                       {currentUser.role !== "maintenance_reporter" && (
                         <>
-                          <td className="px-3 py-3">{d.inspectorName || "-"}</td>
-                          <td className="px-3 py-3">{d.completeText || "-"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[150px]">{d.inspectorName || "-"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[200px]">{d.completeText || "-"}</td>
                         </>
                       )}
 
