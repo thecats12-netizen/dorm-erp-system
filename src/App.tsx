@@ -61,6 +61,24 @@ import {
   saveMilitaryModule,
   type MilitaryModuleState,
 } from "./services/supabaseService";
+import {
+  loadDormModule,
+  saveDormModule,
+} from "./services/dormSupabaseService";
+import {
+  loadOperationalModule,
+  saveOperationalModule,
+} from "./services/operationalSupabaseService";
+import {
+  signInWithEmail,
+  signOut as supabaseSignOut,
+  getCurrentSession,
+  getCurrentAuthUser,
+  getProfile,
+  updateProfileOnly,
+  createUserViaEdgeFunction,
+  type Profile,
+} from "./services/authService";
 import { createAuditLogEntry, getChangedFields } from "./services/auditService";
 import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
@@ -133,6 +151,21 @@ declare global {
   }
 }
 
+function mapProfileToLoginUser(profile: Profile, authUserEmail?: string): LoginUser {
+  return {
+    id: profile.id,
+    username: profile.email || profile.display_name || authUserEmail || profile.id,
+    password: "",
+    role: (profile.role || "viewer") as UserRole,
+    displayName: profile.display_name || profile.email || "",
+    isActive: profile.is_active ?? true,
+    siteAccess: profile.site_access || "전체",
+    genderAccess: profile.gender_access || "전체",
+    createdAt: profile.created_at || new Date().toISOString(),
+    dormId: profile.dorm_id || undefined,
+  } as LoginUser;
+}
+
 function openAddressSearch(onSelected: (roadAddress: string) => void) {
   if (!window.daum?.Postcode) {
     alert("주소검색 스크립트가 아직 로드되지 않았습니다.");
@@ -159,6 +192,11 @@ function openAddressSearch(onSelected: (roadAddress: string) => void) {
  * - 하자접수 텍스트 + 사진 첨부(base64)
  * - localStorage 저장
  */
+
+const parseSafeDate = (value: string) => {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? null : date;
+};
 
 const getRoleLabel = (role: UserRole) => {
   switch (role) {
@@ -1015,7 +1053,7 @@ function canManageUsers(user: LoginUser | null) {
 }
 
 function canFileDefect(user: LoginUser | null) {
-  return !!user && ["admin", "maintenance_reporter", "dorm_manager"].includes(user.role);
+  return !!user && ["admin", "maintenance_reporter"].includes(user.role);
 }
 
 export default function App() {
@@ -1465,6 +1503,13 @@ export default function App() {
 
   const [tenantId] = useState<string>("default");
   const [isLoading, setIsLoading] = useState(true);
+  const [operationalSyncError, setOperationalSyncError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (operationalSyncError) {
+      console.warn("Operational sync error:", operationalSyncError);
+    }
+  }, [operationalSyncError]);
   const [customTemplates, setCustomTemplates] = usePersistedState<CustomTemplate[]>(CUSTOM_TEMPLATES_KEY, [], tenantId);
   const [templateUploadName, setTemplateUploadName] = useState("");
   const [templateUploadType, setTemplateUploadType] = useState<"dormContract" | "newHire" | "dorm" | "occupant" | "inventory" | "sale">("dormContract");
@@ -1535,56 +1580,111 @@ export default function App() {
       : systemSettings.screenSettings.filter((screen) => screen.tabKey === selectedScreenTab);
 
   useEffect(() => {
-    runLegacyLocalStorageMigration(tenantId);
+    const loadInitialData = async () => {
+      runLegacyLocalStorageMigration(tenantId);
 
-    try {
-      const savedTheme = loadJson<ThemeSettings>(THEME_KEY, themeDefault, tenantId);
-      const dormSeed = loadJson<Dorm[]>(DORMS_KEY, demoDorms, tenantId);
+      try {
+        const savedTheme = loadJson<ThemeSettings>(THEME_KEY, themeDefault, tenantId);
+        const dormSeed = loadJson<Dorm[]>(DORMS_KEY, demoDorms, tenantId);
 
-      setTheme({ ...themeDefault, ...savedTheme });
-      const loadedUsers = loadJson<LoginUser[]>(USERS_KEY, [], tenantId);
-      const hasAdmin = loadedUsers.some((u) => u.username === "admin" && u.role === "admin" && u.isActive);
-      if (loadedUsers.length === 0 || !hasAdmin) {
-        setUsers(demoUsers);
-        saveJson(USERS_KEY, demoUsers, tenantId);
-      } else {
-        setUsers(loadedUsers);
-      }
-      setDorms(dormSeed);
-      setOccupants(loadJson<Occupant[]>(OCCUPANTS_KEY, demoOccupants(dormSeed), tenantId));
-      setInventory(loadJson<InventoryItem[]>(INVENTORY_KEY, demoInventory, tenantId));
-      setLeases(loadJson<LeaseContract[]>(LEASES_KEY, demoLeases, tenantId));
-      setDormContracts(loadJson<DormContract[]>(DORM_CONTRACTS_KEY, demoDormContracts, tenantId));
-      setCleaningReports(loadJson<CleaningReport[]>(CLEANING_REPORTS_KEY, [], tenantId));
-      setAuditLogs(loadJson<AuditLog[]>(AUDIT_LOGS_KEY, [], tenantId));
-      setNewHires(loadJson<NewHireEmployee[]>(NEW_HIRES_KEY, demoNewHires, tenantId));
-      setSales(loadJson<SaleRecord[]>(SALES_KEY, [], tenantId));
-      setDefects(loadJson<DefectRequest[]>(DEFECTS_KEY, [], tenantId));
-      setMilitaryPersonnel(loadJson<any[]>(MILITARY_PERSONNEL_KEY, [], tenantId));
-      setMilitaryTrainingRecords(loadJson<any[]>(MILITARY_TRAINING_KEY, [], tenantId));
-      setMilitaryNotices(loadJson<any[]>(MILITARY_NOTICES_KEY, [], tenantId));
-      setMilitaryReports(loadJson<any[]>(MILITARY_REPORTS_KEY, [], tenantId));
-      setMilitarySettings(loadJson<any>(MILITARY_SETTINGS_KEY, {}, tenantId));
-      const loadedRules = loadJson<MilitaryTrainingRule[]>(MILITARY_TRAINING_RULES_KEY, [], tenantId);
-      setMilitaryTrainingRules(loadedRules.length ? loadedRules : defaultMilitaryTrainingRules);
-      const loadedCodeValues = loadJson<MilitaryCodeValues>(MILITARY_CODE_VALUES_KEY, defaultMilitaryCodeValues, tenantId);
-      setMilitaryCodeValues({
-        ...loadedCodeValues,
-        departments: normalizeMilitaryDepartments(loadedCodeValues.departments),
-      });
-      setMilitaryTrainingAutoConfig(
-        loadJson<{ enabled: boolean; targetStatuses: string[] }>(MILITARY_TRAINING_AUTOCREATE_KEY, { enabled: true, targetStatuses: ["재직"] }, tenantId)
-      );
-      setCleaningSettings(
-        loadJson<CleaningSettings>(CLEANING_SETTINGS_KEY, { missingReportPenalty: -5, includeWeekendReports: false }, tenantId)
-      );
-      setSystemSettings(
-        loadSystemSettings(JSON.stringify(loadJson<SystemSettings>(SYSTEM_SETTINGS_KEY, getDefaultSystemSettings(), tenantId)), tenantId)
-      );
-      setSettlementRecords(loadJson<SettlementRecord[]>(SETTLEMENT_RECORDS_KEY, [], tenantId));
-      setSettlementItems(loadJson<SettlementItem[]>(SETTLEMENT_ITEMS_KEY, [], tenantId));
-      setCurrentUser(loadJson<LoginUser | null>(AUTH_KEY, null, tenantId));
-    } catch (error) {
+        setTheme({ ...themeDefault, ...savedTheme });
+        const loadedUsers = loadJson<LoginUser[]>(USERS_KEY, [], tenantId);
+        const hasAdmin = loadedUsers.some((u) => u.username === "admin" && u.role === "admin" && u.isActive);
+        if (loadedUsers.length === 0 || !hasAdmin) {
+          setUsers(demoUsers);
+          saveJson(USERS_KEY, demoUsers, tenantId);
+        } else {
+          setUsers(loadedUsers);
+        }
+        setDorms(dormSeed);
+        setOccupants(loadJson<Occupant[]>(OCCUPANTS_KEY, demoOccupants(dormSeed), tenantId));
+        setInventory(loadJson<InventoryItem[]>(INVENTORY_KEY, demoInventory, tenantId));
+        setLeases(loadJson<LeaseContract[]>(LEASES_KEY, demoLeases, tenantId));
+        setDormContracts(loadJson<DormContract[]>(DORM_CONTRACTS_KEY, demoDormContracts, tenantId));
+        setCleaningReports(loadJson<CleaningReport[]>(CLEANING_REPORTS_KEY, [], tenantId));
+        setAuditLogs(loadJson<AuditLog[]>(AUDIT_LOGS_KEY, [], tenantId));
+        setNewHires(loadJson<NewHireEmployee[]>(NEW_HIRES_KEY, demoNewHires, tenantId));
+        setSales(loadJson<SaleRecord[]>(SALES_KEY, [], tenantId));
+        setDefects(loadJson<DefectRequest[]>(DEFECTS_KEY, [], tenantId));
+        setMilitaryPersonnel(loadJson<any[]>(MILITARY_PERSONNEL_KEY, [], tenantId));
+        setMilitaryTrainingRecords(loadJson<any[]>(MILITARY_TRAINING_KEY, [], tenantId));
+        setMilitaryNotices(loadJson<any[]>(MILITARY_NOTICES_KEY, [], tenantId));
+        setMilitaryReports(loadJson<any[]>(MILITARY_REPORTS_KEY, [], tenantId));
+        setMilitarySettings(loadJson<any>(MILITARY_SETTINGS_KEY, {}, tenantId));
+        const loadedRules = loadJson<MilitaryTrainingRule[]>(MILITARY_TRAINING_RULES_KEY, [], tenantId);
+        setMilitaryTrainingRules(loadedRules.length ? loadedRules : defaultMilitaryTrainingRules);
+        const loadedCodeValues = loadJson<MilitaryCodeValues>(MILITARY_CODE_VALUES_KEY, defaultMilitaryCodeValues, tenantId);
+        setMilitaryCodeValues({
+          ...loadedCodeValues,
+          departments: normalizeMilitaryDepartments(loadedCodeValues.departments),
+        });
+        setMilitaryTrainingAutoConfig(
+          loadJson<{ enabled: boolean; targetStatuses: string[] }>(MILITARY_TRAINING_AUTOCREATE_KEY, { enabled: true, targetStatuses: ["재직"] }, tenantId)
+        );
+        setCleaningSettings(
+          loadJson<CleaningSettings>(CLEANING_SETTINGS_KEY, { missingReportPenalty: -5, includeWeekendReports: false }, tenantId)
+        );
+        setSystemSettings(
+          loadSystemSettings(JSON.stringify(loadJson<SystemSettings>(SYSTEM_SETTINGS_KEY, getDefaultSystemSettings(), tenantId)), tenantId)
+        );
+        setSettlementRecords(loadJson<SettlementRecord[]>(SETTLEMENT_RECORDS_KEY, [], tenantId));
+        setSettlementItems(loadJson<SettlementItem[]>(SETTLEMENT_ITEMS_KEY, [], tenantId));
+        setCurrentUser(loadJson<LoginUser | null>(AUTH_KEY, null, tenantId));
+
+        if (isSupabaseAvailable()) {
+          const session = await getCurrentSession();
+          if (session?.user?.id) {
+            const remoteDormModule = await loadDormModule(tenantId);
+            if (
+              remoteDormModule &&
+              (remoteDormModule.dorms.length > 0 ||
+                remoteDormModule.occupants.length > 0 ||
+                remoteDormModule.dormContracts.length > 0 ||
+                remoteDormModule.newHires.length > 0)
+            ) {
+              setDorms(remoteDormModule.dorms);
+              setOccupants(remoteDormModule.occupants);
+              setDormContracts(remoteDormModule.dormContracts);
+              setNewHires(remoteDormModule.newHires);
+            }
+
+            const remoteOperationalModule = await loadOperationalModule(tenantId);
+            if (remoteOperationalModule) {
+              const mergeLatestById = <T extends { id: string; updatedAt?: string }>(local: T[], remote: T[]) => {
+                const map = new Map<string, T>();
+                local.forEach((item) => map.set(item.id, item));
+                remote.forEach((item) => {
+                  const existing = map.get(item.id);
+                  if (!existing) {
+                    map.set(item.id, item);
+                    return;
+                  }
+                  const localTime = existing.updatedAt ? Date.parse(existing.updatedAt) : 0;
+                  const remoteTime = item.updatedAt ? Date.parse(item.updatedAt) : 0;
+                  if (remoteTime >= localTime) {
+                    map.set(item.id, item);
+                  }
+                });
+                return Array.from(map.values());
+              };
+
+              setCleaningReports((prev) => mergeLatestById(prev, remoteOperationalModule.cleaningReports));
+              setDefects((prev) => mergeLatestById(prev, remoteOperationalModule.defects));
+              setInventory((prev) => mergeLatestById(prev, remoteOperationalModule.inventory));
+              setSettlementRecords((prev) => mergeLatestById(prev, remoteOperationalModule.settlementRecords));
+              setSettlementItems((prev) => mergeLatestById(prev, remoteOperationalModule.settlementItems as unknown as SettlementItem[]));
+              setAuditLogs((prev) => mergeLatestById(prev, remoteOperationalModule.auditLogs));
+            }
+
+            const authUser = await getCurrentAuthUser();
+            const profile = await getProfile(session.user.id);
+            if (profile) {
+              setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
+              setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
+            }
+          }
+        }
+      } catch (error) {
       console.error("초기 데이터 로딩 중 오류가 발생했습니다:", error);
       setTheme(themeDefault);
       setUsers(getSafeUsers());
@@ -1611,7 +1711,10 @@ export default function App() {
     } finally {
       setIsLoading(false);
     }
-  }, [tenantId]);
+  };
+
+  loadInitialData();
+}, [tenantId]);
 
   const saveSystemSettings = () => {
     saveJson(SYSTEM_SETTINGS_KEY, systemSettings, tenantId);
@@ -1927,7 +2030,6 @@ export default function App() {
     if (user.role === "admin") return true;
     if (user.role === "viewer") return true; // 조회 권한 있음
     if (user.role === "maintenance_reporter" || user.role === "dorm_manager") {
-      // 본인이 관리하는 기숙사만 접근 가능
       return user.dormId === dormId;
     }
     return false;
@@ -1938,7 +2040,7 @@ export default function App() {
     if (user.role === "admin") return true;
     if (user.role === "viewer") return true;
     if (user.role === "maintenance_reporter" || user.role === "dorm_manager") {
-      return user.id === dorm.managerUserId || user.dormId === dorm.id;
+      return user.dormId === dorm.id;
     }
     return false;
   };
@@ -2844,6 +2946,79 @@ export default function App() {
   useEffect(() => saveJson(CLEANING_REPORTS_KEY, cleaningReports, tenantId), [cleaningReports, tenantId]);
   useEffect(() => saveJson(CLEANING_SETTINGS_KEY, cleaningSettings, tenantId), [cleaningSettings, tenantId]);
   useEffect(() => saveJson(NEW_HIRES_KEY, newHires, tenantId), [newHires, tenantId]);
+
+  useEffect(() => {
+    if (!isSupabaseAvailable()) return;
+
+    const timer = setTimeout(async () => {
+      const session = await getCurrentSession();
+      if (!session?.user?.id) return;
+
+      try {
+        await saveDormModule(
+          {
+            tenantId,
+            dorms,
+            occupants,
+            dormContracts,
+            newHires,
+          },
+          session.user.id
+        );
+      } catch (error) {
+        console.error("Supabase dorm module sync failed:", error);
+      }
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [dorms, occupants, dormContracts, newHires, tenantId]);
+
+  useEffect(() => {
+    if (!isSupabaseAvailable()) return;
+
+    const timer = setTimeout(async () => {
+      const session = await getCurrentSession();
+      if (!session?.user?.id) return;
+
+      try {
+        console.debug("Operational sync: saving", {
+          cleaningReports: cleaningReports.length,
+          defects: defects.length,
+          inventory: inventory.length,
+          settlementRecords: settlementRecords.length,
+          settlementItems: settlementItems.length,
+          auditLogs: auditLogs.length,
+        });
+        setOperationalSyncError(null);
+        await saveOperationalModule(
+          {
+            tenantId,
+            cleaningReports,
+            defects,
+            inventory,
+            settlementRecords,
+            settlementItems,
+            auditLogs,
+          },
+          session.user.id
+        );
+        // clear any previous error on success
+        setOperationalSyncError(null);
+      } catch (error) {
+        console.error("Supabase operational module sync failed:", error);
+        const msg = (error && (error as any).message) || String(error);
+        setOperationalSyncError(msg);
+        // show immediate visible feedback so QA can notice failures
+        try {
+          // eslint-disable-next-line no-alert
+          alert(`Supabase operational module sync failed: ${msg}`);
+        } catch {}
+      }
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [cleaningReports, defects, inventory, settlementRecords, settlementItems, auditLogs, tenantId]);
+
   useEffect(() => saveJson(SETTLEMENT_RECORDS_KEY, settlementRecords, tenantId), [settlementRecords, tenantId]);
   useEffect(() => saveJson(SETTLEMENT_ITEMS_KEY, settlementItems, tenantId), [settlementItems, tenantId]);
 
@@ -2919,8 +3094,12 @@ export default function App() {
   };
   useEffect(() => saveJson(SYSTEM_SETTINGS_KEY, systemSettings, tenantId), [systemSettings, tenantId]);
   useEffect(() => {
-    if (currentUser) saveJson(AUTH_KEY, currentUser, tenantId);
-    else removeJson(AUTH_KEY, tenantId);
+    if (currentUser) {
+      const { password: _p, ...safeUser } = currentUser;
+      saveJson(AUTH_KEY, safeUser, tenantId);
+    } else {
+      removeJson(AUTH_KEY, tenantId);
+    }
   }, [currentUser, tenantId]);
 
   const operationalDorms = useMemo<OperationalDorm[]>(() => {
@@ -3582,10 +3761,7 @@ export default function App() {
   const deletedDefects = useMemo(() => defects.filter((d) => d.isDeleted), [defects]);
   const deletedCleaningReports = useMemo(() => cleaningReports.filter((report) => report.isDeleted), [cleaningReports]);
 
-  const parseSafeDate = (value: string) => {
-    const date = new Date(value);
-    return Number.isNaN(date.valueOf()) ? null : date;
-  };
+  
 
   const getStayMonths = (startDate: Date | null, endDate: Date | null) => {
     if (!startDate || !endDate || endDate < startDate) return 0;
@@ -3610,22 +3786,24 @@ export default function App() {
     return { start, end };
   };
 
-  const matchDormKey = (site: string, buildingName: string, dong: string, roomHo: string) =>
-    `${site.trim().toLowerCase()}|${buildingName.trim().toLowerCase()}|${stripDongHoSuffix(dong).toLowerCase()}|${stripDongHoSuffix(roomHo).toLowerCase()}`;
+  function matchDormKey(site: string, buildingName: string, dong: string, roomHo: string) {
+    return `${site.trim().toLowerCase()}|${buildingName.trim().toLowerCase()}|${stripDongHoSuffix(dong).toLowerCase()}|${stripDongHoSuffix(roomHo).toLowerCase()}`;
+  }
 
-  const findOperationalDormByKey = (
+  function findOperationalDormByKey(
     site: string,
     buildingName: string,
     dong: string,
     roomHo: string
-  ): OperationalDorm | undefined =>
-    operationalDorms.find(
+  ): OperationalDorm | undefined {
+    return operationalDorms.find(
       (d) =>
         matchDormKey(d.site, d.buildingName, d.dong, d.roomHo) ===
         matchDormKey(site, buildingName, dong, roomHo)
     );
+  }
 
-  const findOperationalDormForDefect = (defect: DefectRequest): OperationalDorm | undefined => {
+  function findOperationalDormForDefect(defect: DefectRequest): OperationalDorm | undefined {
     if (defect.dormId) {
       return (
         operationalDorms.find((d) => d.id === defect.dormId) ||
@@ -3633,11 +3811,11 @@ export default function App() {
       );
     }
     return findOperationalDormByKey(defect.site, defect.buildingName, defect.dong, defect.ho);
-  };
+  }
 
-  const findOperationalDormForCleaningReport = (
+  function findOperationalDormForCleaningReport(
     report: CleaningReport
-  ): OperationalDorm | undefined => {
+  ): OperationalDorm | undefined {
     if (report.dormId) {
       return (
         operationalDorms.find((d) => d.id === report.dormId) ||
@@ -3645,7 +3823,8 @@ export default function App() {
       );
     }
     return findOperationalDormByKey(report.site, report.buildingName, report.dong, report.roomHo);
-  };
+  }
+
 
   const getCleaningWeeklyStatus = (dorm: Dorm, weekNo: number) => {
     const range = getWeekRange(cleaningYear, cleaningMonth, weekNo);
@@ -4295,25 +4474,59 @@ export default function App() {
     };
   }, [newHires, dormContracts, dorms, occupants, defects, cleaningReports, inventory]);
 
-  const login = () => {
-   const found = users.find(
+  const login = async () => {
+    if (isSupabaseAvailable()) {
+      const raw = loginForm.username.trim();
+      const usernamePattern = /^[A-Za-z0-9._-]+$/;
+      if (!raw.includes("@") && !usernamePattern.test(raw)) {
+        setLoginError("로그인 아이디는 영문, 숫자, 점(.), 언더바(_), 하이픈(-)만 사용할 수 있습니다.");
+        return;
+      }
+      const authEmail = raw.includes("@") ? raw : `${raw}@dormerpsystem.com`;
+      const { session, error } = await signInWithEmail(authEmail, loginForm.password);
+      if (error) {
+        const message = (error && (error as any).message) || "Supabase 로그인에 실패했습니다.";
+        console.error("Supabase sign-in failed:", error);
+        setLoginError(message);
+      } else if (session?.user?.id) {
+        const profile = await getProfile(session.user.id);
+        const authUser = await getCurrentAuthUser();
+        if (!profile) {
+          setLoginError("Supabase 로그인은 성공했으나 profiles에 계정 정보가 없습니다.");
+          return;
+        }
+        if (profile.is_active === false) {
+          setLoginError("계정이 비활성화되어 있습니다.");
+          return;
+        }
+        setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
+        setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
+        setLoginError("");
+        return;
+      }
+    }
+
+    const found = users.find(
       (u) =>
-       u.username === loginForm.username.trim() &&
+        u.username === loginForm.username.trim() &&
         u.password === loginForm.password &&
-       u.isActive
-   );
+        u.isActive
+    );
 
-   if (!found) {
+    if (!found) {
       setLoginError("아이디 또는 비밀번호가 맞지 않거나 비활성 계정입니다.");
-     return;
-   }
+      return;
+    }
 
-  setCurrentUser(found);
-  setActiveTab(found.role === "maintenance_reporter" ? "defects" : "dashboard");
-  setLoginError("");
-};
+    setCurrentUser(found);
+    setActiveTab(found.role === "maintenance_reporter" ? "defects" : "dashboard");
+    setLoginError("");
+  };
 
-  const logout = () => {
+  const logout = async () => {
+    if (isSupabaseAvailable()) {
+      await supabaseSignOut();
+    }
     setCurrentUser(null);
   };
 
@@ -4920,10 +5133,17 @@ export default function App() {
     softDeleteItem(cleaningReports, setCleaningReports, reportId, "cleaningReport");
   };
 
-  const saveUser = () => {
+  const saveUser = async () => {
     if (!canManageUsers(currentUser)) return;
     if (!userForm.displayName.trim() || !userForm.username.trim()) {
       alert("표시이름과 아이디는 필수입니다.");
+      return;
+    }
+    // 로그인 아이디 유효성 검사: 영문, 숫자, 점(.), 언더바(_), 하이픈(-)만 허용
+    const rawUsername = userForm.username.trim();
+    const usernamePattern = /^[A-Za-z0-9._-]+$/;
+    if (!rawUsername.includes("@") && !usernamePattern.test(rawUsername)) {
+      alert("로그인 아이디는 영문, 숫자, 점(.), 언더바(_), 하이픈(-)만 사용할 수 있습니다.");
       return;
     }
     if (!editingUserId && !userForm.password.trim()) {
@@ -4935,6 +5155,7 @@ export default function App() {
       alert("이미 사용 중인 아이디입니다.");
       return;
     }
+
     const payload: LoginUser = {
       id: editingUserId || crypto.randomUUID(),
       ...userForm,
@@ -4942,7 +5163,65 @@ export default function App() {
       displayName: userForm.displayName.trim(),
       createdAt: editingUserId ? users.find((u) => u.id === editingUserId)?.createdAt || new Date().toISOString() : new Date().toISOString(),
     };
-    setUsers((prev) => (editingUserId ? prev.map((u) => (u.id === editingUserId ? { ...payload, password: userForm.password || u.password } : u)) : [payload, ...prev]));
+
+    // Supabase Auth + profiles 동기화
+    if (isSupabaseAvailable()) {
+      try {
+        if (!editingUserId) {
+          // 신규 사용자: Edge Function 호출 (service_role은 서버에서만 사용)
+          const raw = userForm.username.trim();
+          const email = raw.includes("@") ? raw : `${raw}@dormerpsystem.com`;
+          const { user_id: userId, error: createError } = await createUserViaEdgeFunction({
+            email,
+            password: userForm.password,
+            display_name: userForm.displayName.trim(),
+            role: (userForm.role as any) || "viewer",
+            is_active: userForm.isActive ?? true,
+            dorm_id: userForm.dormId,
+            site_access: userForm.siteAccess || "전체",
+            gender_access: userForm.genderAccess || "전체",
+            tenant_id: tenantId,
+          });
+
+          if (createError) {
+            console.error("Edge Function user creation failed:", createError);
+            alert(`사용자 생성 실패: ${(createError as any).message || "알 수 없는 오류"}`);
+            return;
+          }
+
+          if (userId) {
+            payload.id = userId;
+          }
+        } else {
+          // 기존 사용자: profiles 테이블만 업데이트
+          const { error: updateError } = await updateProfileOnly(editingUserId, {
+            display_name: userForm.displayName.trim(),
+            role: (userForm.role as any) || "viewer",
+            is_active: userForm.isActive ?? true,
+            dorm_id: userForm.dormId,
+            site_access: userForm.siteAccess || "전체",
+            gender_access: userForm.genderAccess || "전체",
+          });
+
+          if (updateError) {
+            console.error("Profile update failed:", updateError);
+            alert(`프로필 업데이트 실패: ${(updateError as any).message || "알 수 없는 오류"}`);
+            return;
+          }
+        }
+      } catch (err) {
+        console.error("Supabase user save failed:", err);
+        alert(`Supabase 저장 실패: ${err}`);
+        return;
+      }
+    }
+
+    // 로컬 상태 업데이트 (비밀번호는 저장하지 않음)
+    setUsers((prev) =>
+      editingUserId
+        ? prev.map((u) => (u.id === editingUserId ? { ...payload, password: "" } : u))
+        : [{ ...payload, password: "" }, ...prev]
+    );
     setUserForm(userTemplate());
     setEditingUserId(null);
     setShowUserForm(false);
@@ -7358,6 +7637,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
     return (
       <div className={`min-h-screen ${theme.darkMode ? "dark-mode bg-slate-950 text-slate-100" : "bg-slate-50 text-slate-900"}`}>
+        {operationalSyncError && (
+          <div className={`fixed inset-x-0 top-0 z-50 border-b px-4 py-3 text-sm font-medium ${theme.darkMode ? "border-rose-700 bg-rose-900 text-rose-100" : "border-rose-200 bg-rose-50 text-rose-900"}`}>
+            Supabase operational sync failed: {operationalSyncError}
+          </div>
+        )}
         <aside className={`hidden xl:block fixed left-0 top-0 z-20 h-full w-72 border-r p-6 pt-8 shadow-sm ${theme.darkMode ? "border-slate-800 bg-slate-950" : "border-slate-200 bg-white"}`}>
           <div className="mb-8">
             <div className={`mb-4 flex h-14 w-14 items-center justify-center rounded-3xl ${theme.darkMode ? "bg-slate-800" : "bg-slate-100"}`}>

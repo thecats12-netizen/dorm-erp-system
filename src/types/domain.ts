@@ -358,6 +358,7 @@ export type DefectRequest = {
   requestPhotoDataUrls: string[];
   completionPhotoDataUrls: string[];
   createdAt: string;
+  updatedAt?: string;
   completedAt?: string;
   isDeleted?: boolean;
   deletedAt?: string;
