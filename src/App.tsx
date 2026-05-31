@@ -8328,7 +8328,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           <td className="px-3 py-4">{d.site}</td>
                           <td className="px-3 py-4">{d.buildingName}</td>
                           <td className="px-3 py-4">{`${d.address} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`}</td>
-                          <td className="px-3 py-4">{d.contractEnd || "-"}</td>
+                          <td className="px-3 py-4">{formatDateOnly(d.contractEnd || "") || "-"}</td>
                           <td className="px-3 py-4 text-blue-600 font-semibold">{daysDiff(d.contractEnd)}</td>
                         </tr>
                       ))}
@@ -8473,7 +8473,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3">{row.roomHo}</td>
                         <td className="px-3 py-3">{row.managerName}</td>
                         <td className="px-3 py-3">{row.leaseStatus}</td>
-                        <td className="px-3 py-3">{row.contractEnd || "-"}</td>
+                        <td className="px-3 py-3">{formatDateOnly(row.contractEnd || "") || "-"}</td>
                         <td className="px-3 py-3">{row.dDay}</td>
                         <td className="px-3 py-3">{row.currentResidents}</td>
                         <td className="px-3 py-3">{row.capacity}</td>
@@ -9795,8 +9795,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.landlordPhone}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.realEstateName}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.realEstatePhone}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractStart}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractEnd}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.contractStart)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.contractEnd)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{getDormContractDisplayStatus(c, dorms, occupants)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractAmount}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.prepaymentDeposit}</td>
@@ -10009,12 +10009,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.buildingName}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.dong}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.roomHo}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.expectedMoveInDate}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveInDate}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.expectedMoveOutDate}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveOutDate}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.actualMoveOutDate}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.cheonanMoveDate}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.expectedMoveInDate)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.moveInDate)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.expectedMoveOutDate)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.moveOutDate)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.actualMoveOutDate)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.cheonanMoveDate)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{calculateNewHireResidenceStatus(h)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveInType}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.extensionReason || "-"}</td>
@@ -10158,7 +10158,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <div className="grid grid-cols-3 gap-2 text-[0.72rem]">
                       <CompactField
                         label="계약기간"
-                        value={`${d.contractStart || "-"} ~ ${d.contractEnd || "-"}`}
+                        value={`${formatDateOnly(d.contractStart || "") || "-"} ~ ${formatDateOnly(d.contractEnd || "") || "-"}`}
                         className="p-3 min-h-[4rem]"
                         valueClassName="text-[0.78rem] leading-5"
                       />
@@ -10409,7 +10409,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3">{dorm?.공동현관 || "-"}</td>
                         <td className="px-3 py-3">{dorm?.세대현관 || "-"}</td>
                         <td className="px-3 py-3">{dorm?.leaseStatus || "-"}</td>
-                        <td className="px-3 py-3">{dorm?.contractEnd || "-"}</td>
+                        <td className="px-3 py-3">{formatDateOnly(dorm?.contractEnd || "") || "-"}</td>
                         <td className="px-3 py-3">{dorm ? daysDiff(dorm.contractEnd) : "-"}</td>
                         <td className="px-3 py-3">{users.find((u) => u.id === dorm?.managerUserId)?.displayName || "미지정"}</td>
                         <td className="px-3 py-3">{dorm ? (isCleaningMissing(dorm) ? "미보고" : "정상") : "-"}</td>
@@ -10423,7 +10423,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             {o.status}
                           </span>
                         </td>
-                        <td className="px-3 py-3">{o.moveInDate || "-"}</td>
+                        <td className="px-3 py-3">{formatDateOnly(o.moveInDate || "") || "-"}</td>
                         <td translate="no" className="px-3 py-3 notranslate">{o.department}</td>
                         <td className="px-3 py-3">{o.phone}</td>
                         <td className="px-3 py-3">
@@ -10482,8 +10482,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                       <h4 className="mb-3 text-base font-semibold">계약정보</h4>
                       <dl className={`${theme.darkMode ? "grid gap-2 text-sm text-slate-300 sm:grid-cols-2" : "grid gap-2 text-sm text-slate-700 sm:grid-cols-2"}`}>
-                        <div><dt className="font-medium">계약시작</dt><dd>{selectedDetailDorm.contractStart || "-"}</dd></div>
-                        <div><dt className="font-medium">계약종료</dt><dd>{selectedDetailDorm.contractEnd || "-"}</dd></div>
+                        <div><dt className="font-medium">계약시작</dt><dd>{formatDateOnly(selectedDetailDorm.contractStart || "") || "-"}</dd></div>
+                        <div><dt className="font-medium">계약종료</dt><dd>{formatDateOnly(selectedDetailDorm.contractEnd || "") || "-"}</dd></div>
                         <div><dt className="font-medium">만료 D-Day</dt><dd>{getDormDday(selectedDetailDorm)}</dd></div>
                         <div><dt className="font-medium">계약상태</dt><dd>{selectedDetailDorm.leaseStatus}</dd></div>
                         <div><dt className="font-medium">계약금액</dt><dd>{selectedDetailDorm.contractAmount || "-"}</dd></div>
@@ -10532,11 +10532,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             <tr key={occupant.id} className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}`}>
                               <td className="px-3 py-3">{occupant.employeeName}</td>
                               <td className="px-3 py-3">{occupant.gender}</td>
-                              <td className="px-3 py-3">{occupant.moveInDate || "-"}</td>
+                              <td className="px-3 py-3">{formatDateOnly(occupant.moveInDate || "") || "-"}</td>
                               <td className="px-3 py-3">{occupant.status}</td>
                               <td translate="no" className="px-3 py-3 notranslate">{occupant.department}</td>
                               <td className="px-3 py-3">{occupant.phone}</td>
-                              <td className="px-3 py-3">{occupant.moveOutDueDate || "-"}</td>
+                              <td className="px-3 py-3">{formatDateOnly(occupant.moveOutDueDate || "") || "-"}</td>
                               <td className="px-3 py-3">{daysBetween(occupant.moveInDate, occupant.moveOutDueDate)}</td>
                             </tr>
                           ))}
@@ -10859,7 +10859,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <td className="px-3 py-3">{d.site}</td>
                     <td className="px-3 py-3">{d.buildingName}</td>
                     <td className="px-3 py-3">{`${d.address} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`}</td>
-                    <td className="px-3 py-3">{d.contractEnd || "-"}</td>
+                    <td className="px-3 py-3">{formatDateOnly(d.contractEnd || "") || "-"}</td>
                     <td className="px-3 py-3">{daysDiff(d.contractEnd)}</td>
                     <td className="px-3 py-3">
                       <button className="text-blue-600 text-sm" onClick={() => { const contract = dormContracts.find(c => matchDormKey(c.site, c.buildingName, c.dong, c.roomHo) === matchDormKey(d.site, d.buildingName, d.dong, d.roomHo)); if (contract) openDormContractEdit(contract); }}>수정</button>
@@ -10895,7 +10895,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <td className="px-3 py-3">{idx + 1}</td>
                     <td className="px-3 py-3">{h.name}</td>
                     <td className="px-3 py-3">{h.department}</td>
-                    <td className="px-3 py-3">{h.expectedMoveInDate || "-"}</td>
+                    <td className="px-3 py-3">{formatDateOnly(h.expectedMoveInDate) || "-"}</td>
                     <td className="px-3 py-3">{h.residenceStatus}</td>
                     <td className="px-3 py-3">
                       <button className="text-blue-600 text-sm mr-3" onClick={() => { setAssigningNewHireId(h.id); setShowAssignDormForNewHire(true); }}>배정</button>
@@ -12008,8 +12008,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                       <td className="px-3 py-2">{dorm.dong}</td>
                                       <td className="px-3 py-2">{dorm.roomHo}</td>
                                       <td className="px-3 py-2">{o.employeeName}</td>
-                                      <td className="px-3 py-2">{o.moveInDate}</td>
-                                      <td className="px-3 py-2">{o.actualMoveOutDate || o.moveOutDueDate || "-"}</td>
+                                      <td className="px-3 py-2">{formatDateOnly(o.moveInDate || "") || "-"}</td>
+                                      <td className="px-3 py-2">{formatDateOnly(o.actualMoveOutDate || o.moveOutDueDate || "") || "-"}</td>
                                       <td className="px-3 py-2 text-right">{stayMonths}</td>
                                       <td className="px-3 py-2 text-right">{monthlyRentOrMaintenance}</td>
                                       <td className="px-3 py-2 text-right">{formatNumber(prepaymentDeposit)}원</td>
@@ -12891,8 +12891,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3">{dorm.세대현관 || "-"}</td>
                         <td className="px-3 py-3">{occupant?.employeeName || "-"}</td>
                         <td className="px-3 py-3">{occupant?.phone || "-"}</td>
-                        <td className="px-3 py-3">{occupant?.moveInDate || "-"}</td>
-                        <td className="px-3 py-3">{occupant?.expectedMoveOutDate || occupant?.moveOutDueDate || "-"}</td>
+                        <td className="px-3 py-3">{formatDateOnly(occupant?.moveInDate || "") || "-"}</td>
+                        <td className="px-3 py-3">{formatDateOnly(occupant?.expectedMoveOutDate || occupant?.moveOutDueDate || "") || "-"}</td>
                         <td className="px-3 py-3">{manager?.displayName || "미지정"}</td>
                         {[1, 2, 3, 4, 5].map((weekNo) => (
                           <td key={weekNo} className="px-3 py-3">
