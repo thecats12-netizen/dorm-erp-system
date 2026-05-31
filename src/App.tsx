@@ -1647,6 +1647,8 @@ export default function App() {
               setDormContracts(remoteDormModule.dormContracts);
               setNewHires(remoteDormModule.newHires);
               console.log("[LOAD] Dorm module setState completed");
+              console.debug("[LOAD] newHires count (after set)", (remoteDormModule.newHires || []).length);
+              console.debug("[LOAD] occupants count (after set)", (remoteDormModule.occupants || []).length);
               // persist remote dorm module to localStorage so fallback won't overwrite
               saveJson(DORM_CONTRACTS_KEY, remoteDormModule.dormContracts || [], tenantId);
               saveJson(NEW_HIRES_KEY, remoteDormModule.newHires || [], tenantId);
@@ -2951,7 +2953,10 @@ export default function App() {
   useEffect(() => saveJson(THEME_KEY, theme, tenantId), [theme, tenantId]);
   useEffect(() => saveJson(USERS_KEY, users, tenantId), [users, tenantId]);
   useEffect(() => saveJson(DORMS_KEY, dorms, tenantId), [dorms, tenantId]);
-  useEffect(() => saveJson(OCCUPANTS_KEY, occupants, tenantId), [occupants, tenantId]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(OCCUPANTS_KEY, occupants, tenantId);
+  }, [occupants, tenantId, isLoading]);
   useEffect(() => saveJson(INVENTORY_KEY, inventory, tenantId), [inventory, tenantId]);
   useEffect(() => saveJson(LEASES_KEY, leases, tenantId), [leases, tenantId]);
   useEffect(() => {
@@ -4055,6 +4060,15 @@ export default function App() {
         return true;
       }).length;
 
+      console.debug("[KPI] currentOccupants source/count", {
+        site,
+        gender,
+        occupants: occupants.length,
+        newHires: newHires.length,
+        groupOccupants: groupOccupants.length,
+        currentResidents,
+      });
+
       // 4. 만료자: 예상퇴실일 또는 퇴실예정일이 해당 월인 인원
       const expiredResidents = groupOccupants.filter((o) => {
         const dueDate = parseDateValue(o.moveOutDueDate);
@@ -4908,7 +4922,33 @@ export default function App() {
       updatedAt: new Date().toISOString().slice(0, 10),
     };
     setNewHires((prev) => (editingNewHireId ? prev.map((h) => (h.id === editingNewHireId ? payload : h)) : [payload, ...prev]));
-    setOccupants((prev) => upsertOccupantFromNewHire(payload, prev));
+
+    const shouldCreateOccupant = Boolean(
+      payload.dormId &&
+        payload.moveInType !== "대기자" &&
+        ["거주중", "신규입주", "연장"].includes(payload.residenceStatus)
+    );
+
+    if (shouldCreateOccupant) {
+      setOccupants((prev) => upsertOccupantFromNewHire(payload, prev));
+      console.debug("[NEW_HIRE_SAVE] target table/state", {
+        newHires: true,
+        occupants: true,
+        id: payload.id,
+        dormId: payload.dormId,
+        moveInType: payload.moveInType,
+        residenceStatus: payload.residenceStatus,
+      });
+    } else {
+      console.debug("[NEW_HIRE_SAVE] target table/state", {
+        newHires: true,
+        occupants: false,
+        id: payload.id,
+        dormId: payload.dormId,
+        moveInType: payload.moveInType,
+        residenceStatus: payload.residenceStatus,
+      });
+    }
 
     const actionType = existing
       ? existing.residenceStatus !== payload.residenceStatus
