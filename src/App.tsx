@@ -2954,10 +2954,16 @@ export default function App() {
   useEffect(() => saveJson(OCCUPANTS_KEY, occupants, tenantId), [occupants, tenantId]);
   useEffect(() => saveJson(INVENTORY_KEY, inventory, tenantId), [inventory, tenantId]);
   useEffect(() => saveJson(LEASES_KEY, leases, tenantId), [leases, tenantId]);
-  useEffect(() => saveJson(DORM_CONTRACTS_KEY, dormContracts, tenantId), [dormContracts, tenantId]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(DORM_CONTRACTS_KEY, dormContracts, tenantId);
+  }, [dormContracts, tenantId, isLoading]);
   useEffect(() => saveJson(CLEANING_REPORTS_KEY, cleaningReports, tenantId), [cleaningReports, tenantId]);
   useEffect(() => saveJson(CLEANING_SETTINGS_KEY, cleaningSettings, tenantId), [cleaningSettings, tenantId]);
-  useEffect(() => saveJson(NEW_HIRES_KEY, newHires, tenantId), [newHires, tenantId]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(NEW_HIRES_KEY, newHires, tenantId);
+  }, [newHires, tenantId, isLoading]);
 
   useEffect(() => {
     if (!isSupabaseAvailable()) return;

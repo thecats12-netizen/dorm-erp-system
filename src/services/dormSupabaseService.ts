@@ -137,10 +137,10 @@ const toDbDormContract = (contract: DormContract, tenantId: string, userId: stri
   contract_start: contract.contractStart || null,
   contract_end: contract.contractEnd || null,
   contract_status: contract.contractStatus,
-  contract_amount: contract.contractAmount,
-  prepayment_deposit: contract.prepaymentDeposit,
-  deposit: contract.deposit,
-  monthly_rent_or_maintenance: contract.monthlyRentOrMaintenance,
+  contract_amount: safeNumberOrNull(contract.contractAmount),
+  prepayment_deposit: safeNumberOrNull(contract.prepaymentDeposit),
+  deposit: safeNumberOrNull(contract.deposit),
+  monthly_rent_or_maintenance: safeNumberOrNull(contract.monthlyRentOrMaintenance),
   contract_type: contract.contractType,
   gender: contract.gender,
   notes: contract.notes,
@@ -187,6 +187,19 @@ const toDomainDormContract = (row: any): DormContract => ({
   deletedAt: row.deleted_at || undefined,
   deletedBy: row.deleted_by || undefined,
 });
+
+const safeNumberOrNull = (value: string | number | null | undefined): number | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const trimmed = String(value).trim();
+  if (trimmed === "" || trimmed === "-") return null;
+  const normalized = trimmed.replace(/,/g, "");
+  if (/^[+-]?(?:\d+|\d*\.\d+)$/.test(normalized)) {
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
 
 const toDbNewHire = (hire: NewHireEmployee, tenantId: string, userId: string) => ({
   id: hire.id,
@@ -295,41 +308,66 @@ export const saveDormModule = async (
     return;
   }
 
+  console.debug("[SAVE] saveDormModule payload lengths", {
+    dorms: payload.dorms.length,
+    occupants: payload.occupants.length,
+    dormContracts: payload.dormContracts.length,
+    newHires: payload.newHires.length,
+  });
+
+  const errors: string[] = [];
+
+  // Save each table independently so one failure doesn't abort the whole save
   try {
-    console.debug("[SAVE] saveDormModule payload lengths", {
-      dorms: payload.dorms.length,
-      occupants: payload.occupants.length,
-      dormContracts: payload.dormContracts.length,
-      newHires: payload.newHires.length,
-    });
-
-    const [dormsResult, occupantsResult, dormContractsResult, newHiresResult] = await Promise.all([
-      supabase!
-        .from("dorms")
-        .upsert(payload.dorms.map((dorm) => toDbDorm(dorm, payload.tenantId, userId)), { onConflict: "id" }),
-      supabase!
-        .from("occupants")
-        .upsert(payload.occupants.map((occupant) => toDbOccupant(occupant, payload.tenantId, userId)), { onConflict: "id" }),
-      supabase!
-        .from("dorm_contracts")
-        .upsert(payload.dormContracts.map((contract) => toDbDormContract(contract, payload.tenantId, userId)), { onConflict: "id" }),
-      supabase!
-        .from("new_hires")
-        .upsert(payload.newHires.map((hire) => toDbNewHire(hire, payload.tenantId, userId)), { onConflict: "id" }),
-    ]);
-
-    if (dormsResult.error || occupantsResult.error || dormContractsResult.error || newHiresResult.error) {
-      console.error("Supabase dorm module upsert result errors:", {
-        dormsResult: dormsResult.error,
-        occupantsResult: occupantsResult.error,
-        dormContractsResult: dormContractsResult.error,
-        newHiresResult: newHiresResult.error,
-      });
-      throw dormsResult.error || occupantsResult.error || dormContractsResult.error || newHiresResult.error;
+    const { error } = await supabase!.from("dorms").upsert(payload.dorms.map((d) => toDbDorm(d, payload.tenantId, userId)), { onConflict: "id" });
+    if (error) {
+      console.error("Dorms upsert error:", error);
+      errors.push(`dorms:${error.message || error}`);
     }
-  } catch (error) {
-    console.error("Supabase dorm module save error:", error);
-    throw error;
+  } catch (e: any) {
+    console.error("Dorms upsert exception:", e);
+    errors.push(`dorms:${e.message || String(e)}`);
+  }
+
+  try {
+    const { error } = await supabase!.from("occupants").upsert(payload.occupants.map((o) => toDbOccupant(o, payload.tenantId, userId)), { onConflict: "id" });
+    if (error) {
+      console.error("Occupants upsert error:", error);
+      errors.push(`occupants:${error.message || error}`);
+    }
+  } catch (e: any) {
+    console.error("Occupants upsert exception:", e);
+    errors.push(`occupants:${e.message || String(e)}`);
+  }
+
+  try {
+    const dormContractPayload = payload.dormContracts.map((c) => toDbDormContract(c, payload.tenantId, userId));
+    console.debug("[SAVE] dorm_contracts upsert payload", dormContractPayload);
+    const { error } = await supabase!.from("dorm_contracts").upsert(dormContractPayload, { onConflict: "id" });
+    if (error) {
+      console.error("DormContracts upsert error:", error);
+      errors.push(`dorm_contracts:${error.message || error}`);
+    }
+  } catch (e: any) {
+    console.error("DormContracts upsert exception:", e);
+    errors.push(`dorm_contracts:${e.message || String(e)}`);
+  }
+
+  try {
+    const { error } = await supabase!.from("new_hires").upsert(payload.newHires.map((h) => toDbNewHire(h, payload.tenantId, userId)), { onConflict: "id" });
+    if (error) {
+      console.error("NewHires upsert error:", error);
+      errors.push(`new_hires:${error.message || error}`);
+    }
+  } catch (e: any) {
+    console.error("NewHires upsert exception:", e);
+    errors.push(`new_hires:${e.message || String(e)}`);
+  }
+
+  if (errors.length) {
+    const msg = `Some Supabase dorm module upserts failed: ${errors.join("; ")}`;
+    console.error(msg);
+    throw new Error(msg);
   }
 };
 
