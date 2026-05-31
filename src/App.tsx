@@ -1624,6 +1624,8 @@ export default function App() {
               dormContracts: remoteDormModule?.dormContracts?.length || 0,
               newHires: remoteDormModule?.newHires?.length || 0,
             });
+            console.log("[LOAD] contracts loaded:", remoteDormModule?.dormContracts?.length || 0);
+            console.log("[LOAD] newHires loaded:", remoteDormModule?.newHires?.length || 0);
             if (remoteDormModule) {
               console.log("[LOAD] Setting Dorm module state...");
               setDorms(remoteDormModule.dorms);
@@ -1631,6 +1633,9 @@ export default function App() {
               setDormContracts(remoteDormModule.dormContracts);
               setNewHires(remoteDormModule.newHires);
               console.log("[LOAD] Dorm module setState completed");
+              // persist remote dorm module to localStorage so fallback won't overwrite
+              saveJson(DORM_CONTRACTS_KEY, remoteDormModule.dormContracts || [], tenantId);
+              saveJson(NEW_HIRES_KEY, remoteDormModule.newHires || [], tenantId);
             }
 
             const remoteOperationalModule = await loadOperationalModule(tenantId);
@@ -2944,10 +2949,13 @@ export default function App() {
     if (!isSupabaseAvailable()) return;
 
     const timer = setTimeout(async () => {
+      // Do not run Supabase save during initial loading to avoid overwriting remote data with local fallback
+      if (isLoading) return;
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
 
       try {
+        console.debug("[SAVE] Saving dorm module to Supabase", { dormContracts: dormContracts.length, newHires: newHires.length });
         await saveDormModule(
           {
             tenantId,
@@ -2958,8 +2966,14 @@ export default function App() {
           },
           session.user.id
         );
+        console.log("[SAVE] contracts saved:", dormContracts.length);
+        console.log("[SAVE] newHires saved:", newHires.length);
       } catch (error) {
         console.error("Supabase dorm module sync failed:", error);
+        try {
+          // eslint-disable-next-line no-alert
+          alert(`Supabase dorm module sync failed: ${(error && (error as any).message) || String(error)}`);
+        } catch {}
       }
     }, 1500);
 
