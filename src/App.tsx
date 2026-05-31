@@ -7416,6 +7416,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     return mapping;
   }, [systemSettings.menus]);
 
+  const isMaintenanceAccessUser = currentUser?.role === "maintenance_reporter" || currentUser?.role === "dorm_manager";
+
   const visibleMenuGroups = useMemo(
     () => {
       const groups: Record<string, { groupKey: string; label: string; order: number; children: Array<{ tab: TabKey; label: string; order: number }> }> = {};
@@ -7468,7 +7470,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const currentMenuGroup = menuGroupForTab[activeTab];
   const isViewer = currentUser?.role === "viewer";
-  const isMaintenanceAccessUser = currentUser?.role === "maintenance_reporter" || currentUser?.role === "dorm_manager";
   const isMaintenanceReporterWithDorm = currentUser?.role === "maintenance_reporter" && !!currentUser.dormId;
 
   useEffect(() => {
