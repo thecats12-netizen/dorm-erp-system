@@ -1569,6 +1569,7 @@ export default function App() {
 
   useEffect(() => {
     const loadInitialData = async () => {
+      console.log("[LOAD] === Starting initial data load ===");
       runLegacyLocalStorageMigration(tenantId);
 
       try {
@@ -1615,47 +1616,65 @@ export default function App() {
         if (isSupabaseAvailable()) {
           const session = await getCurrentSession();
           if (session?.user?.id) {
+            console.log("[LOAD] Supabase session found:", session.user.id);
             const remoteDormModule = await loadDormModule(tenantId);
-            if (
-              remoteDormModule &&
-              (remoteDormModule.dorms.length > 0 ||
-                remoteDormModule.occupants.length > 0 ||
-                remoteDormModule.dormContracts.length > 0 ||
-                remoteDormModule.newHires.length > 0)
-            ) {
+            console.log("[LOAD] remoteDormModule loaded:", {
+              dorms: remoteDormModule?.dorms?.length || 0,
+              occupants: remoteDormModule?.occupants?.length || 0,
+              dormContracts: remoteDormModule?.dormContracts?.length || 0,
+              newHires: remoteDormModule?.newHires?.length || 0,
+            });
+            if (remoteDormModule) {
+              console.log("[LOAD] Setting Dorm module state...");
               setDorms(remoteDormModule.dorms);
               setOccupants(remoteDormModule.occupants);
               setDormContracts(remoteDormModule.dormContracts);
               setNewHires(remoteDormModule.newHires);
+              console.log("[LOAD] Dorm module setState completed");
             }
 
             const remoteOperationalModule = await loadOperationalModule(tenantId);
+            console.log("[LOAD] remoteOperationalModule loaded:", {
+              cleaningReports: remoteOperationalModule?.cleaningReports?.length || 0,
+              defects: remoteOperationalModule?.defects?.length || 0,
+              inventory: remoteOperationalModule?.inventory?.length || 0,
+              settlementRecords: remoteOperationalModule?.settlementRecords?.length || 0,
+              settlementItems: remoteOperationalModule?.settlementItems?.length || 0,
+              auditLogs: remoteOperationalModule?.auditLogs?.length || 0,
+            });
             if (remoteOperationalModule) {
-              // Supabase 우선: 원격 데이터가 존재하면 로컬(localStorage) 대신 원격 데이터를 그대로 사용합니다.
-              // 로컬에만 있는 항목이 필요하면 서버로 푸시하는 별도 동기화 로직을 추가할 수 있습니다.
+              console.log("[LOAD] Setting Operational module state...");
               setCleaningReports(remoteOperationalModule.cleaningReports || []);
               setDefects(remoteOperationalModule.defects || []);
               setInventory(remoteOperationalModule.inventory || []);
               setSettlementRecords(remoteOperationalModule.settlementRecords || []);
               setSettlementItems((remoteOperationalModule.settlementItems as unknown as SettlementItem[]) || []);
               setAuditLogs(remoteOperationalModule.auditLogs || []);
-
-              // 로컬 스토리지도 원격 데이터로 덮어써서 다른 기기에서 일관된 뷰를 제공
+              console.log("[LOAD] Operational module setState completed");
+              console.log("[LOAD] Syncing Supabase data to localStorage...");
               saveJson(CLEANING_REPORTS_KEY, remoteOperationalModule.cleaningReports || [], tenantId);
               saveJson(DEFECTS_KEY, remoteOperationalModule.defects || [], tenantId);
               saveJson(INVENTORY_KEY, remoteOperationalModule.inventory || [], tenantId);
               saveJson(SETTLEMENT_RECORDS_KEY, remoteOperationalModule.settlementRecords || [], tenantId);
               saveJson(SETTLEMENT_ITEMS_KEY, remoteOperationalModule.settlementItems || [], tenantId);
               saveJson(AUDIT_LOGS_KEY, remoteOperationalModule.auditLogs || [], tenantId);
+              console.log("[LOAD] localStorage sync completed");
+            } else {
+              console.warn("[LOAD] remoteOperationalModule is null/undefined, using localStorage fallback");
             }
 
             const authUser = await getCurrentAuthUser();
             const profile = await getProfile(session.user.id);
             if (profile) {
+              console.log("[LOAD] User profile loaded:", profile.id, profile.email);
               setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
               setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
             }
+          } else {
+            console.warn("[LOAD] No Supabase session found");
           }
+        } else {
+          console.warn("[LOAD] Supabase not available");
         }
       } catch (error) {
       console.error("초기 데이터 로딩 중 오류가 발생했습니다:", error);
@@ -1682,6 +1701,7 @@ export default function App() {
       setSettlementItems([]);
       setCurrentUser(null);
     } finally {
+      console.log("[LOAD] === Initial data load completed ===");
       setIsLoading(false);
     }
   };
