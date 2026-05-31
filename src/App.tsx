@@ -1436,7 +1436,21 @@ export default function App() {
 
   const deleteSettlementItem = (itemId: string) => {
     if (!window.confirm("정산 항목을 삭제하시겠습니까?")) return;
-    setSettlementItems((prev) => prev.filter((item) => item.id !== itemId));
+    const now = new Date().toISOString();
+    const deletedBy = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
+    setSettlementItems((prev) =>
+      prev.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              isDeleted: true,
+              deletedAt: now,
+              deletedBy,
+              updatedAt: now,
+            }
+          : item
+      )
+    );
     if (selectedSettlementItemId === itemId) {
       resetSettlementItemForm();
     }
@@ -2949,13 +2963,25 @@ export default function App() {
     if (!isSupabaseAvailable()) return;
 
     const timer = setTimeout(async () => {
+      console.log("[SAVE] dorm module effect triggered", {
+        isLoading,
+        dorms: dorms.length,
+        dormContracts: dormContracts.length,
+        newHires: newHires.length,
+        occupants: occupants.length,
+      });
       // Do not run Supabase save during initial loading to avoid overwriting remote data with local fallback
       if (isLoading) return;
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
 
       try {
-        console.debug("[SAVE] Saving dorm module to Supabase", { dormContracts: dormContracts.length, newHires: newHires.length });
+        console.debug("[SAVE] Saving dorm module to Supabase", {
+          dorms: dorms.length,
+          dormContracts: dormContracts.length,
+          newHires: newHires.length,
+          occupants: occupants.length,
+        });
         await saveDormModule(
           {
             tenantId,
@@ -10022,8 +10048,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 {canEditData(currentUser) && selectedDormIds.length > 0 && (
                   <button
                     onClick={() => {
-                      setDorms((prev) => prev.filter((d) => !selectedDormIds.includes(d.id)));
-                      setSelectedDormIds([]);
+                      if (softDeleteItems(dorms, setDorms, selectedDormIds, "dorm")) {
+                        setSelectedDormIds([]);
+                      }
                     }}
                     className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
                   >
@@ -11225,8 +11252,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               {canEditData(currentUser) && selectedInventoryIds.length > 0 && (
                 <button
                   onClick={() => {
-                    setInventory((prev) => prev.filter((i) => !selectedInventoryIds.includes(i.id)));
-                    setSelectedInventoryIds([]);
+                    if (softDeleteItems(inventory, setInventory, selectedInventoryIds, "inventory")) {
+                      setSelectedInventoryIds([]);
+                    }
                   }}
                   className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
                 >
@@ -14820,8 +14848,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 {canManageUsers(currentUser) && selectedDefectIds.length > 0 && (
                   <button
                     onClick={() => {
-                      setDefects((prev) => prev.filter((d) => !selectedDefectIds.includes(d.id)));
-                      setSelectedDefectIds([]);
+                      if (softDeleteItems(defects, setDefects, selectedDefectIds, "defect")) {
+                        setSelectedDefectIds([]);
+                      }
                     }}
                     className="inline-flex items-center gap-2 rounded-2xl bg-rose-600 px-4 py-2 text-white hover:bg-rose-700"
                   >

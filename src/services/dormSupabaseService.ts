@@ -296,6 +296,13 @@ export const saveDormModule = async (
   }
 
   try {
+    console.debug("[SAVE] saveDormModule payload lengths", {
+      dorms: payload.dorms.length,
+      occupants: payload.occupants.length,
+      dormContracts: payload.dormContracts.length,
+      newHires: payload.newHires.length,
+    });
+
     const [dormsResult, occupantsResult, dormContractsResult, newHiresResult] = await Promise.all([
       supabase!
         .from("dorms")
@@ -312,6 +319,12 @@ export const saveDormModule = async (
     ]);
 
     if (dormsResult.error || occupantsResult.error || dormContractsResult.error || newHiresResult.error) {
+      console.error("Supabase dorm module upsert result errors:", {
+        dormsResult: dormsResult.error,
+        occupantsResult: occupantsResult.error,
+        dormContractsResult: dormContractsResult.error,
+        newHiresResult: newHiresResult.error,
+      });
       throw dormsResult.error || occupantsResult.error || dormContractsResult.error || newHiresResult.error;
     }
   } catch (error) {
