@@ -82,16 +82,7 @@ import {
 import { createAuditLogEntry, getChangedFields } from "./services/auditService";
 import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
-import {
-  demoUsers,
-  demoDorms,
-  demoOccupants,
-  demoDormContracts,
-  demoNewHires,
-  demoInventory,
-  demoLeases,
-  themeDefault,
-} from "./constants/defaultData";
+import { themeDefault } from "./constants/defaultData";
 import {
   getDefaultSystemSettings,
   mergeMenus,
@@ -339,8 +330,8 @@ function runLegacyLocalStorageMigration(tenantId = "default"): void {
 
 function getSafeUsers(): LoginUser[] {
   try {
-    const parsed = loadJson<LoginUser[]>(USERS_KEY, demoUsers);
-    if (!Array.isArray(parsed) || parsed.length === 0) return demoUsers;
+    const parsed = loadJson<LoginUser[]>(USERS_KEY, []);
+    if (!Array.isArray(parsed) || parsed.length === 0) return [];
 
     const valid = parsed.filter(
       (u: any) =>
@@ -350,12 +341,9 @@ function getSafeUsers(): LoginUser[] {
         typeof u.role === "string"
     );
 
-    if (valid.length === 0) return demoUsers;
-
-    const hasAdmin = valid.some((u: any) => u.username === "admin");
-    return hasAdmin ? valid : demoUsers;
+    return valid;
   } catch {
-    return demoUsers;
+    return [];
   }
 }
 
@@ -1585,25 +1573,18 @@ export default function App() {
 
       try {
         const savedTheme = loadJson<ThemeSettings>(THEME_KEY, themeDefault, tenantId);
-        const dormSeed = loadJson<Dorm[]>(DORMS_KEY, demoDorms, tenantId);
 
         setTheme({ ...themeDefault, ...savedTheme });
         const loadedUsers = loadJson<LoginUser[]>(USERS_KEY, [], tenantId);
-        const hasAdmin = loadedUsers.some((u) => u.username === "admin" && u.role === "admin" && u.isActive);
-        if (loadedUsers.length === 0 || !hasAdmin) {
-          setUsers(demoUsers);
-          saveJson(USERS_KEY, demoUsers, tenantId);
-        } else {
-          setUsers(loadedUsers);
-        }
-        setDorms(dormSeed);
-        setOccupants(loadJson<Occupant[]>(OCCUPANTS_KEY, demoOccupants(dormSeed), tenantId));
-        setInventory(loadJson<InventoryItem[]>(INVENTORY_KEY, demoInventory, tenantId));
-        setLeases(loadJson<LeaseContract[]>(LEASES_KEY, demoLeases, tenantId));
-        setDormContracts(loadJson<DormContract[]>(DORM_CONTRACTS_KEY, demoDormContracts, tenantId));
+        setUsers(loadedUsers);
+        setDorms(loadJson<Dorm[]>(DORMS_KEY, [], tenantId));
+        setOccupants(loadJson<Occupant[]>(OCCUPANTS_KEY, [], tenantId));
+        setInventory(loadJson<InventoryItem[]>(INVENTORY_KEY, [], tenantId));
+        setLeases(loadJson<LeaseContract[]>(LEASES_KEY, [], tenantId));
+        setDormContracts(loadJson<DormContract[]>(DORM_CONTRACTS_KEY, [], tenantId));
         setCleaningReports(loadJson<CleaningReport[]>(CLEANING_REPORTS_KEY, [], tenantId));
         setAuditLogs(loadJson<AuditLog[]>(AUDIT_LOGS_KEY, [], tenantId));
-        setNewHires(loadJson<NewHireEmployee[]>(NEW_HIRES_KEY, demoNewHires, tenantId));
+        setNewHires(loadJson<NewHireEmployee[]>(NEW_HIRES_KEY, [], tenantId));
         setSales(loadJson<SaleRecord[]>(SALES_KEY, [], tenantId));
         setDefects(loadJson<DefectRequest[]>(DEFECTS_KEY, [], tenantId));
         setMilitaryPersonnel(loadJson<any[]>(MILITARY_PERSONNEL_KEY, [], tenantId));
@@ -1650,30 +1631,22 @@ export default function App() {
 
             const remoteOperationalModule = await loadOperationalModule(tenantId);
             if (remoteOperationalModule) {
-              const mergeLatestById = <T extends { id: string; updatedAt?: string }>(local: T[], remote: T[]) => {
-                const map = new Map<string, T>();
-                local.forEach((item) => map.set(item.id, item));
-                remote.forEach((item) => {
-                  const existing = map.get(item.id);
-                  if (!existing) {
-                    map.set(item.id, item);
-                    return;
-                  }
-                  const localTime = existing.updatedAt ? Date.parse(existing.updatedAt) : 0;
-                  const remoteTime = item.updatedAt ? Date.parse(item.updatedAt) : 0;
-                  if (remoteTime >= localTime) {
-                    map.set(item.id, item);
-                  }
-                });
-                return Array.from(map.values());
-              };
+              // Supabase 우선: 원격 데이터가 존재하면 로컬(localStorage) 대신 원격 데이터를 그대로 사용합니다.
+              // 로컬에만 있는 항목이 필요하면 서버로 푸시하는 별도 동기화 로직을 추가할 수 있습니다.
+              setCleaningReports(remoteOperationalModule.cleaningReports || []);
+              setDefects(remoteOperationalModule.defects || []);
+              setInventory(remoteOperationalModule.inventory || []);
+              setSettlementRecords(remoteOperationalModule.settlementRecords || []);
+              setSettlementItems((remoteOperationalModule.settlementItems as unknown as SettlementItem[]) || []);
+              setAuditLogs(remoteOperationalModule.auditLogs || []);
 
-              setCleaningReports((prev) => mergeLatestById(prev, remoteOperationalModule.cleaningReports));
-              setDefects((prev) => mergeLatestById(prev, remoteOperationalModule.defects));
-              setInventory((prev) => mergeLatestById(prev, remoteOperationalModule.inventory));
-              setSettlementRecords((prev) => mergeLatestById(prev, remoteOperationalModule.settlementRecords));
-              setSettlementItems((prev) => mergeLatestById(prev, remoteOperationalModule.settlementItems as unknown as SettlementItem[]));
-              setAuditLogs((prev) => mergeLatestById(prev, remoteOperationalModule.auditLogs));
+              // 로컬 스토리지도 원격 데이터로 덮어써서 다른 기기에서 일관된 뷰를 제공
+              saveJson(CLEANING_REPORTS_KEY, remoteOperationalModule.cleaningReports || [], tenantId);
+              saveJson(DEFECTS_KEY, remoteOperationalModule.defects || [], tenantId);
+              saveJson(INVENTORY_KEY, remoteOperationalModule.inventory || [], tenantId);
+              saveJson(SETTLEMENT_RECORDS_KEY, remoteOperationalModule.settlementRecords || [], tenantId);
+              saveJson(SETTLEMENT_ITEMS_KEY, remoteOperationalModule.settlementItems || [], tenantId);
+              saveJson(AUDIT_LOGS_KEY, remoteOperationalModule.auditLogs || [], tenantId);
             }
 
             const authUser = await getCurrentAuthUser();
@@ -1688,14 +1661,14 @@ export default function App() {
       console.error("초기 데이터 로딩 중 오류가 발생했습니다:", error);
       setTheme(themeDefault);
       setUsers(getSafeUsers());
-      setDorms(demoDorms);
-      setOccupants(demoOccupants(demoDorms));
-      setInventory(demoInventory);
-      setLeases(demoLeases);
-      setDormContracts(demoDormContracts);
+      setDorms([]);
+      setOccupants([]);
+      setInventory([]);
+      setLeases([]);
+      setDormContracts([]);
       setCleaningReports([]);
       setAuditLogs([]);
-      setNewHires(demoNewHires);
+      setNewHires([]);
       setSales([]);
       setDefects([]);
       setMilitaryPersonnel([]);
@@ -1898,7 +1871,7 @@ export default function App() {
       return;
     }
     if (!window.confirm("전체 데이터를 초기화하시겠습니까? 이 작업은 되돌릴 수 없습니다.")) return;
-    setUsers(demoUsers);
+    setUsers([]);
     setDorms([]);
     setOccupants([]);
     setInventory([]);
@@ -1931,13 +1904,13 @@ export default function App() {
       return;
     }
     if (!window.confirm("데모 데이터를 로드하시겠습니까? 현재 데이터는 덮어쓰기됩니다.")) return;
-    setUsers(demoUsers);
-    setDorms(demoDorms);
-    setOccupants(demoOccupants(demoDorms));
-    setInventory(demoInventory);
-    setLeases(demoLeases);
-    setDormContracts(demoDormContracts);
-    setNewHires(demoNewHires);
+    setUsers([]);
+    setDorms([]);
+    setOccupants([]);
+    setInventory([]);
+    setLeases([]);
+    setDormContracts([]);
+    setNewHires([]);
     setSales([]);
     setDefects([]);
     setCleaningReports([]);
@@ -1956,13 +1929,13 @@ export default function App() {
     setCustomTemplates([]);
     setSystemSettings(getDefaultSystemSettings());
     setTheme(themeDefault);
-    saveJson(USERS_KEY, demoUsers, tenantId);
-    saveJson(DORMS_KEY, demoDorms, tenantId);
-    saveJson(OCCUPANTS_KEY, demoOccupants(demoDorms), tenantId);
-    saveJson(INVENTORY_KEY, demoInventory, tenantId);
-    saveJson(LEASES_KEY, demoLeases, tenantId);
-    saveJson(DORM_CONTRACTS_KEY, demoDormContracts, tenantId);
-    saveJson(NEW_HIRES_KEY, demoNewHires, tenantId);
+    saveJson(USERS_KEY, [], tenantId);
+    saveJson(DORMS_KEY, [], tenantId);
+    saveJson(OCCUPANTS_KEY, [], tenantId);
+    saveJson(INVENTORY_KEY, [], tenantId);
+    saveJson(LEASES_KEY, [], tenantId);
+    saveJson(DORM_CONTRACTS_KEY, [], tenantId);
+    saveJson(NEW_HIRES_KEY, [], tenantId);
     saveJson(SALES_KEY, [], tenantId);
     saveJson(DEFECTS_KEY, [], tenantId);
     saveJson(CLEANING_REPORTS_KEY, [], tenantId);
@@ -1985,7 +1958,7 @@ export default function App() {
     }
     if (!window.confirm("관리자 계정을 기본값으로 초기화하시겠습니까?")) return;
     const adminUser: LoginUser = {
-      id: demoUsers[0].id,
+      id: crypto.randomUUID(),
       username: "admin",
       password: "admin1234",
       role: "admin",
