@@ -56,6 +56,7 @@ import {
   saveJson,
 } from "./services/storageService";
 import {
+  supabase,
   isSupabaseAvailable,
   loadMilitaryModule,
   saveMilitaryModule,
@@ -1066,6 +1067,260 @@ export default function App() {
   const [militaryTrainingRules, setMilitaryTrainingRules] = useState<any[]>([]);
   const [militaryCodeValues, setMilitaryCodeValues] = useState<MilitaryCodeValues>(defaultMilitaryCodeValues);
   const [militaryTrainingAutoConfig, setMilitaryTrainingAutoConfig] = useState<{ enabled: boolean; targetStatuses: string[] }>({ enabled: true, targetStatuses: ["재직"] });
+
+  const applyRealtimeUpdate = <T extends { id: string }>(prev: T[], row: any, toDomain: (row: any) => T): T[] => {
+    if (!row?.id) return prev;
+    if (row.is_deleted) {
+      return prev.filter((item) => item.id !== row.id);
+    }
+    const nextItem = toDomain(row);
+    return prev.some((item) => item.id === row.id)
+      ? prev.map((item) => (item.id === row.id ? nextItem : item))
+      : [...prev, nextItem];
+  };
+
+  const toDomainRealtimeDorm = (row: any): Dorm => ({
+    id: row.id,
+    site: row.site,
+    gender: row.gender,
+    buildingName: row.building_name || "",
+    address: row.address || "",
+    dong: row.dong || "",
+    roomHo: row.room_ho || "",
+    pyeong: row.pyeong || "",
+    capacity: row.capacity ?? 0,
+    managerUserId: row.manager_user_id || undefined,
+    contractStart: row.contract_start || "",
+    contractEnd: row.contract_end || "",
+    contractAmount: row.contract_amount || "",
+    leaseStatus: row.lease_status || "사용중",
+    공동현관: row.shared_entry || "",
+    세대현관: row.unit_entry || "",
+    prepaymentDeposit: row.prepayment_deposit ?? 0,
+    realEstateName: row.real_estate_name || "",
+    balanceDate: row.balance_date || "",
+    notes: row.notes || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || "",
+    isDeleted: row.is_deleted ?? false,
+    deletedAt: row.deleted_at || undefined,
+    deletedBy: row.deleted_by || undefined,
+  });
+
+  const toDomainRealtimeOccupant = (row: any): Occupant => ({
+    id: row.id,
+    dormId: row.dorm_id || "",
+    site: row.site || "",
+    employeeName: row.employee_name || "",
+    gender: row.gender || "남",
+    department: row.department || "",
+    phone: row.phone || "",
+    moveInDate: row.move_in_date || "",
+    moveOutDueDate: row.move_out_due_date || "",
+    status: row.status || "거주중",
+    isNewHireAssignment: row.is_new_hire_assignment ?? false,
+    notes: row.notes || "",
+    expectedMoveInDate: row.expected_move_in_date || "",
+    expectedMoveOutDate: row.expected_move_out_date || "",
+    actualMoveOutDate: row.actual_move_out_date || "",
+    sourceNewHireId: row.source_new_hire_id || undefined,
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || "",
+    isDeleted: row.is_deleted ?? false,
+    deletedAt: row.deleted_at || undefined,
+    deletedBy: row.deleted_by || undefined,
+  });
+
+  const toDomainRealtimeDormContract = (row: any): DormContract => ({
+    id: row.id,
+    site: row.site,
+    address: row.address || "",
+    buildingName: row.building_name || "",
+    dong: row.dong || "",
+    roomHo: row.room_ho || "",
+    pyeong: row.pyeong || "",
+    landlordName: row.landlord_name || "",
+    landlordPhone: row.landlord_phone || "",
+    realEstateName: row.real_estate_name || "",
+    realEstatePhone: row.real_estate_phone || "",
+    공동현관: row.shared_entry || "",
+    세대현관: row.unit_entry || "",
+    contractStart: row.contract_start || "",
+    contractEnd: row.contract_end || "",
+    contractStatus: row.contract_status || "진행중",
+    contractAmount: row.contract_amount || "",
+    prepaymentDeposit: row.prepayment_deposit || "",
+    deposit: row.deposit || "",
+    monthlyRentOrMaintenance: row.monthly_rent_or_maintenance || "",
+    contractType: row.contract_type || "",
+    gender: row.gender || "남",
+    notes: row.notes || "",
+    registeredBy: row.registered_by || "",
+    modifiedBy: row.modified_by || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || "",
+    isDeleted: row.is_deleted ?? false,
+    deletedAt: row.deleted_at || undefined,
+    deletedBy: row.deleted_by || undefined,
+  });
+
+  const toDomainRealtimeNewHire = (row: any): NewHireEmployee => ({
+    id: row.id,
+    site: row.site,
+    gender: row.gender || "남",
+    name: row.name || "",
+    phone: row.phone || "",
+    department: row.department || "",
+    dormId: row.dorm_id || "",
+    address: row.address || "",
+    buildingName: row.building_name || "",
+    dong: row.dong || "",
+    roomHo: row.room_ho || "",
+    공동현관: row.shared_entry || "",
+    세대현관: row.unit_entry || "",
+    expectedMoveInDate: row.expected_move_in_date || "",
+    moveInDate: row.move_in_date || "",
+    expectedMoveOutDate: row.expected_move_out_date || "",
+    moveOutDate: row.move_out_date || "",
+    actualMoveOutDate: row.actual_move_out_date || "",
+    cheonanMoveDate: row.cheonan_move_date || "",
+    residenceStatus: row.residence_status || "대기중",
+    moveInType: row.move_in_type || "대기자",
+    extensionReason: row.extension_reason || "",
+    notes: row.notes || "",
+    managerUserId: row.manager_user_id || undefined,
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || "",
+    isDeleted: row.is_deleted ?? false,
+    deletedAt: row.deleted_at || undefined,
+    deletedBy: row.deleted_by || undefined,
+  });
+
+  const toDomainRealtimeCleaningReport = (row: any): CleaningReport => ({
+    id: row.id,
+    reportDate: row.report_date || "",
+    site: row.site || "",
+    dormId: row.dorm_id || "",
+    buildingName: row.building_name || "",
+    address: row.address || "",
+    dong: row.dong || "",
+    roomHo: row.room_ho || "",
+    공동현관: row.shared_entry || "",
+    세대현관: row.unit_entry || "",
+    managerUserId: row.manager_user_id || "",
+    managerName: row.manager_name || "",
+    cleanerName: row.cleaner_name || "",
+    weekLabel: row.week_label || "",
+    monthLabel: row.month_label || "",
+    cleanStatus: row.clean_status || "미제출",
+    checkResult: row.check_result || "-",
+    score: row.score ?? 0,
+    memo: row.memo || "",
+    beforePhotoDataUrls: row.before_photo_data_urls || [],
+    afterPhotoDataUrls: row.after_photo_data_urls || [],
+    reporterUserId: row.reporter_user_id || "",
+    reporterName: row.reporter_name || "",
+    confirmedBy: row.confirmed_by || undefined,
+    confirmedAt: row.confirmed_at || undefined,
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || row.created_at || new Date().toISOString(),
+    isDeleted: row.is_deleted ?? false,
+    deletedAt: row.deleted_at || undefined,
+    deletedBy: row.deleted_by || undefined,
+  });
+
+  const toDomainRealtimeDefectRequest = (row: any): DefectRequest => ({
+    id: row.id,
+    receiptDate: row.receipt_date || "",
+    site: row.site || "",
+    dormId: row.dorm_id || "",
+    inspectorName: row.inspector_name || "",
+    dormManagerName: row.dorm_manager_name || "",
+    managerUserId: row.manager_user_id || "",
+    buildingName: row.building_name || "",
+    dong: row.dong || "",
+    ho: row.ho || "",
+    공동현관: row.shared_entry || "",
+    세대현관: row.unit_entry || "",
+    roadAddress: row.road_address || "",
+    detailAddress: row.detail_address || "",
+    defectStatus: row.defect_status || "접수",
+    requestText: row.request_text || "",
+    completeText: row.complete_text || "",
+    reporterUserId: row.reporter_user_id || "",
+    reporterName: row.reporter_name || "",
+    requestPhotoDataUrls: row.request_photo_data_urls || [],
+    completionPhotoDataUrls: row.completion_photo_data_urls || [],
+    createdAt: row.created_at || "",
+    completedAt: row.completed_at || undefined,
+    updatedAt: row.updated_at || row.created_at || new Date().toISOString(),
+    isDeleted: row.is_deleted ?? false,
+    deletedAt: row.deleted_at || undefined,
+    deletedBy: row.deleted_by || undefined,
+  });
+
+  const toDomainRealtimeInventoryItem = (row: any): InventoryItem => ({
+    id: row.id,
+    dormId: row.dorm_id || "",
+    site: row.site || "",
+    dormAddress: row.dorm_address || "",
+    buildingName: row.building_name || "",
+    dong: row.dong || "",
+    roomHo: row.room_ho || "",
+    managerName: row.manager_name || "",
+    itemName: row.item_name || "",
+    quantity: row.quantity ?? 0,
+    modelName: row.model_name || "",
+    maker: row.maker || "",
+    status: row.status || "정상",
+    installationLocation: row.installation_location || "",
+    purchaseDate: row.purchase_date || "",
+    purchaseAmount: row.purchase_amount ?? 0,
+    issuedDate: row.issued_date || "",
+    proofFile: row.proof_file || "",
+    soldDate: row.sold_date || "",
+    soldAmount: row.sold_amount ?? 0,
+    disposalDate: row.disposal_date || "",
+    disposalReason: row.disposal_reason || "",
+    notes: row.notes || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || row.created_at || new Date().toISOString(),
+    isDeleted: row.is_deleted ?? false,
+    deletedAt: row.deleted_at || undefined,
+    deletedBy: row.deleted_by || undefined,
+  });
+
+  const handleRealtimeTableRow = (table: string, payload: any) => {
+    const row = payload.eventType === "DELETE" ? payload.old_record : payload.record;
+    if (!row || row.tenant_id !== tenantId) return;
+
+    switch (table) {
+      case "dorms":
+        setDorms((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeDorm));
+        break;
+      case "occupants":
+        setOccupants((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeOccupant));
+        break;
+      case "new_hires":
+        setNewHires((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeNewHire));
+        break;
+      case "dorm_contracts":
+        setDormContracts((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeDormContract));
+        break;
+      case "cleaning_reports":
+        setCleaningReports((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeCleaningReport));
+        break;
+      case "defect_requests":
+        setDefects((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeDefectRequest));
+        break;
+      case "inventory_items":
+        setInventory((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeInventoryItem));
+        break;
+      default:
+        break;
+    }
+  };
+
   const militaryReferenceYear = Number(militarySettings["기준연도"]);
   const effectiveMilitaryReferenceYear = Number.isInteger(militaryReferenceYear) && militaryReferenceYear > 0 ? militaryReferenceYear : undefined;
   const [militaryTrainingRuleForm, setMilitaryTrainingRuleForm] = useState<MilitaryTrainingRule>({
@@ -3099,6 +3354,64 @@ export default function App() {
 
     return () => clearTimeout(timer);
   }, [cleaningReports, defects, inventory, settlementRecords, settlementItems, auditLogs, tenantId]);
+
+  useEffect(() => {
+    if (!isSupabaseAvailable() || isLoading) return;
+
+    let realtimeSubscription: any = null;
+    const subscribeRealtime = async () => {
+      if (!supabase) return;
+      const session = await getCurrentSession();
+      if (!session?.user?.id) return;
+
+      realtimeSubscription = supabase
+        .channel(`realtime-${tenantId}`)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "dorms", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("dorms", payload)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "occupants", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("occupants", payload)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "new_hires", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("new_hires", payload)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "dorm_contracts", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("dorm_contracts", payload)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "cleaning_reports", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("cleaning_reports", payload)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "defect_requests", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("defect_requests", payload)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "inventory_items", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("inventory_items", payload)
+        )
+        .subscribe();
+    };
+
+    subscribeRealtime();
+
+    return () => {
+      if (realtimeSubscription?.unsubscribe) {
+        realtimeSubscription.unsubscribe().catch(() => {});
+      }
+    };
+  }, [tenantId, currentUser, isLoading]);
 
   useEffect(() => {
     if (isLoading) return;
