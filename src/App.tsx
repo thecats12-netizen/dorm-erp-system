@@ -3375,6 +3375,9 @@ export default function App() {
   useEffect(() => {
     if (!isSupabaseAvailable() || isLoading) return;
 
+    // Supabase Realtime is temporarily disabled until load/save sync stability is confirmed.
+    return;
+
     let realtimeSubscription: any = null;
     const subscribeRealtime = async () => {
       if (!supabase) return;
@@ -12108,7 +12111,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className="grid gap-3 md:grid-cols-4 mb-6">
               <MiniStat label="기숙사 수" value={`${operationalDorms.length}개`} />
-              <MiniStat label="현재 거주인" value={`${occupants.filter(o => !o.isDeleted && o.status !== "퇴실").length}명`} />
+              <MiniStat label="현재 거주인" value={`${occupants.filter(o => !o.isDeleted && ["거주중", "신규입주", "만료예정"].includes(o.status)).length}명`} />
               <MiniStat label="비품 총액" value={`${formatNumber(inventory.reduce((sum, i) => sum + (i.purchaseAmount || 0), 0))}원`} />
               <MiniStat label="미완료 하자" value={`${defects.filter(d => !d.isDeleted && d.defectStatus !== "완료").length}건`} />
             </div>
