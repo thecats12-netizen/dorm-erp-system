@@ -59,6 +59,7 @@ import {
   isSupabaseAvailable,
   loadMilitaryModule,
   saveMilitaryModule,
+  translateSupabaseError,
   type MilitaryModuleState,
 } from "./services/supabaseService";
 import {
@@ -3020,8 +3021,9 @@ export default function App() {
       } catch (error) {
         console.error("Supabase dorm module sync failed:", error);
         try {
+          const message = translateSupabaseError((error && (error as any).message) || String(error));
           // eslint-disable-next-line no-alert
-          alert(`Supabase dorm module sync failed: ${(error && (error as any).message) || String(error)}`);
+          alert(`Supabase 기숙사 모듈 동기화에 실패했습니다. ${message}`);
         } catch {}
       }
     }, 1500);
@@ -3062,12 +3064,12 @@ export default function App() {
         setOperationalSyncError(null);
       } catch (error) {
         console.error("Supabase operational module sync failed:", error);
-        const msg = (error && (error as any).message) || String(error);
+        const msg = translateSupabaseError((error && (error as any).message) || String(error));
         setOperationalSyncError(msg);
         // show immediate visible feedback so QA can notice failures
         try {
           // eslint-disable-next-line no-alert
-          alert(`Supabase operational module sync failed: ${msg}`);
+          alert(`Supabase 운영 모듈 동기화에 실패했습니다. ${msg}`);
         } catch {}
       }
     }, 1500);
@@ -4550,7 +4552,7 @@ export default function App() {
       const authEmail = raw.includes("@") ? raw : `${raw}@dormerpsystem.com`;
       const { session, error } = await signInWithEmail(authEmail, loginForm.password);
       if (error) {
-        const message = (error && (error as any).message) || "Supabase 로그인에 실패했습니다.";
+        const message = translateSupabaseError((error && (error as any).message) || String(error));
         console.error("Supabase sign-in failed:", error);
         setLoginError(message);
       } else if (session?.user?.id) {
@@ -5276,7 +5278,7 @@ export default function App() {
 
           if (createError) {
             console.error("Edge Function user creation failed:", createError);
-            alert(`사용자 생성 실패: ${(createError as any).message || "알 수 없는 오류"}`);
+            alert(`사용자 생성 실패: ${translateSupabaseError((createError as any).message || String(createError))}`);
             return;
           }
 
@@ -5296,13 +5298,13 @@ export default function App() {
 
           if (updateError) {
             console.error("Profile update failed:", updateError);
-            alert(`프로필 업데이트 실패: ${(updateError as any).message || "알 수 없는 오류"}`);
+            alert(`프로필 업데이트 실패: ${translateSupabaseError((updateError as any).message || String(updateError))}`);
             return;
           }
         }
       } catch (err) {
         console.error("Supabase user save failed:", err);
-        alert(`Supabase 저장 실패: ${err}`);
+        alert(`Supabase 저장 실패: ${translateSupabaseError(String(err))}`);
         return;
       }
     }

@@ -1,4 +1,4 @@
-import { supabase, isSupabaseAvailable } from "./supabaseService";
+import { supabase, isSupabaseAvailable, translateSupabaseError } from "./supabaseService";
 import type {
   CleaningReport,
   DefectRequest,
@@ -401,10 +401,10 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
       if (err && /permission|row level security|RLS/i.test(JSON.stringify(err))) {
         console.error("Supabase permission/RLS error detected:", err);
       }
-      throw err;
+      throw new Error(translateSupabaseError((err as any)?.message || String(err)));
     }
   } catch (error) {
     console.error("Supabase operational module save error:", error);
-    throw error;
+    throw new Error(translateSupabaseError((error as any)?.message || String(error)));
   }
 };

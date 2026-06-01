@@ -1,4 +1,4 @@
-import { supabase, isSupabaseAvailable } from "./supabaseService";
+import { supabase, isSupabaseAvailable, translateSupabaseError } from "./supabaseService";
 import type { Session, User } from "@supabase/supabase-js";
 import type { UserRole, Site } from "../types/domain";
 
@@ -41,14 +41,20 @@ export const signInWithEmail = async (
 
     if (error) {
       console.error("[AuthService] Sign in error:", error, { email });
-      return { session: null, error };
+      return {
+        session: null,
+        error: new Error(translateSupabaseError(error.message || String(error))),
+      };
     }
 
     console.debug("[AuthService] Sign in success", { userId: data.session?.user?.id, email });
     return { session: data.session, error: null };
   } catch (err) {
     console.error("[AuthService] Sign in exception:", err, { email });
-    return { session: null, error: err };
+    return {
+      session: null,
+      error: new Error(translateSupabaseError(String(err))),
+    };
   }
 };
 
@@ -66,12 +72,12 @@ export const signOut = async (): Promise<{ error: any }> => {
     const { error } = await supabase!.auth.signOut();
     if (error) {
       console.error("[AuthService] Sign out error:", error);
-      return { error };
+      return { error: new Error(translateSupabaseError(error.message || String(error))) };
     }
     return { error: null };
   } catch (err) {
     console.error("[AuthService] Sign out exception:", err);
-    return { error: err };
+    return { error: new Error(translateSupabaseError(String(err))) };
   }
 };
 
@@ -206,13 +212,19 @@ export const upsertProfile = async (
 
     if (error) {
       console.error("[AuthService] Upsert profile error:", error);
-      return { data: null, error };
+      return {
+        data: null,
+        error: new Error(translateSupabaseError(error.message || String(error))),
+      };
     }
 
     return { data: data as Profile, error: null };
   } catch (err) {
     console.error("[AuthService] Upsert profile exception:", err);
-    return { data: null, error: err };
+    return {
+      data: null,
+      error: new Error(translateSupabaseError(String(err))),
+    };
   }
 };
 
@@ -240,14 +252,20 @@ export const signUpWithEmail = async (
 
     if (error) {
       console.error("[AuthService] Sign up error:", error, { email });
-      return { user: null, error };
+      return {
+        user: null,
+        error: new Error(translateSupabaseError(error.message || String(error))),
+      };
     }
 
     console.debug("[AuthService] Sign up success", { userId: data.user?.id, email });
     return { user: data.user, error: null };
   } catch (err) {
     console.error("[AuthService] Sign up exception:", err, { email });
-    return { user: null, error: err };
+    return {
+      user: null,
+      error: new Error(translateSupabaseError(String(err))),
+    };
   }
 };
 
@@ -284,13 +302,19 @@ export const updateProfileOnly = async (
 
     if (error) {
       console.error("[AuthService] Update profile error:", error);
-      return { data: null, error };
+      return {
+        data: null,
+        error: new Error(translateSupabaseError(error.message || String(error))),
+      };
     }
 
     return { data: data as Profile, error: null };
   } catch (err) {
     console.error("[AuthService] Update profile exception:", err);
-    return { data: null, error: err };
+    return {
+      data: null,
+      error: new Error(translateSupabaseError(String(err))),
+    };
   }
 };
 
@@ -329,18 +353,18 @@ export const createUserViaEdgeFunction = async (payload: {
 
     if (error) {
       console.error("[AuthService] Edge Function error:", error);
-      return { error };
+      return { error: new Error(translateSupabaseError(error.message || String(error))) };
     }
 
     if (data?.error) {
       console.error("[AuthService] Edge Function returned error:", data.error);
-      return { error: data.error };
+      return { error: new Error(translateSupabaseError(String(data.error))) };
     }
 
     console.debug("[AuthService] Edge Function success", { userId: data?.user_id });
     return { user_id: data?.user_id };
   } catch (err) {
     console.error("[AuthService] Edge Function exception:", err);
-    return { error: err };
+    return { error: new Error(translateSupabaseError(String(err))) };
   }
 };

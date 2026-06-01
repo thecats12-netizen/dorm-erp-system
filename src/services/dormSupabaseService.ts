@@ -1,4 +1,4 @@
-import { supabase, isSupabaseAvailable } from "./supabaseService";
+import { supabase, isSupabaseAvailable, translateSupabaseError } from "./supabaseService";
 import type { Dorm, Occupant, DormContract, NewHireEmployee } from "../types/domain";
 
 export type DormModuleState = {
@@ -367,7 +367,7 @@ export const saveDormModule = async (
   if (errors.length) {
     const msg = `Some Supabase dorm module upserts failed: ${errors.join("; ")}`;
     console.error(msg);
-    throw new Error(msg);
+    throw new Error(translateSupabaseError(msg));
   }
 };
 
@@ -378,7 +378,10 @@ export const upsertDorm = async (dorm: Dorm, tenantId: string, userId: string): 
   const { error } = await supabase!
     .from("dorms")
     .upsert(toDbDorm(dorm, tenantId, userId), { onConflict: "id" });
-  if (error) throw error;
+  if (error) {
+    console.error("Dorm upsert error:", error);
+    throw new Error(translateSupabaseError(error.message || String(error)));
+  }
 };
 
 export const upsertOccupant = async (occupant: Occupant, tenantId: string, userId: string): Promise<void> => {
@@ -388,7 +391,10 @@ export const upsertOccupant = async (occupant: Occupant, tenantId: string, userI
   const { error } = await supabase!
     .from("occupants")
     .upsert(toDbOccupant(occupant, tenantId, userId), { onConflict: "id" });
-  if (error) throw error;
+  if (error) {
+    console.error("Occupant upsert error:", error);
+    throw new Error(translateSupabaseError(error.message || String(error)));
+  }
 };
 
 export const upsertDormContract = async (contract: DormContract, tenantId: string, userId: string): Promise<void> => {
@@ -398,7 +404,10 @@ export const upsertDormContract = async (contract: DormContract, tenantId: strin
   const { error } = await supabase!
     .from("dorm_contracts")
     .upsert(toDbDormContract(contract, tenantId, userId), { onConflict: "id" });
-  if (error) throw error;
+  if (error) {
+    console.error("Dorm contract upsert error:", error);
+    throw new Error(translateSupabaseError(error.message || String(error)));
+  }
 };
 
 export const upsertNewHire = async (hire: NewHireEmployee, tenantId: string, userId: string): Promise<void> => {
@@ -408,5 +417,8 @@ export const upsertNewHire = async (hire: NewHireEmployee, tenantId: string, use
   const { error } = await supabase!
     .from("new_hires")
     .upsert(toDbNewHire(hire, tenantId, userId), { onConflict: "id" });
-  if (error) throw error;
+  if (error) {
+    console.error("New hire upsert error:", error);
+    throw new Error(translateSupabaseError(error.message || String(error)));
+  }
 };
