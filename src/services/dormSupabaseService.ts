@@ -21,10 +21,10 @@ const toDbDorm = (dorm: Dorm, tenantId: string, userId: string) => {
     room_ho: dorm.roomHo,
     pyeong: dorm.pyeong,
     capacity: safeNumberOrNull(dorm.capacity) ?? 0,
-    manager_user_id: dorm.managerUserId || null,
+    manager_user_id: safeUuidOrNull(dorm.managerUserId),
     contract_start: safeDateOrNull(dorm.contractStart),
     contract_end: safeDateOrNull(dorm.contractEnd),
-    contract_amount: dorm.contractAmount || null,
+    contract_amount: safeNumberOrNull(dorm.contractAmount),
     lease_status: dorm.leaseStatus,
     shared_entry: dorm["공동현관"] || null,
     unit_entry: dorm["세대현관"] || null,
@@ -34,7 +34,7 @@ const toDbDorm = (dorm: Dorm, tenantId: string, userId: string) => {
     notes: dorm.notes || null,
     is_deleted: dorm.isDeleted ?? false,
     deleted_at: safeDateOrNull(dorm.deletedAt),
-    deleted_by: dorm.deletedBy || null,
+    deleted_by: safeUuidOrNull(dorm.deletedBy),
     created_by: userId,
     updated_by: userId,
     created_at: dorm.createdAt || new Date().toISOString(),
@@ -80,18 +80,18 @@ const toDbOccupant = (occupant: Occupant, tenantId: string, userId: string) => (
   gender: occupant.gender,
   department: occupant.department,
   phone: occupant.phone,
-  move_in_date: occupant.moveInDate || null,
-  move_out_due_date: occupant.moveOutDueDate || null,
+  move_in_date: safeDateOrNull(occupant.moveInDate),
+  move_out_due_date: safeDateOrNull(occupant.moveOutDueDate),
   status: occupant.status,
   is_new_hire_assignment: occupant.isNewHireAssignment ?? false,
   notes: occupant.notes,
-  expected_move_in_date: occupant.expectedMoveInDate || null,
-  expected_move_out_date: occupant.expectedMoveOutDate || null,
-  actual_move_out_date: occupant.actualMoveOutDate || null,
-  source_new_hire_id: occupant.sourceNewHireId || null,
+  expected_move_in_date: safeDateOrNull(occupant.expectedMoveInDate),
+  expected_move_out_date: safeDateOrNull(occupant.expectedMoveOutDate),
+  actual_move_out_date: safeDateOrNull(occupant.actualMoveOutDate),
+  source_new_hire_id: safeUuidOrNull(occupant.sourceNewHireId),
   is_deleted: occupant.isDeleted ?? false,
-  deleted_at: occupant.deletedAt || null,
-  deleted_by: occupant.deletedBy || null,
+  deleted_at: safeDateOrNull(occupant.deletedAt),
+  deleted_by: safeUuidOrNull(occupant.deletedBy),
   created_by: userId,
   updated_by: userId,
   created_at: occupant.createdAt || new Date().toISOString(),
@@ -130,15 +130,15 @@ const toDbDormContract = (contract: DormContract, tenantId: string, userId: stri
   building_name: contract.buildingName,
   dong: contract.dong,
   room_ho: contract.roomHo,
-  pyeong: contract.pyeong,
+  pyeong: safeNumberOrNull(contract.pyeong),
   landlord_name: contract.landlordName,
   landlord_phone: contract.landlordPhone,
   real_estate_name: contract.realEstateName,
   real_estate_phone: contract.realEstatePhone,
   shared_entry: contract["공동현관"] || null,
   unit_entry: contract["세대현관"] || null,
-  contract_start: contract.contractStart || null,
-  contract_end: contract.contractEnd || null,
+  contract_start: safeDateOrNull(contract.contractStart),
+  contract_end: safeDateOrNull(contract.contractEnd),
   contract_status: contract.contractStatus,
   contract_amount: safeNumberOrNull(contract.contractAmount),
   prepayment_deposit: safeNumberOrNull(contract.prepaymentDeposit),
@@ -147,11 +147,11 @@ const toDbDormContract = (contract: DormContract, tenantId: string, userId: stri
   contract_type: contract.contractType,
   gender: contract.gender,
   notes: contract.notes,
-  registered_by: contract.registeredBy,
-  modified_by: contract.modifiedBy,
+  registered_by: safeUuidOrNull(contract.registeredBy),
+  modified_by: safeUuidOrNull(contract.modifiedBy),
   is_deleted: contract.isDeleted ?? false,
-  deleted_at: contract.deletedAt || null,
-  deleted_by: contract.deletedBy || null,
+  deleted_at: safeDateOrNull(contract.deletedAt),
+  deleted_by: safeUuidOrNull(contract.deletedBy),
   created_by: userId,
   updated_by: userId,
   created_at: contract.createdAt || new Date().toISOString(),
@@ -214,6 +214,15 @@ const safeDateOrNull = (value: string | null | undefined): string | null => {
   return null;
 };
 
+const safeUuidOrNull = (value: string | null | undefined): string | null => {
+  if (value === null || value === undefined) return null;
+  const trimmed = String(value).trim();
+  if (trimmed === "" || trimmed === "-") return null;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)
+    ? trimmed
+    : null;
+};
+
 const toDbNewHire = (hire: NewHireEmployee, tenantId: string, userId: string) => ({
   id: hire.id,
   tenant_id: tenantId,
@@ -221,27 +230,27 @@ const toDbNewHire = (hire: NewHireEmployee, tenantId: string, userId: string) =>
   name: hire.name,
   phone: hire.phone,
   department: hire.department,
-  dorm_id: hire.dormId,
+  dorm_id: safeUuidOrNull(hire.dormId),
   address: hire.address,
   building_name: hire.buildingName,
   dong: hire.dong,
   room_ho: hire.roomHo,
   shared_entry: hire["공동현관"] || null,
   unit_entry: hire["세대현관"] || null,
-  expected_move_in_date: hire.expectedMoveInDate || null,
-  move_in_date: hire.moveInDate || null,
-  expected_move_out_date: hire.expectedMoveOutDate || null,
-  move_out_date: hire.moveOutDate || null,
-  actual_move_out_date: hire.actualMoveOutDate || null,
-  cheonan_move_date: hire.cheonanMoveDate || null,
+  expected_move_in_date: safeDateOrNull(hire.expectedMoveInDate),
+  move_in_date: safeDateOrNull(hire.moveInDate),
+  expected_move_out_date: safeDateOrNull(hire.expectedMoveOutDate),
+  move_out_date: safeDateOrNull(hire.moveOutDate),
+  actual_move_out_date: safeDateOrNull(hire.actualMoveOutDate),
+  cheonan_move_date: safeDateOrNull(hire.cheonanMoveDate),
   residence_status: hire.residenceStatus,
   move_in_type: hire.moveInType,
   extension_reason: hire.extensionReason,
   notes: hire.notes,
-  manager_user_id: hire.managerUserId || null,
+  manager_user_id: safeUuidOrNull(hire.managerUserId),
   is_deleted: hire.isDeleted ?? false,
-  deleted_at: hire.deletedAt || null,
-  deleted_by: hire.deletedBy || null,
+  deleted_at: safeDateOrNull(hire.deletedAt),
+  deleted_by: safeUuidOrNull(hire.deletedBy),
   created_by: userId,
   updated_by: userId,
   created_at: hire.createdAt || new Date().toISOString(),
@@ -330,6 +339,7 @@ export const saveDormModule = async (
 
   const errors: string[] = [];
   let dormsPayload: any[] = [];
+  let successfulTables = 0;
 
   // Save each table independently so one failure doesn't abort the whole save
   try {
@@ -340,9 +350,15 @@ export const saveDormModule = async (
     }
     const { error } = await supabase!.from("dorms").upsert(dormsPayload, { onConflict: "id" });
     if (error) {
-      console.error("[DORM_ERROR] Dorms upsert error:", error);
-      console.error("[DORM_ERROR] Problematic payload:", dormsPayload);
+      console.error("[DORM_ERROR] Dorms upsert error code:", error.code);
+      console.error("[DORM_ERROR] Dorms upsert error message:", error.message);
+      console.error("[DORM_ERROR] Dorms upsert error details:", error.details);
+      console.error("[DORM_ERROR] Dorms upsert error hint:", error.hint);
+      console.error("[DORM_ERROR] Dorms upsert error full:", error);
+      console.error("[DORM_ERROR] Dorms upsert payload:", JSON.stringify(dormsPayload, null, 2));
       errors.push(`dorms:${error.message || error}`);
+    } else {
+      successfulTables += 1;
     }
   } catch (e: any) {
     console.error("[DORM_ERROR] Dorms upsert exception:", e);
@@ -352,44 +368,75 @@ export const saveDormModule = async (
   }
 
   try {
-    const { error } = await supabase!.from("occupants").upsert(payload.occupants.map((o) => toDbOccupant(o, payload.tenantId, userId)), { onConflict: "id" });
+    const occupantsPayload = payload.occupants.map((o) => toDbOccupant(o, payload.tenantId, userId));
+    const { error } = await supabase!.from("occupants").upsert(occupantsPayload, { onConflict: "id" });
     if (error) {
-      console.error("Occupants upsert error:", error);
+      console.error("[OCCUPANT_ERROR] Occupants upsert error code:", error.code);
+      console.error("[OCCUPANT_ERROR] Occupants upsert error message:", error.message);
+      console.error("[OCCUPANT_ERROR] Occupants upsert error details:", error.details);
+      console.error("[OCCUPANT_ERROR] Occupants upsert error hint:", error.hint);
+      console.error("[OCCUPANT_ERROR] Occupants upsert error full:", error);
+      console.error("[OCCUPANT_ERROR] Occupants payload:", JSON.stringify(occupantsPayload, null, 2));
       errors.push(`occupants:${error.message || error}`);
+    } else {
+      successfulTables += 1;
     }
   } catch (e: any) {
-    console.error("Occupants upsert exception:", e);
+    console.error("[OCCUPANT_ERROR] Occupants upsert exception:", e);
+    console.error("[OCCUPANT_ERROR] Occupants payload length:", payload.occupants.length);
     errors.push(`occupants:${e.message || String(e)}`);
   }
 
   try {
     const dormContractPayload = payload.dormContracts.map((c) => toDbDormContract(c, payload.tenantId, userId));
-    console.debug("[SAVE] dorm_contracts upsert payload", dormContractPayload);
+    console.debug("[SAVE] dorm_contracts upsert payload count:", dormContractPayload.length);
+    if (dormContractPayload.length > 0) {
+      console.debug("[SAVE] dorm_contracts first payload:", JSON.stringify(dormContractPayload[0], null, 2));
+    }
     const { error } = await supabase!.from("dorm_contracts").upsert(dormContractPayload, { onConflict: "id" });
     if (error) {
-      console.error("DormContracts upsert error:", error);
+      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error code:", error.code);
+      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error message:", error.message);
+      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error details:", error.details);
+      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error hint:", error.hint);
+      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error full:", error);
+      console.error("[DORMCONTRACT_ERROR] DormContracts payload:", JSON.stringify(dormContractPayload, null, 2));
       errors.push(`dorm_contracts:${error.message || error}`);
+    } else {
+      successfulTables += 1;
     }
   } catch (e: any) {
-    console.error("DormContracts upsert exception:", e);
+    console.error("[DORMCONTRACT_ERROR] DormContracts upsert exception:", e);
+    console.error("[DORMCONTRACT_ERROR] DormContracts payload length:", payload.dormContracts.length);
     errors.push(`dorm_contracts:${e.message || String(e)}`);
   }
 
   try {
-    const { error } = await supabase!.from("new_hires").upsert(payload.newHires.map((h) => toDbNewHire(h, payload.tenantId, userId)), { onConflict: "id" });
+    const newHiresPayload = payload.newHires.map((h) => toDbNewHire(h, payload.tenantId, userId));
+    const { error } = await supabase!.from("new_hires").upsert(newHiresPayload, { onConflict: "id" });
     if (error) {
-      console.error("NewHires upsert error:", error);
+      console.error("[NEWHIRE_ERROR] NewHires upsert error code:", error.code);
+      console.error("[NEWHIRE_ERROR] NewHires upsert error message:", error.message);
+      console.error("[NEWHIRE_ERROR] NewHires upsert error details:", error.details);
+      console.error("[NEWHIRE_ERROR] NewHires upsert error hint:", error.hint);
+      console.error("[NEWHIRE_ERROR] NewHires upsert error full:", error);
+      console.error("[NEWHIRE_ERROR] NewHires payload:", JSON.stringify(newHiresPayload, null, 2));
       errors.push(`new_hires:${error.message || error}`);
+    } else {
+      successfulTables += 1;
     }
   } catch (e: any) {
-    console.error("NewHires upsert exception:", e);
+    console.error("[NEWHIRE_ERROR] NewHires upsert exception:", e);
+    console.error("[NEWHIRE_ERROR] NewHires payload length:", payload.newHires.length);
     errors.push(`new_hires:${e.message || String(e)}`);
   }
 
   if (errors.length) {
     const msg = `Some Supabase dorm module upserts failed: ${errors.join("; ")}`;
     console.error(msg);
-    throw new Error(translateSupabaseError(msg));
+    if (successfulTables === 0) {
+      throw new Error(translateSupabaseError(msg));
+    }
   }
 };
 
