@@ -2214,6 +2214,18 @@ export default function App() {
 
   // 감사 로그 값 변환 함수
   const getAuditFieldLabel = (fieldName: string): string => FIELD_LABEL_MAP[fieldName] || fieldName;
+
+  const getUserDisplayName = (userIdOrEmailOrName: string): string => {
+    const normalized = String(userIdOrEmailOrName).trim();
+    if (!normalized) return "-";
+    const matchedUser = users.find((u) =>
+      u.id === normalized ||
+      u.username === normalized ||
+      ("email" in u && (u as any).email === normalized) ||
+      u.displayName === normalized
+    );
+    return matchedUser?.displayName || normalized;
+  };
   
   const getAuditDisplayValue = (fieldName: string, value: string): string => {
     if (!value) return "";
@@ -10282,7 +10294,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <table className="w-full min-w-[1300px] text-sm text-center">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
-                    <th className="px-3 py-2">
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">
                       <input
                         type="checkbox"
                         checked={
@@ -10318,25 +10330,25 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         className="h-5 w-5"
                       />
                     </th>
-                    <th className="px-3 py-2">지역</th>
-                    <th className="px-3 py-2">성별</th>
-                    <th className="px-3 py-2">건물명</th>
-                    <th className="px-3 py-2">동</th>
-                    <th className="px-3 py-2">호수</th>
-                    <th className="px-3 py-2">공동현관</th>
-                    <th className="px-3 py-2">세대현관</th>
-                    <th className="px-3 py-2">계약상태</th>
-                    <th className="px-3 py-2">계약만료일</th>
-                    <th className="px-3 py-2">남은일수</th>
-                    <th className="px-3 py-2">담당자</th>
-                    <th className="px-3 py-2">청소상태</th>
-                    <th className="px-3 py-2">하자건수</th>
-                    <th className="px-3 py-2">이름</th>
-                    <th className="px-3 py-2">상태</th>
-                    <th className="px-3 py-2">입실일</th>
-                    <th className="px-3 py-2">부서</th>
-                    <th className="px-3 py-2">연락처</th>
-                    <th className="px-3 py-2">작업</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">지역</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">성별</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">건물명</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">동</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">호수</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">공동현관</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">세대현관</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">계약상태</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">계약만료일</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">남은일수</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">담당자</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">청소상태</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">하자건수</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">이름</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">상태</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">입실일</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">부서</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">연락처</th>
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">작업</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -10403,19 +10415,19 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             />
                           </label>
                         </td>
-                        <td className="px-3 py-3">{dorm?.site || "-"}</td>
-                        <td className="px-3 py-3">{o.gender}</td>
-                        <td className="px-3 py-3">{dorm?.buildingName || "-"}</td>
-                        <td className="px-3 py-3">{formatDong(dorm?.dong) || "-"}</td>
-                        <td className="px-3 py-3">{formatRoomHo(dorm?.roomHo) || "-"}</td>
-                        <td className="px-3 py-3">{dorm?.공동현관 || "-"}</td>
-                        <td className="px-3 py-3">{dorm?.세대현관 || "-"}</td>
-                        <td className="px-3 py-3">{dorm?.leaseStatus || "-"}</td>
-                        <td className="px-3 py-3">{formatDateOnly(dorm?.contractEnd || "") || "-"}</td>
-                        <td className="px-3 py-3">{dorm ? daysDiff(dorm.contractEnd) : "-"}</td>
-                        <td className="px-3 py-3">{users.find((u) => u.id === dorm?.managerUserId)?.displayName || "미지정"}</td>
-                        <td className="px-3 py-3">{dorm ? (isCleaningMissing(dorm) ? "미보고" : "정상") : "-"}</td>
-                        <td className="px-3 py-3">{getOpenDefectCount(dorm?.id || "")}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm?.site || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{o.gender}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{dorm?.buildingName || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{formatDong(dorm?.dong) || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{formatRoomHo(dorm?.roomHo) || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm?.공동현관 || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm?.세대현관 || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm?.leaseStatus || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(dorm?.contractEnd || "") || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm ? daysDiff(dorm.contractEnd) : "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(dorm?.managerUserId || "") || "미지정"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm ? (isCleaningMissing(dorm) ? "미보고" : "정상") : "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{getOpenDefectCount(dorm?.id || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{o.employeeName}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
                           <span
@@ -12851,26 +12863,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <table className="w-full min-w-[1300px] text-sm text-left">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
-                    <th className="px-3 py-3">#</th>
-                    <th className="px-3 py-3">지역</th>
-                    <th className="px-3 py-3">성별</th>
-                    <th className="px-3 py-3">기숙사명</th>
-                    <th className="px-3 py-3">도로명주소</th>
-                    <th className="px-3 py-3">동</th>
-                    <th className="px-3 py-3">호수</th>
-                    <th className="px-3 py-3">공동현관</th>
-                    <th className="px-3 py-3">세대현관</th>
-                    <th className="px-3 py-3">거주자</th>
-                    <th className="px-3 py-3">연락처</th>
-                    <th className="px-3 py-3">입실일</th>
-                    <th className="px-3 py-3">퇴실예정일</th>
-                    <th className="px-3 py-3">담당 관리자</th>
-                    <th className="px-3 py-3">1주차</th>
-                    <th className="px-3 py-3">2주차</th>
-                    <th className="px-3 py-3">3주차</th>
-                    <th className="px-3 py-3">4주차</th>
-                    <th className="px-3 py-3">5주차</th>
-                    <th className="px-3 py-3">작업</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">#</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">지역</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">성별</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">기숙사명</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">도로명주소</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">동</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">호수</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">공동현관</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">세대현관</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">거주자</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">연락처</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">입실일</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">퇴실예정일</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">1주차</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">2주차</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">3주차</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">4주차</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">5주차</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">작업</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -12982,8 +12994,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(report.reportDate) || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{`${report.buildingName} ${report.dong}-${report.roomHo}`}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{report.cleanStatus}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{report.managerName || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{report.cleanerName || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(report.managerName || report.managerUserId || "")}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(report.cleanerName || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{report.beforePhotoDataUrls.length && report.afterPhotoDataUrls.length ? "완료" : "사진누락"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
                           <div className="flex gap-2">
@@ -14912,7 +14924,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <table className="w-full min-w-[1500px] text-sm text-center">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
-                    <th className="px-3 py-2">
+                    <th className="px-3 py-2 whitespace-nowrap leading-tight">
                       <input
                         type="checkbox"
                         checked={
@@ -14926,30 +14938,30 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         className="h-4 w-4"
                       />
                     </th>
-                    <th className="px-3 py-2 text-center">구분</th>
-                    <th className="px-3 py-2 text-center">접수일</th>
-                    <th className="px-3 py-2 text-center">기숙사관리자명</th>
-                    <th className="px-3 py-2 text-center">건물명</th>
-                    <th className="px-3 py-2 text-center">도로명주소</th>
-                    <th className="px-3 py-2 text-center">동</th>
-                    <th className="px-3 py-2 text-center">호수</th>
-                    <th className="px-3 py-2 text-center">공동현관</th>
-                    <th className="px-3 py-2 text-center">세대현관</th>
-                    <th className="px-3 py-2 text-center">상황</th>
-                    <th className="px-3 py-2 text-center">하자신청</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">구분</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">접수일</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">기숙사관리자명</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">건물명</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">도로명주소</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">동</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">호수</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">공동현관</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">세대현관</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">상황</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">하자신청</th>
 
                     {currentUser.role !== "maintenance_reporter" && (
                       <>
-                        <th className="px-3 py-2 text-center">점검자</th>
-                        <th className="px-3 py-2 text-center">완료내용</th>
+                        <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">점검자</th>
+                        <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">완료내용</th>
                       </>
                     )}
 
-                    <th className="px-3 py-2 text-center">접수사진</th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">접수사진</th>
                     {currentUser.role !== "maintenance_reporter" && (
-                      <th className="px-3 py-2 text-center">완료사진</th>
+                      <th className="px-3 py-2 text-center whitespace-nowrap leading-tight">완료사진</th>
                     )}
-                    <th className="px-3 py-2 text-centerer">작업</th>
+                    <th className="px-3 py-2 text-centerer whitespace-nowrap leading-tight">작업</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -14975,7 +14987,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       </td>
                       <td className="px-3 py-3 whitespace-nowrap font-medium">{idx + 1}</td>
                       <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(d.receiptDate) || "-"}</td>
-                      <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{d.dormManagerName}</td>
+                      <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(d.dormManagerName)}</td>
                       <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{d.buildingName}</td>
                       <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{d.roadAddress}</td>
                       <td className="px-3 py-3 whitespace-nowrap">{d.dong}</td>
