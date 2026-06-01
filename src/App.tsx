@@ -1852,21 +1852,124 @@ export default function App() {
       runLegacyLocalStorageMigration(tenantId);
 
       try {
+        // Step 1: Always load theme and users (no Supabase for these)
         const savedTheme = loadJson<ThemeSettings>(THEME_KEY, themeDefault, tenantId);
-
         setTheme({ ...themeDefault, ...savedTheme });
         const loadedUsers = loadJson<LoginUser[]>(USERS_KEY, [], tenantId);
         setUsers(loadedUsers);
-        setDorms(loadJson<Dorm[]>(DORMS_KEY, [], tenantId));
-        setOccupants(loadJson<Occupant[]>(OCCUPANTS_KEY, [], tenantId));
-        setInventory(loadJson<InventoryItem[]>(INVENTORY_KEY, [], tenantId));
-        setLeases(loadJson<LeaseContract[]>(LEASES_KEY, [], tenantId));
-        setDormContracts(loadJson<DormContract[]>(DORM_CONTRACTS_KEY, [], tenantId));
-        setCleaningReports(loadJson<CleaningReport[]>(CLEANING_REPORTS_KEY, [], tenantId));
-        setAuditLogs(loadJson<AuditLog[]>(AUDIT_LOGS_KEY, [], tenantId));
-        setNewHires(loadJson<NewHireEmployee[]>(NEW_HIRES_KEY, [], tenantId));
-        setSales(loadJson<SaleRecord[]>(SALES_KEY, [], tenantId));
-        setDefects(loadJson<DefectRequest[]>(DEFECTS_KEY, [], tenantId));
+
+        // Step 2: Try Supabase first; fall back to localStorage only if unavailable
+        let useSupabase = false;
+        if (isSupabaseAvailable()) {
+          const session = await getCurrentSession();
+          if (session?.user?.id) {
+            console.log("[LOAD] Supabase session found:", session.user.id);
+            useSupabase = true;
+            
+            // Load dorm module from Supabase
+            try {
+              const remoteDormModule = await loadDormModule(tenantId);
+              console.log("[LOAD] remoteDormModule loaded:", {
+                dorms: remoteDormModule?.dorms?.length || 0,
+                occupants: remoteDormModule?.occupants?.length || 0,
+                dormContracts: remoteDormModule?.dormContracts?.length || 0,
+                newHires: remoteDormModule?.newHires?.length || 0,
+              });
+              
+              // Always set state to Supabase result, even if empty
+              setDorms(remoteDormModule?.dorms || []);
+              setOccupants(remoteDormModule?.occupants || []);
+              setDormContracts(remoteDormModule?.dormContracts || []);
+              setNewHires(remoteDormModule?.newHires || []);
+              
+              // Sync Supabase data back to localStorage to prevent old fallback data
+              saveJson(DORMS_KEY, remoteDormModule?.dorms || [], tenantId);
+              saveJson(OCCUPANTS_KEY, remoteDormModule?.occupants || [], tenantId);
+              saveJson(DORM_CONTRACTS_KEY, remoteDormModule?.dormContracts || [], tenantId);
+              saveJson(NEW_HIRES_KEY, remoteDormModule?.newHires || [], tenantId);
+              console.log("[LOAD] Dorm module from Supabase: state set + localStorage synced");
+            } catch (dormError) {
+              console.error("[LOAD] Failed to load dorm module from Supabase:", dormError);
+              useSupabase = false;
+            }
+            
+            // Load operational module from Supabase
+            if (useSupabase) {
+              try {
+                const remoteOperationalModule = await loadOperationalModule(tenantId);
+                console.log("[LOAD] remoteOperationalModule loaded:", {
+                  cleaningReports: remoteOperationalModule?.cleaningReports?.length || 0,
+                  defects: remoteOperationalModule?.defects?.length || 0,
+                  inventory: remoteOperationalModule?.inventory?.length || 0,
+                  settlementRecords: remoteOperationalModule?.settlementRecords?.length || 0,
+                  settlementItems: remoteOperationalModule?.settlementItems?.length || 0,
+                  auditLogs: remoteOperationalModule?.auditLogs?.length || 0,
+                });
+                
+                // Always set state to Supabase result, even if empty
+                setCleaningReports(remoteOperationalModule?.cleaningReports || []);
+                setDefects(remoteOperationalModule?.defects || []);
+                setInventory(remoteOperationalModule?.inventory || []);
+                setSettlementRecords(remoteOperationalModule?.settlementRecords || []);
+                setSettlementItems((remoteOperationalModule?.settlementItems as unknown as SettlementItem[]) || []);
+                setAuditLogs(remoteOperationalModule?.auditLogs || []);
+                
+                // Sync Supabase data back to localStorage to prevent old fallback data
+                saveJson(CLEANING_REPORTS_KEY, remoteOperationalModule?.cleaningReports || [], tenantId);
+                saveJson(DEFECTS_KEY, remoteOperationalModule?.defects || [], tenantId);
+                saveJson(INVENTORY_KEY, remoteOperationalModule?.inventory || [], tenantId);
+                saveJson(SETTLEMENT_RECORDS_KEY, remoteOperationalModule?.settlementRecords || [], tenantId);
+                saveJson(SETTLEMENT_ITEMS_KEY, remoteOperationalModule?.settlementItems || [], tenantId);
+                saveJson(AUDIT_LOGS_KEY, remoteOperationalModule?.auditLogs || [], tenantId);
+                console.log("[LOAD] Operational module from Supabase: state set + localStorage synced");
+              } catch (operationalError) {
+                console.error("[LOAD] Failed to load operational module from Supabase:", operationalError);
+                useSupabase = false;
+              }
+            }
+            
+            // Load user profile
+            if (useSupabase) {
+              try {
+                const authUser = await getCurrentAuthUser();
+                const profile = await getProfile(session.user.id);
+                if (profile) {
+                  console.log("[LOAD] User profile loaded:", profile.id, profile.email);
+                  setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
+                  setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
+                }
+              } catch (profileError) {
+                console.error("[LOAD] Failed to load user profile:", profileError);
+              }
+            }
+          } else {
+            console.warn("[LOAD] No Supabase session found, falling back to localStorage");
+            useSupabase = false;
+          }
+        } else {
+          console.warn("[LOAD] Supabase not available, falling back to localStorage");
+          useSupabase = false;
+        }
+        
+        // Step 3: If Supabase not used, fall back to localStorage for core data
+        if (!useSupabase) {
+          console.log("[LOAD] Using localStorage as fallback");
+          setDorms(loadJson<Dorm[]>(DORMS_KEY, [], tenantId));
+          setOccupants(loadJson<Occupant[]>(OCCUPANTS_KEY, [], tenantId));
+          setInventory(loadJson<InventoryItem[]>(INVENTORY_KEY, [], tenantId));
+          setLeases(loadJson<LeaseContract[]>(LEASES_KEY, [], tenantId));
+          setDormContracts(loadJson<DormContract[]>(DORM_CONTRACTS_KEY, [], tenantId));
+          setCleaningReports(loadJson<CleaningReport[]>(CLEANING_REPORTS_KEY, [], tenantId));
+          setAuditLogs(loadJson<AuditLog[]>(AUDIT_LOGS_KEY, [], tenantId));
+          setNewHires(loadJson<NewHireEmployee[]>(NEW_HIRES_KEY, [], tenantId));
+          setSales(loadJson<SaleRecord[]>(SALES_KEY, [], tenantId));
+          setDefects(loadJson<DefectRequest[]>(DEFECTS_KEY, [], tenantId));
+          setSettlementRecords(loadJson<SettlementRecord[]>(SETTLEMENT_RECORDS_KEY, [], tenantId));
+          setSettlementItems(loadJson<SettlementItem[]>(SETTLEMENT_ITEMS_KEY, [], tenantId));
+          setCurrentUser(loadJson<LoginUser | null>(AUTH_KEY, null, tenantId));
+        }
+        
+        // Step 4: Always load settings and military data from localStorage
         setMilitaryPersonnel(loadJson<any[]>(MILITARY_PERSONNEL_KEY, [], tenantId));
         setMilitaryTrainingRecords(loadJson<any[]>(MILITARY_TRAINING_KEY, [], tenantId));
         setMilitaryNotices(loadJson<any[]>(MILITARY_NOTICES_KEY, [], tenantId));
@@ -1888,80 +1991,8 @@ export default function App() {
         setSystemSettings(
           loadSystemSettings(JSON.stringify(loadJson<SystemSettings>(SYSTEM_SETTINGS_KEY, getDefaultSystemSettings(), tenantId)), tenantId)
         );
-        setSettlementRecords(loadJson<SettlementRecord[]>(SETTLEMENT_RECORDS_KEY, [], tenantId));
-        setSettlementItems(loadJson<SettlementItem[]>(SETTLEMENT_ITEMS_KEY, [], tenantId));
-        setCurrentUser(loadJson<LoginUser | null>(AUTH_KEY, null, tenantId));
 
-        if (isSupabaseAvailable()) {
-          const session = await getCurrentSession();
-          if (session?.user?.id) {
-            console.log("[LOAD] Supabase session found:", session.user.id);
-            const remoteDormModule = await loadDormModule(tenantId);
-            console.log("[LOAD] remoteDormModule loaded:", {
-              dorms: remoteDormModule?.dorms?.length || 0,
-              occupants: remoteDormModule?.occupants?.length || 0,
-              dormContracts: remoteDormModule?.dormContracts?.length || 0,
-              newHires: remoteDormModule?.newHires?.length || 0,
-            });
-            console.log("[LOAD] contracts loaded:", remoteDormModule?.dormContracts?.length || 0);
-            console.log("[LOAD] newHires loaded:", remoteDormModule?.newHires?.length || 0);
-            if (remoteDormModule) {
-              console.log("[LOAD] Setting Dorm module state...");
-              setDorms(remoteDormModule.dorms);
-              setOccupants(remoteDormModule.occupants);
-              setDormContracts(remoteDormModule.dormContracts);
-              setNewHires(remoteDormModule.newHires);
-              console.log("[LOAD] Dorm module setState completed");
-              console.debug("[LOAD] newHires count (after set)", (remoteDormModule.newHires || []).length);
-              console.debug("[LOAD] occupants count (after set)", (remoteDormModule.occupants || []).length);
-              // persist remote dorm module to localStorage so fallback won't overwrite
-              saveJson(DORM_CONTRACTS_KEY, remoteDormModule.dormContracts || [], tenantId);
-              saveJson(NEW_HIRES_KEY, remoteDormModule.newHires || [], tenantId);
-            }
 
-            const remoteOperationalModule = await loadOperationalModule(tenantId);
-            console.log("[LOAD] remoteOperationalModule loaded:", {
-              cleaningReports: remoteOperationalModule?.cleaningReports?.length || 0,
-              defects: remoteOperationalModule?.defects?.length || 0,
-              inventory: remoteOperationalModule?.inventory?.length || 0,
-              settlementRecords: remoteOperationalModule?.settlementRecords?.length || 0,
-              settlementItems: remoteOperationalModule?.settlementItems?.length || 0,
-              auditLogs: remoteOperationalModule?.auditLogs?.length || 0,
-            });
-            if (remoteOperationalModule) {
-              console.log("[LOAD] Setting Operational module state...");
-              setCleaningReports(remoteOperationalModule.cleaningReports || []);
-              setDefects(remoteOperationalModule.defects || []);
-              setInventory(remoteOperationalModule.inventory || []);
-              setSettlementRecords(remoteOperationalModule.settlementRecords || []);
-              setSettlementItems((remoteOperationalModule.settlementItems as unknown as SettlementItem[]) || []);
-              setAuditLogs(remoteOperationalModule.auditLogs || []);
-              console.log("[LOAD] Operational module setState completed");
-              console.log("[LOAD] Syncing Supabase data to localStorage...");
-              saveJson(CLEANING_REPORTS_KEY, remoteOperationalModule.cleaningReports || [], tenantId);
-              saveJson(DEFECTS_KEY, remoteOperationalModule.defects || [], tenantId);
-              saveJson(INVENTORY_KEY, remoteOperationalModule.inventory || [], tenantId);
-              saveJson(SETTLEMENT_RECORDS_KEY, remoteOperationalModule.settlementRecords || [], tenantId);
-              saveJson(SETTLEMENT_ITEMS_KEY, remoteOperationalModule.settlementItems || [], tenantId);
-              saveJson(AUDIT_LOGS_KEY, remoteOperationalModule.auditLogs || [], tenantId);
-              console.log("[LOAD] localStorage sync completed");
-            } else {
-              console.warn("[LOAD] remoteOperationalModule is null/undefined, using localStorage fallback");
-            }
-
-            const authUser = await getCurrentAuthUser();
-            const profile = await getProfile(session.user.id);
-            if (profile) {
-              console.log("[LOAD] User profile loaded:", profile.id, profile.email);
-              setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
-              setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
-            }
-          } else {
-            console.warn("[LOAD] No Supabase session found");
-          }
-        } else {
-          console.warn("[LOAD] Supabase not available");
-        }
       } catch (error) {
       console.error("초기 데이터 로딩 중 오류가 발생했습니다:", error);
       setTheme(themeDefault);

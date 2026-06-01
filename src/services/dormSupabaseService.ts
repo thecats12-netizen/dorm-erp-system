@@ -9,36 +9,39 @@ export type DormModuleState = {
   newHires: NewHireEmployee[];
 };
 
-const toDbDorm = (dorm: Dorm, tenantId: string, userId: string) => ({
-  id: dorm.id,
-  tenant_id: tenantId,
-  site: dorm.site,
-  gender: dorm.gender,
-  building_name: dorm.buildingName,
-  address: dorm.address,
-  dong: dorm.dong,
-  room_ho: dorm.roomHo,
-  pyeong: dorm.pyeong,
-  capacity: dorm.capacity,
-  manager_user_id: dorm.managerUserId || null,
-  contract_start: dorm.contractStart || null,
-  contract_end: dorm.contractEnd || null,
-  contract_amount: dorm.contractAmount,
-  lease_status: dorm.leaseStatus,
-  shared_entry: dorm["공동현관"] || null,
-  unit_entry: dorm["세대현관"] || null,
-  prepayment_deposit: dorm.prepaymentDeposit ?? null,
-  real_estate_name: dorm.realEstateName,
-  balance_date: dorm.balanceDate,
-  notes: dorm.notes,
-  is_deleted: dorm.isDeleted ?? false,
-  deleted_at: dorm.deletedAt || null,
-  deleted_by: dorm.deletedBy || null,
-  created_by: userId,
-  updated_by: userId,
-  created_at: dorm.createdAt || new Date().toISOString(),
-  updated_at: dorm.updatedAt || new Date().toISOString(),
-});
+const toDbDorm = (dorm: Dorm, tenantId: string, userId: string) => {
+  const payload = {
+    id: dorm.id,
+    tenant_id: tenantId,
+    site: dorm.site,
+    gender: dorm.gender,
+    building_name: dorm.buildingName,
+    address: dorm.address,
+    dong: dorm.dong,
+    room_ho: dorm.roomHo,
+    pyeong: dorm.pyeong,
+    capacity: safeNumberOrNull(dorm.capacity) ?? 0,
+    manager_user_id: dorm.managerUserId || null,
+    contract_start: safeDateOrNull(dorm.contractStart),
+    contract_end: safeDateOrNull(dorm.contractEnd),
+    contract_amount: dorm.contractAmount || null,
+    lease_status: dorm.leaseStatus,
+    shared_entry: dorm["공동현관"] || null,
+    unit_entry: dorm["세대현관"] || null,
+    prepayment_deposit: safeNumberOrNull(dorm.prepaymentDeposit) ?? 0,
+    real_estate_name: dorm.realEstateName || null,
+    balance_date: safeDateOrNull(dorm.balanceDate),
+    notes: dorm.notes || null,
+    is_deleted: dorm.isDeleted ?? false,
+    deleted_at: safeDateOrNull(dorm.deletedAt),
+    deleted_by: dorm.deletedBy || null,
+    created_by: userId,
+    updated_by: userId,
+    created_at: dorm.createdAt || new Date().toISOString(),
+    updated_at: dorm.updatedAt || new Date().toISOString(),
+  };
+  return payload;
+};
 
 const toDomainDorm = (row: any): Dorm => ({
   id: row.id,
@@ -201,6 +204,16 @@ const safeNumberOrNull = (value: string | number | null | undefined): number | n
   return null;
 };
 
+const safeDateOrNull = (value: string | null | undefined): string | null => {
+  if (value === null || value === undefined) return null;
+  const trimmed = String(value).trim();
+  if (trimmed === "" || trimmed === "-") return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+    return trimmed;
+  }
+  return null;
+};
+
 const toDbNewHire = (hire: NewHireEmployee, tenantId: string, userId: string) => ({
   id: hire.id,
   tenant_id: tenantId,
@@ -316,16 +329,25 @@ export const saveDormModule = async (
   });
 
   const errors: string[] = [];
+  let dormsPayload: any[] = [];
 
   // Save each table independently so one failure doesn't abort the whole save
   try {
-    const { error } = await supabase!.from("dorms").upsert(payload.dorms.map((d) => toDbDorm(d, payload.tenantId, userId)), { onConflict: "id" });
+    dormsPayload = payload.dorms.map((d) => toDbDorm(d, payload.tenantId, userId));
+    console.debug("[DORM_SAVE_PAYLOAD] dorms upsert payload count:", dormsPayload.length);
+    if (dormsPayload.length > 0) {
+      console.debug("[DORM_SAVE_PAYLOAD] first dorm:", JSON.stringify(dormsPayload[0], null, 2));
+    }
+    const { error } = await supabase!.from("dorms").upsert(dormsPayload, { onConflict: "id" });
     if (error) {
-      console.error("Dorms upsert error:", error);
+      console.error("[DORM_ERROR] Dorms upsert error:", error);
+      console.error("[DORM_ERROR] Problematic payload:", dormsPayload);
       errors.push(`dorms:${error.message || error}`);
     }
   } catch (e: any) {
-    console.error("Dorms upsert exception:", e);
+    console.error("[DORM_ERROR] Dorms upsert exception:", e);
+    console.error("[DORM_ERROR] Exception details - payload length:", dormsPayload.length);
+    console.error("[DORM_ERROR] First dorm in payload:", dormsPayload[0]);
     errors.push(`dorms:${e.message || String(e)}`);
   }
 
