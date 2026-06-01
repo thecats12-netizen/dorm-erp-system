@@ -1067,6 +1067,7 @@ export default function App() {
   const [militaryTrainingRules, setMilitaryTrainingRules] = useState<any[]>([]);
   const [militaryCodeValues, setMilitaryCodeValues] = useState<MilitaryCodeValues>(defaultMilitaryCodeValues);
   const [militaryTrainingAutoConfig, setMilitaryTrainingAutoConfig] = useState<{ enabled: boolean; targetStatuses: string[] }>({ enabled: true, targetStatuses: ["재직"] });
+  const realtimeUpdateSourceRef = useRef<Set<string>>(new Set());
 
   const applyRealtimeUpdate = <T extends { id: string }>(prev: T[], row: any, toDomain: (row: any) => T): T[] => {
     if (!row?.id) return prev;
@@ -1291,8 +1292,16 @@ export default function App() {
   });
 
   const handleRealtimeTableRow = (table: string, payload: any) => {
-    const row = payload.eventType === "DELETE" ? payload.old_record : payload.record;
+    const eventType = payload.eventType || payload.event;
+    const row = eventType === "DELETE" ? payload.old_record : payload.record;
     if (!row || row.tenant_id !== tenantId) return;
+
+    if (["dorms", "occupants", "new_hires", "dorm_contracts"].includes(table)) {
+      realtimeUpdateSourceRef.current.add("dorm_module");
+    }
+    if (["cleaning_reports", "defect_requests", "inventory_items"].includes(table)) {
+      realtimeUpdateSourceRef.current.add("operational_module");
+    }
 
     switch (table) {
       case "dorms":
@@ -2947,7 +2956,7 @@ export default function App() {
   // 기숙사별 현재 거주중 인원 계산
   const getCurrentResidentCount = (dormId: string): number => {
     return occupants.filter(
-      (occ) => occ.dormId === dormId && occ.status === "거주중"
+      (occ) => occ.dormId === dormId && !occ.isDeleted && occ.status !== "퇴실"
     ).length;
   };
 
@@ -3271,8 +3280,12 @@ export default function App() {
         newHires: newHires.length,
         occupants: occupants.length,
       });
-      // Do not run Supabase save during initial loading to avoid overwriting remote data with local fallback
+      // Do not run Supabase save during initial loading or when the change originated from realtime.
       if (isLoading) return;
+      if (realtimeUpdateSourceRef.current.has("dorm_module")) {
+        realtimeUpdateSourceRef.current.delete("dorm_module");
+        return;
+      }
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
 
@@ -3313,6 +3326,10 @@ export default function App() {
 
     const timer = setTimeout(async () => {
       if (isLoading) return;
+      if (realtimeUpdateSourceRef.current.has("operational_module")) {
+        realtimeUpdateSourceRef.current.delete("operational_module");
+        return;
+      }
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
 
