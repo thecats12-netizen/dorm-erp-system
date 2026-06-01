@@ -2960,24 +2960,46 @@ export default function App() {
   }, [dorms, users]);
 
   useEffect(() => {
+    if (isLoading) return;
     saveJson(CUSTOM_TEMPLATES_KEY, customTemplates, tenantId);
-  }, [customTemplates, tenantId]);
+  }, [customTemplates, tenantId, isLoading]);
 
-  useEffect(() => saveJson(THEME_KEY, theme, tenantId), [theme, tenantId]);
-  useEffect(() => saveJson(USERS_KEY, users, tenantId), [users, tenantId]);
-  useEffect(() => saveJson(DORMS_KEY, dorms, tenantId), [dorms, tenantId]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(THEME_KEY, theme, tenantId);
+  }, [theme, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(USERS_KEY, users, tenantId);
+  }, [users, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(DORMS_KEY, dorms, tenantId);
+  }, [dorms, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
     saveJson(OCCUPANTS_KEY, occupants, tenantId);
   }, [occupants, tenantId, isLoading]);
-  useEffect(() => saveJson(INVENTORY_KEY, inventory, tenantId), [inventory, tenantId]);
-  useEffect(() => saveJson(LEASES_KEY, leases, tenantId), [leases, tenantId]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(INVENTORY_KEY, inventory, tenantId);
+  }, [inventory, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(LEASES_KEY, leases, tenantId);
+  }, [leases, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
     saveJson(DORM_CONTRACTS_KEY, dormContracts, tenantId);
   }, [dormContracts, tenantId, isLoading]);
-  useEffect(() => saveJson(CLEANING_REPORTS_KEY, cleaningReports, tenantId), [cleaningReports, tenantId]);
-  useEffect(() => saveJson(CLEANING_SETTINGS_KEY, cleaningSettings, tenantId), [cleaningSettings, tenantId]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(CLEANING_REPORTS_KEY, cleaningReports, tenantId);
+  }, [cleaningReports, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(CLEANING_SETTINGS_KEY, cleaningSettings, tenantId);
+  }, [cleaningSettings, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
     saveJson(NEW_HIRES_KEY, newHires, tenantId);
@@ -3035,6 +3057,7 @@ export default function App() {
     if (!isSupabaseAvailable()) return;
 
     const timer = setTimeout(async () => {
+      if (isLoading) return;
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
 
@@ -3077,8 +3100,14 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [cleaningReports, defects, inventory, settlementRecords, settlementItems, auditLogs, tenantId]);
 
-  useEffect(() => saveJson(SETTLEMENT_RECORDS_KEY, settlementRecords, tenantId), [settlementRecords, tenantId]);
-  useEffect(() => saveJson(SETTLEMENT_ITEMS_KEY, settlementItems, tenantId), [settlementItems, tenantId]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(SETTLEMENT_RECORDS_KEY, settlementRecords, tenantId);
+  }, [settlementRecords, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(SETTLEMENT_ITEMS_KEY, settlementItems, tenantId);
+  }, [settlementItems, tenantId, isLoading]);
 
   useEffect(() => {
     if (!newHires.length) return;
@@ -3087,17 +3116,50 @@ export default function App() {
     );
   }, [newHires]);
 
-  useEffect(() => saveJson(SALES_KEY, sales, tenantId), [sales, tenantId]);
-  useEffect(() => saveJson(DEFECTS_KEY, defects, tenantId), [defects, tenantId]);
-  useEffect(() => saveJson(AUDIT_LOGS_KEY, auditLogs, tenantId), [auditLogs, tenantId]);
-  useEffect(() => saveJson(MILITARY_PERSONNEL_KEY, militaryPersonnel, tenantId), [militaryPersonnel, tenantId]);
-  useEffect(() => saveJson(MILITARY_TRAINING_KEY, militaryTrainingRecords, tenantId), [militaryTrainingRecords, tenantId]);
-  useEffect(() => saveJson(MILITARY_NOTICES_KEY, militaryNotices, tenantId), [militaryNotices, tenantId]);
-  useEffect(() => saveJson(MILITARY_REPORTS_KEY, militaryReports, tenantId), [militaryReports, tenantId]);
-  useEffect(() => saveJson(MILITARY_SETTINGS_KEY, militarySettings, tenantId), [militarySettings, tenantId]);
-  useEffect(() => saveJson(MILITARY_TRAINING_RULES_KEY, militaryTrainingRules, tenantId), [militaryTrainingRules, tenantId]);
-  useEffect(() => saveJson(MILITARY_CODE_VALUES_KEY, militaryCodeValues, tenantId), [militaryCodeValues, tenantId]);
-  useEffect(() => saveJson(MILITARY_TRAINING_AUTOCREATE_KEY, militaryTrainingAutoConfig, tenantId), [militaryTrainingAutoConfig, tenantId]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(SALES_KEY, sales, tenantId);
+  }, [sales, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(DEFECTS_KEY, defects, tenantId);
+  }, [defects, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(AUDIT_LOGS_KEY, auditLogs, tenantId);
+  }, [auditLogs, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(MILITARY_PERSONNEL_KEY, militaryPersonnel, tenantId);
+  }, [militaryPersonnel, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(MILITARY_TRAINING_KEY, militaryTrainingRecords, tenantId);
+  }, [militaryTrainingRecords, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(MILITARY_NOTICES_KEY, militaryNotices, tenantId);
+  }, [militaryNotices, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(MILITARY_REPORTS_KEY, militaryReports, tenantId);
+  }, [militaryReports, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(MILITARY_SETTINGS_KEY, militarySettings, tenantId);
+  }, [militarySettings, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(MILITARY_TRAINING_RULES_KEY, militaryTrainingRules, tenantId);
+  }, [militaryTrainingRules, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(MILITARY_CODE_VALUES_KEY, militaryCodeValues, tenantId);
+  }, [militaryCodeValues, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
+    saveJson(MILITARY_TRAINING_AUTOCREATE_KEY, militaryTrainingAutoConfig, tenantId);
+  }, [militaryTrainingAutoConfig, tenantId, isLoading]);
 
   const computeRequiredTraining = (person: MilitaryPersonnel) => {
     try {
@@ -3150,15 +3212,19 @@ export default function App() {
     if (/(완료|이수|completed)/i.test(status)) return "완료";
     return "미이수";
   };
-  useEffect(() => saveJson(SYSTEM_SETTINGS_KEY, systemSettings, tenantId), [systemSettings, tenantId]);
   useEffect(() => {
+    if (isLoading) return;
+    saveJson(SYSTEM_SETTINGS_KEY, systemSettings, tenantId);
+  }, [systemSettings, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
     if (currentUser) {
       const { password: _p, ...safeUser } = currentUser;
       saveJson(AUTH_KEY, safeUser, tenantId);
     } else {
       removeJson(AUTH_KEY, tenantId);
     }
-  }, [currentUser, tenantId]);
+  }, [currentUser, tenantId, isLoading]);
 
   const operationalDorms = useMemo<OperationalDorm[]>(() => {
     const latestContractByDorm = new Map<string, DormContract>();
