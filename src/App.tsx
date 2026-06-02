@@ -10161,11 +10161,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 {canEditData(currentUser) && selectedDormContractIds.length > 0 && (
                   <button
                     onClick={() => {
-                      if (softDeleteItems(dormContracts, setDormContracts, selectedDormContractIds, "dormContract")) {
-                        setSelectedDormContractIds([]);
-                        // 편집/모달 상태가 삭제된 항목을 참조하지 않도록 초기화
-                        setEditingDormContractId(null);
-                        setShowDormContractForm(false);
+                      const idsToDelete = selectedDormContractIds;
+                      setSelectedDormContractIds([]);
+                      setEditingDormContractId(null);
+                      setShowDormContractForm(false);
+                      if (softDeleteItems(dormContracts, setDormContracts, idsToDelete, "dormContract")) {
+                        // selection already cleared before delete
                       }
                     }}
                     className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
@@ -10185,10 +10186,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <input
                           type="checkbox"
                           checked={visibleDormContracts.length > 0 && selectedDormContractIds.length === visibleDormContracts.length}
+                          onClick={(e) => e.stopPropagation()}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              const ids = visibleDormContracts.map((c) => c.id).filter(Boolean);
-                              setSelectedDormContractIds((prev) => Array.from(new Set([...prev, ...ids])));
+                              setSelectedDormContractIds(visibleDormContracts.map((c) => c.id));
                             } else {
                               setSelectedDormContractIds([]);
                             }
@@ -10235,10 +10236,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           <input
                             type="checkbox"
                             checked={selectedDormContractIds.includes(c.id)}
+                            onClick={(e) => e.stopPropagation()}
                             onChange={(e) =>
-                              e.target.checked
-                                ? setSelectedDormContractIds((prev) => Array.from(new Set([...prev, c.id])))
-                                : setSelectedDormContractIds((prev) => prev.filter((id) => id !== c.id))
+                              setSelectedDormContractIds((prev) => {
+                                const next = prev.filter((id) => id !== c.id);
+                                return e.target.checked ? [...next, c.id] : next;
+                              })
                             }
                             className="h-5 w-5"
                           />
@@ -10385,13 +10388,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 {canEditData(currentUser) && selectedNewHireIds.length > 0 && (
                   <button
                     onClick={() => {
-                      if (softDeleteItems(newHires, setNewHires, selectedNewHireIds, "newHire")) {
-                        setSelectedNewHireIds([]);
-                        // 편집/모달 상태가 삭제된 항목을 참조하지 않도록 초기화
-                        setEditingNewHireId(null);
-                        setShowNewHireForm(false);
-                        setAssigningNewHireId(null);
-                        setShowAssignDormForNewHire(false);
+                      const idsToDelete = selectedNewHireIds;
+                      setSelectedNewHireIds([]);
+                      setEditingNewHireId(null);
+                      setShowNewHireForm(false);
+                      setAssigningNewHireId(null);
+                      setShowAssignDormForNewHire(false);
+                      if (softDeleteItems(newHires, setNewHires, idsToDelete, "newHire")) {
+                        // selection already cleared before delete
                       }
                     }}
                     className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
@@ -10411,10 +10415,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <input
                           type="checkbox"
                           checked={visibleNewHires.length > 0 && selectedNewHireIds.length === visibleNewHires.length}
+                          onClick={(e) => e.stopPropagation()}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              const ids = visibleNewHires.map((h) => h.id).filter(Boolean);
-                              setSelectedNewHireIds((prev) => Array.from(new Set([...prev, ...ids])));
+                              setSelectedNewHireIds(visibleNewHires.map((h) => h.id));
                             } else {
                               setSelectedNewHireIds([]);
                             }
@@ -10460,10 +10464,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           <input
                             type="checkbox"
                             checked={selectedNewHireIds.includes(h.id)}
+                            onClick={(e) => e.stopPropagation()}
                             onChange={(e) =>
-                              e.target.checked
-                                ? setSelectedNewHireIds((prev) => Array.from(new Set([...prev, h.id])))
-                                : setSelectedNewHireIds((prev) => prev.filter((id) => id !== h.id))
+                              setSelectedNewHireIds((prev) => {
+                                const next = prev.filter((id) => id !== h.id);
+                                return e.target.checked ? [...next, h.id] : next;
+                              })
                             }
                             className="h-5 w-5"
                           />
