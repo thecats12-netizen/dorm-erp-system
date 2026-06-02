@@ -1882,12 +1882,8 @@ export default function App() {
               setDormContracts(remoteDormModule?.dormContracts || []);
               setNewHires(remoteDormModule?.newHires || []);
               
-              // Sync Supabase data back to localStorage to prevent old fallback data
-              saveJson(DORMS_KEY, remoteDormModule?.dorms || [], tenantId);
-              saveJson(OCCUPANTS_KEY, remoteDormModule?.occupants || [], tenantId);
-              saveJson(DORM_CONTRACTS_KEY, remoteDormModule?.dormContracts || [], tenantId);
-              saveJson(NEW_HIRES_KEY, remoteDormModule?.newHires || [], tenantId);
-              console.log("[LOAD] Dorm module from Supabase: state set + localStorage synced");
+              // Use Supabase as source of truth. Do NOT overwrite localStorage with Supabase results.
+              console.log("[LOAD] Dorm module from Supabase: state set (not syncing to localStorage)");
             } catch (dormError) {
               console.error("[LOAD] Failed to load dorm module from Supabase:", dormError);
               useSupabase = false;
@@ -1914,14 +1910,8 @@ export default function App() {
                 setSettlementItems((remoteOperationalModule?.settlementItems as unknown as SettlementItem[]) || []);
                 setAuditLogs(remoteOperationalModule?.auditLogs || []);
                 
-                // Sync Supabase data back to localStorage to prevent old fallback data
-                saveJson(CLEANING_REPORTS_KEY, remoteOperationalModule?.cleaningReports || [], tenantId);
-                saveJson(DEFECTS_KEY, remoteOperationalModule?.defects || [], tenantId);
-                saveJson(INVENTORY_KEY, remoteOperationalModule?.inventory || [], tenantId);
-                saveJson(SETTLEMENT_RECORDS_KEY, remoteOperationalModule?.settlementRecords || [], tenantId);
-                saveJson(SETTLEMENT_ITEMS_KEY, remoteOperationalModule?.settlementItems || [], tenantId);
-                saveJson(AUDIT_LOGS_KEY, remoteOperationalModule?.auditLogs || [], tenantId);
-                console.log("[LOAD] Operational module from Supabase: state set + localStorage synced");
+                // Use Supabase as source of truth for operational module. Do NOT sync to localStorage.
+                console.log("[LOAD] Operational module from Supabase: state set (not syncing to localStorage)");
               } catch (operationalError) {
                 console.error("[LOAD] Failed to load operational module from Supabase:", operationalError);
                 useSupabase = false;
@@ -1951,22 +1941,22 @@ export default function App() {
           useSupabase = false;
         }
         
-        // Step 3: If Supabase not used, fall back to localStorage for core data
+        // Step 3: If Supabase not used, clear Supabase-linked state to enforce Supabase as single source of truth.
         if (!useSupabase) {
-          console.log("[LOAD] Using localStorage as fallback");
-          setDorms(loadJson<Dorm[]>(DORMS_KEY, [], tenantId));
-          setOccupants(loadJson<Occupant[]>(OCCUPANTS_KEY, [], tenantId));
-          setInventory(loadJson<InventoryItem[]>(INVENTORY_KEY, [], tenantId));
-          setLeases(loadJson<LeaseContract[]>(LEASES_KEY, [], tenantId));
-          setDormContracts(loadJson<DormContract[]>(DORM_CONTRACTS_KEY, [], tenantId));
-          setCleaningReports(loadJson<CleaningReport[]>(CLEANING_REPORTS_KEY, [], tenantId));
-          setAuditLogs(loadJson<AuditLog[]>(AUDIT_LOGS_KEY, [], tenantId));
-          setNewHires(loadJson<NewHireEmployee[]>(NEW_HIRES_KEY, [], tenantId));
-          setSales(loadJson<SaleRecord[]>(SALES_KEY, [], tenantId));
-          setDefects(loadJson<DefectRequest[]>(DEFECTS_KEY, [], tenantId));
-          setSettlementRecords(loadJson<SettlementRecord[]>(SETTLEMENT_RECORDS_KEY, [], tenantId));
-          setSettlementItems(loadJson<SettlementItem[]>(SETTLEMENT_ITEMS_KEY, [], tenantId));
-          setCurrentUser(loadJson<LoginUser | null>(AUTH_KEY, null, tenantId));
+          console.log("[LOAD] Supabase unavailable or no session; clearing Supabase-linked state (no localStorage fallback)");
+          setDorms([]);
+          setOccupants([]);
+          setInventory([]);
+          setLeases([]);
+          setDormContracts([]);
+          setCleaningReports([]);
+          setAuditLogs([]);
+          setNewHires([]);
+          setSales([]);
+          setDefects([]);
+          setSettlementRecords([]);
+          setSettlementItems([]);
+          setCurrentUser(null);
         }
         
         // Step 4: Always load settings and military data from localStorage
@@ -3269,27 +3259,27 @@ export default function App() {
   }, [users, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(DORMS_KEY, dorms, tenantId);
+    if (!isSupabaseAvailable()) saveJson(DORMS_KEY, dorms, tenantId);
   }, [dorms, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(OCCUPANTS_KEY, occupants, tenantId);
+    if (!isSupabaseAvailable()) saveJson(OCCUPANTS_KEY, occupants, tenantId);
   }, [occupants, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(INVENTORY_KEY, inventory, tenantId);
+    if (!isSupabaseAvailable()) saveJson(INVENTORY_KEY, inventory, tenantId);
   }, [inventory, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(LEASES_KEY, leases, tenantId);
+    if (!isSupabaseAvailable()) saveJson(LEASES_KEY, leases, tenantId);
   }, [leases, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(DORM_CONTRACTS_KEY, dormContracts, tenantId);
+    if (!isSupabaseAvailable()) saveJson(DORM_CONTRACTS_KEY, dormContracts, tenantId);
   }, [dormContracts, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(CLEANING_REPORTS_KEY, cleaningReports, tenantId);
+    if (!isSupabaseAvailable()) saveJson(CLEANING_REPORTS_KEY, cleaningReports, tenantId);
   }, [cleaningReports, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
@@ -3297,7 +3287,7 @@ export default function App() {
   }, [cleaningSettings, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(NEW_HIRES_KEY, newHires, tenantId);
+    if (!isSupabaseAvailable()) saveJson(NEW_HIRES_KEY, newHires, tenantId);
   }, [newHires, tenantId, isLoading]);
 
   useEffect(() => {
@@ -3466,11 +3456,11 @@ export default function App() {
 
   useEffect(() => {
     if (isLoading) return;
-    saveJson(SETTLEMENT_RECORDS_KEY, settlementRecords, tenantId);
+    if (!isSupabaseAvailable()) saveJson(SETTLEMENT_RECORDS_KEY, settlementRecords, tenantId);
   }, [settlementRecords, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(SETTLEMENT_ITEMS_KEY, settlementItems, tenantId);
+    if (!isSupabaseAvailable()) saveJson(SETTLEMENT_ITEMS_KEY, settlementItems, tenantId);
   }, [settlementItems, tenantId, isLoading]);
 
   useEffect(() => {
@@ -3486,11 +3476,11 @@ export default function App() {
   }, [sales, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(DEFECTS_KEY, defects, tenantId);
+    if (!isSupabaseAvailable()) saveJson(DEFECTS_KEY, defects, tenantId);
   }, [defects, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(AUDIT_LOGS_KEY, auditLogs, tenantId);
+    if (!isSupabaseAvailable()) saveJson(AUDIT_LOGS_KEY, auditLogs, tenantId);
   }, [auditLogs, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
@@ -7658,7 +7648,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
     if (hasChanges) {
       setOccupants(updatedOccupants);
-      saveJson(OCCUPANTS_KEY, updatedOccupants, tenantId);
+      if (!isSupabaseAvailable()) saveJson(OCCUPANTS_KEY, updatedOccupants, tenantId);
     }
   }, [dormContracts, occupants, currentUser?.displayName, tenantId]);
 
@@ -7683,11 +7673,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       if (log.targetType === "dormContract") {
         const updated = dormContracts.map((c) => (c.id === log.targetId ? beforeData : c));
         setDormContracts(updated);
-        saveJson(DORM_CONTRACTS_KEY, updated, tenantId);
+        if (!isSupabaseAvailable()) saveJson(DORM_CONTRACTS_KEY, updated, tenantId);
       } else if (log.targetType === "occupant") {
         const updated = occupants.map((o) => (o.id === log.targetId ? beforeData : o));
         setOccupants(updated);
-        saveJson(OCCUPANTS_KEY, updated, tenantId);
+        if (!isSupabaseAvailable()) saveJson(OCCUPANTS_KEY, updated, tenantId);
       }
 
       createAuditLog({
@@ -11262,15 +11252,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         setSelectedDormForAssignment("");
                         setSelectedNewHiresForAssignment([]);
 
-                        // 로컬스토리지 저장
-                        saveJson(NEW_HIRES_KEY, updatedNewHires, tenantId);
-                        saveJson(OCCUPANTS_KEY, [
-                          ...occupants.map(o => {
-                            const newOccupant = newOccupants.find(no => no.sourceNewHireId === o.sourceNewHireId);
-                            return newOccupant || o;
-                          }),
-                          ...newOccupants.filter(no => !occupants.find(o => o.sourceNewHireId === no.sourceNewHireId))
-                        ], tenantId);
+                        // 로컬스토리지 저장 (Supabase가 사용 중이면 쓰지 않음)
+                        if (!isSupabaseAvailable()) {
+                          saveJson(NEW_HIRES_KEY, updatedNewHires, tenantId);
+                          saveJson(
+                            OCCUPANTS_KEY,
+                            [
+                              ...occupants.map((o) => {
+                                const newOccupant = newOccupants.find((no) => no.sourceNewHireId === o.sourceNewHireId);
+                                return newOccupant || o;
+                              }),
+                              ...newOccupants.filter((no) => !occupants.find((o) => o.sourceNewHireId === no.sourceNewHireId)),
+                            ],
+                            tenantId
+                          );
+                        }
                       }}
                       className="rounded-2xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white hover:bg-blue-500"
                     >
