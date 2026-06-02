@@ -3979,6 +3979,24 @@ export default function App() {
     });
   }, [newHires, newHireSearch, newHireSiteFilter, newHireGenderFilter, newHireAssignmentFilter, currentUser]);
 
+  useEffect(() => {
+    if (selectedDormContractIds.length === 0) return;
+    const visibleIds = new Set(visibleDormContracts.map((c) => c.id));
+    const sanitizedIds = selectedDormContractIds.filter((id) => visibleIds.has(id));
+    if (sanitizedIds.length !== selectedDormContractIds.length) {
+      setSelectedDormContractIds(sanitizedIds);
+    }
+  }, [visibleDormContracts, selectedDormContractIds]);
+
+  useEffect(() => {
+    if (selectedNewHireIds.length === 0) return;
+    const visibleIds = new Set(visibleNewHires.map((h) => h.id));
+    const sanitizedIds = selectedNewHireIds.filter((id) => visibleIds.has(id));
+    if (sanitizedIds.length !== selectedNewHireIds.length) {
+      setSelectedNewHireIds(sanitizedIds);
+    }
+  }, [visibleNewHires, selectedNewHireIds]);
+
   const visibleOccupants = useMemo(() => {
     return occupants.filter((o) => {
       if (o.isDeleted) return false;
@@ -7706,7 +7724,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     if (ids.length === 0) return false;
     if (!confirm("삭제할까요?")) return false;
     const now = new Date().toISOString();
-    const deletedBy = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
+    const deletedBy = currentUser?.id || currentUser?.username || currentUser?.displayName || "";
     const beforeMap = new Map(items.filter((entry) => ids.includes(entry.id)).map((entry) => [entry.id, entry]));
 
     setter((prev) =>
@@ -10168,8 +10186,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           type="checkbox"
                           checked={visibleDormContracts.length > 0 && selectedDormContractIds.length === visibleDormContracts.length}
                           onChange={(e) => {
-                            if (e.target.checked) setSelectedDormContractIds(visibleDormContracts.map((c) => c.id));
-                            else setSelectedDormContractIds([]);
+                            if (e.target.checked) {
+                              const ids = visibleDormContracts.map((c) => c.id).filter(Boolean);
+                              setSelectedDormContractIds((prev) => Array.from(new Set([...prev, ...ids])));
+                            } else {
+                              setSelectedDormContractIds([]);
+                            }
                           }}
                           className="h-5 w-5"
                         />
@@ -10215,7 +10237,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             checked={selectedDormContractIds.includes(c.id)}
                             onChange={(e) =>
                               e.target.checked
-                                ? setSelectedDormContractIds((prev) => [...prev, c.id])
+                                ? setSelectedDormContractIds((prev) => Array.from(new Set([...prev, c.id])))
                                 : setSelectedDormContractIds((prev) => prev.filter((id) => id !== c.id))
                             }
                             className="h-5 w-5"
@@ -10390,8 +10412,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           type="checkbox"
                           checked={visibleNewHires.length > 0 && selectedNewHireIds.length === visibleNewHires.length}
                           onChange={(e) => {
-                            if (e.target.checked) setSelectedNewHireIds(visibleNewHires.map((h) => h.id));
-                            else setSelectedNewHireIds([]);
+                            if (e.target.checked) {
+                              const ids = visibleNewHires.map((h) => h.id).filter(Boolean);
+                              setSelectedNewHireIds((prev) => Array.from(new Set([...prev, ...ids])));
+                            } else {
+                              setSelectedNewHireIds([]);
+                            }
                           }}
                           className="h-5 w-5"
                         />
@@ -10436,7 +10462,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             checked={selectedNewHireIds.includes(h.id)}
                             onChange={(e) =>
                               e.target.checked
-                                ? setSelectedNewHireIds((prev) => [...prev, h.id])
+                                ? setSelectedNewHireIds((prev) => Array.from(new Set([...prev, h.id])))
                                 : setSelectedNewHireIds((prev) => prev.filter((id) => id !== h.id))
                             }
                             className="h-5 w-5"
