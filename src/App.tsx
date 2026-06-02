@@ -8169,7 +8169,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   }
 
     return (
-      <div className={`min-h-screen ${theme.darkMode ? "dark-mode bg-slate-950 text-slate-100" : "bg-slate-50 text-slate-900"}`}>
+      <div className={`min-h-screen notranslate ${theme.darkMode ? "dark-mode bg-slate-950 text-slate-100" : "bg-slate-50 text-slate-900"}`} translate="no">
         {operationalSyncError && (
           <div className={`fixed inset-x-0 top-0 z-50 border-b px-4 py-3 text-sm font-medium ${theme.darkMode ? "border-rose-700 bg-rose-900 text-rose-100" : "border-rose-200 bg-rose-50 text-rose-900"}`}>
             Supabase operational sync failed: {operationalSyncError}
