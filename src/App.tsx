@@ -10145,6 +10145,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     onClick={() => {
                       if (softDeleteItems(dormContracts, setDormContracts, selectedDormContractIds, "dormContract")) {
                         setSelectedDormContractIds([]);
+                        // 편집/모달 상태가 삭제된 항목을 참조하지 않도록 초기화
+                        setEditingDormContractId(null);
+                        setShowDormContractForm(false);
                       }
                     }}
                     className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
@@ -10362,6 +10365,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     onClick={() => {
                       if (softDeleteItems(newHires, setNewHires, selectedNewHireIds, "newHire")) {
                         setSelectedNewHireIds([]);
+                        // 편집/모달 상태가 삭제된 항목을 참조하지 않도록 초기화
+                        setEditingNewHireId(null);
+                        setShowNewHireForm(false);
+                        setAssigningNewHireId(null);
+                        setShowAssignDormForNewHire(false);
                       }
                     }}
                     className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
