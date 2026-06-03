@@ -2465,6 +2465,18 @@ export default function App() {
 
   const getAuditTargetLabel = (targetType: AuditLog["targetType"]) => AUDIT_TARGET_LABEL_MAP[targetType] || targetType;
 
+  const ACTION_LABEL_MAP: Record<string, string> = {
+    create: "등록",
+    update: "수정",
+    delete: "삭제",
+    statusChange: "상태변경",
+    restore: "복원",
+    login: "로그인",
+    logout: "로그아웃",
+  } as any;
+
+  const getAuditActionLabel = (actionType: AuditLog["actionType"]) => ACTION_LABEL_MAP[actionType] || actionType;
+
   // 감사 로그 필드명 한글화 맵
   const FIELD_LABEL_MAP: Record<string, string> = {
     managerUserId: "기숙사 담당자",
@@ -2512,14 +2524,21 @@ export default function App() {
     );
     return matchedUser?.displayName || normalized;
   };
+
+  const getDormManagerDisplayName = (dormId?: string): string => {
+    if (!dormId) return "-";
+    const dorm = dorms.find((d) => d.id === dormId);
+    if (!dorm || !dorm.managerUserId) return "-";
+    const manager = users.find((u) => u.id === dorm.managerUserId);
+    return manager?.displayName || manager?.username || "-";
+  };
   
   const getAuditDisplayValue = (fieldName: string, value: string): string => {
     if (!value) return "";
-    
-    // user id로 displayName 변환
+
+    // user id/email/username로 displayName 변환
     if (fieldName === "managerUserId" || fieldName === "reporterUserId" || fieldName === "confirmedBy") {
-      const user = users.find(u => u.id === value);
-      return user ? user.displayName : value;
+      return getUserDisplayName(value);
     }
     
     // dormId로 기숙사명/동/호수 변환
@@ -2581,6 +2600,13 @@ export default function App() {
       return item ? `${item.buildingName} ${formatDong(item.dong)}-${formatRoomHo(item.roomHo)}` : log.targetId;
     }
     return log.targetId;
+  };
+
+  const getAuditTargetDisplayName = (log: AuditLog) => {
+    const name = getAuditTargetName(log);
+    if (!name) return log.targetId ? `${log.targetId.slice(0, 8)}...` : "-";
+    if (name === log.targetId) return `${log.targetId.slice(0, 8)}...`;
+    return name;
   };
 
   // 지역/성별 기숙사 필터 함수
@@ -3047,11 +3073,12 @@ export default function App() {
           (1000 * 60 * 60 * 24)
       );
       if (daysLeft >= 0 && daysLeft <= 30) {
+        const endLabel = formatDateOnly(contract.contractEnd) || "-";
         notifications.push({
           id: `contract-${contract.id}`,
           type: "contract",
           title: `계약 만료 예정: ${contract.buildingName}`,
-          detail: `${contract.contractEnd}에 계약 종료`,
+          detail: `${endLabel} 계약 종료`,
           when: `${daysLeft}일`,
         });
       }
@@ -3074,11 +3101,12 @@ export default function App() {
           (1000 * 60 * 60 * 24)
       );
       if (daysLeft >= 0 && daysLeft <= 14 && occ.status !== "퇴실") {
+        const dueLabel = formatDateOnly(occ.moveOutDueDate) || "-";
         notifications.push({
           id: `moveout-${occ.id}`,
           type: "occupant",
           title: `${occ.employeeName} 퇴실 예정`,
-          detail: `${occ.moveOutDueDate} 거주기한 만료`,
+          detail: `${dueLabel} 거주기한 만료`,
           when: `${daysLeft}일`,
         });
       }
@@ -6745,7 +6773,7 @@ const exportExcel = () => {
     fileName = "운영시뮬레이션.xlsx";
   } else if (activeTab === "inventory") {
     rows = inventory.map((i) => ({
-      관리자명: i.managerName,
+      관리자명: getDormManagerDisplayName(i.dormId),
       계약일: i.purchaseDate,
       만료일: i.purchaseDate,
       기숙사주소: i.dormAddress,
@@ -6987,7 +7015,7 @@ const exportExcel = () => {
     rows = visibleDefects.map((d) => ({
       접수일: d.receiptDate,
       접수자: d.reporterName,
-      기숙사관리자명: d.dormManagerName,
+      기숙사관리자명: getDormManagerDisplayName(d.dormId),
       건물명: d.buildingName,
       동: d.dong,
       호수: d.ho,
@@ -7049,7 +7077,6 @@ const exportDormSummaryExcel = () => {
   const rows = operationalDorms.map((dorm) => {
     const currentResidents = occupancyCountByDorm.get(dorm.id) || 0;
     const vacancy = Math.max(dorm.capacity - currentResidents, 0);
-    const manager = users.find((u) => u.id === dorm.managerUserId);
     const incompleteDefectCount = defects.filter((defect) => {
       const defectDorm = findOperationalDormForDefect(defect);
       return defectDorm?.id === dorm.id && defect.defectStatus !== "완료";
@@ -7077,7 +7104,7 @@ const exportDormSummaryExcel = () => {
       계약상태: dorm.leaseStatus,
       계약시작일: dorm.contractStart,
       계약종료일: dorm.contractEnd,
-      담당자: manager?.displayName || manager?.username || "",
+      담당자: getDormManagerDisplayName(dorm.id),
       "하자 미완료 건수": incompleteDefectCount,
       청소상태: cleaningStatus,
       "비품 수량": equipmentCount,
@@ -10188,11 +10215,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           checked={visibleDormContracts.length > 0 && selectedDormContractIds.length === visibleDormContracts.length}
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedDormContractIds(visibleDormContracts.map((c) => c.id));
-                            } else {
-                              setSelectedDormContractIds([]);
-                            }
+                            setSelectedDormContractIds(() =>
+                              e.target.checked ? visibleDormContracts.map((c) => c.id) : []
+                            );
                           }}
                           className="h-5 w-5"
                         />
@@ -10395,7 +10420,24 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       setAssigningNewHireId(null);
                       setShowAssignDormForNewHire(false);
                       if (softDeleteItems(newHires, setNewHires, idsToDelete, "newHire")) {
-                        // selection already cleared before delete
+                        const now = new Date().toISOString();
+                        const today = now.slice(0, 10);
+                        const deletedBy = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
+                        setOccupants((prev) =>
+                          prev.map((occupant) =>
+                            idsToDelete.includes(occupant.sourceNewHireId || "")
+                              ? {
+                                  ...occupant,
+                                  isDeleted: true,
+                                  deletedAt: now,
+                                  deletedBy,
+                                  status: "퇴실",
+                                  actualMoveOutDate: today,
+                                  updatedAt: now,
+                                }
+                              : occupant
+                          )
+                        );
                       }
                     }}
                     className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
@@ -10417,11 +10459,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           checked={visibleNewHires.length > 0 && selectedNewHireIds.length === visibleNewHires.length}
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedNewHireIds(visibleNewHires.map((h) => h.id));
-                            } else {
-                              setSelectedNewHireIds([]);
-                            }
+                            setSelectedNewHireIds(() =>
+                              e.target.checked ? visibleNewHires.map((h) => h.id) : []
+                            );
                           }}
                           className="h-5 w-5"
                         />
@@ -10585,7 +10625,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
               {visibleDorms.map((d, index) => {
-                const manager = users.find((u) => u.id === d.managerUserId);
                 const residentCount = occupancyCountByDorm.get(d.id) || 0;
                 return (
                   <div
@@ -10646,7 +10685,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         labelClassName="text-[0.64rem]"
                         valueClassName="text-[0.68rem]"
                       />
-                      <CompactField label="관리자" value={manager?.displayName || "미지정"} />
+                      <CompactField label="관리자" value={getDormManagerDisplayName(d.id)} />
                       <CompactField label="현재 인원" value={`${residentCount}/6`} />
                       <CompactField label="부동산명" value={d.realEstateName || "-"} />
                     </div>
@@ -10887,7 +10926,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{dorm?.leaseStatus || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(dorm?.contractEnd || "") || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm ? daysDiff(dorm.contractEnd) : "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(dorm?.managerUserId || "") || "미지정"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm?.id)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm ? (isCleaningMissing(dorm) ? "미보고" : "정상") : "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getOpenDefectCount(dorm?.id || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{o.employeeName}</td>
@@ -11435,15 +11474,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           <div>
                             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">대상</div>
                             <div className={`${theme.darkMode ? "mt-1 text-sm font-medium text-slate-100" : "mt-1 text-sm font-medium text-slate-900"}`}>{getAuditTargetLabel(log.targetType)}</div>
-                            <div className={`${theme.darkMode ? "text-xs text-slate-400" : "text-xs text-slate-500"}`}>{getAuditTargetName(log)}</div>
+                            <div className={`${theme.darkMode ? "text-xs text-slate-400" : "text-xs text-slate-500"}`}>{getAuditTargetDisplayName(log)}</div>
                           </div>
                           <div>
                             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">작업</div>
-                            <div className={`${theme.darkMode ? "mt-1 text-sm font-medium text-slate-100" : "mt-1 text-sm font-medium text-slate-900"}`}>{log.actionType === "restore" ? "복구" : log.actionType === "create" ? "생성" : log.actionType === "update" ? "수정" : log.actionType === "delete" ? "삭제" : log.actionType}</div>
+                            <div className={`${theme.darkMode ? "mt-1 text-sm font-medium text-slate-100" : "mt-1 text-sm font-medium text-slate-900"}`}>{getAuditActionLabel(log.actionType)}</div>
                           </div>
                           <div>
                             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">변경자</div>
-                            <div className={`${theme.darkMode ? "mt-1 text-sm font-medium text-slate-100" : "mt-1 text-sm font-medium text-slate-900"}`}>{log.changedBy}</div>
+                            <div className={`${theme.darkMode ? "mt-1 text-sm font-medium text-slate-100" : "mt-1 text-sm font-medium text-slate-900"}`}>{getUserDisplayName(log.changedBy)}</div>
                           </div>
                           <div>
                             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">변경 시간</div>
@@ -11887,7 +11926,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 font-medium">{index + 1}</td>
                         <td className="px-3 py-3">{i.site}</td>
                         <td className="px-3 py-3">{i.buildingName} {i.dong}-{i.roomHo}</td>
-                        <td className="px-3 py-3">{i.managerName}</td>
+                        <td className="px-3 py-3">{getDormManagerDisplayName(i.dormId)}</td>
                         <td className="px-3 py-3">{i.purchaseDate}</td>
                         <td className="px-3 py-3">{i.purchaseDate}</td>
                         <td className="px-3 py-3">{i.dormAddress}</td>
@@ -12905,11 +12944,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         />
                       </td>
                       <td className="px-3 py-2">{new Date(log.changedAt).toLocaleString("ko-KR")}</td>
-                      <td className="px-3 py-2">{log.changedBy}</td>
+                      <td className="px-3 py-2">{getUserDisplayName(log.changedBy)}</td>
                       <td className="px-3 py-2">
                         <div className="flex flex-col gap-1">
                           <span className={`${theme.darkMode ? "rounded-full bg-slate-900 px-2 py-1 text-xs" : "rounded-full bg-slate-100 px-2 py-1 text-xs"}`}>{getAuditTargetLabel(log.targetType)}</span>
-                          <span className={`${theme.darkMode ? "text-[10px] text-slate-400" : "text-[10px] text-slate-500"}`}>{getAuditTargetName(log)}</span>
+                          <span className={`${theme.darkMode ? "text-[10px] text-slate-400" : "text-[10px] text-slate-500"}`}>{getAuditTargetDisplayName(log)}</span>
                         </div>
                       </td>
                       <td className="px-3 py-2">
@@ -12920,7 +12959,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           log.actionType === "restore" ? "bg-orange-100 text-orange-700" :
                           "bg-purple-100 text-purple-700"
                         }`}>
-                          {log.actionType}
+                          {getAuditActionLabel(log.actionType)}
                         </span>
                       </td>
                       <td className={`${theme.darkMode ? "px-3 py-2 text-slate-300 max-w-xs truncate" : "px-3 py-2 text-slate-600 max-w-xs truncate"}`}>{log.memo || "-"}</td>
@@ -13359,7 +13398,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       (o) =>
                         o.dormId === dorm.id && ["거주중", "만료예정", "신규입주"].includes(o.status)
                     );
-                    const manager = users.find((u) => u.id === dorm.managerUserId);
                     return (
                       <tr key={`${dorm.id}-${idx}`} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
                         <td className="px-3 py-3 whitespace-nowrap">{idx + 1}</td>
@@ -13375,7 +13413,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{occupant?.phone || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(occupant?.moveInDate || "") || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(occupant?.expectedMoveOutDate || occupant?.moveOutDueDate || "") || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{manager?.displayName || "미지정"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm.id)}</td>
                         {[1, 2, 3, 4, 5].map((weekNo) => (
                           <td key={weekNo} className="px-3 py-3 whitespace-nowrap">
                             {getCleaningWeeklyStatus(dorm, weekNo)}
@@ -13462,7 +13500,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(report.reportDate) || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{`${report.buildingName} ${report.dong}-${report.roomHo}`}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{report.cleanStatus}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(report.managerName || report.managerUserId || "")}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(report.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(report.cleanerName || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{report.beforePhotoDataUrls.length && report.afterPhotoDataUrls.length ? "완료" : "사진누락"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
@@ -14658,10 +14696,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         auditLogs.slice(0, 20).map((log) => (
                           <div key={log.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-3" : "rounded-2xl border border-slate-200 bg-slate-50 p-3"}`}>
                             <div className="flex items-center justify-between gap-2">
-                              <div className="text-sm font-semibold text-slate-800">{log.actionType} · {log.targetType}</div>
-                              <div className="text-xs text-slate-500">{log.changedAt.slice(0, 10)}</div>
+                              <div className="text-sm font-semibold text-slate-800">{getAuditActionLabel(log.actionType)} · {getAuditTargetLabel(log.targetType)}</div>
+                              <div className="text-xs text-slate-500">{formatDateOnly(log.changedAt) || "-"}</div>
                             </div>
-                            <div className="mt-2 text-xs text-slate-500">{log.changedBy}</div>
+                            <div className="mt-2 text-xs text-slate-500">{getUserDisplayName(log.changedBy)}</div>
                             {log.memo && <div className="mt-1 text-xs text-slate-500">{log.memo}</div>}
                           </div>
                         ))
@@ -15455,7 +15493,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       </td>
                       <td className="px-3 py-3 whitespace-nowrap font-medium">{idx + 1}</td>
                       <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(d.receiptDate) || "-"}</td>
-                      <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(d.dormManagerName)}</td>
+                      <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(d.dormId)}</td>
                       <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{d.buildingName}</td>
                       <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{d.roadAddress}</td>
                       <td className="px-3 py-3 whitespace-nowrap">{d.dong}</td>
@@ -15735,7 +15773,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <Input label="동/호수" value={`${formatDong(cleaningReportForm.dong)} ${formatRoomHo(cleaningReportForm.roomHo)}`} readOnly />
                 <Input label="공동현관" value={cleaningReportForm.공동현관} readOnly />
                 <Input label="세대현관" value={cleaningReportForm.세대현관} readOnly />
-                <Input label="담당 관리자" value={cleaningReportForm.managerName} readOnly />
+                <Input label="담당 관리자" value={getDormManagerDisplayName(cleaningReportForm.dormId)} readOnly />
               </div>
             </div>
 
