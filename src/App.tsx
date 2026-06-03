@@ -754,7 +754,7 @@ function calculateDormContractStatus(contract: DormContractFormLike, dorms: Dorm
   const occupantCount = dorm
     ? occupants.filter(
         (o) =>
-          o.dormId === dorm.id && ["거주중", "만료예정", "신규입주"].includes(o.status)
+          o.dormId === dorm.id && ["거주중", "만료예정"].includes(o.status)
       ).length
     : 0;
 
@@ -3039,6 +3039,12 @@ export default function App() {
   ): Occupant | null => {
     if (!hire.dormId) return null;
 
+    // actualMoveOutDate가 존재하면 퇴실 상태로 자동 설정
+    let status = mapNewHireStatusToOccupantStatus(hire.residenceStatus);
+    if (hire.actualMoveOutDate) {
+      status = "퇴실";
+    }
+
     return {
       id: existingOccupant?.id || crypto.randomUUID(),
       dormId: hire.dormId,
@@ -3049,7 +3055,7 @@ export default function App() {
       phone: hire.phone,
       moveInDate: hire.moveInDate,
       moveOutDueDate: hire.moveOutDate,
-      status: mapNewHireStatusToOccupantStatus(hire.residenceStatus),
+      status,
       isNewHireAssignment: true,
       notes: hire.notes,
       expectedMoveInDate: hire.expectedMoveInDate,
@@ -4206,7 +4212,7 @@ export default function App() {
       if (occupantGenderFilter !== "전체" && o.gender !== occupantGenderFilter) return false;
       if (occupantStatusFilter !== "전체") {
         if (occupantStatusFilter === "거주중") {
-          if (!["거주중", "만료예정", "신규입주"].includes(o.status)) return false;
+          if (!["거주중", "만료예정"].includes(o.status)) return false;
         } else {
           if (o.status !== occupantStatusFilter) return false;
         }
@@ -4600,7 +4606,7 @@ export default function App() {
   const occupancyCountByDorm = useMemo(() => {
     const map = new Map<string, number>();
     occupants.forEach((o) => {
-      if (["거주중", "만료예정", "신규입주"].includes(o.status)) {
+      if (["거주중", "만료예정"].includes(o.status)) {
         map.set(o.dormId, (map.get(o.dormId) || 0) + 1);
       }
     });
@@ -4691,9 +4697,9 @@ export default function App() {
         return occupantDorm && occupantDorm.site === site && occupantDorm.gender === gender;
       });
 
-      // 3. 현 거주자: 입실일이 해당 월 말일 이전, 실제퇴실일/퇴실일이 없거나 해당 월 이후, 상태가 퇴실이 아닌 사람
+      // 3. 현 거주자: 입실일이 해당 월 말일 이전, 실제퇴실일/퇴실일이 없거나 해당 월 이후, 상태가 거주중/만료예정인 사람
       const currentResidents = groupOccupants.filter((o) => {
-        if (!["거주중", "만료예정", "신규입주"].includes(o.status)) return false;
+        if (!["거주중", "만료예정"].includes(o.status)) return false;
         const moveInDate = parseDateValue(o.moveInDate);
         if (!moveInDate || !isBeforeOrSameMonthEnd(moveInDate, year, month)) return false;
         const actualOutDate = parseDateValue(o.actualMoveOutDate || "");
@@ -5138,7 +5144,7 @@ export default function App() {
     // 3. 공실률
     const totalCapacity = dorms.reduce((sum, d) => sum + (d.capacity || 6), 0);
     const totalOccupied = occupants.filter(o =>
-      !o.isDeleted && ["거주중", "신규입주", "만료예정", "연장"].includes(o.status)
+      !o.isDeleted && ["거주중", "만료예정"].includes(o.status)
     ).length;
     const vacancyRate = totalCapacity > 0 ? Math.round((totalCapacity - totalOccupied) / totalCapacity * 100) : 0;
 
@@ -5259,8 +5265,8 @@ export default function App() {
     }
     const count = dorm ? (occupancyCountByDorm.get(dorm.id) || 0) : 0;
     const editingCurrent = editingOccupantId ? occupants.find((o) => o.id === editingOccupantId) : null;
-    const adjust = editingCurrent && editingCurrent.dormId === occupantForm.dormId && ["거주중", "만료예정", "신규입주"].includes(editingCurrent.status) ? -1 : 0;
-    const willCount = ["거주중", "만료예정", "신규입주"].includes(occupantForm.status);
+    const adjust = editingCurrent && editingCurrent.dormId === occupantForm.dormId && ["거주중", "만료예정"].includes(editingCurrent.status) ? -1 : 0;
+    const willCount = ["거주중", "만료예정"].includes(occupantForm.status);
     if (dorm && willCount && count + adjust >= 6) {
       alert("이 기숙사는 최대 6명까지만 배정할 수 있습니다.");
       return;
@@ -8258,7 +8264,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const dashboardStat = {
     dormCount: uniqueActiveDormContracts.length,
-    currentResidents: occupants.filter((o) => !o.isDeleted && ["거주중", "신규입주", "만료예정"].includes(o.status)).length,
+    currentResidents: occupants.filter((o) => !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length,
     totalVacancy: dormSummary.reduce((sum, item) => sum + item.vacancy, 0),
     openDefects: defects.filter((d) => !d.isDeleted && d.defectStatus !== "완료").length,
     inventoryCount: inventory.filter((i) => !i.isDeleted).length,
@@ -10534,7 +10540,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div>
                 <h2 className="text-lg font-semibold">기숙사별 인원 / 입실일</h2>
                 <p className="text-sm text-slate-500">선택된 기숙사 기준 입주자 상세 관리</p>
-                <p className="text-xs text-slate-400 mt-1">집계 기준: "거주중"은 거주중·만료예정·신규입주를 포함합니다.</p>
+                <p className="text-xs text-slate-400 mt-1">집계 기준: "거주중"은 거주중·만료예정만 포함합니다.</p>
               </div>
               {canEditData(currentUser) && (
                 <button
@@ -10549,7 +10555,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className="grid gap-4 mb-6 md:grid-cols-4">
               <MiniStat label="총 입주자" value={`${visibleOccupants.length}`} />
-              <MiniStat label="거주중" value={`${visibleOccupants.filter((o) => ["거주중", "만료예정", "신규입주"].includes(o.status)).length}`} />
+              <MiniStat label="거주중" value={`${visibleOccupants.filter((o) => ["거주중", "만료예정"].includes(o.status)).length}`} />
               <MiniStat label="만료예정" value={`${visibleOccupants.filter((o) => o.status === "만료예정").length}`} />
               <MiniStat label="퇴실" value={`${visibleOccupants.filter((o) => o.status === "퇴실").length}`} />
             </div>
@@ -11020,7 +11026,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <div className="text-sm text-slate-500">
                         {(() => {
                           const selectedDorm = operationalDorms.find(d => d.id === selectedDormForAssignment);
-                          const currentOccupants = occupants.filter(o => o.dormId === selectedDormForAssignment && !o.isDeleted && ["거주중", "만료예정", "신규입주"].includes(o.status)).length;
+                          const currentOccupants = occupants.filter(o => o.dormId === selectedDormForAssignment && !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length;
                           const totalAfter = currentOccupants + selectedNewHiresForAssignment.length;
                           const capacity = selectedDorm?.capacity || 6;
                           return `현재 ${currentOccupants}명 거주 중 / 정원 ${capacity}명 → 배정 후 ${totalAfter}명`;
@@ -11033,7 +11039,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         const selectedDorm = operationalDorms.find(d => d.id === selectedDormForAssignment);
                         if (!selectedDorm) return;
 
-                        const currentOccupants = occupants.filter(o => o.dormId === selectedDorm.id && !o.isDeleted && ["거주중", "만료예정", "신규입주"].includes(o.status)).length;
+                        const currentOccupants = occupants.filter(o => o.dormId === selectedDorm.id && !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length;
                         const capacity = selectedDorm.capacity || 6;
                         const totalAfter = currentOccupants + selectedNewHiresForAssignment.length;
 
@@ -12026,7 +12032,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className="grid gap-3 md:grid-cols-4 mb-6">
               <MiniStat label="기숙사 수" value={`${operationalDorms.length}개`} />
-              <MiniStat label="현재 거주인" value={`${occupants.filter(o => !o.isDeleted && ["거주중", "신규입주", "만료예정"].includes(o.status)).length}명`} />
+              <MiniStat label="현재 거주인" value={`${occupants.filter(o => !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length}명`} />
               <MiniStat label="비품 총액" value={`${formatNumber(inventory.reduce((sum, i) => sum + (i.purchaseAmount || 0), 0))}원`} />
               <MiniStat label="미완료 하자" value={`${defects.filter(d => !d.isDeleted && d.defectStatus !== "완료").length}건`} />
             </div>
@@ -13063,7 +13069,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   {visibleCleaningDormRows.map((dorm, idx) => {
                     const occupant = occupants.find(
                       (o) =>
-                        o.dormId === dorm.id && ["거주중", "만료예정", "신규입주"].includes(o.status)
+                        o.dormId === dorm.id && ["거주중", "만료예정"].includes(o.status)
                     );
                     return (
                       <tr key={`${dorm.id}-${idx}`} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
