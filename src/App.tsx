@@ -9021,7 +9021,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
               </section>
             </div>
-          </section>
+          </div>
         )}
 
         {activeTab === "trainingRecords" && (
