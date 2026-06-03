@@ -1808,14 +1808,25 @@ export default function App() {
   );
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+  const normalizeFieldKey = (key: string) =>
+    String(key)
+      .trim()
+      .replace(/[_\s]+([a-zA-Z])/g, (_, c) => c.toUpperCase())
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .replace(/^[A-Z]/, (c) => c.toLowerCase());
+
   const prettifyFieldKey = (key: string) =>
-    key
+    String(key)
+      .trim()
+      .replace(/[_\s]+/g, " ")
       .replace(/([a-z])([A-Z])/g, "$1 $2")
       .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2");
 
   const getFieldLabel = (key: string) => {
+    const normalizedKey = normalizeFieldKey(key);
+
     try {
-      const f = systemSettings.fields.find((s) => s.fieldKey === key);
+      const f = systemSettings.fields.find((s) => s.fieldKey === key || normalizeFieldKey(s.fieldKey) === normalizedKey);
       if (f) return f.fieldName;
     } catch {
       // ignore
@@ -1837,6 +1848,14 @@ export default function App() {
       mobilization: "동원여부",
       status: "상태",
       notes: "비고",
+      site: "지역",
+      cleanerName: "청소담당자",
+      weekLabel: "주차",
+      monthLabel: "월",
+      beforePhotoDataUrls: "청소 전 사진",
+      afterPhotoDataUrls: "청소 후 사진",
+      reporterUserId: "보고자",
+      reporterName: "보고자명",
       managerUserId: "기숙사 담당자",
       dormManagerName: "기숙사 관리자명",
       managerName: "담당 관리자",
@@ -1861,7 +1880,7 @@ export default function App() {
       isDeleted: "삭제여부",
     };
 
-    return auditFieldLabelMap[key] || prettifyFieldKey(key);
+    return auditFieldLabelMap[normalizedKey] || auditFieldLabelMap[key] || prettifyFieldKey(key);
   };
   const getCodeKeyLabel = (key: string) => {
     const map: Record<string, string> = {
@@ -2516,6 +2535,14 @@ export default function App() {
     roomHo: "호수",
     dong: "동",
     phone: "연락처",
+    site: "지역",
+    cleanerName: "청소담당자",
+    weekLabel: "주차",
+    monthLabel: "월",
+    beforePhotoDataUrls: "청소 전 사진",
+    afterPhotoDataUrls: "청소 후 사진",
+    reporterUserId: "보고자",
+    reporterName: "보고자명",
     name: "이름",
     email: "이메일",
     status: "상태",
@@ -2538,18 +2565,30 @@ export default function App() {
 
   // 감사 로그 값 변환 함수
   const formatAuditValue = (fieldName: string, value: any, targetType?: AuditLog["targetType"]): string => {
+    const normalizedField = normalizeFieldKey(fieldName);
+
     if (value === null || value === undefined || value === "") return "(없음)";
+    if (value === "-") return "-";
+
+    if (typeof value === "string" && value.startsWith("data:image/")) return "사진 첨부됨";
+    if (Array.isArray(value)) {
+      if (value.length === 0) return "(없음)";
+      if (normalizedField === "beforePhotoDataUrls" || normalizedField === "afterPhotoDataUrls") return "사진 첨부됨";
+      return value.join(", ");
+    }
 
     const normalized = typeof value === "string" ? value.trim() : value;
     if (normalized === "") return "(없음)";
 
     if (normalized === true || normalized === "true") return "예";
     if (normalized === false || normalized === "false") return "아니오";
+    if (typeof normalized === "string" && normalized.startsWith("data:image/")) return "사진 첨부됨";
+    if (typeof normalized === "string" && /^\d{1,4}\.\s?\d{1,2}\.\s?\d{1,2}\.\s?오[전후]\s?\d{1,2}:\d{2}$/.test(normalized)) return "(없음)";
 
     const parsedDate = parseDateValue(normalized);
     if (parsedDate) {
       const dateString = String(normalized);
-      if (/^\d{4}-\d{2}-\d{2}$/.test(dateString) || /^\d{4}\.\s?\d{1,2}\.\s?\d{1,2}$/.test(dateString)) {
+      if (/^\d{4}-\d{2}-\d{2}(?:[T\s].*)?$/.test(dateString)) {
         return formatDateOnly(parsedDate);
       }
       return formatDateTimeKorea(parsedDate);
@@ -2565,42 +2604,43 @@ export default function App() {
 
     const isUuid = (candidate: string) => uuidRegex.test(candidate);
 
-    if (fieldName === "managerUserId") {
+    if (normalizedField === "managerUserId") {
       const id = String(normalized).split("_")[0];
       const displayName = getUserDisplayName(id);
       if (displayName === id && isUuid(id)) return "기숙사 담당자";
       return displayName;
     }
 
-    if (fieldName === "reporterUserId" || fieldName === "confirmedBy") {
+    if (normalizedField === "reporterUserId" || normalizedField === "confirmedBy") {
       return getUserDisplayName(normalized);
     }
 
-    if (fieldName === "dormId") {
+    if (normalizedField === "dormId") {
       const dorm = dorms.find((d) => d.id === normalized) || operationalDorms.find((d) => d.id === normalized);
       if (dorm) return `${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}`;
       return isUuid(String(normalized)) ? "기숙사" : String(normalized);
     }
 
-    if (fieldName === "sourceNewHireId") {
+    if (normalizedField === "sourceNewHireId") {
       const hire = newHires.find((h) => h.id === normalized);
       if (hire) return hire.name;
       return isUuid(String(normalized)) ? "신입사원" : String(normalized);
     }
 
-    if (fieldName === "personnelId") {
+    if (normalizedField === "personnelId") {
       const personnel = militaryPersonnel.find((m) => m.id === normalized);
       return personnel ? personnel.name : String(normalized);
     }
 
-    if (fieldName === "personnelIds") {
+    if (normalizedField === "personnelIds") {
       const parsed = parseJson(String(normalized));
       if (Array.isArray(parsed)) {
+        if (parsed.length === 0) return "(없음)";
         return parsed.map((id) => militaryPersonnel.find((m) => m.id === id)?.name || String(id)).join(", ");
       }
     }
 
-    if (fieldName === "targetId" && targetType) {
+    if (normalizedField === "targetId" && targetType) {
       if (targetType === "dorm") {
         const dorm = dorms.find((d) => d.id === normalized) || operationalDorms.find((d) => d.id === normalized);
         if (dorm) return `${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}`;
