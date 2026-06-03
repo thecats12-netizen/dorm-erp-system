@@ -438,7 +438,7 @@ export type TabKey =
   | "militarySettings"
   | "testChecklist";
 
-export type SettingsSubTab = "menuManagement" | "fieldManagement" | "permissionManagement" | "codeManagement" | "screenSettings" | "trashManagement";
+export type SettingsSubTab = "menuManagement" | "fieldManagement" | "permissionManagement" | "codeManagement" | "screenSettings";
 
 export type MenuItem = {
   id: string;

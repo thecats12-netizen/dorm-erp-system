@@ -8110,7 +8110,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             order: menu.order,
             children: [],
           };
-          existing.children.push({ tab: menu.tabKey, label: menu.menuName, order: menu.order });
+          const existingChildIndex = existing.children.findIndex((child) => child.tab === menu.tabKey);
+          if (existingChildIndex >= 0) {
+            existing.children[existingChildIndex] = { tab: menu.tabKey, label: menu.menuName, order: menu.order };
+          } else {
+            existing.children.push({ tab: menu.tabKey, label: menu.menuName, order: menu.order });
+          }
           existing.order = Math.min(existing.order, menu.order);
           groups[menu.groupName] = existing;
         });
@@ -9015,395 +9020,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </table>
                 </div>
               </section>
-
-              <div className="space-y-6">
-                <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-                  <div className="mb-4 flex items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-lg font-semibold">신입사원 입주배정</h2>
-                      <p className="text-sm text-slate-500">신규 입주자의 배정 현황을 확인하세요.</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowUnassignedNewHiresModal(true)}
-                      className={`rounded-2xl px-4 py-2 text-sm font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}
-                    >
-                      더보기
-                    </button>
-                  </div>
-                  <div className="space-y-3">
-                    {occupants.filter((o) => o.isNewHireAssignment).map((o) => {
-                      const dorm =
-                        operationalDorms.find((d) => d.id === o.dormId) ||
-                        dorms.find((d) => d.id === o.dormId);
-                      return (
-                        <div
-                          key={o.id}
-                          className={`${theme.darkMode ? "cursor-pointer rounded-2xl border border-slate-700 p-4" : "cursor-pointer rounded-2xl border border-slate-200 p-4"}`}
-                          onDoubleClick={() => handleNewHireDoubleClick(o)}
-                          title="신입사원 상세보기/수정"
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="font-semibold">{o.employeeName}</div>
-                              <div translate="no" className="text-sm text-slate-500 notranslate">{o.department}</div>
-                              <div className="text-sm text-slate-500">{dorm ? `${dorm.buildingName} ${dorm.dong} ${dorm.roomHo}` : "미배정"}</div>
-                            </div>
-                            <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">{o.status}</span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {!occupants.some((o) => o.isNewHireAssignment) && (
-                      <div className={`${theme.darkMode ? "rounded-2xl border border-dashed border-slate-600 p-8 text-center text-slate-400" : "rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-400"}`}>현재 신입사원 배정 데이터가 없습니다.</div>
-                    )}
-                  </div>
-                </section>
-
-                <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-                  <div className="mb-4 flex items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-lg font-semibold">오늘의 일정 및 알림</h2>
-                      <p className="text-sm text-slate-500">계약 만료, 하자, 출입 일정 등을 한 곳에서 확인합니다.</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab("notificationManagement")}
-                      className={`rounded-2xl px-4 py-2 text-sm font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}
-                    >
-                      모두 보기
-                    </button>
-                  </div>
-                  <div className="space-y-3">
-                    {dashboardAlerts.map((alert) => (
-                      <div
-                        key={alert.id}
-                        className={`${theme.darkMode ? "cursor-pointer rounded-2xl border border-slate-700 bg-slate-950 p-4" : "cursor-pointer rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}
-                        onDoubleClick={() => handleAlertDoubleClick(alert)}
-                        title="알림 상세보기"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="font-semibold">{alert.title}</p>
-                            <p className="text-sm text-slate-500">{alert.detail}</p>
-                          </div>
-                          <span className="text-sm font-semibold text-blue-700">{alert.when}</span>
-                        </div>
-                      </div>
-                    ))}
-                    {dashboardAlerts.length === 0 && (
-                      <div className={`${theme.darkMode ? "rounded-2xl border border-dashed border-slate-600 p-8 text-center text-slate-400" : "rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-400"}`}>현재 알림이 없습니다.</div>
-                    )}
-                  </div>
-                </section>
-              </div>
-            </div>
-
-            <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-              <div className="mb-4 flex items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-semibold">기숙사별 현황 요약</h2>
-                  <p className="text-sm text-slate-500">기숙사별 입주 현황과 공실을 확인하세요.</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={exportDormSummaryExcel}
-                  className={`rounded-2xl px-4 py-2 text-sm font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}
-                >
-                  엑셀다운
-                </button>
-              </div>
-              <div className="overflow-auto">
-                <table className="w-full min-w-[1100px] text-sm text-left">
-                  <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
-                    <tr>
-                      <th className="px-3 py-3">기숙사</th>
-                      <th className="px-3 py-3">지역</th>
-                      <th className="px-3 py-3">성별</th>
-                      <th className="px-3 py-3">동</th>
-                      <th className="px-3 py-3">호수</th>
-                      <th className="px-3 py-3">관리자</th>
-                      <th className="px-3 py-3">상태</th>
-                      <th className="px-3 py-3">만료일</th>
-                      <th className="px-3 py-3">D-Day</th>
-                      <th className="px-3 py-3">현재 거주자</th>
-                      <th className="px-3 py-3">정원</th>
-                      <th className="px-3 py-3">공실</th>
-                      <th className="px-3 py-3">입주율</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dormSummary.map((row) => (
-                      <tr
-                        key={row.id}
-                        className={`${theme.darkMode ? "cursor-pointer border-b border-slate-700 hover:bg-slate-950" : "cursor-pointer border-b border-slate-100 hover:bg-slate-50"}`}
-                        onDoubleClick={() => handleDormSummaryDoubleClick(row)}
-                        title="기숙사 상세보기/수정"
-                      >
-                        <td className="px-3 py-3 font-semibold">{row.buildingName}</td>
-                        <td className="px-3 py-3">{row.site}</td>
-                        <td className="px-3 py-3">{row.gender}</td>
-                        <td className="px-3 py-3">{row.dong}</td>
-                        <td className="px-3 py-3">{row.roomHo}</td>
-                        <td className="px-3 py-3">{row.managerName}</td>
-                        <td className="px-3 py-3">{row.leaseStatus}</td>
-                        <td className="px-3 py-3">{formatDateOnly(row.contractEnd || "") || "-"}</td>
-                        <td className="px-3 py-3">{row.dDay}</td>
-                        <td className="px-3 py-3">{row.currentResidents}</td>
-                        <td className="px-3 py-3">{row.capacity}</td>
-                        <td className="px-3 py-3">{row.vacancy}</td>
-                        <td className="px-3 py-3">{row.usageRate}%</td>
-                      </tr>
-                    ))}
-                    {dormSummary.length === 0 && (
-                      <tr>
-                        <td colSpan={13} className="px-3 py-12 text-center text-slate-400">표시할 기숙사 데이터가 없습니다.</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </div>
-        )}
-
-        {activeTab === "militaryDashboard" && (
-          <section className="space-y-6">
-            <div className="grid gap-6 xl:grid-cols-5">
-              {[
-                { title: "전체 인원", value: militaryPersonnel.length },
-                { title: "예비군", value: militaryCategoryCounts.reserve },
-                { title: "민방위", value: militaryCategoryCounts.civilDefense },
-                { title: "대상아님", value: militaryCategoryCounts.none },
-                { title: "전역 예정(30일)", value: militaryUpcomingDischargeCount },
-                { title: "보고서", value: militaryReports.length },
-              ].map((item) => (
-                <div key={item.title} className={`${theme.darkMode ? "rounded-3xl border p-5 shadow-sm ring-1 ring-slate-200 bg-slate-950" : "rounded-3xl border p-5 shadow-sm ring-1 ring-slate-200 bg-white"}`}>
-                  <div className="text-sm font-medium text-slate-500">{item.title}</div>
-                  <div className={`${theme.darkMode ? "mt-3 text-3xl font-bold text-slate-100" : "mt-3 text-3xl font-bold text-slate-900"}`}>{item.value}</div>
-                </div>
-              ))}
-            </div>
-            <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-              <h2 className="text-lg font-semibold">예비군/민방위 현황</h2>
-              <p className="mt-2 text-sm text-slate-500">전역 예정, 미발송 통보서, 미이수 교육 항목을 자동 집계합니다.</p>
-              <p className="mt-2 text-xs text-slate-400">집계 기준: 미이수/예정자는 자동연차 대상 상태(예: 재직)이며 필요훈련시간&gt;0인 인원 중 훈련상태가 '미이수' 또는 '예정'으로 분류됩니다.</p>
-              <div className="mt-5 grid gap-4 lg:grid-cols-3">
-                <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
-                  <div className="text-sm font-semibold text-slate-400">전역 예정 인원</div>
-                  {militaryPersonnel.filter((person) => typeof person.dischargeDate === "string" && person.dischargeDate).length === 0 ? (
-                    <div className="mt-3 text-sm text-slate-400">예정 인원이 없습니다.</div>
-                  ) : (
-                    <ul className="mt-3 space-y-2 text-sm text-slate-600 dark:text-slate-300">
-                      {militaryPersonnelSummary
-                        .filter((person) => typeof person.dischargeDue === "number" && person.dischargeDue >= 0 && person.dischargeDue <= 30)
-                        .slice(0, 5)
-                        .map((person) => (
-                          <li key={person.id}>{person.name} · D-{person.dischargeDue}</li>
-                        ))}
-                    </ul>
-                  )}
-                </div>
-                <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
-                  <div className="text-sm font-semibold text-slate-400">미이수 교육</div>
-                  {militaryTrainingNotCompletedCount === 0 ? (
-                    <div className="mt-3 text-sm text-slate-400">모든 훈련이 완료되었습니다.</div>
-                  ) : (
-                    <ul className="mt-3 space-y-2 text-sm text-slate-600 dark:text-slate-300">
-                      {militaryPersonnelSummary
-                        .filter((person) => militaryTrainingAutoConfig.targetStatuses?.includes(person.status) && person.requiredTrainingHours > 0 && person.trainingStatus === "미이수")
-                        .slice(0, 5)
-                        .map((person) => (
-                          <li key={person.id}>{person.name} · {person.requiredTrainingLabel}</li>
-                        ))}
-                    </ul>
-                  )}
-                </div>
-                <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
-                  <div className="text-sm font-semibold text-slate-400">미발송 통보서</div>
-                  {militaryPendingNoticeCount === 0 ? (
-                    <div className="mt-3 text-sm text-slate-400">모든 통보서가 발송되었습니다.</div>
-                  ) : (
-                    <ul className="mt-3 space-y-2 text-sm text-slate-600 dark:text-slate-300">
-                      {(() => {
-                        const targetPersonnelIds = militaryPersonnel.filter((p) => militaryTrainingAutoConfig.targetStatuses?.includes(p.status)).map((p) => p.id);
-                        return militaryNotices.filter((n) => !n.publishedDate && n.personnelIds?.some((pid) => targetPersonnelIds.includes(pid))).slice(0, 5).map((notice) => (
-                          <li key={notice.id}>{notice.title || "제목 없음"}</li>
-                        ));
-                      })()}
-                    </ul>
-                  )}
-                </div>
-              </div>
-            </section>
-          </section>
-        )}
-
-        {activeTab === "personnelManagement" && (
-          <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold">예비군/민방위 인원 관리</h2>
-                  <p className="text-sm text-slate-500">인원 정보를 확인하고 엑셀로 내보낼 수 있습니다.</p>
-                  <p className="text-xs text-slate-400 mt-1">기준연도: {effectiveMilitaryReferenceYear ? `${effectiveMilitaryReferenceYear}년` : "자동"} · 자동연차/필요훈련은 이 기준연도를 기준으로 계산됩니다.</p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  type="text"
-                  value={militaryPersonnelSearch}
-                  onChange={(e) => setMilitaryPersonnelSearch(e.target.value)}
-                  placeholder="이름, 계급, 부대 검색"
-                  className="rounded-2xl border px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <select
-                  value={militaryPersonnelStatusFilter}
-                  onChange={(e) => setMilitaryPersonnelStatusFilter(e.target.value)}
-                  className="rounded-2xl border bg-white px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="전체">전체 상태</option>
-                  <option value="복무중">복무중</option>
-                  <option value="전역">전역</option>
-                  <option value="휴직">휴직</option>
-                </select>
-                {canEditData(currentUser) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMilitaryPersonnelForm({
-                        id: "",
-                        name: "",
-                        rank: "",
-                        serviceBranch: "",
-                        unit: "",
-                        phone: "",
-                        birthDate: "",
-                        enlistmentDate: "",
-                        dischargeDate: "",
-                        mobilization: false,
-                        status: "",
-                        notes: "",
-                        createdAt: "",
-                        updatedAt: "",
-                      });
-                      setEditingMilitaryPersonnelId(null);
-                      setShowMilitaryPersonnelForm(true);
-                    }}
-                    className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
-                  >
-                    인원 등록
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[1200px] table-auto text-sm text-left">
-                <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
-                  <tr>
-                    <th className="px-3 py-3 whitespace-nowrap">이름</th>
-                    <th className="px-3 py-3 whitespace-nowrap">연락처</th>
-                    <th className="px-3 py-3 whitespace-nowrap">생년월일</th>
-                    <th className="px-3 py-3 whitespace-nowrap">현재구분</th>
-                    <th className="px-3 py-3 whitespace-nowrap">병역구분</th>
-                    <th className="px-3 py-3 whitespace-nowrap">동원여부</th>
-                    <th className="px-3 py-3 whitespace-nowrap">예비군연차</th>
-                    <th className="px-3 py-3 whitespace-nowrap">민방위연차</th>
-                    <th className="px-3 py-3 whitespace-nowrap">필요훈련</th>
-                    <th className="px-3 py-3 whitespace-nowrap">필요시간</th>
-                    <th className="px-3 py-3 whitespace-nowrap">이수상태</th>
-                    <th className="px-3 py-3 whitespace-nowrap">훈련기록</th>
-                    <th className="px-3 py-3 whitespace-nowrap">통보서</th>
-                    <th className="px-3 py-3 whitespace-nowrap">상태</th>
-                    {canEditData(currentUser) && <th className="px-3 py-3 whitespace-nowrap">작업</th>}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredMilitaryPersonnel.map((person) => {
-                    const isExpanded = expandedMilitaryPersonnelIds.includes(person.id);
-                    return (
-                      <>
-                        <tr key={person.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                          <td className="max-w-[150px] truncate px-3 py-3 whitespace-nowrap" title={person.name}>{person.name}</td>
-                          <td className="max-w-[140px] truncate px-3 py-3 whitespace-nowrap" title={person.phone}>{person.phone}</td>
-                          <td className="px-3 py-3 whitespace-nowrap">{person.birthDate || "-"}</td>
-                          <td className="max-w-[120px] truncate px-3 py-3 whitespace-nowrap" title={person.currentCategory}>{person.currentCategory}</td>
-                          <td className="px-3 py-3 whitespace-nowrap">{person.currentCategory}</td>
-                          <td className="px-3 py-3 whitespace-nowrap">{person.mobilization ? "동원" : "동원미지정"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap">{person.reserveAnnualLeave || "-"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap">{person.civilDefenseAnnualLeave || "-"}</td>
-                          <td className="max-w-[170px] truncate px-3 py-3 whitespace-nowrap" title={person.requiredTrainingLabel}>{person.requiredTrainingLabel || "-"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap">{person.requiredTrainingHours ? `${person.requiredTrainingHours}시간` : "-"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap">{person.trainingStatus || "-"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap">{person.trainingRecordsCount ?? 0}건</td>
-                          <td className="px-3 py-3 whitespace-nowrap">{person.noticeCount ?? 0}건</td>
-                          <td className="max-w-[120px] truncate px-3 py-3 whitespace-nowrap" title={person.status}>{person.status}</td>
-                          {canEditData(currentUser) && (
-                            <td className="px-3 py-3 whitespace-nowrap">
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setExpandedMilitaryPersonnelIds((prev) =>
-                                    prev.includes(person.id) ? prev.filter((id) => id !== person.id) : [...prev, person.id]
-                                  )}
-                                  className="rounded-2xl border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-100"
-                                >
-                                  {isExpanded ? "숨기기" : "상세"}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => openMilitaryPersonnelEdit(person)}
-                                  className="rounded-2xl border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-100"
-                                >
-                                  수정
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (!confirm("해당 인원을 삭제하시겠습니까?")) return;
-                                    const existing = militaryPersonnel.find((item) => item.id === person.id);
-                                    if (!existing) return;
-                                    setMilitaryPersonnel((prev) => prev.filter((item) => item.id !== person.id));
-                                    createAuditLog({
-                                      targetType: "militaryPersonnel",
-                                      targetId: person.id,
-                                      actionType: "delete",
-                                      changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
-                                      beforeValue: JSON.stringify(existing),
-                                      afterValue: "",
-                                    });
-                                  }}
-                                  className="rounded-2xl border border-rose-300 px-3 py-1 text-rose-600 hover:bg-rose-50"
-                                >
-                                  삭제
-                                </button>
-                              </div>
-                            </td>
-                          )}
-                        </tr>
-                        {isExpanded && (
-                          <tr key={`${person.id}-detail`} className={theme.darkMode ? "bg-slate-950" : "bg-slate-50"}>
-                            <td colSpan={canEditData(currentUser) ? 13 : 12} className="px-3 py-3">
-                              <div className="grid gap-2 text-xs text-slate-500 sm:grid-cols-2 lg:grid-cols-3">
-                                <div><span className="font-medium text-slate-700">계급:</span> {person.rank || "-"}</div>
-                                <div><span className="font-medium text-slate-700">군별:</span> {person.serviceBranch || "-"}</div>
-                                <div><span className="font-medium text-slate-700">부대:</span> {person.unit || "-"}</div>
-                                <div><span className="font-medium text-slate-700">입대일:</span> {person.enlistmentDate || "-"}</div>
-                                <div><span className="font-medium text-slate-700">전역일:</span> {person.dischargeDate || "-"}</div>
-                                <div><span className="font-medium text-slate-700">근속:</span> {person.serviceDuration || "-"}</div>
-                                <div><span className="font-medium text-slate-700">연차:</span> {person.accruedAnnualLeave ? `${person.accruedAnnualLeave}일` : "-"}</div>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </>
-                    );
-                  })}
-                  {filteredMilitaryPersonnel.length === 0 && (
-                    <tr>
-                      <td colSpan={canEditData(currentUser) ? 13 : 12} className="px-3 py-12 text-center text-slate-400">예비군/민방위 인원 데이터가 없습니다.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
             </div>
           </section>
         )}
@@ -13040,148 +12656,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           </section>
         )}
 
-        {activeTab === "notificationManagement" && (
-          <section className={`rounded-3xl ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"} p-5 shadow-sm ring-1 mt-6`}>
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold">변경이력 (Audit Log)</h2>
-                <p className="text-sm text-slate-500">계약, 입주자 상태 변경 등 모든 데이터 변경사항을 추적합니다.</p>
-              </div>
-            </div>
-
-            <div className="mb-4 flex flex-wrap gap-2 items-center">
-              <input
-                type="text"
-                placeholder="변경자명 검색..."
-                className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"}`}
-              />
-              <FilterSelect
-                label="대상"
-                value="전체"
-                onChange={() => {}}
-                options={["전체", "dormContract", "occupant", "dorm", "newHire"]}
-              />
-              <FilterSelect
-                label="작업"
-                value="전체"
-                onChange={() => {}}
-                options={["전체", "create", "update", "delete", "restore", "statusChange"]}
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  if (currentUser?.role !== "admin") {
-                    alert("관리자만 감사 로그를 삭제할 수 있습니다.");
-                    return;
-                  }
-                  if (selectedAuditLogIds.length === 0) {
-                    alert("삭제할 감사 로그를 선택해주세요.");
-                    return;
-                  }
-                  if (!window.confirm("선택한 감사 로그를 삭제하시겠습니까?")) return;
-                  setAuditLogs((prev) => prev.filter((log) => !selectedAuditLogIds.includes(log.id)));
-                  setSelectedAuditLogIds([]);
-                }}
-                disabled={selectedAuditLogIds.length === 0 || currentUser?.role !== "admin"}
-                className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                선택 삭제
-              </button>
-            </div>
-
-            <div className="overflow-auto">
-              <table className="w-full min-w-[1000px] text-xs">
-                <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
-                  <tr>
-                    <th className="px-3 py-2 text-center">
-                      <input
-                        type="checkbox"
-                        checked={
-                          auditLogs.slice(0, 50).length > 0 &&
-                          selectedAuditLogIds.length > 0 &&
-                          auditLogs.slice(0, 50).every((log) => selectedAuditLogIds.includes(log.id))
-                        }
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setSelectedAuditLogIds(auditLogs.slice(0, 50).map((log) => log.id));
-                          } else {
-                            setSelectedAuditLogIds([]);
-                          }
-                        }}
-                        className="h-5 w-5"
-                      />
-                    </th>
-                    <th className="px-3 py-2 text-left">시간</th>
-                    <th className="px-3 py-2 text-left">변경자</th>
-                    <th className="px-3 py-2 text-left">대상</th>
-                    <th className="px-3 py-2 text-left">작업</th>
-                    <th className="px-3 py-2 text-left">메모</th>
-                    <th className="px-3 py-2 text-center">작업</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {auditLogs.slice(0, 50).map((log) => (
-                    <tr key={log.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                      <td className="px-3 py-2 text-center">
-                        <input
-                          type="checkbox"
-                          checked={selectedAuditLogIds.includes(log.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedAuditLogIds((prev) => [...prev, log.id]);
-                            } else {
-                              setSelectedAuditLogIds((prev) => prev.filter((id) => id !== log.id));
-                            }
-                          }}
-                          className="h-5 w-5"
-                        />
-                      </td>
-                      <td className="px-3 py-2">{formatDateTimeKorea(log.changedAt)}</td>
-                      <td className="px-3 py-2">{getUserDisplayName(log.changedBy)}</td>
-                      <td className="px-3 py-2">
-                        <div className="flex flex-col gap-1">
-                          <span className={`${theme.darkMode ? "rounded-full bg-slate-900 px-2 py-1 text-xs" : "rounded-full bg-slate-100 px-2 py-1 text-xs"}`}>{getAuditTargetLabel(log.targetType)}</span>
-                          <span className={`${theme.darkMode ? "text-[10px] text-slate-400" : "text-[10px] text-slate-500"}`}>{getAuditTargetDisplayName(log)}</span>
-                        </div>
-                      </td>
-                      <td className="px-3 py-2">
-                        <span className={`rounded-full px-2 py-1 text-xs ${
-                          log.actionType === "create" ? "bg-green-100 text-green-700" :
-                          log.actionType === "update" ? "bg-blue-100 text-blue-700" :
-                          log.actionType === "delete" ? "bg-red-100 text-red-700" :
-                          log.actionType === "restore" ? "bg-orange-100 text-orange-700" :
-                          "bg-purple-100 text-purple-700"
-                        }`}>
-                          {getAuditActionLabel(log.actionType)}
-                        </span>
-                      </td>
-                      <td className={`${theme.darkMode ? "px-3 py-2 text-slate-300 max-w-xs truncate" : "px-3 py-2 text-slate-600 max-w-xs truncate"}`}>{log.memo || "-"}</td>
-                      <td className="px-3 py-2 text-center">
-                        <button
-                          onClick={() => {
-                            setSelectedAuditLogId(log.id);
-                            setShowAuditLogModal(true);
-                            setShowRawJson(false);
-                          }}
-                          className={`${theme.darkMode ? "rounded-lg bg-slate-900 px-2 py-1 text-xs font-medium text-slate-300 hover:bg-slate-200" : "rounded-lg bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-200"}`}
-                        >
-                          보기
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {auditLogs.length === 0 && (
-              <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-8 text-center" : "rounded-3xl border border-slate-200 bg-slate-50 p-8 text-center"}`}>
-                <div className="text-sm text-slate-500">변경이력이 없습니다.</div>
-              </div>
-            )}
-          </section>
-        )}
-
         {activeTab === "documentManagement" && (
           <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -13951,16 +13425,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 }`}
               >
                 화면 설정
-              </button>
-              <button
-                onClick={() => setSettingsSubTab("trashManagement")}
-                className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${
-                  settingsSubTab === "trashManagement"
-                    ? "bg-slate-900 text-white"
-                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                }`}
-              >
-                휴지통 & 감사
               </button>
             </div>
 
@@ -14834,338 +14298,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
               </div>
             )}
-            {settingsSubTab === "trashManagement" && (
-              <div className="space-y-6">
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-5" : "rounded-3xl border border-slate-200 bg-slate-50 p-5"}`}>
-                    <div className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>휴지통 요약</div>
-                    <div className="grid gap-3 md:grid-cols-3">
-                      <div className={`rounded-3xl p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-                        <div className="text-xs text-slate-500">기숙사</div>
-                        <div className={`${theme.darkMode ? "mt-2 text-xl font-semibold text-slate-100" : "mt-2 text-xl font-semibold text-slate-900"}`}>{deletedDorms.length}</div>
-                      </div>
-                      <div className={`rounded-3xl p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-                        <div className="text-xs text-slate-500">계약</div>
-                        <div className={`${theme.darkMode ? "mt-2 text-xl font-semibold text-slate-100" : "mt-2 text-xl font-semibold text-slate-900"}`}>{deletedDormContracts.length}</div>
-                      </div>
-                      <div className={`rounded-3xl p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-                        <div className="text-xs text-slate-500">신규계약</div>
-                        <div className={`${theme.darkMode ? "mt-2 text-xl font-semibold text-slate-100" : "mt-2 text-xl font-semibold text-slate-900"}`}>{deletedLeases.length}</div>
-                      </div>
-                      <div className={`rounded-3xl p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-                        <div className="text-xs text-slate-500">신입사원</div>
-                        <div className={`${theme.darkMode ? "mt-2 text-xl font-semibold text-slate-100" : "mt-2 text-xl font-semibold text-slate-900"}`}>{deletedNewHires.length}</div>
-                      </div>
-                    </div>
-                    <div className="mt-3 grid gap-3 md:grid-cols-3">
-                      <div className={`rounded-3xl p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-                        <div className="text-xs text-slate-500">입주자</div>
-                        <div className={`${theme.darkMode ? "mt-2 text-xl font-semibold text-slate-100" : "mt-2 text-xl font-semibold text-slate-900"}`}>{deletedOccupants.length}</div>
-                      </div>
-                      <div className={`rounded-3xl p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-                        <div className="text-xs text-slate-500">비품</div>
-                        <div className={`${theme.darkMode ? "mt-2 text-xl font-semibold text-slate-100" : "mt-2 text-xl font-semibold text-slate-900"}`}>{deletedInventory.length}</div>
-                      </div>
-                      <div className={`rounded-3xl p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
-                        <div className="text-xs text-slate-500">하자</div>
-                        <div className={`${theme.darkMode ? "mt-2 text-xl font-semibold text-slate-100" : "mt-2 text-xl font-semibold text-slate-900"}`}>{deletedDefects.length}</div>
-                      </div>
-                    </div>
-                    <div className={`${theme.darkMode ? "mt-3 rounded-3xl bg-slate-950 p-4 shadow-sm ring-1 ring-slate-200" : "mt-3 rounded-3xl bg-white p-4 shadow-sm ring-1 ring-slate-200"}`}>
-                      <div className="text-xs text-slate-500">청소 보고서</div>
-                      <div className={`${theme.darkMode ? "mt-2 text-xl font-semibold text-slate-100" : "mt-2 text-xl font-semibold text-slate-900"}`}>{deletedCleaningReports.length}</div>
-                    </div>
-                  </div>
-                  <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-5 shadow-sm" : "rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"}`}>
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                      <div>
-                        <div className={`${theme.darkMode ? "text-sm font-semibold text-slate-300" : "text-sm font-semibold text-slate-700"}`}>감사 로그</div>
-                        <div className="text-xs text-slate-500">최근 변경 내역을 확인하세요.</div>
-                      </div>
-                      <div className="text-xs text-slate-500">총 {auditLogs.length}건</div>
-                    </div>
-                    <div className="max-h-80 space-y-3 overflow-y-auto">
-                      {auditLogs.length > 0 ? (
-                        auditLogs.slice(0, 20).map((log) => (
-                          <div key={log.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-3" : "rounded-2xl border border-slate-200 bg-slate-50 p-3"}`}>
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-sm font-semibold text-slate-800">{getAuditActionLabel(log.actionType)} · {formatAuditTarget(log)}</div>
-                              <div className="text-xs text-slate-500">{formatDateTimeKorea(log.changedAt)}</div>
-                            </div>
-                            <div className="mt-2 text-xs text-slate-500">{getUserDisplayName(log.changedBy)}</div>
-                            {log.memo && <div className="mt-1 text-xs text-slate-500">{log.memo}</div>}
-                          </div>
-                        ))
-                      ) : (
-                        <div className={`${theme.darkMode ? "rounded-2xl border border-dashed border-slate-600 bg-slate-950 p-6 text-center text-slate-400" : "rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-slate-400"}`}>기록된 감사 로그가 없습니다.</div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-4">
-                  {deletedDorms.length > 0 && (
-                    <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-base font-semibold text-slate-800">삭제된 기숙사</h3>
-                          <p className="text-sm text-slate-500">복원 또는 영구 삭제가 가능합니다.</p>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        {deletedDorms.map((item) => (
-                          <div key={item.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
-                            <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{item.buildingName} {item.dong}-{item.roomHo}</div>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={() => restoreItem(dorms, setDorms, item.id, "dorm")}
-                                className="rounded-2xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
-                              >
-                                복원
-                              </button>
-                              <button
-                                onClick={() => permanentlyDeleteItem(dorms, setDorms, item.id, "dorm")}
-                                className="rounded-2xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-500"
-                              >
-                                영구 삭제
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {deletedDormContracts.length > 0 && (
-                    <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-base font-semibold text-slate-800">삭제된 신규계약</h3>
-                          <p className="text-sm text-slate-500">삭제된 계약을 복원하거나 영구 삭제하세요.</p>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        {deletedDormContracts.map((item) => (
-                          <div key={item.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
-                            <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{item.buildingName} {item.dong}-{item.roomHo} ({item.contractStatus})</div>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={() => restoreItem(dormContracts, setDormContracts, item.id, "dormContract")}
-                                className="rounded-2xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
-                              >
-                                복원
-                              </button>
-                              <button
-                                onClick={() => permanentlyDeleteItem(dormContracts, setDormContracts, item.id, "dormContract")}
-                                className="rounded-2xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-500"
-                              >
-                                영구 삭제
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {deletedLeases.length > 0 && (
-                    <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-base font-semibold text-slate-800">삭제된 신규계약(Lease)</h3>
-                          <p className="text-sm text-slate-500">삭제된 Lease 데이터를 복원하거나 영구 삭제하세요.</p>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        {deletedLeases.map((item) => (
-                          <div key={item.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
-                            <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{item.addressName} {item.dong}-{item.ho} ({item.contractPeriod})</div>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={() => restoreItem(leases, setLeases, item.id, "lease")}
-                                className="rounded-2xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
-                              >
-                                복원
-                              </button>
-                              <button
-                                onClick={() => permanentlyDeleteItem(leases, setLeases, item.id, "lease")}
-                                className="rounded-2xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-500"
-                              >
-                                영구 삭제
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {deletedNewHires.length > 0 && (
-                    <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-base font-semibold text-slate-800">삭제된 신입사원</h3>
-                          <p className="text-sm text-slate-500">삭제된 직원 정보를 복원하거나 영구 삭제하세요.</p>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        {deletedNewHires.map((item) => (
-                          <div key={item.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
-                            <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{item.name} / {item.buildingName} {item.dong}-{item.roomHo}</div>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={() => restoreItem(newHires, setNewHires, item.id, "newHire")}
-                                className="rounded-2xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
-                              >
-                                복원
-                              </button>
-                              <button
-                                onClick={() => permanentlyDeleteItem(newHires, setNewHires, item.id, "newHire")}
-                                className="rounded-2xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-500"
-                              >
-                                영구 삭제
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {deletedOccupants.length > 0 && (
-                    <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-base font-semibold text-slate-800">삭제된 입주자</h3>
-                          <p className="text-sm text-slate-500">삭제된 입주자를 복원하거나 영구 삭제하세요.</p>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        {deletedOccupants.map((item) => (
-                          <div key={item.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
-                            <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
-                              {item.employeeName} / {dorms.find((d) => d.id === item.dormId)
-                                ? `${dorms.find((d) => d.id === item.dormId)?.buildingName} ${dorms.find((d) => d.id === item.dormId)?.dong}-${dorms.find((d) => d.id === item.dormId)?.roomHo}`
-                                : item.dormId}
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={() => restoreItem(occupants, setOccupants, item.id, "occupant")}
-                                className="rounded-2xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
-                              >
-                                복원
-                              </button>
-                              <button
-                                onClick={() => permanentlyDeleteItem(occupants, setOccupants, item.id, "occupant")}
-                                className="rounded-2xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-500"
-                              >
-                                영구 삭제
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {deletedInventory.length > 0 && (
-                    <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-base font-semibold text-slate-800">삭제된 비품</h3>
-                          <p className="text-sm text-slate-500">삭제된 비품 데이터를 복원하거나 영구 삭제하세요.</p>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        {deletedInventory.map((item) => (
-                          <div key={item.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
-                            <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{item.itemName} / {item.buildingName} {item.dong}-{item.roomHo}</div>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={() => restoreItem(inventory, setInventory, item.id, "inventory")}
-                                className="rounded-2xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
-                              >
-                                복원
-                              </button>
-                              <button
-                                onClick={() => permanentlyDeleteItem(inventory, setInventory, item.id, "inventory")}
-                                className="rounded-2xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-500"
-                              >
-                                영구 삭제
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {deletedDefects.length > 0 && (
-                    <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-base font-semibold text-slate-800">삭제된 하자 접수</h3>
-                          <p className="text-sm text-slate-500">삭제된 하자 접수 건을 복원하거나 영구 삭제하세요.</p>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        {deletedDefects.map((item) => (
-                          <div key={item.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
-                            <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{item.buildingName} {item.dong}-{item.ho} / {item.defectStatus}</div>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={() => restoreItem(defects, setDefects, item.id, "defect")}
-                                className="rounded-2xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
-                              >
-                                복원
-                              </button>
-                              <button
-                                onClick={() => permanentlyDeleteItem(defects, setDefects, item.id, "defect")}
-                                className="rounded-2xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-500"
-                              >
-                                영구 삭제
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {deletedCleaningReports.length > 0 && (
-                    <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
-                      <div className="mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-base font-semibold text-slate-800">삭제된 청소 보고서</h3>
-                          <p className="text-sm text-slate-500">삭제된 청소 보고서를 복원하거나 영구 삭제하세요.</p>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        {deletedCleaningReports.map((item) => (
-                          <div key={item.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
-                            <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{item.buildingName} {item.dong}-{item.roomHo} / {item.cleanStatus}</div>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={() => restoreItem(cleaningReports, setCleaningReports, item.id, "cleaningReport")}
-                                className="rounded-2xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
-                              >
-                                복원
-                              </button>
-                              <button
-                                onClick={() => permanentlyDeleteItem(cleaningReports, setCleaningReports, item.id, "cleaningReport")}
-                                className="rounded-2xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-500"
-                              >
-                                영구 삭제
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
           </section>
         )}
 
@@ -15180,7 +14312,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-6">
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">신규계약</div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">계약</div>
                 <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{dormContracts.filter(c => c.isDeleted).length}</div>
                 <div className="mt-2 text-sm text-slate-500">삭제됨</div>
               </div>
@@ -15201,7 +14333,67 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-2">
+            <div className="space-y-6 mb-6">
+              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-slate-800">변경이력</h3>
+                    <p className="text-sm text-slate-500">휴지통 관련 변경 기록과 전체 작업 내역을 한눈에 확인하세요.</p>
+                  </div>
+                  <div className="text-xs text-slate-500">총 {auditLogs.length}건</div>
+                </div>
+                <div className="max-h-80 space-y-3 overflow-y-auto">
+                  {auditLogs.length > 0 ? (
+                    auditLogs.slice(0, 20).map((log) => (
+                      <div key={log.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-3" : "rounded-2xl border border-slate-200 bg-slate-50 p-3"}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-semibold text-slate-800">{getAuditActionLabel(log.actionType)} · {formatAuditTarget(log)}</div>
+                          <div className="text-xs text-slate-500">{formatDateTimeKorea(log.changedAt)}</div>
+                        </div>
+                        <div className="mt-2 text-xs text-slate-500">{getUserDisplayName(log.changedBy)}</div>
+                        {log.memo && <div className="mt-1 text-xs text-slate-500">{log.memo}</div>}
+                      </div>
+                    ))
+                  ) : (
+                    <div className={`${theme.darkMode ? "rounded-2xl border border-dashed border-slate-600 bg-slate-950 p-6 text-center text-slate-400" : "rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-slate-400"}`}>변경 이력이 없습니다.</div>
+                  )}
+                </div>
+              </div>
+              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-slate-800">복구 이력</h3>
+                    <p className="text-sm text-slate-500">휴지통에서 복원된 항목 내역을 확인합니다.</p>
+                  </div>
+                  <div className="text-xs text-slate-500">총 {auditLogs.filter((log) => log.actionType === "restore").length}건</div>
+                </div>
+                <div className="max-h-80 space-y-3 overflow-y-auto">
+                  {auditLogs.filter((log) => log.actionType === "restore").length > 0 ? (
+                    auditLogs.filter((log) => log.actionType === "restore").slice(0, 20).map((log) => (
+                      <div key={log.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-3" : "rounded-2xl border border-slate-200 bg-slate-50 p-3"}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-semibold text-slate-800">{getAuditTargetLabel(log.targetType)} 복원</div>
+                          <div className="text-xs text-slate-500">{formatDateTimeKorea(log.changedAt)}</div>
+                        </div>
+                        <div className="mt-2 text-xs text-slate-500">{getUserDisplayName(log.changedBy)}</div>
+                        {log.memo && <div className="mt-1 text-xs text-slate-500">{log.memo}</div>}
+                      </div>
+                    ))
+                  ) : (
+                    <div className={`${theme.darkMode ? "rounded-2xl border border-dashed border-slate-600 bg-slate-950 p-6 text-center text-slate-400" : "rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-slate-400"}`}>복구된 내역이 없습니다.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-base font-semibold text-slate-800">완전삭제 관리</h3>
+                  <p className="text-sm text-slate-500">삭제된 데이터 리스트에서 복원 및 영구 삭제를 처리합니다.</p>
+                </div>
+              </div>
+              <div className="grid gap-6 lg:grid-cols-2">
               {/* 신규계약 휴지통 */}
               {dormContracts.filter(c => c.isDeleted).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
@@ -15411,6 +14603,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </div>
                 </div>
               )}
+              </div>
             </div>
           </section>
         )}
