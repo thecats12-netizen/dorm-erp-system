@@ -1873,6 +1873,12 @@ export default function App() {
       ho: "호수",
       pyeong: "평형",
       gender: "성별",
+      moveInDate: "입실일",
+      moveOutDate: "퇴실일",
+      moveOutDueDate: "예정 퇴실일",
+      expectedMoveOutDate: "예정 퇴실일",
+      actualMoveOutDate: "실제 퇴실일",
+      residenceStatus: "거주 상태",
       createdAt: "등록일",
       updatedAt: "수정일",
       deletedAt: "삭제일",
@@ -6406,21 +6412,53 @@ export default function App() {
 
   // Generate summary reports into militaryReports state
   const formatReportNotes = (items: Array<Record<string, any>> | Record<string, any>): string => {
+    const labelMap: Record<string, string> = {
+      name: "이름",
+      department: "부서",
+      status: "상태",
+      trainingType: "훈련유형",
+      trainingRound: "차수",
+      trainingDate: "훈련일",
+      completionDate: "이수일",
+      trainingHours: "이수시간",
+    };
+    const ignoredKeys = new Set(["id", "personnelId", "personnelIds", "createdAt", "updatedAt", "notes"]);
+
+    const formatValue = (key: string, value: any): string | null => {
+      if (value === undefined || value === null || String(value).trim() === "") return null;
+      if (key === "trainingDate" || key === "completionDate") {
+        const formatted = formatDateOnly(value);
+        return `${labelMap[key] || key}: ${formatted || "-"}`;
+      }
+      if (key === "trainingHours") {
+        return `${labelMap[key] || key}: ${Number(value) || 0}`;
+      }
+      const displayKey = labelMap[key] || key;
+      return `${displayKey}: ${String(value)}`;
+    };
+
+    const formatSingleItem = (item: Record<string, any>): string => {
+      const entries = Object.entries(item)
+        .flatMap(([key, value]) => {
+          if (ignoredKeys.has(key)) return [];
+          const formatted = formatValue(key, value);
+          return formatted ? [formatted] : [];
+        });
+      return entries.join(" / ");
+    };
+
     if (!items) return "";
     if (!Array.isArray(items)) {
-      return Object.entries(items).map(([key, value]) => `${key}: ${value}`).join("\n");
+      return Object.entries(items)
+        .flatMap(([key, value]) => {
+          if (ignoredKeys.has(key)) return [];
+          const formatted = formatValue(key, value);
+          return formatted ? [formatted] : [];
+        })
+        .join("\n");
     }
-    return items
-      .map((item) =>
-        Object.entries(item)
-          .map(([key, value]) => {
-            if (value === undefined || value === null) return `${key}: `;
-            if (typeof value === "object") return `${key}: ${JSON.stringify(value)}`;
-            return `${key}: ${value}`;
-          })
-          .join(", ")
-      )
-      .join("\n");
+
+    return items.map(formatSingleItem).join("\n");
   };
 
   const generateMilitaryReports = () => {
@@ -6462,7 +6500,7 @@ export default function App() {
       type: '미이수',
       author: currentUser?.displayName || currentUser?.username || '',
       status: '완료',
-      notes: `총 ${incomplete.length}건\n${formatReportNotes(incomplete.map((r) => ({ personnelId: r.personnelId, trainingType: r.trainingType || r.subject, trainingRound: r.trainingRound, status: r.status })))}`,
+      notes: `총 ${incomplete.length}건\n${formatReportNotes(incomplete.map((r) => ({ name: militaryPersonnel.find((p) => p.id === r.personnelId)?.name || '', trainingType: r.trainingType || r.subject, trainingRound: r.trainingRound, status: r.status })))}`,
       createdAt: now,
       updatedAt: now,
     });
@@ -6475,7 +6513,7 @@ export default function App() {
       type: '예정',
       author: currentUser?.displayName || currentUser?.username || '',
       status: '완료',
-      notes: `총 ${scheduled.length}건\n${formatReportNotes(scheduled.map((r) => ({ personnelId: r.personnelId, trainingType: r.trainingType || r.subject, trainingDate: r.trainingDate })))}`,
+      notes: `총 ${scheduled.length}건\n${formatReportNotes(scheduled.map((r) => ({ name: militaryPersonnel.find((p) => p.id === r.personnelId)?.name || '', trainingType: r.trainingType || r.subject, trainingDate: r.trainingDate })))}`,
       createdAt: now,
       updatedAt: now,
     });
@@ -6493,7 +6531,7 @@ export default function App() {
       type: '30일',
       author: currentUser?.displayName || currentUser?.username || '',
       status: '완료',
-      notes: `총 ${in30.length}건\n${formatReportNotes(in30.map((r) => ({ personnelId: r.personnelId, trainingType: r.trainingType || r.subject, trainingDate: r.trainingDate })))}`,
+      notes: `총 ${in30.length}건\n${formatReportNotes(in30.map((r) => ({ name: militaryPersonnel.find((p) => p.id === r.personnelId)?.name || '', trainingType: r.trainingType || r.subject, trainingDate: r.trainingDate })))}`,
       createdAt: now,
       updatedAt: now,
     });
@@ -13264,8 +13302,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <div className="space-y-2">
                     {dormContracts.slice(-5).reverse().map((contract) => (
                       <div key={contract.id} className={`rounded-2xl p-3 shadow-sm text-xs ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
-                        <div className={`font-medium truncate ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{contract.buildingName} {contract.dong}-{contract.roomHo}</div>
-                        <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>{contract.contractStart}</div>
+                        <div className={`font-medium truncate ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{contract.buildingName} {formatDong(contract.dong)}-{formatRoomHo(contract.roomHo)}</div>
+                        <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>{formatDateOnly(contract.contractStart) || "-"}</div>
                       </div>
                     ))}
                   </div>
@@ -13281,7 +13319,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <div className="space-y-2">
                     {cleaningReports.slice(-5).reverse().map((report) => (
                       <div key={report.id} className={`rounded-2xl p-3 shadow-sm text-xs ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
-                        <div className={`font-medium truncate ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{report.buildingName} {report.dong}-{report.roomHo}</div>
+                        <div className={`font-medium truncate ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{report.buildingName} {formatDong(report.dong)}-{formatRoomHo(report.roomHo)}</div>
                         <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>{report.monthLabel} {report.weekLabel}</div>
                       </div>
                     ))}
@@ -13402,8 +13440,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       )
                       .map((dorm) => (
                         <li key={dorm.id} className={`rounded-2xl p-3 shadow-sm ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
-                          <div className={`font-medium ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{dorm.site} {dorm.buildingName} {dorm.dong}-{dorm.roomHo}</div>
-                          <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>만기 {dorm.contractEnd} · 상태 {dorm.leaseStatus}</div>
+                          <div className={`font-medium ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{dorm.site} {dorm.buildingName} {formatDong(dorm.dong)} {formatRoomHo(dorm.roomHo)}</div>
+                          <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>만기 {formatDateOnly(dorm.contractEnd) || "-"} · 상태 {dorm.leaseStatus}</div>
                         </li>
                       ))}
                   </ul>
