@@ -93,6 +93,13 @@ import {
 import { TABLE_TYPE_BY_TAB } from "./constants/excelHeaders";
 import { formatDong, formatRoomHo, stripDongHoSuffix } from "./utils/formatUtils";
 import {
+  formatActionLabel,
+  formatAuditTarget,
+  formatDateOnly,
+  formatDateTimeKorea,
+  formatUserDisplay,
+} from "./utils/formatters";
+import {
   normalizeExcelRow,
   getWorksheetHeaders,
   arrayBufferToBase64,
@@ -611,11 +618,6 @@ function userTemplate(): Omit<LoginUser, "id" | "createdAt"> {
 
 function formatNumber(n: number) {
   return new Intl.NumberFormat("ko-KR").format(n || 0);
-}
-
-function formatDateOnly(value: string) {
-  if (!value) return "";
-  return value.slice(0, 10);
 }
 
 function clearWorksheetRowsAfterHeader(worksheet: XLSX.WorkSheet, headerRowIndex = 0) {
@@ -2448,34 +2450,9 @@ export default function App() {
 
   const closeDormDetailModal = () => setSelectedDormDetailId("");
 
-  const AUDIT_TARGET_LABEL_MAP: Record<AuditLog["targetType"], string> = {
-    dorm: "기숙사",
-    dormContract: "기숙사 계약",
-    newHire: "신입사원",
-    occupant: "입주자",
-    inventory: "비품",
-    defect: "하자",
-    cleaningReport: "청소 보고서",
-    lease: "매입계약",
-    militaryPersonnel: "군인원",
-    trainingRecord: "훈련 기록",
-    militaryNotice: "공지",
-    militaryReport: "보고서",
-  };
+  const getAuditTargetLabel = (targetType: AuditLog["targetType"]) => formatAuditTarget({ targetType });
 
-  const getAuditTargetLabel = (targetType: AuditLog["targetType"]) => AUDIT_TARGET_LABEL_MAP[targetType] || targetType;
-
-  const ACTION_LABEL_MAP: Record<string, string> = {
-    create: "등록",
-    update: "수정",
-    delete: "삭제",
-    statusChange: "상태변경",
-    restore: "복원",
-    login: "로그인",
-    logout: "로그아웃",
-  } as any;
-
-  const getAuditActionLabel = (actionType: AuditLog["actionType"]) => ACTION_LABEL_MAP[actionType] || actionType;
+  const getAuditActionLabel = (actionType: AuditLog["actionType"]) => formatActionLabel(actionType);
 
   // 감사 로그 필드명 한글화 맵
   const FIELD_LABEL_MAP: Record<string, string> = {
@@ -2522,7 +2499,7 @@ export default function App() {
       ("email" in u && (u as any).email === normalized) ||
       u.displayName === normalized
     );
-    return matchedUser?.displayName || normalized;
+    return matchedUser ? formatUserDisplay(matchedUser) : formatUserDisplay(normalized);
   };
 
   const getDormManagerDisplayName = (dormId?: string): string => {
@@ -2604,8 +2581,7 @@ export default function App() {
 
   const getAuditTargetDisplayName = (log: AuditLog) => {
     const name = getAuditTargetName(log);
-    if (!name) return log.targetId ? `${log.targetId.slice(0, 8)}...` : "-";
-    if (name === log.targetId) return `${log.targetId.slice(0, 8)}...`;
+    if (!name || name === log.targetId) return formatAuditTarget(log);
     return name;
   };
 
@@ -7708,7 +7684,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     if (!log) return;
 
     const confirmed = window.confirm(
-      `정말 이전값으로 복구하시겠습니까?\n\n대상: ${log.targetType}\n시간: ${new Date(log.changedAt).toLocaleString("ko-KR")}\n변경자: ${log.changedBy}`
+      `정말 이전값으로 복구하시겠습니까?\n\n대상: ${formatAuditTarget(log)}\n시간: ${formatDateTimeKorea(log.changedAt)}\n변경자: ${getUserDisplayName(log.changedBy)}`
     );
     if (!confirmed) return;
 
@@ -7732,7 +7708,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         changedBy: currentUser?.displayName || "시스템",
         beforeValue: log.afterValue,
         afterValue: log.beforeValue,
-        memo: `변경이력 복구 (원본 시간: ${log.changedAt})`,
+        memo: `변경이력 복구 (원본 시간: ${formatDateTimeKorea(log.changedAt)})`,
       });
 
       setShowAuditLogModal(false);
@@ -11486,7 +11462,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           </div>
                           <div>
                             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">변경 시간</div>
-                            <div className={`${theme.darkMode ? "mt-1 text-sm font-medium text-slate-100" : "mt-1 text-sm font-medium text-slate-900"}`}>{new Date(log.changedAt).toLocaleString("ko-KR")}</div>
+                            <div className={`${theme.darkMode ? "mt-1 text-sm font-medium text-slate-100" : "mt-1 text-sm font-medium text-slate-900"}`}>{formatDateTimeKorea(log.changedAt)}</div>
                           </div>
                           <div>
                             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">변경 필드</div>
@@ -12943,7 +12919,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           className="h-5 w-5"
                         />
                       </td>
-                      <td className="px-3 py-2">{new Date(log.changedAt).toLocaleString("ko-KR")}</td>
+                      <td className="px-3 py-2">{formatDateTimeKorea(log.changedAt)}</td>
                       <td className="px-3 py-2">{getUserDisplayName(log.changedBy)}</td>
                       <td className="px-3 py-2">
                         <div className="flex flex-col gap-1">
@@ -14696,8 +14672,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         auditLogs.slice(0, 20).map((log) => (
                           <div key={log.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-3" : "rounded-2xl border border-slate-200 bg-slate-50 p-3"}`}>
                             <div className="flex items-center justify-between gap-2">
-                              <div className="text-sm font-semibold text-slate-800">{getAuditActionLabel(log.actionType)} · {getAuditTargetLabel(log.targetType)}</div>
-                              <div className="text-xs text-slate-500">{formatDateOnly(log.changedAt) || "-"}</div>
+                              <div className="text-sm font-semibold text-slate-800">{getAuditActionLabel(log.actionType)} · {formatAuditTarget(log)}</div>
+                              <div className="text-xs text-slate-500">{formatDateTimeKorea(log.changedAt)}</div>
                             </div>
                             <div className="mt-2 text-xs text-slate-500">{getUserDisplayName(log.changedBy)}</div>
                             {log.memo && <div className="mt-1 text-xs text-slate-500">{log.memo}</div>}
