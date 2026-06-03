@@ -1806,13 +1806,62 @@ export default function App() {
   const [systemSettings, setSystemSettings] = useState<SystemSettings>(() =>
     loadJson<SystemSettings>(SYSTEM_SETTINGS_KEY, getDefaultSystemSettings(), tenantId)
   );
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  const prettifyFieldKey = (key: string) =>
+    key
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2");
+
   const getFieldLabel = (key: string) => {
     try {
       const f = systemSettings.fields.find((s) => s.fieldKey === key);
-      return f ? f.fieldName : key;
+      if (f) return f.fieldName;
     } catch {
-      return key;
+      // ignore
     }
+
+    const auditFieldLabelMap: Record<string, string> = {
+      ...FIELD_LABEL_MAP,
+      name: "이름",
+      employeeName: "이름",
+      phone: "연락처",
+      department: "부서",
+      rank: "계급",
+      serviceBranch: "군별",
+      unit: "부대",
+      birthDate: "생년월일",
+      enlistmentDate: "입대일",
+      dischargeDate: "전역일",
+      dischargedDate: "전역일",
+      mobilization: "동원여부",
+      status: "상태",
+      notes: "비고",
+      managerUserId: "기숙사 담당자",
+      dormManagerName: "기숙사 관리자명",
+      managerName: "담당 관리자",
+      dormId: "기숙사",
+      sourceNewHireId: "신입사원",
+      contractStart: "계약시작일",
+      contractEnd: "계약만료일",
+      contractAmount: "계약금액",
+      contractStatus: "계약상태",
+      contractType: "계약유형",
+      buildingName: "건물명",
+      address: "주소",
+      dong: "동",
+      roomHo: "호수",
+      ho: "호수",
+      pyeong: "평형",
+      gender: "성별",
+      createdAt: "등록일",
+      updatedAt: "수정일",
+      deletedAt: "삭제일",
+      deletedBy: "삭제자",
+      isDeleted: "삭제여부",
+    };
+
+    return auditFieldLabelMap[key] || prettifyFieldKey(key);
   };
   const getCodeKeyLabel = (key: string) => {
     const map: Record<string, string> = {
@@ -2488,7 +2537,133 @@ export default function App() {
   };
 
   // 감사 로그 값 변환 함수
-  const getAuditFieldLabel = (fieldName: string): string => FIELD_LABEL_MAP[fieldName] || fieldName;
+  const formatAuditValue = (fieldName: string, value: any, targetType?: AuditLog["targetType"]): string => {
+    if (value === null || value === undefined || value === "") return "(없음)";
+
+    const normalized = typeof value === "string" ? value.trim() : value;
+    if (normalized === "") return "(없음)";
+
+    if (normalized === true || normalized === "true") return "예";
+    if (normalized === false || normalized === "false") return "아니오";
+
+    const parsedDate = parseDateValue(normalized);
+    if (parsedDate) {
+      const dateString = String(normalized);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateString) || /^\d{4}\.\s?\d{1,2}\.\s?\d{1,2}$/.test(dateString)) {
+        return formatDateOnly(parsedDate);
+      }
+      return formatDateTimeKorea(parsedDate);
+    }
+
+    const parseJson = (candidate: string) => {
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        return null;
+      }
+    };
+
+    const isUuid = (candidate: string) => uuidRegex.test(candidate);
+
+    if (fieldName === "managerUserId") {
+      const id = String(normalized).split("_")[0];
+      const displayName = getUserDisplayName(id);
+      if (displayName === id && isUuid(id)) return "기숙사 담당자";
+      return displayName;
+    }
+
+    if (fieldName === "reporterUserId" || fieldName === "confirmedBy") {
+      return getUserDisplayName(normalized);
+    }
+
+    if (fieldName === "dormId") {
+      const dorm = dorms.find((d) => d.id === normalized) || operationalDorms.find((d) => d.id === normalized);
+      if (dorm) return `${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}`;
+      return isUuid(String(normalized)) ? "기숙사" : String(normalized);
+    }
+
+    if (fieldName === "sourceNewHireId") {
+      const hire = newHires.find((h) => h.id === normalized);
+      if (hire) return hire.name;
+      return isUuid(String(normalized)) ? "신입사원" : String(normalized);
+    }
+
+    if (fieldName === "personnelId") {
+      const personnel = militaryPersonnel.find((m) => m.id === normalized);
+      return personnel ? personnel.name : String(normalized);
+    }
+
+    if (fieldName === "personnelIds") {
+      const parsed = parseJson(String(normalized));
+      if (Array.isArray(parsed)) {
+        return parsed.map((id) => militaryPersonnel.find((m) => m.id === id)?.name || String(id)).join(", ");
+      }
+    }
+
+    if (fieldName === "targetId" && targetType) {
+      if (targetType === "dorm") {
+        const dorm = dorms.find((d) => d.id === normalized) || operationalDorms.find((d) => d.id === normalized);
+        if (dorm) return `${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}`;
+      }
+      if (targetType === "occupant") {
+        const occupant = occupants.find((o) => o.id === normalized);
+        if (occupant) return occupant.employeeName || occupant.id;
+      }
+      if (targetType === "dormContract") {
+        const contract = dormContracts.find((c) => c.id === normalized);
+        if (contract) return `${contract.buildingName} ${formatDong(contract.dong)}-${formatRoomHo(contract.roomHo)}`;
+      }
+      if (targetType === "newHire") {
+        const hire = newHires.find((h) => h.id === normalized);
+        if (hire) return hire.name;
+      }
+      if (targetType === "inventory") {
+        const item = inventory.find((i) => i.id === normalized);
+        if (item) return item.itemName || String(normalized);
+      }
+      if (targetType === "defect") {
+        const defect = defects.find((d) => d.id === normalized);
+        if (defect) return defect.requestText || defect.reporterName || defect.id;
+      }
+      if (targetType === "lease") {
+        const lease = leases.find((l) => l.id === normalized);
+        if (lease) return lease.addressName || lease.id;
+      }
+      if (targetType === "cleaningReport") {
+        const report = cleaningReports.find((r) => r.id === normalized);
+        if (report) return report.reportDate || String(normalized);
+      }
+      return isUuid(String(normalized)) ? "식별자" : String(normalized);
+    }
+
+    if (typeof normalized === "string") {
+      const parsed = parseJson(normalized);
+      if (parsed !== null) {
+        if (Array.isArray(parsed)) {
+          return parsed.map((item) => (typeof item === "object" && item !== null ? JSON.stringify(item) : String(item))).join(", ");
+        }
+        if (typeof parsed === "object") {
+          if (parsed === null) return "(없음)";
+          if ("name" in parsed && parsed.name) return String((parsed as any).name);
+          if ("displayName" in parsed && (parsed as any).displayName) return String((parsed as any).displayName);
+          if ("buildingName" in parsed && "dong" in parsed && "roomHo" in parsed) {
+            return `${(parsed as any).buildingName} ${formatDong((parsed as any).dong)}-${formatRoomHo((parsed as any).roomHo)}`;
+          }
+          return Object.entries(parsed)
+            .slice(0, 3)
+            .map(([k, v]) => `${getFieldLabel(k)}: ${typeof v === "object" ? JSON.stringify(v) : String(v)}`)
+            .join(", ");
+        }
+        if (isUuid(normalized)) {
+          return "식별자";
+        }
+      }
+
+      return String(normalized);
+    }
+
+    return String(normalized);
+  };
 
   const getUserDisplayName = (userIdOrEmailOrName: string): string => {
     const normalized = String(userIdOrEmailOrName).trim();
@@ -2510,42 +2685,6 @@ export default function App() {
     return manager?.displayName || manager?.username || "-";
   };
   
-  const getAuditDisplayValue = (fieldName: string, value: string): string => {
-    if (!value) return "";
-
-    // user id/email/username로 displayName 변환
-    if (fieldName === "managerUserId" || fieldName === "reporterUserId" || fieldName === "confirmedBy") {
-      return getUserDisplayName(value);
-    }
-    
-    // dormId로 기숙사명/동/호수 변환
-    if (fieldName === "dormId") {
-      const dorm = dorms.find(d => d.id === value) || operationalDorms.find(d => d.id === value);
-      return dorm ? `${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}` : value;
-    }
-    
-    // sourceNewHireId로 신입사원 이름 변환
-    if (fieldName === "sourceNewHireId") {
-      const hire = newHires.find(h => h.id === value);
-      return hire ? hire.name : value;
-    }
-
-    // personnelId 또는 personnelIds로 군인 이름 변환
-    if (fieldName === "personnelId") {
-      const p = militaryPersonnel.find((m) => m.id === value);
-      return p ? p.name : value;
-    }
-    if (fieldName === "personnelIds") {
-      try {
-        const ids = JSON.parse(value) as string[];
-        return ids.map((id) => militaryPersonnel.find((m) => m.id === id)?.name || id).join(", ");
-      } catch {
-        return value;
-      }
-    }
-    
-    return value;
-  };
 
   const getAuditTargetName = (log: AuditLog) => {
     if (log.targetType === "dormContract") {
@@ -4429,9 +4568,9 @@ export default function App() {
       .slice(0, 10);
   }, [operationalDorms]);
 
-  const parseDateValue = (value: string | undefined) => {
-    if (!value) return null;
-    const date = new Date(value);
+  const parseDateValue = (value: any) => {
+    if (value === undefined || value === null || value === "") return null;
+    const date = typeof value === "number" ? new Date(value) : new Date(String(value));
     return Number.isNaN(date.valueOf()) ? null : date;
   };
 
@@ -11502,11 +11641,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 </thead>
                                 <tbody>
                                   {changedFields.map((change, idx) => {
-                                    const beforeDisplay = getAuditDisplayValue(change.field, change.beforeValue);
-                                    const afterDisplay = getAuditDisplayValue(change.field, change.afterValue);
+                                    const beforeDisplay = formatAuditValue(change.field, change.beforeValue, log.targetType);
+                                    const afterDisplay = formatAuditValue(change.field, change.afterValue, log.targetType);
                                     return (
                                       <tr key={idx} className={idx % 2 === 0 ? "bg-white" : "bg-slate-50"}>
-                                        <td className={`${theme.darkMode ? "px-4 py-3 font-medium text-slate-100" : "px-4 py-3 font-medium text-slate-900"}`}>{getAuditFieldLabel(change.field)}</td>
+                                        <td className={`${theme.darkMode ? "px-4 py-3 font-medium text-slate-100" : "px-4 py-3 font-medium text-slate-900"}`}>{getFieldLabel(change.field)}</td>
                                         <td className={`${theme.darkMode ? "px-4 py-3 text-slate-300 max-w-xs overflow-hidden text-ellipsis" : "px-4 py-3 text-slate-600 max-w-xs overflow-hidden text-ellipsis"}`} title={beforeDisplay}>
                                           <span className="line-clamp-2">{beforeDisplay}</span>
                                         </td>
