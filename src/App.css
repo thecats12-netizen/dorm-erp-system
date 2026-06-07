@@ -1,3 +1,96 @@
+/* ===== ERP 스타일 테이블 공통 클래스 ===== */
+/* 컨테이너: 항상 가로 스크롤 허용 (모바일/태블릿 깨짐 방지) */
+.erp-table-container {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.erp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  table-layout: fixed; /* 컬럼 폭 균일화 + ellipsis 동작 보장 */
+}
+
+/* 헤더 sticky 유지 */
+.erp-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.erp-table thead th {
+  padding: 0.5rem 0.75rem;
+  height: 2.25rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+  line-height: 1.2;
+  vertical-align: middle;
+}
+
+/* 행 높이 통일 */
+.erp-table tbody tr {
+  height: 2.5rem;
+}
+
+/* 셀 기본: 한 줄 + 말줄임 + 높이 통일 */
+.erp-table tbody td {
+  padding: 0.375rem 0.75rem;
+  height: 2.5rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+  vertical-align: middle;
+}
+
+/* 빈 상태(colspan) 행은 균일 높이 강제에서 제외 */
+.erp-table tbody td[colspan] {
+  white-space: normal;
+  height: auto;
+}
+
+/* 셀 내부 줄바꿈 강제(line-clamp 등)는 한 줄 ERP 스타일로 정리 */
+.erp-table tbody td .line-clamp-2 {
+  display: block;
+  -webkit-line-clamp: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 날짜 컬럼 - 폭 고정 (날짜 컬럼 폭 이상 방지) */
+.erp-table-date {
+  min-width: 96px;
+  width: 96px;
+}
+
+/* 이름/주소 컬럼 (긴 텍스트) */
+.erp-table-name {
+  min-width: 120px;
+  max-width: 180px;
+}
+
+.erp-table-address {
+  min-width: 150px;
+  max-width: 220px;
+}
+
+.erp-table-text {
+  min-width: 100px;
+  max-width: 140px;
+}
+
+/* 모바일 대응 */
+@media (max-width: 1024px) {
+  .erp-table {
+    min-width: 720px;
+  }
+}
+
 .counter {
   font-size: 16px;
   padding: 5px 10px;

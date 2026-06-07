@@ -10,7 +10,22 @@ export function mergeMenus(current: unknown, defaults: MenuItem[]): MenuItem[] {
     mergedById.set(item.id, defaultItem ? { ...defaultItem, ...item } : item);
   });
 
-  return Array.from(mergedById.values()).sort((a, b) => a.order - b.order);
+  // tabKey 기준 중복 제거 (구버전 저장 데이터로 인한 메뉴 중복 방지, 기본 정의 우선)
+  const defaultIdByTab = new Map<string, string>(defaults.map((item) => [item.tabKey, item.id]));
+  const byTab = new Map<string, MenuItem>();
+  Array.from(mergedById.values()).forEach((item) => {
+    const existing = byTab.get(item.tabKey);
+    if (!existing) {
+      byTab.set(item.tabKey, item);
+      return;
+    }
+    const defaultId = defaultIdByTab.get(item.tabKey);
+    if (defaultId && item.id === defaultId) {
+      byTab.set(item.tabKey, item);
+    }
+  });
+
+  return Array.from(byTab.values()).sort((a, b) => a.order - b.order);
 }
 
 export function useSavedOrDefaultArray<T>(current: unknown, defaults: T[]): T[] {

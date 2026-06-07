@@ -1294,8 +1294,11 @@ export default function App() {
   });
 
   const handleRealtimeTableRow = (table: string, payload: any) => {
-    const eventType = payload.eventType || payload.event;
-    const row = eventType === "DELETE" ? payload.old_record : payload.record;
+    const eventType = payload.eventType || payload.event || payload.type;
+    // Supabase Realtime 클라이언트는 payload.new/old, DB 웹훅은 record/old_record 사용 → 양쪽 지원
+    const newRow = payload.new ?? payload.record;
+    const oldRow = payload.old ?? payload.old_record;
+    const row = eventType === "DELETE" ? (oldRow ?? newRow) : (newRow ?? oldRow);
     if (!row || row.tenant_id !== tenantId) return;
 
     if (["dorms", "occupants", "new_hires", "dorm_contracts"].includes(table)) {
@@ -1884,6 +1887,71 @@ export default function App() {
       deletedAt: "삭제일",
       deletedBy: "삭제자",
       isDeleted: "삭제여부",
+      // 훈련/교육 기록
+      subject: "훈련명",
+      trainingType: "훈련유형",
+      trainingRound: "차수",
+      trainingYear: "훈련연도",
+      trainingDate: "훈련예정일",
+      completionDate: "이수일",
+      trainingHours: "이수시간",
+      location: "장소",
+      attendees: "참석인원",
+      personnelId: "군인",
+      personnelIds: "통보 대상",
+      calculationMode: "계산모드",
+      manualCategory: "수동 병역구분",
+      manualYear: "수동 연차",
+      // 공지/통보서
+      title: "제목",
+      category: "구분",
+      content: "내용",
+      publishedDate: "게시일",
+      expiresDate: "만료일",
+      sentStatus: "발송상태",
+      // 보고서
+      type: "종류",
+      author: "작성자",
+      reportDate: "보고일",
+      // 계약 추가 항목
+      landlordName: "임대인명",
+      landlordPhone: "임대인연락처",
+      realEstateName: "부동산명",
+      realEstatePhone: "부동산연락처",
+      prepaymentDeposit: "선납금",
+      deposit: "보증금",
+      monthlyRentOrMaintenance: "월세/관리비",
+      registeredBy: "등록자",
+      modifiedBy: "수정자",
+      공동현관: "공동현관",
+      세대현관: "세대현관",
+      cheonanMoveDate: "천안이동일",
+      extensionReason: "연장사유",
+      moveInType: "입주유형",
+      expectedMoveInDate: "예상 입실일",
+      leaseStatus: "임차상태",
+      capacity: "정원",
+      // 비품
+      itemName: "비품명",
+      modelName: "모델명",
+      maker: "제조사",
+      quantity: "수량",
+      purchaseDate: "구매일",
+      purchaseAmount: "구매금액",
+      issuedDate: "지급일",
+      soldDate: "매각일",
+      soldAmount: "매각금액",
+      disposalDate: "폐기일",
+      disposalReason: "폐기사유",
+      installationLocation: "설치위치",
+      // 청소 보고서
+      reportDateOnly: "보고일",
+      cleanStatus: "청소상태",
+      checkResult: "점검결과",
+      score: "점수",
+      memo: "메모",
+      confirmedBy: "확인자",
+      confirmedAt: "확인일",
     };
 
     return auditFieldLabelMap[normalizedKey] || auditFieldLabelMap[key] || prettifyFieldKey(key);
@@ -3039,9 +3107,12 @@ export default function App() {
   ): Occupant | null => {
     if (!hire.dormId) return null;
 
+    // 삭제 상태는 신입사원(원본)을 따라감 → 삭제/복원이 입주자에 그대로 전파
+    const inheritedDeleted = hire.isDeleted || false;
+
     // actualMoveOutDate가 존재하면 퇴실 상태로 자동 설정
     let status = mapNewHireStatusToOccupantStatus(hire.residenceStatus);
-    if (hire.actualMoveOutDate) {
+    if (hire.actualMoveOutDate || inheritedDeleted) {
       status = "퇴실";
     }
 
@@ -3060,8 +3131,11 @@ export default function App() {
       notes: hire.notes,
       expectedMoveInDate: hire.expectedMoveInDate,
       expectedMoveOutDate: hire.expectedMoveOutDate,
-      actualMoveOutDate: hire.actualMoveOutDate,
+      actualMoveOutDate: hire.actualMoveOutDate || existingOccupant?.actualMoveOutDate,
       sourceNewHireId: hire.id,
+      isDeleted: inheritedDeleted,
+      deletedAt: inheritedDeleted ? (hire.deletedAt || existingOccupant?.deletedAt) : undefined,
+      deletedBy: inheritedDeleted ? (hire.deletedBy || existingOccupant?.deletedBy) : undefined,
       createdAt: existingOccupant?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -3591,9 +3665,6 @@ export default function App() {
   useEffect(() => {
     if (!isSupabaseAvailable() || isLoading) return;
 
-    // Supabase Realtime is temporarily disabled until load/save sync stability is confirmed.
-    return;
-
     let realtimeSubscription: any = null;
     const subscribeRealtime = async () => {
       if (!supabase) return;
@@ -3647,7 +3718,8 @@ export default function App() {
         realtimeSubscription.unsubscribe().catch(() => {});
       }
     };
-  }, [tenantId, currentUser, isLoading]);
+    // currentUser?.id 기준으로만 재구독 (객체 재참조로 인한 과도한 재구독 방지)
+  }, [tenantId, currentUser?.id, isLoading]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -3660,8 +3732,11 @@ export default function App() {
 
   useEffect(() => {
     if (!newHires.length) return;
+    // 삭제된 신입사원은 동기화에서 제외 (삭제된 입주자 부활 방지)
     setOccupants((prevOccupants) =>
-      newHires.reduce((acc, newHire) => upsertOccupantFromNewHire(newHire, acc), prevOccupants)
+      newHires
+        .filter((newHire) => !newHire.isDeleted)
+        .reduce((acc, newHire) => upsertOccupantFromNewHire(newHire, acc), prevOccupants)
     );
   }, [newHires]);
 
@@ -5174,6 +5249,44 @@ export default function App() {
     };
   }, [newHires, dormContracts, dorms, occupants, defects, cleaningReports, inventory]);
 
+  // 대시보드: 오늘의 일정(입주/퇴실) + 미배정 신입사원 목록
+  const dashboardOpsData = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+
+    const moveInTodayCount = [
+      ...occupants.filter((o) => !o.isDeleted && o.moveInDate === today),
+      ...newHires.filter(
+        (h) =>
+          !h.isDeleted &&
+          h.moveInDate === today &&
+          !occupants.some((o) => o.sourceNewHireId === h.id)
+      ),
+    ].length;
+
+    const moveOutTodayCount = occupants.filter(
+      (o) =>
+        !o.isDeleted &&
+        (o.actualMoveOutDate === today || (!o.actualMoveOutDate && o.moveOutDueDate === today))
+    ).length;
+
+    const isUnassigned = (h: NewHireEmployee) => !h.dormId || !h.buildingName || !h.address;
+
+    const unassignedNewHires = newHires.filter((h) => !h.isDeleted && isUnassigned(h));
+
+    // 전체 신입사원 배정 현황 (미배정 우선 정렬, isDeleted 제외)
+    const newHireAssignments = newHires
+      .filter((h) => !h.isDeleted)
+      .map((h) => ({ hire: h, assigned: !isUnassigned(h) }))
+      .sort((a, b) => {
+        if (a.assigned !== b.assigned) return a.assigned ? 1 : -1;
+        const aDate = a.hire.expectedMoveInDate || a.hire.moveInDate || "";
+        const bDate = b.hire.expectedMoveInDate || b.hire.moveInDate || "";
+        return aDate.localeCompare(bDate);
+      });
+
+    return { moveInTodayCount, moveOutTodayCount, unassignedNewHires, newHireAssignments };
+  }, [occupants, newHires]);
+
   const login = async () => {
     if (isSupabaseAvailable()) {
       const raw = loginForm.username.trim();
@@ -6427,6 +6540,14 @@ export default function App() {
       trainingDate: "훈련일",
       completionDate: "이수일",
       trainingHours: "이수시간",
+      title: "제목",
+      sentStatus: "발송상태",
+      type: "종류",
+      author: "작성자",
+      reportDate: "보고일",
+      location: "장소",
+      subject: "훈련명",
+      attendees: "참석인원",
     };
     const ignoredKeys = new Set(["id", "personnelId", "personnelIds", "createdAt", "updatedAt", "notes"]);
 
@@ -9026,7 +9147,168 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </table>
                 </div>
               </section>
+
+              <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+                <div className="mb-4">
+                  <h2 className="text-lg font-semibold">오늘의 일정 및 알림</h2>
+                  <p className="text-sm text-slate-500">{formatDateOnly(new Date().toISOString().slice(0, 10))} 기준 처리할 항목</p>
+                </div>
+                <div className="space-y-2">
+                  {([
+                    { label: "오늘 입주 예정", count: dashboardOpsData.moveInTodayCount, tab: "occupants", color: "text-blue-600" },
+                    { label: "오늘 퇴실 예정", count: dashboardOpsData.moveOutTodayCount, tab: "occupants", color: "text-indigo-600" },
+                    { label: "계약 만료 예정 (30일)", count: dashboardSummaryStats.expiringCount, tab: "dormContracts", color: "text-amber-600" },
+                    { label: "청소 미제출", count: dashboardSummaryStats.unreportedCleaning, tab: "cleaningReports", color: "text-green-600" },
+                    { label: "하자 미처리", count: dashboardSummaryStats.unprocessedDefects, tab: "defects", color: "text-red-600" },
+                    { label: "미배정 신입사원", count: dashboardSummaryStats.unassignedCount, tab: "newHires", color: "text-purple-600" },
+                    { label: "비품 부족/교체 필요", count: dashboardSummaryStats.outdatedInventory, tab: "inventory", color: "text-cyan-600" },
+                  ] as Array<{ label: string; count: number; tab: TabKey; color: string }>).map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      onClick={() => setActiveTab(item.tab)}
+                      className={`flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left transition ${theme.darkMode ? "border-slate-700 bg-slate-950 hover:bg-slate-800" : "border-slate-200 bg-slate-50 hover:bg-slate-100"}`}
+                    >
+                      <span className="text-sm font-medium">{item.label}</span>
+                      <span className={`text-base font-bold ${item.count > 0 ? item.color : "text-slate-400"}`}>{item.count}건</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
             </div>
+
+            <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">신입사원 입주배정</h2>
+                  <p className="text-sm text-slate-500">전체 {dashboardOpsData.newHireAssignments.length}명 · 미배정 {dashboardOpsData.unassignedNewHires.length}명 (미배정 우선 표시)</p>
+                </div>
+                {canEditData(currentUser) && (
+                  <button
+                    type="button"
+                    onClick={() => setShowNewHireAssignmentModal(true)}
+                    className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
+                  >
+                    <Plus className="h-4 w-4" /> 일괄 배정
+                  </button>
+                )}
+              </div>
+              {dashboardOpsData.newHireAssignments.length > 0 ? (
+                <div className="erp-table-container max-h-[480px] overflow-y-auto">
+                  <table className="erp-table min-w-[720px] text-left">
+                    <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                      <tr>
+                        <th className="px-3 py-2">성명</th>
+                        <th className="px-3 py-2">성별</th>
+                        <th className="px-3 py-2">부서</th>
+                        <th className="px-3 py-2">입주예정일</th>
+                        <th className="px-3 py-2">현재 상태</th>
+                        <th className="px-3 py-2">작업</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dashboardOpsData.newHireAssignments.slice(0, 10).map(({ hire: h, assigned }) => (
+                        <tr key={h.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
+                          <td className="px-3 py-2">{h.name}</td>
+                          <td className="px-3 py-2">{h.gender}</td>
+                          <td translate="no" className="px-3 py-2 notranslate">{h.department}</td>
+                          <td className="px-3 py-2">{formatDateOnly(h.expectedMoveInDate) || "-"}</td>
+                          <td className="px-3 py-2">
+                            <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${assigned ? "bg-emerald-100 text-emerald-700" : "bg-orange-100 text-orange-700"}`}>
+                              {assigned ? "배정완료" : "미배정"}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            {canEditData(currentUser) && !assigned && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setAssigningNewHireId(h.id);
+                                  setShowAssignDormForNewHire(true);
+                                }}
+                                className="rounded-xl border border-blue-300 px-2 py-1 text-xs text-blue-600 hover:bg-blue-50"
+                              >
+                                배정
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className={`rounded-2xl border border-dashed p-6 text-center text-sm ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-400" : "border-slate-300 bg-slate-50 text-slate-400"}`}>
+                  등록된 신입사원이 없습니다.
+                </div>
+              )}
+            </section>
+
+            <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold">기숙사별 현황 요약</h2>
+                <p className="text-sm text-slate-500">지역·성별 단위 운영 현황 (현 거주자 = 거주중 + 만료예정)</p>
+              </div>
+              <div className="erp-table-container">
+                <table className="erp-table min-w-[900px] text-left">
+                  <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                    <tr>
+                      <th className="px-3 py-2">지역</th>
+                      <th className="px-3 py-2">성별</th>
+                      <th className="px-3 py-2">기숙사 수</th>
+                      <th className="px-3 py-2">현재 거주자</th>
+                      <th className="px-3 py-2">남은 공실</th>
+                      <th className="px-3 py-2">사용률</th>
+                      <th className="px-3 py-2">만료예정 계약</th>
+                      <th className="px-3 py-2">미처리 하자</th>
+                      <th className="px-3 py-2">청소 미제출</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {siteGenderStats.map((s) => (
+                      <tr key={`${s.site}-${s.gender}`} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
+                        <td className="px-3 py-2">{s.site}</td>
+                        <td className="px-3 py-2">{s.gender}</td>
+                        <td className="px-3 py-2">{s.operationalDormCount}</td>
+                        <td className="px-3 py-2">{s.currentResidents}</td>
+                        <td className="px-3 py-2">{s.vacancy}</td>
+                        <td className="px-3 py-2">{s.occupancyRate}%</td>
+                        <td className="px-3 py-2">{s.expiringCount}</td>
+                        <td className="px-3 py-2">{s.unprocessedDefects}</td>
+                        <td className="px-3 py-2">{s.unsubmittedCleaning}</td>
+                      </tr>
+                    ))}
+                    {(() => {
+                      const t = siteGenderStats.reduce(
+                        (acc, s) => ({
+                          dorm: acc.dorm + s.operationalDormCount,
+                          cap: acc.cap + s.totalCapacity,
+                          res: acc.res + s.currentResidents,
+                          vac: acc.vac + s.vacancy,
+                          exp: acc.exp + s.expiringCount,
+                          def: acc.def + s.unprocessedDefects,
+                          clean: acc.clean + s.unsubmittedCleaning,
+                        }),
+                        { dorm: 0, cap: 0, res: 0, vac: 0, exp: 0, def: 0, clean: 0 }
+                      );
+                      const totalRate = t.cap > 0 ? Math.round((t.res / t.cap) * 100) : 0;
+                      return (
+                        <tr className={`font-semibold ${theme.darkMode ? "bg-slate-800" : "bg-slate-100"}`}>
+                          <td className="px-3 py-2" colSpan={2}>합계</td>
+                          <td className="px-3 py-2">{t.dorm}</td>
+                          <td className="px-3 py-2">{t.res}</td>
+                          <td className="px-3 py-2">{t.vac}</td>
+                          <td className="px-3 py-2">{totalRate}%</td>
+                          <td className="px-3 py-2">{t.exp}</td>
+                          <td className="px-3 py-2">{t.def}</td>
+                          <td className="px-3 py-2">{t.clean}</td>
+                        </tr>
+                      );
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
         )}
 
@@ -10019,8 +10301,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
 
-            <div className="overflow-auto">
-              <table className="w-full min-w-[1400px] text-sm text-center">
+            <div className="erp-table-container">
+              <table className="erp-table min-w-[1400px]">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
                     {canEditData(currentUser) && (
@@ -10238,6 +10520,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         const now = new Date().toISOString();
                         const today = now.slice(0, 10);
                         const deletedBy = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
+                        const affectedOccupants = occupants.filter(
+                          (o) => !o.isDeleted && idsToDelete.includes(o.sourceNewHireId || "")
+                        );
                         setOccupants((prev) =>
                           prev.map((occupant) =>
                             idsToDelete.includes(occupant.sourceNewHireId || "")
@@ -10253,6 +10538,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               : occupant
                           )
                         );
+                        // 신입사원 삭제에 연동된 입주자 자동삭제도 감사로그 기록
+                        affectedOccupants.forEach((occupant) => {
+                          createAuditLog({
+                            targetType: "occupant",
+                            targetId: occupant.id,
+                            actionType: "delete",
+                            changedBy: deletedBy,
+                            beforeValue: JSON.stringify(occupant),
+                            afterValue: JSON.stringify({
+                              ...occupant,
+                              isDeleted: true,
+                              deletedAt: now,
+                              deletedBy,
+                              status: "퇴실",
+                              actualMoveOutDate: today,
+                              updatedAt: now,
+                            }),
+                            memo: "신입사원 삭제 연동 자동 퇴실/삭제",
+                          });
+                        });
                       }
                     }}
                     className="rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
@@ -10263,8 +10568,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
 
-            <div className="overflow-auto">
-              <table className="w-full min-w-[1400px] text-sm text-center">
+            <div className="erp-table-container">
+              <table className="erp-table min-w-[1400px]">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
                     {canEditData(currentUser) && (
@@ -10606,8 +10911,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               })}
             </div>
 
-            <div className="overflow-auto">
-              <table className="w-full min-w-[1300px] text-sm text-center">
+            <div className="erp-table-container">
+              <table className="erp-table min-w-[1300px]">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
                     <th className="px-3 py-2 whitespace-nowrap leading-tight">
@@ -10843,8 +11148,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
                   <div className={`${theme.darkMode ? "mt-6 rounded-3xl border border-slate-700 p-4" : "mt-6 rounded-3xl border border-slate-200 p-4"}`}>
                     <h4 className="mb-4 text-base font-semibold">입주자 리스트</h4>
-                    <div className="overflow-x-auto">
-                      <table className="w-full min-w-[900px] text-sm text-left">
+                    <div className="erp-table-container">
+                      <table className="erp-table min-w-[900px] text-left">
                         <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                           <tr>
                             <th className="px-3 py-2">이름</th>
@@ -11330,8 +11635,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           </div>
                           
                           {changedFields.length > 0 ? (
-                            <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 overflow-hidden" : "rounded-2xl border border-slate-200 overflow-hidden"}`}>
-                              <table className="w-full text-sm">
+                            <div className={`erp-table-container ${theme.darkMode ? "rounded-2xl border border-slate-700" : "rounded-2xl border border-slate-200"}`}>
+                              <table className="erp-table text-left">
                                 <thead className={`${theme.darkMode ? "bg-slate-900 border-b border-slate-700" : "bg-slate-100 border-b border-slate-200"}`}>
                                   <tr>
                                     <th className={`${theme.darkMode ? "px-4 py-2 text-left font-semibold text-slate-300" : "px-4 py-2 text-left font-semibold text-slate-700"}`}>필드명</th>
@@ -11686,8 +11991,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
               </div>
             ) : (
-              <div className="overflow-auto">
-                <table className="w-full min-w-[1500px] text-sm text-center">
+              <div className="erp-table-container">
+                <table className="erp-table min-w-[1500px]">
                   <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                     <tr>
                       <th className="px-3 py-2">
@@ -12934,7 +13239,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             {/* 월별 요약 테이블 */}
             <div className={`${theme.darkMode ? "mt-6 overflow-auto rounded-3xl border border-slate-700 bg-slate-950 p-4" : "mt-6 overflow-auto rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
               <div className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>운영 현황 요약</div>
-              <table className="w-full text-sm text-left">
+              <table className="erp-table text-left">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
                     <th className="px-3 py-2">지역</th>
@@ -13039,8 +13344,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
 
-            <div className="mt-6 overflow-x-auto">
-              <table className="w-full min-w-[1300px] text-sm text-left">
+            <div className="mt-6 erp-table-container">
+              <table className="erp-table min-w-[1300px] text-left">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">#</th>
@@ -13154,8 +13459,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </button>
                 )}
               </div>
-              <div className="overflow-auto">
-                <table className="w-full text-sm text-left">
+              <div className="erp-table-container">
+                <table className="erp-table w-full">
                   <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                     <tr>
                       <th className="px-3 py-3">보고일</th>
@@ -14470,8 +14775,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <div className="flex flex-wrap gap-2">
                           <button
                             onClick={() => {
-                              setNewHires(prev => prev.map(h => 
-                                h.id === hire.id ? { ...h, isDeleted: false, deletedAt: undefined, deletedBy: undefined } : h
+                              const now = new Date().toISOString();
+                              setNewHires(prev => prev.map(h =>
+                                h.id === hire.id ? { ...h, isDeleted: false, deletedAt: undefined, deletedBy: undefined, updatedAt: now } : h
                               ));
                               addAuditLog({
                                 targetType: "newHire",
@@ -14482,6 +14788,39 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 afterValue: "복원됨",
                                 memo: "휴지통에서 복원",
                               });
+                              // 연동 입주자 자동복구 (sourceNewHireId 관계 유지, 중복 생성 없음)
+                              const linkedOccupants = occupants.filter(
+                                (o) => o.isDeleted && o.sourceNewHireId === hire.id
+                              );
+                              if (linkedOccupants.length > 0) {
+                                const restoredStatus = mapNewHireStatusToOccupantStatus(hire.residenceStatus);
+                                setOccupants((prev) =>
+                                  prev.map((o) =>
+                                    o.isDeleted && o.sourceNewHireId === hire.id
+                                      ? {
+                                          ...o,
+                                          isDeleted: false,
+                                          deletedAt: undefined,
+                                          deletedBy: undefined,
+                                          status: restoredStatus,
+                                          actualMoveOutDate: hire.actualMoveOutDate || "",
+                                          updatedAt: now,
+                                        }
+                                      : o
+                                  )
+                                );
+                                linkedOccupants.forEach((o) => {
+                                  addAuditLog({
+                                    targetType: "occupant",
+                                    targetId: o.id,
+                                    actionType: "restore",
+                                    changedBy: currentUser?.displayName || "",
+                                    beforeValue: "삭제됨",
+                                    afterValue: "복원됨",
+                                    memo: "신입사원 복원 연동 자동복구",
+                                  });
+                                });
+                              }
                             }}
                             className="rounded-2xl bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200"
                           >
@@ -14818,8 +15157,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
 
-            <div className="overflow-auto">
-              <table className="w-full min-w-[1500px] text-sm text-center">
+            <div className="erp-table-container">
+              <table className="erp-table min-w-[1500px]">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
                     <th className="px-3 py-2 whitespace-nowrap leading-tight">

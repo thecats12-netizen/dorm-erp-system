@@ -57,6 +57,7 @@ export const formatAuditTarget = (log: Pick<AuditLog, "targetType">): string => 
     militaryPersonnel: "군인",
     militaryReport: "보고서",
     militaryTraining: "훈련 기록",
+    trainingRecord: "훈련 기록",
     militaryTrainingRule: "훈련 규칙",
     sales: "매출 기록",
     settlementRecord: "정산 기록",
