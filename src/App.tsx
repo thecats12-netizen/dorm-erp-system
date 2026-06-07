@@ -5349,16 +5349,25 @@ export default function App() {
       alert("기숙사명과 주소는 필수입니다.");
       return;
     }
+    const existingDorm = editingDormId ? dorms.find((d) => d.id === editingDormId) : null;
     const payload: Dorm = {
       id: editingDormId || crypto.randomUUID(),
       ...dormForm,
       capacity: 6,
       managerUserId: dormForm.managerUserId || undefined,
-      createdAt: editingDormId ? dorms.find((d) => d.id === editingDormId)?.createdAt || new Date().toISOString() : new Date().toISOString(),
+      createdAt: editingDormId ? existingDorm?.createdAt || new Date().toISOString() : new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     setDorms((prev) => (editingDormId ? prev.map((d) => (d.id === editingDormId ? payload : d)) : [payload, ...prev]));
     setupDormManager(payload.id, payload.managerUserId || "");
+    createAuditLog({
+      targetType: "dorm",
+      targetId: payload.id,
+      actionType: existingDorm ? "update" : "create",
+      changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+      beforeValue: existingDorm ? JSON.stringify(existingDorm) : "",
+      afterValue: JSON.stringify(payload),
+    });
     setDormForm(dormTemplate());
     setEditingDormId(null);
     setShowDormForm(false);
@@ -5392,6 +5401,18 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     };
     setOccupants((prev) => (editingOccupantId ? prev.map((o) => (o.id === editingOccupantId ? payload : o)) : [payload, ...prev]));
+    createAuditLog({
+      targetType: "occupant",
+      targetId: payload.id,
+      actionType: editingCurrent
+        ? editingCurrent.status !== payload.status
+          ? "statusChange"
+          : "update"
+        : "create",
+      changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+      beforeValue: editingCurrent ? JSON.stringify(editingCurrent) : "",
+      afterValue: JSON.stringify(payload),
+    });
     if (assignManagerToDorm && payload.status === "거주중" && payload.dormId) {
       const targetDorm = dorms.find((d) => d.id === payload.dormId);
       if (targetDorm) {
@@ -8119,6 +8140,67 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     softDeleteItems(items, setter, [id], targetType);
   };
 
+  // 기숙사 삭제: 화면 목록은 dorm_contracts 기반이므로, 동일 기숙사를 가리키는
+  // 계약과 dorms 레코드를 함께 soft-delete 해야 목록/통계에 삭제가 반영됨.
+  const softDeleteDormsCascade = (operationalDormIds: string[]) => {
+    if (operationalDormIds.length === 0) return false;
+    if (!confirm("삭제할까요?")) return false;
+    const now = new Date().toISOString();
+    const deletedBy = currentUser?.id || currentUser?.username || currentUser?.displayName || "";
+    const idSet = new Set(operationalDormIds);
+
+    // 대상 키 수집 (dormId 우선, 없으면 site+건물+동+호)
+    const targets = operationalDorms.filter((d) => idSet.has(d.id));
+    const keySet = new Set(targets.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo)));
+
+    const isContractMatch = (c: DormContract) =>
+      !c.isDeleted &&
+      (idSet.has(c.id) ||
+        keySet.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo)));
+
+    const isDormMatch = (d: Dorm) =>
+      !d.isDeleted &&
+      (idSet.has(d.id) || keySet.has(getDormKey(d.site, d.buildingName, d.dong, d.roomHo)));
+
+    const matchedContracts = dormContracts.filter(isContractMatch);
+    const matchedDorms = dorms.filter(isDormMatch);
+
+    if (matchedContracts.length > 0) {
+      setDormContracts((prev) =>
+        prev.map((c) => (isContractMatch(c) ? { ...c, isDeleted: true, deletedAt: now, deletedBy, updatedAt: now } : c))
+      );
+      matchedContracts.forEach((c) => {
+        createAuditLog({
+          targetType: "dormContract",
+          targetId: c.id,
+          actionType: "delete",
+          changedBy: deletedBy,
+          beforeValue: JSON.stringify(c),
+          afterValue: JSON.stringify({ ...c, isDeleted: true, deletedAt: now, deletedBy, updatedAt: now }),
+          memo: "기숙사 삭제 연동",
+        });
+      });
+    }
+
+    if (matchedDorms.length > 0) {
+      setDorms((prev) =>
+        prev.map((d) => (isDormMatch(d) ? { ...d, isDeleted: true, deletedAt: now, deletedBy, updatedAt: now } : d))
+      );
+      matchedDorms.forEach((d) => {
+        createAuditLog({
+          targetType: "dorm",
+          targetId: d.id,
+          actionType: "delete",
+          changedBy: deletedBy,
+          beforeValue: JSON.stringify(d),
+          afterValue: JSON.stringify({ ...d, isDeleted: true, deletedAt: now, deletedBy, updatedAt: now }),
+        });
+      });
+    }
+
+    return true;
+  };
+
   const deleteById = <T extends { id: string }>(
     setter: React.Dispatch<React.SetStateAction<T[]>>,
     id: string
@@ -9428,34 +9510,34 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 기준연도 필터는 훈련예정일, 이수일, 등록일을 기준으로 작동합니다. 전년도 기록은 연도 선택에서 해당 연도를 고르면 조회할 수 있습니다.
               </p>
             </div>
-            <div className="overflow-auto">
-              <table className="w-full text-sm text-left">
+            <div className="erp-table-container">
+              <table className="erp-table text-left">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
-                    <th className="px-3 py-3">대상자</th>
+                    <th className="px-3 py-3 erp-col-name">대상자</th>
                     <th className="px-3 py-3">훈련명</th>
-                    <th className="px-3 py-3">훈련일</th>
+                    <th className="px-3 py-3 erp-col-date">훈련일</th>
                     <th className="px-3 py-3">위치</th>
                     <th className="px-3 py-3">참석인원</th>
-                    <th className="px-3 py-3">상태</th>
-                    <th className="px-3 py-3">비고</th>
-                    {canEditData(currentUser) && <th className="px-3 py-3">작업</th>}
+                    <th className="px-3 py-3 erp-col-status">상태</th>
+                    <th className="px-3 py-3 erp-col-memo">비고</th>
+                    {canEditData(currentUser) && <th className="px-3 py-3 erp-col-action">작업</th>}
                   </tr>
                 </thead>
                 <tbody>
                   {filteredMilitaryTrainingRecords.map((record) => (
                     <tr key={record.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                        <td className="px-3 py-3">{militaryPersonnel.find((person) => person.id === record.personnelId)?.name || "-"}</td>
-                      <td className="px-3 py-3">{record.subject}</td>
-                      <td className="px-3 py-3">{record.trainingDate}</td>
-                      <td className="px-3 py-3">{record.location}</td>
+                        <td className="px-3 py-3 erp-col-name" title={militaryPersonnel.find((person) => person.id === record.personnelId)?.name || ""}>{militaryPersonnel.find((person) => person.id === record.personnelId)?.name || "-"}</td>
+                      <td className="px-3 py-3" title={record.subject}>{record.subject}</td>
+                      <td className="px-3 py-3 erp-col-date">{formatDateOnly(record.trainingDate) || "-"}</td>
+                      <td className="px-3 py-3" title={record.location}>{record.location}</td>
                       <td className="px-3 py-3">{record.attendees}</td>
-                      <td className="px-3 py-3">
+                      <td className="px-3 py-3 erp-col-status">
                         <span className={`${/(완료|completed)/i.test(record.status) ? "text-emerald-500" : "text-amber-500"}`}>{record.status}</span>
                       </td>
-                      <td className="px-3 py-3">{record.notes}</td>
+                      <td className="px-3 py-3 erp-col-memo" title={record.notes}>{record.notes}</td>
                       {canEditData(currentUser) && (
-                        <td className="px-3 py-3 space-x-2">
+                        <td className="px-3 py-3 space-x-2 erp-col-action">
                           <button
                             type="button"
                             onClick={() => openMilitaryTrainingEdit(record)}
@@ -9547,18 +9629,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
               </div>
             </div>
-            <div className="overflow-auto">
-              <table className="w-full text-sm text-left">
+            <div className="erp-table-container">
+              <table className="erp-table text-left">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
-                    <th className="px-3 py-3">제목</th>
-                    <th className="px-3 py-3">구분</th>
-                    <th className="px-3 py-3">게시일</th>
-                    <th className="px-3 py-3">만료일</th>
-                    <th className="px-3 py-3">통보대상</th>
-                    <th className="px-3 py-3">발송상태</th>
-                    <th className="px-3 py-3">내용</th>
-                    {canEditData(currentUser) && <th className="px-3 py-3">작업</th>}
+                    <th className="px-3 py-3 erp-col-name">제목</th>
+                    <th className="px-3 py-3 erp-col-status">구분</th>
+                    <th className="px-3 py-3 erp-col-date">게시일</th>
+                    <th className="px-3 py-3 erp-col-date">만료일</th>
+                    <th className="px-3 py-3 erp-col-name">통보대상</th>
+                    <th className="px-3 py-3 erp-col-status">발송상태</th>
+                    <th className="px-3 py-3 erp-col-memo">내용</th>
+                    {canEditData(currentUser) && <th className="px-3 py-3 erp-col-action">작업</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -9566,16 +9648,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     const publishStatus = notice.publishedDate ? "발송됨" : "미발송";
                     return (
                       <tr key={notice.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                        <td className="px-3 py-3">{notice.title}</td>
-                        <td className="px-3 py-3">{notice.category}</td>
-                        <td className="px-3 py-3">{notice.publishedDate}</td>
-                        <td className="px-3 py-3">
+                        <td className="px-3 py-3 erp-col-name" title={notice.title}>{notice.title}</td>
+                        <td className="px-3 py-3 erp-col-status" title={notice.category}>{notice.category}</td>
+                        <td className="px-3 py-3 erp-col-date">{formatDateOnly(notice.publishedDate) || "-"}</td>
+                        <td className="px-3 py-3 erp-col-date" title={formatDateOnly(notice.expiresDate) || "-"}>{formatDateOnly(notice.expiresDate) || "-"}</td>
+                        <td className="px-3 py-3 erp-col-name" title={notice.personnelIds?.map((id) => militaryPersonnel.find((person) => person.id === id)?.name || id).join(", ")}>
                           {notice.personnelIds?.map((id) => militaryPersonnel.find((person) => person.id === id)?.name || id).join(", ")}
                         </td>
-                        <td className="px-3 py-3">{publishStatus}</td>
-                        <td className="px-3 py-3">{notice.content}</td>
+                        <td className="px-3 py-3 erp-col-status">{publishStatus}</td>
+                        <td className="px-3 py-3 erp-col-memo" title={notice.content}>{notice.content}</td>
                         {canEditData(currentUser) && (
-                          <td className="px-3 py-3 space-x-2">
+                          <td className="px-3 py-3 space-x-2 erp-col-action">
                             <button
                               type="button"
                               onClick={() => openMilitaryNoticeEdit(notice)}
@@ -9617,7 +9700,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   })}
                   {filteredMilitaryNotices.length === 0 && (
                     <tr>
-                      <td colSpan={canEditData(currentUser) ? 7 : 6} className="px-3 py-12 text-center text-slate-400">공지/알림 데이터가 없습니다.</td>
+                      <td colSpan={canEditData(currentUser) ? 8 : 7} className="px-3 py-12 text-center text-slate-400">공지/알림 데이터가 없습니다.</td>
                     </tr>
                   )}
                 </tbody>
@@ -9676,29 +9759,29 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     보고서 자동생성
                   </button>
                 )}
-              <table className="w-full text-sm text-left">
+              <table className="erp-table text-left">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
-                    <th className="px-3 py-3">제목</th>
-                    <th className="px-3 py-3">보고일</th>
-                    <th className="px-3 py-3">종류</th>
-                    <th className="px-3 py-3">작성자</th>
-                    <th className="px-3 py-3">상태</th>
-                    <th className="px-3 py-3">비고</th>
-                    {canEditData(currentUser) && <th className="px-3 py-3">작업</th>}
+                    <th className="px-3 py-3 erp-col-name">제목</th>
+                    <th className="px-3 py-3 erp-col-date">보고일</th>
+                    <th className="px-3 py-3 erp-col-status">종류</th>
+                    <th className="px-3 py-3 erp-col-name">작성자</th>
+                    <th className="px-3 py-3 erp-col-status">상태</th>
+                    <th className="px-3 py-3 erp-col-memo">비고</th>
+                    {canEditData(currentUser) && <th className="px-3 py-3 erp-col-action">작업</th>}
                   </tr>
                 </thead>
                 <tbody>
                   {filteredMilitaryReports.map((report) => (
                     <tr key={report.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                      <td className="px-3 py-3">{report.title}</td>
-                      <td className="px-3 py-3">{report.reportDate}</td>
-                      <td className="px-3 py-3">{report.type}</td>
-                      <td className="px-3 py-3">{report.author}</td>
-                      <td className="px-3 py-3">{report.status}</td>
-                      <td className="px-3 py-3">{report.notes}</td>
+                      <td className="px-3 py-3 erp-col-name" title={report.title}>{report.title}</td>
+                      <td className="px-3 py-3 erp-col-date">{formatDateOnly(report.reportDate) || "-"}</td>
+                      <td className="px-3 py-3 erp-col-status" title={report.type}>{report.type}</td>
+                      <td className="px-3 py-3 erp-col-name" title={report.author}>{report.author}</td>
+                      <td className="px-3 py-3 erp-col-status">{report.status}</td>
+                      <td className="px-3 py-3 erp-col-memo" title={report.notes}>{report.notes}</td>
                       {canEditData(currentUser) && (
-                        <td className="px-3 py-3 space-x-2">
+                        <td className="px-3 py-3 space-x-2 erp-col-action">
                           <button
                             type="button"
                             onClick={() => openMilitaryReportEdit(report)}
@@ -10017,17 +10100,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <span className="rounded-full border px-2 py-1 text-xs text-slate-500">총 {militaryTrainingRules.length}개</span>
                   </div>
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm text-left">
+                    <table className="erp-table text-left">
                       <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                         <tr>
-                          <th className="px-3 py-2">기준연도</th>
-                          <th className="px-3 py-2">구분</th>
+                          <th className="px-3 py-2 erp-col-date">기준연도</th>
+                          <th className="px-3 py-2 erp-col-status">구분</th>
                           <th className="px-3 py-2">연차</th>
-                          <th className="px-3 py-2">동원</th>
-                          <th className="px-3 py-2">훈련유형</th>
+                          <th className="px-3 py-2 erp-col-status">동원</th>
+                          <th className="px-3 py-2 erp-col-status">훈련유형</th>
                           <th className="px-3 py-2">시간</th>
                           <th className="px-3 py-2">사용</th>
-                          <th className="px-3 py-2">작업</th>
+                          <th className="px-3 py-2 erp-col-action">작업</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -10037,10 +10120,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             <td className="px-3 py-2">{rule.currentCategory}</td>
                             <td className="px-3 py-2">{rule.yearMin}~{rule.yearMax}</td>
                             <td className="px-3 py-2">{rule.mobilizationOnly ? "동원" : "동원미지정"}</td>
-                            <td className="px-3 py-2">{rule.trainingType}</td>
+                            <td className="px-3 py-2 erp-col-status" title={rule.trainingType}>{rule.trainingType}</td>
                             <td className="px-3 py-2">{rule.requiredHours}</td>
                             <td className="px-3 py-2">{rule.enabled ? "사용" : "미사용"}</td>
-                            <td className="px-3 py-2 space-x-2">
+                            <td className="px-3 py-2 space-x-2 erp-col-action">
                               <button
                                 type="button"
                                 onClick={() => {
@@ -10111,21 +10194,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       >추가</button>
                     </div>
                     <div className="overflow-x-auto">
-                      <table className="w-full text-sm text-left">
+                      <table className="erp-table text-left">
                         <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                           <tr>
-                            <th className="px-3 py-2">카테고리</th>
-                            <th className="px-3 py-2">코드값</th>
-                            <th className="px-3 py-2">작업</th>
+                            <th className="px-3 py-2 erp-col-name">카테고리</th>
+                            <th className="px-3 py-2 erp-col-name">코드값</th>
+                            <th className="px-3 py-2 erp-col-action">작업</th>
                           </tr>
                         </thead>
                         <tbody>
                           {Object.entries(militaryCodeValues).flatMap(([category, values]) =>
                             values.map((value) => (
                               <tr key={`${category}-${value}`} className={`${theme.darkMode ? "border-slate-700 hover:bg-slate-950" : "border-slate-200 hover:bg-slate-50"}`}>
-                                <td className="px-3 py-2">{category}</td>
-                                <td translate="no" className="px-3 py-2 notranslate">{value}</td>
-                                <td className="px-3 py-2">
+                                <td className="px-3 py-2" title={category}>{category}</td>
+                                <td translate="no" className="px-3 py-2 notranslate" title={value}>{value}</td>
+                                <td className="px-3 py-2 erp-col-action">
                                   <button
                                     type="button"
                                     onClick={() => setMilitaryCodeValues((prev) => ({
@@ -10372,7 +10455,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{index + 1}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.site}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.gender}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.address}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs erp-col-address" title={c.address}>{c.address}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.buildingName}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.dong}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.roomHo}</td>
@@ -10389,7 +10472,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.deposit}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.monthlyRentOrMaintenance}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractType}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.notes}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs erp-col-memo" title={c.notes}>{c.notes}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.createdAt)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.updatedAt)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.registeredBy}</td>
@@ -10654,7 +10737,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{calculateNewHireResidenceStatus(h)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveInType}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.extensionReason || "-"}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.notes || "-"}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs erp-col-memo" title={h.notes || ""}>{h.notes || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.createdAt)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.updatedAt)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">
@@ -10730,7 +10813,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 {canEditData(currentUser) && selectedDormIds.length > 0 && (
                   <button
                     onClick={() => {
-                      if (softDeleteItems(dorms, setDorms, selectedDormIds, "dorm")) {
+                      if (softDeleteDormsCascade(selectedDormIds)) {
                         setSelectedDormIds([]);
                       }
                     }}
@@ -10815,7 +10898,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            softDeleteItem(dorms, setDorms, d.id, "dorm");
+                            softDeleteDormsCascade([d.id]);
                           }}
                           className="rounded-xl border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50"
                         >
@@ -12057,7 +12140,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3">{formatNumber(i.purchaseAmount)}</td>
                         <td className="px-3 py-3">{i.issuedDate}</td>
                         <td className="px-3 py-3">{i.soldDate || "-"}</td>
-                        <td className="px-3 py-3">{i.notes}</td>
+                        <td className="px-3 py-3 erp-col-memo" title={i.notes}>{i.notes}</td>
                         <td className="px-3 py-3">
                           <div className="flex justify-center gap-2">
                             {canEditData(currentUser) && (
@@ -12519,7 +12602,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               <div className="text-xs text-slate-500">기숙사 {filteredDorms.length}개</div>
                             </div>
                           </div>
-                          <table className={`${theme.darkMode ? "min-w-full text-sm text-slate-300" : "min-w-full text-sm text-slate-700"}`}>
+                          <table className={`erp-table text-left ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>
                             <thead className={`${theme.darkMode ? "bg-slate-900 border-b border-slate-700" : "bg-slate-100 border-b border-slate-200"}`}>
                               <tr>
                                 <th className="px-3 py-2 text-left font-semibold">기숙사명</th>
@@ -12570,7 +12653,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               </div>
                             </div>
                           </div>
-                          <table className={`${theme.darkMode ? "min-w-full text-sm text-slate-300" : "min-w-full text-sm text-slate-700"}`}>
+                          <table className={`erp-table text-left ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>
                             <thead className={`${theme.darkMode ? "bg-slate-900 border-b border-slate-700" : "bg-slate-100 border-b border-slate-200"}`}>
                               <tr>
                                 <th className="px-3 py-2 text-left font-semibold">기숙사 주소</th>
@@ -12696,7 +12779,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <div className="text-xs text-slate-500">기숙사 {settlementManagementStats.filteredDorms.length}개</div>
                     </div>
                   </div>
-                  <table className={`${theme.darkMode ? "min-w-full text-sm text-slate-300" : "min-w-full text-sm text-slate-700"}`}>
+                  <table className={`erp-table text-left ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>
                     <thead className={`${theme.darkMode ? "bg-slate-900 border-b border-slate-700" : "bg-slate-100 border-b border-slate-200"}`}>
                       <tr>
                         <th className="px-3 py-2 text-left font-semibold">기숙사명</th>
@@ -12730,7 +12813,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-white p-4"}`}>
                   <h3 className={`${theme.darkMode ? "text-sm font-semibold text-slate-100" : "text-sm font-semibold text-slate-900"}`}>기숙사별 정산 항목</h3>
                   <p className="text-xs text-slate-500 mb-3">선택한 연도/월에 입력된 정산 항목을 확인할 수 있습니다.</p>
-                  <table className={`${theme.darkMode ? "min-w-full text-sm text-slate-300" : "min-w-full text-sm text-slate-700"}`}>
+                  <table className={`erp-table text-left ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>
                     <thead className={`${theme.darkMode ? "bg-slate-900 border-b border-slate-700" : "bg-slate-100 border-b border-slate-200"}`}>
                       <tr>
                         <th className="px-3 py-2 text-left font-semibold">기숙사</th>
@@ -12810,7 +12893,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-white p-4"}`}>
                         <h4 className={`${theme.darkMode ? "text-sm font-semibold text-slate-100" : "text-sm font-semibold text-slate-900"}`}>등록된 정산 항목</h4>
                         <div className="mt-4 overflow-x-auto">
-                          <table className={`${theme.darkMode ? "min-w-full text-sm text-slate-300" : "min-w-full text-sm text-slate-700"}`}>
+                          <table className={`erp-table text-left ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>
                             <thead className={`${theme.darkMode ? "bg-slate-900 border-b border-slate-700" : "bg-slate-100 border-b border-slate-200"}`}>
                               <tr>
                                 <th className="px-3 py-2 text-left font-semibold">기숙사</th>
@@ -14656,10 +14739,31 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="max-h-80 space-y-3 overflow-y-auto">
                   {auditLogs.length > 0 ? (
                     auditLogs.slice(0, 20).map((log) => (
-                      <div key={log.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-3" : "rounded-2xl border border-slate-200 bg-slate-50 p-3"}`}>
+                      <div
+                        key={log.id}
+                        onClick={() => {
+                          setSelectedAuditLogId(log.id);
+                          setShowAuditLogModal(true);
+                        }}
+                        title="상세보기"
+                        className={`cursor-pointer ${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-3 hover:bg-slate-900" : "rounded-2xl border border-slate-200 bg-slate-50 p-3 hover:bg-slate-100"}`}
+                      >
                         <div className="flex items-center justify-between gap-2">
                           <div className="text-sm font-semibold text-slate-800">{getAuditActionLabel(log.actionType)} · {formatAuditTarget(log)}</div>
-                          <div className="text-xs text-slate-500">{formatDateTimeKorea(log.changedAt)}</div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-xs text-slate-500">{formatDateTimeKorea(log.changedAt)}</div>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedAuditLogId(log.id);
+                                setShowAuditLogModal(true);
+                              }}
+                              className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-white"
+                            >
+                              보기
+                            </button>
+                          </div>
                         </div>
                         <div className="mt-2 text-xs text-slate-500">{getUserDisplayName(log.changedBy)}</div>
                         {log.memo && <div className="mt-1 text-xs text-slate-500">{log.memo}</div>}
@@ -14948,6 +15052,117 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </div>
                 </div>
               )}
+
+              {/* 기숙사 휴지통 */}
+              {dorms.filter(d => d.isDeleted).length > 0 && (
+                <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-800">삭제된 기숙사</h3>
+                      <p className="text-sm text-slate-500">삭제된 기숙사를 복원하거나 영구 삭제하세요. (복원 시 연동 계약도 함께 복원)</p>
+                    </div>
+                  </div>
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {dorms.filter(d => d.isDeleted).map((d) => (
+                      <div key={d.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
+                        <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
+                          {d.buildingName} {formatDong(d.dong)}-{formatRoomHo(d.roomHo)} ({d.leaseStatus})
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => {
+                              restoreItem(dorms, setDorms, d.id, "dorm");
+                              const key = getDormKey(d.site, d.buildingName, d.dong, d.roomHo);
+                              dormContracts
+                                .filter((c) => c.isDeleted && getDormKey(c.site, c.buildingName, c.dong, c.roomHo) === key)
+                                .forEach((c) => restoreItem(dormContracts, setDormContracts, c.id, "dormContract"));
+                            }}
+                            className="rounded-2xl bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200"
+                          >
+                            복원
+                          </button>
+                          <button
+                            onClick={() => permanentlyDeleteItem(dorms, setDorms, d.id, "dorm")}
+                            className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
+                          >
+                            영구삭제
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 청소보고서 휴지통 */}
+              {cleaningReports.filter(r => r.isDeleted).length > 0 && (
+                <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-800">삭제된 청소보고서</h3>
+                      <p className="text-sm text-slate-500">삭제된 청소보고서를 복원하거나 영구 삭제하세요.</p>
+                    </div>
+                  </div>
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {cleaningReports.filter(r => r.isDeleted).map((r) => (
+                      <div key={r.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
+                        <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
+                          {r.buildingName} {formatDong(r.dong)}-{formatRoomHo(r.roomHo)} · {formatDateOnly(r.reportDate) || "-"} ({r.cleanStatus})
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => restoreItem(cleaningReports, setCleaningReports, r.id, "cleaningReport")}
+                            className="rounded-2xl bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200"
+                          >
+                            복원
+                          </button>
+                          <button
+                            onClick={() => permanentlyDeleteItem(cleaningReports, setCleaningReports, r.id, "cleaningReport")}
+                            className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
+                          >
+                            영구삭제
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 하자접수 휴지통 */}
+              {defects.filter(d => d.isDeleted).length > 0 && (
+                <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-800">삭제된 하자접수</h3>
+                      <p className="text-sm text-slate-500">삭제된 하자접수를 복원하거나 영구 삭제하세요.</p>
+                    </div>
+                  </div>
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {defects.filter(d => d.isDeleted).map((d) => (
+                      <div key={d.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
+                        <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
+                          {d.buildingName} {formatDong(d.dong)}-{formatRoomHo(d.ho)} ({d.defectStatus})
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => restoreItem(defects, setDefects, d.id, "defect")}
+                            className="rounded-2xl bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200"
+                          >
+                            복원
+                          </button>
+                          <button
+                            onClick={() => permanentlyDeleteItem(defects, setDefects, d.id, "defect")}
+                            className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
+                          >
+                            영구삭제
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               </div>
             </div>
           </section>
@@ -15226,7 +15441,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(d.receiptDate) || "-"}</td>
                       <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(d.dormId)}</td>
                       <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{d.buildingName}</td>
-                      <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{d.roadAddress}</td>
+                      <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis erp-col-address" title={d.roadAddress}>{d.roadAddress}</td>
                       <td className="px-3 py-3 whitespace-nowrap">{d.dong}</td>
                       <td className="px-3 py-3 whitespace-nowrap">{d.ho}</td>
                       <td className="px-3 py-3 whitespace-nowrap">{d.공동현관}</td>
@@ -15239,12 +15454,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           {d.defectStatus}
                         </span>
                       </td>
-<td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[200px]">{d.requestText}</td>
+<td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis erp-col-memo" title={d.requestText}>{d.requestText}</td>
 
                       {currentUser.role !== "maintenance_reporter" && (
                         <>
                           <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[150px]">{d.inspectorName || "-"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[200px]">{d.completeText || "-"}</td>
+                          <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis erp-col-memo" title={d.completeText || ""}>{d.completeText || "-"}</td>
                         </>
                       )}
 

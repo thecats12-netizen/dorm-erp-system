@@ -60,9 +60,47 @@ alter table public.cleaning_reports  replica identity full;
 alter table public.defect_requests   replica identity full;
 alter table public.inventory_items   replica identity full;
 
--- 3) 적용 확인용 조회
---    아래 쿼리로 7개 테이블이 모두 보이면 Realtime 등록 완료.
--- select schemaname, tablename
--- from pg_publication_tables
--- where pubname = 'supabase_realtime' and schemaname = 'public'
--- order by tablename;
+-- 3) 적용 확인 — 7개 테이블이 모두 나오면 publication 등록 완료
+select schemaname, tablename
+from pg_publication_tables
+where pubname = 'supabase_realtime'
+  and schemaname = 'public'
+  and tablename in (
+    'dorms','occupants','new_hires','dorm_contracts',
+    'cleaning_reports','defect_requests','inventory_items'
+  )
+order by tablename;
+
+-- 4) REPLICA IDENTITY 확인 — relreplident 가 모두 'f'(full) 이어야 함
+select c.relname as table_name, c.relreplident as replica_identity
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public'
+  and c.relname in (
+    'dorms','occupants','new_hires','dorm_contracts',
+    'cleaning_reports','defect_requests','inventory_items'
+  )
+order by c.relname;
+
+-- 5) RLS 진단 — Realtime 은 RLS SELECT 정책을 따릅니다.
+--    relrowsecurity=true 인 테이블은 authenticated 가 읽을 수 있는 SELECT 정책이 있어야
+--    해당 행의 Realtime 이벤트를 수신합니다. (정책을 변경하지 말고 존재 여부만 확인)
+select c.relname as table_name, c.relrowsecurity as rls_enabled
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public'
+  and c.relname in (
+    'dorms','occupants','new_hires','dorm_contracts',
+    'cleaning_reports','defect_requests','inventory_items'
+  )
+order by c.relname;
+
+-- 6) RLS 가 켜진 테이블의 SELECT 정책 목록 (수신 가능 역할 확인용)
+select schemaname, tablename, policyname, cmd, roles
+from pg_policies
+where schemaname = 'public'
+  and tablename in (
+    'dorms','occupants','new_hires','dorm_contracts',
+    'cleaning_reports','defect_requests','inventory_items'
+  )
+order by tablename, cmd;

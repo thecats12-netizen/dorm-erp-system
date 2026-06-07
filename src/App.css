@@ -10,7 +10,9 @@
   width: 100%;
   border-collapse: collapse;
   font-size: 0.875rem;
-  table-layout: fixed; /* 컬럼 폭 균일화 + ellipsis 동작 보장 */
+  /* auto: 컬럼 폭을 내용에 맞춰 자동 산정 → 중요 값(주소/날짜/금액 등) 과도한 잘림 방지.
+     한 줄(nowrap)·가로 스크롤은 유지, 너무 긴 자유 텍스트만 max-width 상한에서 말줄임. */
+  table-layout: auto;
 }
 
 /* 헤더 sticky 유지 */
@@ -29,6 +31,10 @@
   font-weight: 600;
   line-height: 1.2;
   vertical-align: middle;
+  /* 헤더는 내용보다 좁아지지 않게 최소폭 확보 */
+  min-width: 64px;
+  /* 자유 텍스트 컬럼이 과도하게 넓어지는 것 방지 (상한에서만 말줄임) */
+  max-width: 30rem;
 }
 
 /* 행 높이 통일 */
@@ -36,7 +42,7 @@
   height: 2.5rem;
 }
 
-/* 셀 기본: 한 줄 + 말줄임 + 높이 통일 */
+/* 셀 기본: 한 줄 + 높이 통일 + 상한 초과 시에만 말줄임 */
 .erp-table tbody td {
   padding: 0.375rem 0.75rem;
   height: 2.5rem;
@@ -45,6 +51,7 @@
   text-overflow: ellipsis;
   line-height: 1.4;
   vertical-align: middle;
+  max-width: 30rem;
 }
 
 /* 빈 상태(colspan) 행은 균일 높이 강제에서 제외 */
@@ -64,8 +71,7 @@
 
 /* 날짜 컬럼 - 폭 고정 (날짜 컬럼 폭 이상 방지) */
 .erp-table-date {
-  min-width: 96px;
-  width: 96px;
+  min-width: 110px;
 }
 
 /* 이름/주소 컬럼 (긴 텍스트) */
@@ -83,6 +89,19 @@
   min-width: 100px;
   max-width: 140px;
 }
+
+/* ===== 컬럼별 폭 헬퍼 (th/td 양쪽 적용 권장) =====
+   auto 레이아웃에서 min-width 는 해당 컬럼의 최소폭을 보장합니다. */
+.erp-col-no      { min-width: 44px;  width: 44px; }
+.erp-col-date    { min-width: 110px; }
+.erp-col-address { min-width: 220px; max-width: 28rem; }
+.erp-col-building{ min-width: 120px; }
+.erp-col-name    { min-width: 90px;  }
+.erp-col-status  { min-width: 90px;  }
+.erp-col-amount  { min-width: 120px; }
+.erp-col-phone   { min-width: 120px; }
+.erp-col-memo    { min-width: 180px; max-width: 24rem; }
+.erp-col-action  { min-width: 120px; }
 
 /* 모바일 대응 */
 @media (max-width: 1024px) {
