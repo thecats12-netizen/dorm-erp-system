@@ -268,7 +268,8 @@ export type AuditLog = {
     | "militaryPersonnel"
     | "trainingRecord"
     | "militaryNotice"
-    | "militaryReport";
+    | "militaryReport"
+    | "system";
   targetId: string;
   actionType: "create" | "update" | "delete" | "restore" | "statusChange";
   changedBy: string;

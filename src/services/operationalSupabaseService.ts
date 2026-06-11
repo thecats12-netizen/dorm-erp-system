@@ -408,3 +408,27 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
     throw new Error(translateSupabaseError((error as any)?.message || String(error)));
   }
 };
+
+/**
+ * 감사로그 INSERT 전용 동기화 (비admin 용).
+ * - upsert + ignoreDuplicates:true → 신규 행만 INSERT, 기존 행은 DO NOTHING (UPDATE 미발생)
+ * - audit_logs 의 INSERT 전용 RLS 정책과 호환 (UPDATE 정책 없어도 403 없음)
+ */
+export const insertAuditLogsScoped = async (
+  auditLogs: AuditLog[],
+  tenantId: string,
+  userId: string
+): Promise<void> => {
+  if (!isSupabaseAvailable()) return;
+  if (!auditLogs || auditLogs.length === 0) return;
+  const { error } = await supabase!
+    .from("audit_logs")
+    .upsert(
+      auditLogs.map((log) => toDbAuditLog(log, tenantId, userId)),
+      { onConflict: "id", ignoreDuplicates: true }
+    );
+  if (error) {
+    const message = error instanceof Error ? error.message : String((error as { message?: string })?.message ?? error);
+    throw new Error(translateSupabaseError(message));
+  }
+};

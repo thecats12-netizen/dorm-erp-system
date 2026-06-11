@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="기숙사 ERP">
+  <!-- full-bleed background for maskable safe zone -->
+  <rect width="512" height="512" fill="#0F172A"/>
+  <!-- building kept within central 80% safe area -->
+  <rect x="184" y="168" width="144" height="200" rx="10" fill="#F1F5F9"/>
+  <g fill="#0F172A">
+    <rect x="202" y="190" width="30" height="30" rx="4"/>
+    <rect x="241" y="190" width="30" height="30" rx="4"/>
+    <rect x="280" y="190" width="30" height="30" rx="4"/>
+    <rect x="202" y="234" width="30" height="30" rx="4"/>
+    <rect x="241" y="234" width="30" height="30" rx="4"/>
+    <rect x="280" y="234" width="30" height="30" rx="4"/>
+    <rect x="232" y="312" width="48" height="56" rx="6"/>
+  </g>
+  <rect x="184" y="154" width="144" height="18" rx="9" fill="#38BDF8"/>
+</svg>

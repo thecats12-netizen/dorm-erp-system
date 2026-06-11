@@ -63,6 +63,7 @@ export const formatAuditTarget = (log: Pick<AuditLog, "targetType">): string => 
     settlementRecord: "정산 기록",
     user: "사용자",
     dorms: "기숙사 목록",
+    system: "시스템",
   };
   return map[log.targetType] || String(log.targetType);
 };

@@ -70,6 +70,7 @@ import {
 import {
   loadOperationalModule,
   saveOperationalModule,
+  insertAuditLogsScoped,
 } from "./services/operationalSupabaseService";
 import {
   signInWithEmail,
@@ -82,8 +83,11 @@ import {
   type Profile,
 } from "./services/authService";
 import { createAuditLogEntry, getChangedFields } from "./services/auditService";
+import { validateExcel, type ExcelTableType, type ExcelValidationResult } from "./services/excelValidation";
 import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
+import FilteredDormSelector from "./components/FilteredDormSelector";
+import { Input, SelectInput, SearchableSelect, FilterSelect, MiniStat, CompactField } from "./components/FormControls";
 import { themeDefault } from "./constants/defaultData";
 import {
   getDefaultSystemSettings,
@@ -1048,6 +1052,28 @@ function canFileDefect(user: LoginUser | null) {
   return !!user && ["admin", "maintenance_reporter"].includes(user.role);
 }
 
+// 저장 스냅샷 직렬화 — 저장 effect와 로드 직후 시드가 동일한 방식을 쓰도록 단일 함수로 통일.
+// (정규화/순서 차이로 인한 오탐을 막기 위해 저장 payload와 동일한 형태를 사용)
+function dormModuleSnapshot(s: { dorms: unknown[]; occupants: unknown[]; dormContracts: unknown[]; newHires: unknown[] }): string {
+  return JSON.stringify({ dorms: s.dorms, occupants: s.occupants, dormContracts: s.dormContracts, newHires: s.newHires });
+}
+
+function operationalModuleSnapshot(
+  s: { cleaningReports: unknown[]; defects: unknown[]; inventory: unknown[]; settlementRecords: unknown[]; settlementItems: unknown[]; auditLogs: unknown[] },
+  isAdmin: boolean
+): string {
+  // 비admin 은 권한 없는 테이블을 빈 배열로 저장하므로 스냅샷도 동일하게.
+  // 단 auditLogs 는 INSERT 경로 감지를 위해 항상 전체 포함.
+  return JSON.stringify({
+    cleaningReports: s.cleaningReports,
+    defects: s.defects,
+    inventory: isAdmin ? s.inventory : [],
+    settlementRecords: isAdmin ? s.settlementRecords : [],
+    settlementItems: isAdmin ? s.settlementItems : [],
+    auditLogs: s.auditLogs,
+  });
+}
+
 export default function App() {
   const [theme, setTheme] = useState<ThemeSettings>(themeDefault);
   const [users, setUsers] = useState<LoginUser[]>([]);
@@ -1070,6 +1096,10 @@ export default function App() {
   const [militaryCodeValues, setMilitaryCodeValues] = useState<MilitaryCodeValues>(defaultMilitaryCodeValues);
   const [militaryTrainingAutoConfig, setMilitaryTrainingAutoConfig] = useState<{ enabled: boolean; targetStatuses: string[] }>({ enabled: true, targetStatuses: ["재직"] });
   const realtimeUpdateSourceRef = useRef<Set<string>>(new Set());
+  // 직전 저장 스냅샷(저장 payload의 안정 직렬화) — 동일 데이터 반복 저장 방지용
+  const lastDormSnapshotRef = useRef<string>("");
+  const lastOperationalSnapshotRef = useRef<string>("");
+  const lastMilitarySnapshotRef = useRef<string>("");
 
   const applyRealtimeUpdate = <T extends { id: string }>(prev: T[], row: any, toDomain: (row: any) => T): T[] => {
     if (!row?.id) return prev;
@@ -1396,6 +1426,7 @@ export default function App() {
   const [dormSearch, setDormSearch] = useState("");
   const [dormSiteFilter, setDormSiteFilter] = useState<Site | "전체">("전체");
   const [dormGenderFilter, setDormGenderFilter] = useState<"남" | "여" | "전체">("전체");
+  const [dormStatusFilter, setDormStatusFilter] = useState<"전체" | "공실" | "사용중">("전체");
   const [occupantSearch, setOccupantSearch] = useState("");
   const [occupantSiteFilter, setOccupantSiteFilter] = useState<Site | "전체">("전체");
   const [occupantGenderFilter, setOccupantGenderFilter] = useState<Gender | "전체">("전체");
@@ -1415,6 +1446,7 @@ export default function App() {
   }, [occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter]);
 
   const [inventorySearch, setInventorySearch] = useState("");
+  const [inventoryStatusFilter, setInventoryStatusFilter] = useState<"전체" | "교체예정">("전체");
   const [inventoryYearFilter, setInventoryYearFilter] = useState<string>("전체");
   const [inventoryMonthFilter, setInventoryMonthFilter] = useState<string>("전체");
   const [inventoryDayFilter, setInventoryDayFilter] = useState<string>("전체");
@@ -1427,6 +1459,7 @@ export default function App() {
   const [saleMonth, setSaleMonth] = useState("");
   const [defectSearch, setDefectSearch] = useState("");
   const [defectStatusFilter, setDefectStatusFilter] = useState<"전체" | "접수" | "진행중" | "완료">("전체");
+  const [defectReceiptMonthFilter, setDefectReceiptMonthFilter] = useState<string>("전체");
   const [cleaningYear, setCleaningYear] = useState(new Date().getFullYear().toString());
   const [cleaningMonth, setCleaningMonth] = useState(String(new Date().getMonth() + 1).padStart(2, "0"));
   const [cleaningDormSiteFilter, setCleaningDormSiteFilter] = useState<Site | "전체">("전체");
@@ -1449,6 +1482,7 @@ export default function App() {
   const [dormContractSearch, setDormContractSearch] = useState("");
   const [dormContractSiteFilter, setDormContractSiteFilter] = useState<Site | "전체">("전체");
   const [dormContractStatusFilter, setDormContractStatusFilter] = useState<DormContractStatus | "전체">("전체");
+  const [dormContractExpiryMonthFilter, setDormContractExpiryMonthFilter] = useState<string>("전체");
   const [newHireSearch, setNewHireSearch] = useState("");
   const [newHireSiteFilter, setNewHireSiteFilter] = useState<Site | "전체">("전체");
   const [newHireGenderFilter, setNewHireGenderFilter] = useState<"남" | "여" | "전체">("전체");
@@ -1461,8 +1495,17 @@ export default function App() {
   const [reportMonth, setReportMonth] = useState<string>(String(new Date().getMonth() + 1).padStart(2, "0"));
   const [reportSiteFilter, setReportSiteFilter] = useState<Site | "전체">("전체");
   const [reportGenderFilter, setReportGenderFilter] = useState<"남" | "여" | "전체">("전체");
+  type PdfReportType =
+    | "overall" | "occupancy" | "expiring" | "vacancy" | "cleaning"
+    | "defect" | "inventory" | "settlement" | "military";
+  const [pdfReportType, setPdfReportType] = useState<PdfReportType>("overall");
+  const [pdfReportDormId, setPdfReportDormId] = useState<string>("전체");
   const [militaryPersonnelSearch, setMilitaryPersonnelSearch] = useState("");
   const [militaryPersonnelStatusFilter, setMilitaryPersonnelStatusFilter] = useState<"전체" | string>("전체");
+  const [personnelDeptFilter, setPersonnelDeptFilter] = useState<string>("전체");
+  const [personnelCategoryFilter, setPersonnelCategoryFilter] = useState<string>("전체");
+  const [personnelTrainingFilter, setPersonnelTrainingFilter] = useState<string>("전체");
+  const [personnelYearFilter, setPersonnelYearFilter] = useState<string>("전체");
   const [militaryTrainingSearch, setMilitaryTrainingSearch] = useState("");
   const [militaryTrainingStatusFilter, setMilitaryTrainingStatusFilter] = useState<"전체" | string>("전체");
   const [militaryTrainingYearFilter, setMilitaryTrainingYearFilter] = useState<string>("전체");
@@ -2161,6 +2204,7 @@ export default function App() {
 }, [tenantId]);
 
   const saveSystemSettings = () => {
+    if (!canEditData(currentUser)) return;
     saveJson(SYSTEM_SETTINGS_KEY, systemSettings, tenantId);
     setSettingsSavedAt(new Date().toLocaleString());
   };
@@ -2176,6 +2220,21 @@ export default function App() {
     militaryCodeValues,
     militaryTrainingAutoConfig,
   });
+
+  // 로드 완료 직후: 현재(로드된) 상태로 저장 스냅샷을 시드.
+  // 저장 effect와 동일한 직렬화 함수를 쓰므로, 첫 1회 불필요한 재 upsert가 발생하지 않음.
+  // (Realtime 수신 시 스냅샷 갱신 로직과 localStorage fallback 동작에는 영향 없음)
+  useEffect(() => {
+    if (isLoading) return;
+    lastDormSnapshotRef.current = dormModuleSnapshot({ dorms, occupants, dormContracts, newHires });
+    lastOperationalSnapshotRef.current = operationalModuleSnapshot(
+      { cleaningReports, defects, inventory, settlementRecords, settlementItems, auditLogs },
+      currentUser?.role === "admin"
+    );
+    lastMilitarySnapshotRef.current = JSON.stringify(getMilitaryModuleState());
+    // 로드 완료 시점에만 1회 시드 (state 변경 시는 각 저장 effect가 처리)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading]);
 
   const loadSupabaseMilitaryModule = async () => {
     if (!isSupabaseAvailable()) {
@@ -2199,6 +2258,22 @@ export default function App() {
           departments: normalizeMilitaryDepartments(remote.militaryCodeValues?.departments || []),
         });
         setMilitaryTrainingAutoConfig(remote.militaryTrainingAutoConfig || { enabled: true, targetStatuses: ["재직"] });
+        // Supabase 군대 모듈 로드는 isLoading 전환 이후 완료될 수 있으므로, 로드 값으로 스냅샷 재시드.
+        // (getMilitaryModuleState() 와 동일한 형태·순서로 구성 → 첫 수동 저장 시 불필요한 재저장 방지)
+        lastMilitarySnapshotRef.current = JSON.stringify({
+          tenantId,
+          militaryPersonnel: remote.militaryPersonnel || [],
+          militaryTrainingRecords: remote.militaryTrainingRecords || [],
+          militaryNotices: remote.militaryNotices || [],
+          militaryReports: remote.militaryReports || [],
+          militarySettings: remote.militarySettings || {},
+          militaryTrainingRules: remote.militaryTrainingRules || [],
+          militaryCodeValues: {
+            ...remote.militaryCodeValues,
+            departments: normalizeMilitaryDepartments(remote.militaryCodeValues?.departments || []),
+          },
+          militaryTrainingAutoConfig: remote.militaryTrainingAutoConfig || { enabled: true, targetStatuses: ["재직"] },
+        });
         setSupabaseSyncStatus("Supabase 불러오기가 완료되었습니다.");
       } else {
         setSupabaseSyncStatus("Supabase에 저장된 군대 모듈 데이터가 없습니다.");
@@ -2216,11 +2291,18 @@ export default function App() {
       setSupabaseSyncStatus("Supabase 환경변수 미설정");
       return;
     }
+    // 직전 저장과 동일한 데이터면 Supabase 저장 생략 (동일 데이터 반복 저장 방지)
+    const snapshot = JSON.stringify(getMilitaryModuleState());
+    if (snapshot === lastMilitarySnapshotRef.current) {
+      setSupabaseSyncStatus("변경 사항이 없어 저장을 건너뛰었습니다. (이미 최신 상태)");
+      return;
+    }
     setIsSupabaseSyncing(true);
     setSupabaseSyncStatus("Supabase에 군대 모듈 데이터를 저장 중입니다...");
 
     try {
       await saveMilitaryModule(getMilitaryModuleState());
+      lastMilitarySnapshotRef.current = snapshot;
       setSupabaseSyncStatus("Supabase 저장이 완료되었습니다.");
     } catch (error) {
       console.error(error);
@@ -2239,6 +2321,7 @@ export default function App() {
   }, [tenantId]);
 
   const restoreDefaultSystemSettings = () => {
+    if (!canEditData(currentUser)) return;
     const defaults = getDefaultSystemSettings();
     setSystemSettings(defaults);
     saveJson(SYSTEM_SETTINGS_KEY, defaults, tenantId);
@@ -2455,9 +2538,211 @@ export default function App() {
   const cleaningReportBeforePhotoInputRef = useRef<HTMLInputElement | null>(null);
   const cleaningReportAfterPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const excelInputRef = useRef<HTMLInputElement | null>(null);
+  const [excelPreview, setExcelPreview] = useState<
+    { file: File; fileName: string; tableType: ExcelTableType; result: ExcelValidationResult } | null
+  >(null);
   const backupInputRef = useRef<HTMLInputElement | null>(null);
   const templateInputRef = useRef<HTMLInputElement | null>(null);
   const [backupImportError, setBackupImportError] = useState<string | null>(null);
+
+  // ============================================
+  // 데이터 백업/복원
+  // ============================================
+  type DataBackup = {
+    id: string;
+    createdAt: string;
+    createdBy: string;
+    type: "manual" | "auto";
+    tenantId: string;
+    version: string;
+    data: {
+      dorms: Dorm[];
+      occupants: Occupant[];
+      newHires: NewHireEmployee[];
+      dormContracts: DormContract[];
+      cleaningReports: CleaningReport[];
+      defects: DefectRequest[];
+      inventory: InventoryItem[];
+      auditLogs: AuditLog[];
+      settlementRecords: SettlementRecord[];
+      settlementItems?: SettlementItem[];
+      militaryModuleData: MilitaryModuleState;
+    };
+  };
+  const BACKUPS_KEY = "erp-data-backups";
+  const BACKUP_VERSION = "v4";
+  const MAX_BACKUPS = 10;
+  const [backups, setBackups] = useState<DataBackup[]>(() => loadJson<DataBackup[]>(BACKUPS_KEY, [], tenantId));
+  const [selectedBackupId, setSelectedBackupId] = useState<string | null>(null);
+  const [recycleBinSubTab, setRecycleBinSubTab] = useState<"trash" | "backup">("trash");
+  const [backupRestoreError, setBackupRestoreError] = useState<string | null>(null);
+
+  // 알림센터 상태(읽음/중요/완료/삭제) — 알림은 자동 생성이라 id 기준 상태만 영속화
+  type NotifState = { read?: boolean; important?: boolean; done?: boolean; deleted?: boolean };
+  const NOTIF_STATES_KEY = "erp-notif-states";
+  const [notifStates, setNotifStates] = useState<Record<string, NotifState>>(() =>
+    loadJson<Record<string, NotifState>>(NOTIF_STATES_KEY, {}, tenantId)
+  );
+  const [notifSort, setNotifSort] = useState<"newest" | "oldest">("newest");
+  const [globalSearch, setGlobalSearch] = useState("");
+  const [showGlobalResults, setShowGlobalResults] = useState(false);
+  const [globalSearchResults, setGlobalSearchResults] = useState<GlobalSearchResult[]>([]);
+  const [notifStatusFilter, setNotifStatusFilter] = useState<"전체" | "안읽음" | "읽음" | "중요" | "완료">("전체");
+  const persistNotifStates = (next: Record<string, NotifState>) => {
+    setNotifStates(next);
+    saveJson(NOTIF_STATES_KEY, next, tenantId);
+  };
+  const updateNotifState = (id: string, patch: NotifState) => {
+    persistNotifStates({ ...notifStates, [id]: { ...notifStates[id], ...patch } });
+  };
+  const backupRestoreInputRef = useRef<HTMLInputElement | null>(null);
+  const autoBackupDoneRef = useRef(false);
+
+  const buildBackupData = (): DataBackup["data"] => ({
+    dorms,
+    occupants,
+    newHires,
+    dormContracts,
+    cleaningReports,
+    defects,
+    inventory,
+    auditLogs,
+    settlementRecords,
+    settlementItems,
+    militaryModuleData: getMilitaryModuleState(),
+  });
+
+  const persistBackups = (next: DataBackup[]) => {
+    try {
+      saveJson(BACKUPS_KEY, next, tenantId);
+      setBackupRestoreError(null);
+    } catch (e) {
+      console.warn("백업 저장 실패:", e);
+      setBackupRestoreError("백업 저장 공간이 부족합니다. 오래된 백업을 삭제하거나 JSON으로 내려받아 보관하세요.");
+    }
+  };
+
+  const createBackup = (type: "manual" | "auto"): DataBackup => {
+    const snapshot: DataBackup = {
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      createdBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "system",
+      type,
+      tenantId,
+      version: BACKUP_VERSION,
+      data: buildBackupData(),
+    };
+    const next = [snapshot, ...backups].slice(0, MAX_BACKUPS);
+    setBackups(next);
+    persistBackups(next);
+    return snapshot;
+  };
+
+  const deleteBackup = (id: string) => {
+    if (!window.confirm("이 백업을 삭제하시겠습니까?")) return;
+    const next = backups.filter((b) => b.id !== id);
+    setBackups(next);
+    persistBackups(next);
+    if (selectedBackupId === id) setSelectedBackupId(null);
+  };
+
+  const applyBackupData = (data: DataBackup["data"]) => {
+    setDorms(data.dorms || []);
+    setOccupants(data.occupants || []);
+    setNewHires(data.newHires || []);
+    setDormContracts(data.dormContracts || []);
+    setCleaningReports(data.cleaningReports || []);
+    setDefects(data.defects || []);
+    setInventory(data.inventory || []);
+    setAuditLogs(data.auditLogs || []);
+    setSettlementRecords(data.settlementRecords || []);
+    if (Array.isArray(data.settlementItems)) setSettlementItems(data.settlementItems);
+    const m = data.militaryModuleData;
+    if (m) {
+      setMilitaryPersonnel(m.militaryPersonnel || []);
+      setMilitaryTrainingRecords(m.militaryTrainingRecords || []);
+      setMilitaryNotices(m.militaryNotices || []);
+      setMilitaryReports(m.militaryReports || []);
+      setMilitarySettings(m.militarySettings || {});
+      setMilitaryTrainingRules(m.militaryTrainingRules || []);
+      if (m.militaryCodeValues) setMilitaryCodeValues(m.militaryCodeValues);
+      if (m.militaryTrainingAutoConfig) setMilitaryTrainingAutoConfig(m.militaryTrainingAutoConfig);
+    }
+  };
+
+  // 복원: admin만, 확인창, 복원 전 현재 상태 자동 백업, 감사로그 기록.
+  // (상태 변경 시 기존 저장 useEffect 가 Supabase/localStorage 에 자동 반영)
+  const restoreFromBackup = (backup: DataBackup) => {
+    if (!canEditData(currentUser)) {
+      alert("복원은 관리자만 실행할 수 있습니다.");
+      return;
+    }
+    if (!window.confirm(`${formatDateTimeKorea(backup.createdAt)} 시점으로 복원하시겠습니까?\n현재 데이터는 복원 전에 자동으로 백업됩니다.`)) return;
+    try {
+      setBackupRestoreError(null);
+      // 1) 복원 전 현재 상태 자동 백업
+      createBackup("auto");
+      // 2) 백업 데이터 적용 (auditLogs 포함)
+      applyBackupData(backup.data);
+      // 3) 복원 감사로그 (적용 후 추가되어 복원된 로그 위에 남음)
+      createAuditLog({
+        targetType: "system",
+        targetId: backup.id,
+        actionType: "restore",
+        changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+        beforeValue: "",
+        afterValue: JSON.stringify({ backupId: backup.id, createdAt: backup.createdAt, type: backup.type, version: backup.version }),
+        memo: `백업 복원 (${formatDateTimeKorea(backup.createdAt)} · ${backup.type === "auto" ? "자동" : "수동"})`,
+      });
+      alert("복원이 완료되었습니다.");
+    } catch (e) {
+      console.error(e);
+      setBackupRestoreError(String(e));
+    }
+  };
+
+  const downloadBackup = (backup: DataBackup) => {
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `erp-backup-${backup.createdAt.slice(0, 19).replace(/[:T]/g, "-")}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importBackupFile = async (files: FileList | null) => {
+    if (!files?.length) return;
+    if (!canEditData(currentUser)) {
+      alert("복원은 관리자만 실행할 수 있습니다.");
+      return;
+    }
+    try {
+      const text = await files[0].text();
+      const parsed = JSON.parse(text) as DataBackup;
+      if (!parsed || typeof parsed !== "object" || !parsed.data || !Array.isArray(parsed.data.dorms)) {
+        throw new Error("유효한 백업 파일이 아닙니다. (data.dorms 누락)");
+      }
+      restoreFromBackup(parsed);
+    } catch (e) {
+      setBackupRestoreError(String(e));
+    }
+  };
+
+  // 자동 백업: 로그인 후 최초 진입 시 1회, 같은 날짜 백업이 없을 때만 생성
+  useEffect(() => {
+    if (isLoading || !currentUser) return;
+    if (autoBackupDoneRef.current) return;
+    autoBackupDoneRef.current = true;
+    const today = new Date().toISOString().slice(0, 10);
+    const hasToday = backups.some((b) => b.createdAt.slice(0, 10) === today);
+    if (!hasToday) {
+      // 동기 setState(렌더 캐스케이드) 회피를 위해 다음 틱에 생성
+      const timer = setTimeout(() => createBackup("auto"), 0);
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading, currentUser]);
 
   // ============================================
   // 1. operationalDorms: 운영 기준 통합 기숙사 데이터
@@ -2536,16 +2821,6 @@ export default function App() {
   //   return permission?.canDelete ?? false;
   // };
 
-  const getAccessibleOperationalDorms = (user: LoginUser | null, dormList: OperationalDorm[]): OperationalDorm[] => {
-    if (!user) return [];
-    if (user.role === "admin") return dormList;
-    if (user.role === "viewer") return dormList;
-    if (user.role === "maintenance_reporter" || user.role === "dorm_manager") {
-      // 본인이 관리하는 기숙사만 접근 가능
-      return dormList.filter((d) => d.managerUserId === user.id || d.id === user.dormId);
-    }
-    return [];
-  };
 
   const getDormDday = (dorm: OperationalDorm): string => {
     if (!dorm.contractEnd) return "-";
@@ -2798,6 +3073,24 @@ export default function App() {
     const manager = users.find((u) => u.id === dorm.managerUserId);
     return manager?.displayName || manager?.username || "-";
   };
+
+  // 개인정보 마스킹: 조회전용(viewer)에게 연락처 가운데 자리 마스킹 (admin/담당자는 원본)
+  const maskPhone = (phone?: string): string => {
+    const p = String(phone || "").trim();
+    if (!p) return "-";
+    if (currentUser?.role !== "viewer") return p;
+    const d = p.replace(/\D/g, "");
+    if (d.length >= 7) return `${d.slice(0, 3)}-****-${d.slice(-4)}`;
+    return "****";
+  };
+
+  // 생년월일 마스킹: viewer 에게 월/일 가림 (admin/담당자는 원본)
+  const maskBirth = (date?: string): string => {
+    const s = formatDateOnly(date || "") || String(date || "").trim();
+    if (!s) return "-";
+    if (currentUser?.role !== "viewer") return s;
+    return s.length >= 4 ? `${s.slice(0, 4)}-**-**` : "****";
+  };
   
 
   const getAuditTargetName = (log: AuditLog) => {
@@ -2839,94 +3132,6 @@ export default function App() {
   };
 
   // 지역/성별 기숙사 필터 함수
-  const filterDormsBySiteGender = (
-    dormList: OperationalDorm[],
-    siteFilter: string,
-    genderFilter: string,
-    statusFilter: string
-  ): OperationalDorm[] => {
-    return dormList.filter(dorm => 
-      (siteFilter === "전체" || dorm.site === siteFilter) &&
-      (genderFilter === "전체" || dorm.gender === genderFilter) &&
-      (statusFilter === "전체" || dorm.leaseStatus === statusFilter)
-    );
-  };
-
-  // FilteredDormSelector 컴포넌트 - 지역/성별/운영중 필터를 포함한 기숙사 선택
-  const FilteredDormSelector = ({ 
-    value, 
-    onChange, 
-    currentUser: currentUserParam, 
-    operationalDorms: domsParam, 
-    defaultSite = "전체", 
-    defaultGender = "전체", 
-    label = "기숙사" 
-  }: { 
-    value: string; 
-    onChange: (dormId: string, dorm?: OperationalDorm) => void; 
-    currentUser: LoginUser | null; 
-    operationalDorms: OperationalDorm[]; 
-    defaultSite?: string;
-    defaultGender?: string;
-    label?: string;
-  }) => {
-    const [siteFilter, setSiteFilter] = useState(defaultSite);
-    const [genderFilter, setGenderFilter] = useState(defaultGender);
-    const [statusFilter, setStatusFilter] = useState<"전체" | "사용중">("전체");
-
-    useEffect(() => {
-      setSiteFilter(defaultSite);
-    }, [defaultSite]);
-
-    useEffect(() => {
-      setGenderFilter(defaultGender);
-    }, [defaultGender]);
-
-    const accessibleDorms = getAccessibleOperationalDorms(currentUserParam, domsParam);
-    const filteredDorms = filterDormsBySiteGender(accessibleDorms, siteFilter, genderFilter, statusFilter);
-
-    useEffect(() => {
-      if (value && !filteredDorms.find(d => d.id === value)) {
-        onChange("", undefined);
-      }
-    }, [siteFilter, genderFilter, filteredDorms, value, onChange]);
-
-    return (
-      <div className="space-y-4">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <SelectInput 
-            label="지역" 
-            value={siteFilter} 
-            onChange={(v) => setSiteFilter(v)} 
-            options={["전체", "평택", "천안"]} 
-          />
-          <SelectInput 
-            label="성별" 
-            value={genderFilter} 
-            onChange={(v) => setGenderFilter(v)} 
-            options={["전체", "남", "여"]} 
-          />
-          <SelectInput
-            label="상태"
-            value={statusFilter}
-            onChange={(v) => setStatusFilter(v as "전체" | "사용중")}
-            options={["전체", "사용중"]}
-          />
-          <SearchableSelect
-            label={label}
-            value={value}
-            onChange={(v) => {
-              const selected = domsParam.find((d) => d.id === v);
-              onChange(v, selected);
-            }}
-            options={["", ...filteredDorms.map((d) => d.id)]}
-            displayOptions={["미배정", ...filteredDorms.map((d) => `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`)]}
-          />
-        </div>
-      </div>
-    );
-  };
-
   // ============================================
   // 3. 주차 계산 함수 (월~금 기준, 1~5주차)
   // 주차 내 1건 이상 → O, 금요일 지나면 → X, 아직 안지나면 → 예정
@@ -3448,6 +3653,148 @@ export default function App() {
   }, [dormContracts, occupants, dorms, users, cleaningReports, defects, inventory]);
 
   // ============================================
+  // 알림센터 항목 (11종 카테고리 + 정렬용 날짜 + 심각도)
+  // ============================================
+  // 알림센터: 카테고리별 useMemo 로 분리 (해당 데이터 변경 시에만 부분 재계산)
+  type NotifItem = { id: string; category: string; level: "중요" | "경고" | "정보"; title: string; detail: string; date: string };
+  const notifTodayStr = new Date().toISOString().slice(0, 10);
+
+  // 1) 계약 만료 60/30/15/7일 (계약별 가장 임박한 임계값 1건)
+  const notifContractExpiry = useMemo<NotifItem[]>(() => {
+    const items: NotifItem[] = [];
+    dormContracts.forEach((c) => {
+      if (c.isDeleted || !c.contractEnd) return;
+      if (["종료", "해지"].includes(c.contractStatus)) return;
+      const d = daysDiff(c.contractEnd);
+      if (d < 0 || d > 60) return;
+      const threshold = d <= 7 ? 7 : d <= 15 ? 15 : d <= 30 ? 30 : 60;
+      const level = threshold <= 7 ? "중요" : threshold <= 30 ? "경고" : "정보";
+      items.push({
+        id: `contract-exp-${c.id}`,
+        category: "계약만료",
+        level,
+        title: `계약 만료 ${threshold}일 이내: ${c.buildingName} ${formatDong(c.dong)}-${formatRoomHo(c.roomHo)}`,
+        detail: `만료일 ${formatDateOnly(c.contractEnd) || "-"} · D-${d}`,
+        date: formatDateOnly(c.contractEnd) || notifTodayStr,
+      });
+    });
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dormContracts]);
+
+  // 2) 오늘 입주/퇴실 알림
+  const notifMoveInOut = useMemo<NotifItem[]>(() => {
+    const items: NotifItem[] = [];
+    const moveInToday = [
+      ...occupants.filter((o) => !o.isDeleted && o.moveInDate === notifTodayStr),
+      ...newHires.filter((h) => !h.isDeleted && h.moveInDate === notifTodayStr && !occupants.some((o) => o.sourceNewHireId === h.id)),
+    ];
+    moveInToday.forEach((o) => {
+      const name = "employeeName" in o ? (o as Occupant).employeeName : (o as NewHireEmployee).name;
+      items.push({ id: `movein-${o.id}`, category: "오늘입주", level: "정보", title: `오늘 입주 예정: ${name}`, detail: `입실일 ${formatDateOnly(notifTodayStr)}`, date: notifTodayStr });
+    });
+    occupants
+      .filter((o) => !o.isDeleted && (o.actualMoveOutDate === notifTodayStr || (!o.actualMoveOutDate && o.moveOutDueDate === notifTodayStr)))
+      .forEach((o) => {
+        items.push({ id: `moveout-today-${o.id}`, category: "오늘퇴실", level: "경고", title: `오늘 퇴실 예정: ${o.employeeName}`, detail: `퇴실일 ${formatDateOnly(o.actualMoveOutDate || o.moveOutDueDate) || "-"}`, date: notifTodayStr });
+      });
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [occupants, newHires]);
+
+  // 3) 미배정 신입사원
+  const notifUnassigned = useMemo<NotifItem[]>(() => {
+    return newHires
+      .filter((h) => !h.isDeleted && (!h.dormId || !h.buildingName || !h.address))
+      .map((h) => ({
+        id: `unassigned-${h.id}`,
+        category: "미배정",
+        level: "정보" as const,
+        title: `미배정 신입사원: ${h.name}`,
+        detail: `${h.site} · ${h.department || "-"} · 예상입실 ${formatDateOnly(h.expectedMoveInDate) || "-"}`,
+        date: formatDateOnly(h.expectedMoveInDate) || formatDateOnly(h.createdAt) || notifTodayStr,
+      }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newHires]);
+
+  // 4) 청소 미제출 (담당자 기준)
+  const notifCleaningMissing = useMemo<NotifItem[]>(() => {
+    const items: NotifItem[] = [];
+    const currentMonthLabel = `${new Date().getMonth() + 1}월`;
+    users
+      .filter((u) => u.role === "maintenance_reporter" && u.dormId)
+      .forEach((manager) => {
+        let missing = false;
+        for (let week = 1; week <= 5; week++) {
+          if (getCleaningWeekStatus(manager.id, week, currentMonthLabel) === "X") { missing = true; break; }
+        }
+        if (missing) {
+          items.push({ id: `cleaning-miss-${manager.id}`, category: "청소미제출", level: "경고", title: `청소보고 미제출: ${manager.displayName}`, detail: "당월 청소보고서 제출 필요", date: notifTodayStr });
+        }
+      });
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [users, cleaningReports]);
+
+  // 5) 하자 미처리
+  const notifDefectOpen = useMemo<NotifItem[]>(() => {
+    return defects
+      .filter((d) => !d.isDeleted && d.defectStatus !== "완료")
+      .map((d) => ({
+        id: `defect-open-${d.id}`,
+        category: "하자미처리",
+        level: "중요" as const,
+        title: `하자 미처리: ${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.ho)}`,
+        detail: `${d.defectStatus} · ${d.requestText || "상세 없음"}`,
+        date: formatDateOnly(d.receiptDate) || notifTodayStr,
+      }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defects]);
+
+  // 6) 비품 교체 예정 (고장/노후/저수량)
+  const notifInventory = useMemo<NotifItem[]>(() => {
+    return inventory
+      .filter((i) => !i.isDeleted && (["고장", "노후"].includes(i.status) || (i.quantity ?? 0) <= 2))
+      .map((i) => ({
+        id: `inv-replace-${i.id}`,
+        category: "비품교체",
+        level: "경고" as const,
+        title: `비품 교체 예정: ${i.itemName}`,
+        detail: `${i.buildingName || "-"} · 상태 ${i.status} · 수량 ${i.quantity ?? 0}`,
+        date: formatDateOnly(i.purchaseDate) || notifTodayStr,
+      }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inventory]);
+
+  // 7) 정원 초과
+  const notifOvercrowded = useMemo<NotifItem[]>(() => {
+    const items: NotifItem[] = [];
+    dorms.forEach((dorm) => {
+      if (dorm.isDeleted) return;
+      const count = occupants.filter((o) => o.dormId === dorm.id && !o.isDeleted && !["퇴실", "천안이동"].includes(o.status)).length;
+      if (count > (dorm.capacity || 6)) {
+        items.push({ id: `overcrowded-${dorm.id}`, category: "정원초과", level: "중요", title: `정원 초과: ${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}`, detail: `정원 ${dorm.capacity || 6}명 < 현재 ${count}명`, date: notifTodayStr });
+      }
+    });
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dorms, occupants]);
+
+  // 합산 (기존 화면과 동일한 단일 배열)
+  const notificationCenterItems = useMemo<NotifItem[]>(
+    () => [
+      ...notifContractExpiry,
+      ...notifMoveInOut,
+      ...notifUnassigned,
+      ...notifCleaningMissing,
+      ...notifDefectOpen,
+      ...notifInventory,
+      ...notifOvercrowded,
+    ],
+    [notifContractExpiry, notifMoveInOut, notifUnassigned, notifCleaningMissing, notifDefectOpen, notifInventory, notifOvercrowded]
+  );
+
+  // ============================================
   // 8. 자동화 연결 부분
   // 주차 자동계산, 담당자 기반 필터링, 권한 기반 접근 제어
   // ============================================
@@ -3572,10 +3919,16 @@ export default function App() {
       });
       // Do not run Supabase save during initial loading or when the change originated from realtime.
       if (isLoading) return;
+      // 저장 대상 payload 스냅샷(동일 데이터면 저장 생략)
+      const snapshot = dormModuleSnapshot({ dorms, occupants, dormContracts, newHires });
       if (realtimeUpdateSourceRef.current.has("dorm_module")) {
         realtimeUpdateSourceRef.current.delete("dorm_module");
+        // Realtime 수신분은 이미 서버 반영 상태 → 스냅샷만 갱신해 저장 루프 방지
+        lastDormSnapshotRef.current = snapshot;
         return;
       }
+      // 직전 저장과 동일한 데이터면 Supabase 저장 생략
+      if (snapshot === lastDormSnapshotRef.current) return;
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
 
@@ -3596,6 +3949,7 @@ export default function App() {
           },
           session.user.id
         );
+        lastDormSnapshotRef.current = snapshot;
         console.log("[SAVE] contracts saved:", dormContracts.length);
         console.log("[SAVE] newHires saved:", newHires.length);
       } catch (error) {
@@ -3606,7 +3960,7 @@ export default function App() {
           alert(`Supabase 기숙사 모듈 동기화에 실패했습니다. ${message}`);
         } catch {}
       }
-    }, 1500);
+    }, 500);
 
     return () => clearTimeout(timer);
   }, [dorms, occupants, dormContracts, newHires, tenantId]);
@@ -3616,35 +3970,60 @@ export default function App() {
 
     const timer = setTimeout(async () => {
       if (isLoading) return;
+
+      // 권한 기반 저장 범위 제한 (RLS 403 회피, RLS 완화 없음)
+      // - admin: 전체 저장
+      // - dorm_manager / maintenance_reporter: 청소/하자만 저장(비품/정산/감사로그 제외)
+      // - viewer 등 그 외: 운영 모듈 저장 자체를 하지 않음
+      const role = currentUser?.role;
+      const isAdmin = role === "admin";
+      // 실제 저장 payload (비admin 은 권한 없는 테이블을 빈 배열로 전달 → upsert no-op, 403 방지)
+      const operationalPayload = {
+        tenantId,
+        cleaningReports,
+        defects,
+        inventory: isAdmin ? inventory : [],
+        settlementRecords: isAdmin ? settlementRecords : [],
+        settlementItems: isAdmin ? settlementItems : [],
+        auditLogs: isAdmin ? auditLogs : [],
+      };
+      // 동일 데이터 반복 저장 방지용 스냅샷 — 비admin INSERT 경로 감지를 위해 auditLogs 전체 포함
+      const snapshot = operationalModuleSnapshot(
+        { cleaningReports, defects, inventory, settlementRecords, settlementItems, auditLogs },
+        isAdmin
+      );
+
       if (realtimeUpdateSourceRef.current.has("operational_module")) {
         realtimeUpdateSourceRef.current.delete("operational_module");
+        // Realtime 수신분은 이미 서버 반영 상태 → 스냅샷만 갱신해 저장 루프 방지
+        lastOperationalSnapshotRef.current = snapshot;
         return;
       }
+      if (role !== "admin" && role !== "dorm_manager" && role !== "maintenance_reporter") {
+        return;
+      }
+      // 직전 저장과 동일한 데이터면 Supabase 저장 생략
+      if (snapshot === lastOperationalSnapshotRef.current) return;
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
 
       try {
         console.debug("Operational sync: saving", {
+          role,
           cleaningReports: cleaningReports.length,
           defects: defects.length,
-          inventory: inventory.length,
-          settlementRecords: settlementRecords.length,
-          settlementItems: settlementItems.length,
-          auditLogs: auditLogs.length,
+          inventory: isAdmin ? inventory.length : "(skip)",
+          settlementRecords: isAdmin ? settlementRecords.length : "(skip)",
+          settlementItems: isAdmin ? settlementItems.length : "(skip)",
+          auditLogs: isAdmin ? auditLogs.length : "(skip)",
         });
         setOperationalSyncError(null);
-        await saveOperationalModule(
-          {
-            tenantId,
-            cleaningReports,
-            defects,
-            inventory,
-            settlementRecords,
-            settlementItems,
-            auditLogs,
-          },
-          session.user.id
-        );
+        await saveOperationalModule(operationalPayload, session.user.id);
+        // 비admin 작업 감사로그는 INSERT 전용 정책으로 신규 행만 별도 저장 (기존 행 UPDATE 없음 → 403 없음)
+        if (!isAdmin) {
+          await insertAuditLogsScoped(auditLogs, tenantId, session.user.id);
+        }
+        lastOperationalSnapshotRef.current = snapshot;
         // clear any previous error on success
         setOperationalSyncError(null);
       } catch (error) {
@@ -3657,10 +4036,10 @@ export default function App() {
           alert(`Supabase 운영 모듈 동기화에 실패했습니다. ${msg}`);
         } catch {}
       }
-    }, 1500);
+    }, 500);
 
     return () => clearTimeout(timer);
-  }, [cleaningReports, defects, inventory, settlementRecords, settlementItems, auditLogs, tenantId]);
+  }, [cleaningReports, defects, inventory, settlementRecords, settlementItems, auditLogs, tenantId, currentUser?.role]);
 
   useEffect(() => {
     if (!isSupabaseAvailable() || isLoading) return;
@@ -4024,6 +4403,8 @@ export default function App() {
           buildingName: selectedDorm.buildingName,
           dong: selectedDorm.dong,
           ho: selectedDorm.roomHo,
+          공동현관: selectedDorm.공동현관 || "",
+          세대현관: selectedDorm.세대현관 || "",
         }));
       }
     }
@@ -4187,13 +4568,18 @@ export default function App() {
       if (!hasAccessToDorm(currentUser, dorm.id)) return false;
       if (dormSiteFilter !== "전체" && dorm.site !== dormSiteFilter) return false;
       if (dormGenderFilter !== "전체" && dorm.gender !== dormGenderFilter) return false;
+      if (dormStatusFilter !== "전체") {
+        const residentCount = occupants.filter((o) => !o.isDeleted && o.dormId === dorm.id && ["거주중", "만료예정"].includes(o.status)).length;
+        if (dormStatusFilter === "공실" && residentCount > 0) return false;
+        if (dormStatusFilter === "사용중" && residentCount === 0) return false;
+      }
       if (dormSearch) {
         const text = `${dorm.site} ${dorm.gender} ${dorm.buildingName} ${dorm.address} ${dorm.dong} ${dorm.roomHo} ${dorm.pyeong} ${dorm.realEstateName}`.toLowerCase();
         if (!text.includes(dormSearch.toLowerCase())) return false;
       }
       return true;
     });
-  }, [operationalDorms, currentUser, dormSearch, dormSiteFilter, dormGenderFilter]);
+  }, [operationalDorms, occupants, currentUser, dormSearch, dormSiteFilter, dormGenderFilter, dormStatusFilter]);
 
   const visibleDormContracts = useMemo(() => {
     return dormContracts.filter((c) => {
@@ -4210,6 +4596,7 @@ export default function App() {
       }
 
       if (dormContractSiteFilter !== "전체" && c.site !== dormContractSiteFilter) return false;
+      if (dormContractExpiryMonthFilter !== "전체" && (c.contractEnd || "").slice(0, 7) !== dormContractExpiryMonthFilter) return false;
       const status = getDormContractDisplayStatus(c, dorms, occupants);
       if (dormContractStatusFilter !== "전체" && status !== dormContractStatusFilter) return false;
       if (dormContractSearch) {
@@ -4218,7 +4605,7 @@ export default function App() {
       }
       return true;
     });
-  }, [dormContracts, dormContractSearch, dormContractSiteFilter, dormContractStatusFilter, dorms, occupants, currentUser, operationalDorms]);
+  }, [dormContracts, dormContractSearch, dormContractSiteFilter, dormContractStatusFilter, dormContractExpiryMonthFilter, dorms, occupants, currentUser, operationalDorms]);
 
   const visibleNewHires = useMemo(() => {
     return newHires.filter((h) => {
@@ -4360,10 +4747,15 @@ export default function App() {
         if (day !== inventoryDayFilter) return false;
       }
 
+      if (inventoryStatusFilter === "교체예정") {
+        const isReplace = ["고장", "노후"].includes(i.status) || (i.quantity ?? 0) <= 2;
+        if (!isReplace) return false;
+      }
+
       const text = `${i.site} ${i.dormAddress} ${i.buildingName} ${i.dong} ${i.roomHo} ${i.managerName} ${i.itemName} ${i.quantity} ${i.modelName} ${i.maker} ${i.status} ${i.installationLocation} ${i.purchaseDate} ${i.purchaseAmount} ${i.issuedDate} ${i.proofFile} ${i.soldDate} ${i.soldAmount} ${i.disposalDate} ${i.disposalReason} ${i.notes}`.toLowerCase();
       return !inventorySearch || text.includes(inventorySearch.toLowerCase());
     });
-  }, [inventory, inventorySearch, inventoryYearFilter, inventoryMonthFilter, inventoryDayFilter, currentUser]);
+  }, [inventory, inventorySearch, inventoryStatusFilter, inventoryYearFilter, inventoryMonthFilter, inventoryDayFilter, currentUser]);
 
   const visibleLeases = useMemo(() => {
     return leases.filter((lease) => {
@@ -4466,14 +4858,15 @@ export default function App() {
       const defectDorm = findOperationalDormForDefect(d);
       const text = `${d.receiptDate} ${d.inspectorName} ${d.dormManagerName} ${defectDorm?.buildingName || d.buildingName} ${defectDorm?.dong || d.dong} ${defectDorm?.roomHo || d.ho} ${d["공동현관"]} ${d["세대현관"]} ${d.roadAddress} ${d.defectStatus} ${d.requestText} ${d.completeText} ${d.reporterName}`.toLowerCase();
       const matchesStatus = defectStatusFilter === "전체" || d.defectStatus === defectStatusFilter;
-      return matchesStatus && (!defectSearch || text.includes(defectSearch.toLowerCase()));
+      const matchesMonth = defectReceiptMonthFilter === "전체" || (d.receiptDate || "").slice(0, 7) === defectReceiptMonthFilter;
+      return matchesStatus && matchesMonth && (!defectSearch || text.includes(defectSearch.toLowerCase()));
     };
 
     if (currentUser?.role === "maintenance_reporter") {
       return defects.filter((d) => d.reporterUserId === currentUser.id && filterDefects(d));
     }
     return defects.filter(filterDefects);
-  }, [defects, currentUser, defectSearch, defectStatusFilter]);
+  }, [defects, currentUser, defectSearch, defectStatusFilter, defectReceiptMonthFilter]);
 
   // Settlement Management Calculations
 
@@ -5286,6 +5679,131 @@ export default function App() {
 
     return { moveInTodayCount, moveOutTodayCount, unassignedNewHires, newHireAssignments };
   }, [occupants, newHires]);
+
+  // ============================================
+  // 통합검색 (전 모듈 대상)
+  // ============================================
+  type GlobalSearchResult = { key: string; category: string; label: string; sub: string; tab: TabKey };
+  // 검색어가 없으면 즉시 반환(O(1)). 검색 시에만 전 모듈 스캔.
+  const computeGlobalSearchResults = (rawQuery: string): GlobalSearchResult[] => {
+    const q = rawQuery.trim().toLowerCase();
+    if (!q) return [];
+    const out: GlobalSearchResult[] = [];
+    const hit = (...vals: Array<string | number | undefined | null>) =>
+      vals.some((v) => v !== undefined && v !== null && String(v).toLowerCase().includes(q));
+    const dh = (dong?: string, ho?: string) => `${formatDong(dong || "")}-${formatRoomHo(ho || "")}`;
+
+    // 권한 범위: 담당자(maintenance_reporter/dorm_manager)는 접근 가능한 본인 기숙사 청소/하자만 검색
+    const role = currentUser?.role;
+    const ownDormId = currentUser?.dormId || "";
+    if (role === "maintenance_reporter" || role === "dorm_manager") {
+      for (const r of cleaningReports) {
+        if (r.isDeleted || r.dormId !== ownDormId) continue;
+        if (hit(r.buildingName, r.cleanerName, r.managerName, r.dong, r.roomHo))
+          out.push({ key: `cr-${r.id}`, category: "청소관리", label: `${r.buildingName} ${dh(r.dong, r.roomHo)}`, sub: `${formatDateOnly(r.reportDate) || "-"} · ${r.cleanStatus}`, tab: "cleaningReports" });
+      }
+      for (const d of defects) {
+        if (d.isDeleted || d.dormId !== ownDormId) continue;
+        if (hit(d.buildingName, d.requestText, d.reporterName, d.dong, d.ho))
+          out.push({ key: `df-${d.id}`, category: "하자접수", label: `${d.buildingName} ${dh(d.dong, d.ho)}`, sub: `${d.defectStatus} · ${d.requestText || "-"}`, tab: "defects" });
+      }
+      return out.slice(0, 20);
+    }
+
+    // 기숙사
+    for (const d of operationalDorms) {
+      if (out.length >= 60) break;
+      if (hit(d.buildingName, d.address, d.dong, d.roomHo, d.site))
+        out.push({ key: `dorm-${d.id}`, category: "기숙사", label: `${d.buildingName} ${dh(d.dong, d.roomHo)}`, sub: `${d.site} · ${d.address}`, tab: "dorms" });
+    }
+    // 입주자
+    for (const o of occupants) {
+      if (o.isDeleted) continue;
+      if (hit(o.employeeName, o.phone, o.department))
+        out.push({ key: `occ-${o.id}`, category: "입주자", label: o.employeeName, sub: `${o.department || "-"} · ${o.status}`, tab: "occupants" });
+    }
+    // 신규계약
+    for (const c of dormContracts) {
+      if (c.isDeleted) continue;
+      if (hit(c.buildingName, c.address, c.landlordName, c.realEstateName, c.dong, c.roomHo))
+        out.push({ key: `dc-${c.id}`, category: "신규계약", label: `${c.buildingName} ${dh(c.dong, c.roomHo)}`, sub: `${c.site} · ${c.contractStatus}`, tab: "dormContracts" });
+    }
+    // 신입사원
+    for (const h of newHires) {
+      if (h.isDeleted) continue;
+      if (hit(h.name, h.phone, h.department))
+        out.push({ key: `nh-${h.id}`, category: "신입사원", label: h.name, sub: `${h.site} · ${h.department || "-"} · ${h.residenceStatus}`, tab: "newHires" });
+    }
+    // 청소관리
+    for (const r of cleaningReports) {
+      if (r.isDeleted) continue;
+      if (hit(r.buildingName, r.cleanerName, r.managerName, r.dong, r.roomHo))
+        out.push({ key: `cr-${r.id}`, category: "청소관리", label: `${r.buildingName} ${dh(r.dong, r.roomHo)}`, sub: `${formatDateOnly(r.reportDate) || "-"} · ${r.cleanStatus}`, tab: "cleaningReports" });
+    }
+    // 하자접수
+    for (const d of defects) {
+      if (d.isDeleted) continue;
+      if (hit(d.buildingName, d.requestText, d.reporterName, d.dong, d.ho))
+        out.push({ key: `df-${d.id}`, category: "하자접수", label: `${d.buildingName} ${dh(d.dong, d.ho)}`, sub: `${d.defectStatus} · ${d.requestText || "-"}`, tab: "defects" });
+    }
+    // 비품관리
+    for (const i of inventory) {
+      if (i.isDeleted) continue;
+      if (hit(i.itemName, i.maker, i.modelName, i.buildingName))
+        out.push({ key: `inv-${i.id}`, category: "비품관리", label: i.itemName, sub: `${i.buildingName || "-"} · ${i.status} · ${i.quantity ?? 0}개`, tab: "inventory" });
+    }
+    // 정산관리
+    for (const it of settlementItems) {
+      if ((it as { isDeleted?: boolean }).isDeleted) continue;
+      if (hit(it.targetName, it.details, it.category, it.memo))
+        out.push({ key: `set-${it.id}`, category: "정산관리", label: `${it.category} ${it.targetName || ""}`.trim(), sub: `${formatNumber(it.amount)}원 · ${it.burdenType}`, tab: "settlementManagement" });
+    }
+    // 군대관리 — 인원/훈련/공지
+    for (const p of militaryPersonnel) {
+      if (hit(p.name, p.unit, p.rank, p.phone))
+        out.push({ key: `mp-${p.id}`, category: "군대관리·인사", label: p.name, sub: `${p.unit || "-"} · ${p.rank || "-"}`, tab: "personnelManagement" });
+    }
+    for (const t of militaryTrainingRecords) {
+      const person = militaryPersonnel.find((p) => p.id === t.personnelId);
+      if (hit(t.subject, t.trainingType, t.location, person?.name))
+        out.push({ key: `mt-${t.id}`, category: "군대관리·훈련", label: `${t.subject || t.trainingType || "훈련"}`, sub: `${person?.name || "-"} · ${formatDateOnly(t.trainingDate) || "-"}`, tab: "trainingRecords" });
+    }
+    for (const n of militaryNotices) {
+      const names = (n.personnelIds || []).map((id) => militaryPersonnel.find((p) => p.id === id)?.name || "").join(", ");
+      if (hit(n.title, n.category, n.content, names))
+        out.push({ key: `mn-${n.id}`, category: "군대관리·공지", label: n.title, sub: `${n.category || "-"} · ${names || "-"}`, tab: "militaryNotices" });
+    }
+
+    return out.slice(0, 20);
+  };
+  // 디바운스: 입력 후 250ms 뒤에만 실제 검색어 갱신 (타이핑마다 전체 스캔 방지)
+  useEffect(() => {
+    const timer = setTimeout(() => setGlobalSearchResults(computeGlobalSearchResults(globalSearch)), 250);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [globalSearch, operationalDorms, occupants, dormContracts, newHires, cleaningReports, defects, inventory, settlementItems, militaryPersonnel, militaryTrainingRecords, militaryNotices, currentUser?.role, currentUser?.dormId]);
+
+  const applyGlobalSearchToTab = (tab: TabKey, term: string) => {
+    switch (tab) {
+      case "dorms": setDormSearch(term); break;
+      case "occupants": setOccupantSearch(term); break;
+      case "dormContracts": setDormContractSearch(term); break;
+      case "newHires": setNewHireSearch(term); break;
+      case "cleaningReports": setCleaningDormSearch(term); break;
+      case "defects": setDefectSearch(term); break;
+      case "inventory": setInventorySearch(term); break;
+      case "personnelManagement": setMilitaryPersonnelSearch(term); break;
+      case "trainingRecords": setMilitaryTrainingSearch(term); break;
+      case "militaryNotices": setMilitaryNoticeSearch(term); break;
+      default: break;
+    }
+  };
+
+  const handleGlobalResultClick = (result: GlobalSearchResult) => {
+    applyGlobalSearchToTab(result.tab, globalSearch.trim());
+    setActiveTab(result.tab);
+    setShowGlobalResults(false);
+  };
 
   const login = async () => {
     if (isSupabaseAvailable()) {
@@ -6986,6 +7504,75 @@ export default function App() {
     setMilitaryReports((prev) => [...mapped, ...prev]);
   };
 
+  // 업로드 대상 탭 → 검증 테이블 타입 (uploadExcel 의 디스패치와 일치)
+  const excelTableTypeForTab = (tab: TabKey): ExcelTableType => {
+    switch (tab) {
+      case "dormContracts": return "dormContract";
+      case "newHires": return "newHire";
+      case "personnelManagement": return "militaryPersonnel";
+      case "trainingRecords": return "militaryTraining";
+      case "inventory": return "inventory";
+      default: return "dorm";
+    }
+  };
+
+  // 업로드 전 검증 → 미리보기 모달 표시 (오류 0건일 때만 실제 업로드 진행)
+  const prepareExcelUpload = async (file: File) => {
+    if (!canEditData(currentUser)) return;
+    // 검증 대상이 아닌 탭(공지/보고서 등)은 기존대로 바로 업로드
+    if (activeTab === "militaryNotices" || activeTab === "militaryReports") {
+      await uploadExcel(file);
+      return;
+    }
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array" });
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" });
+      const tableType = excelTableTypeForTab(activeTab);
+      const result = validateExcel(tableType, rows, {
+        dorms,
+        dormContracts,
+        newHires,
+        inventory,
+        militaryPersonnel,
+        codeValues: {
+          departments: militaryCodeValues.departments,
+          trainingType: militaryCodeValues.trainingType,
+        },
+      });
+      setExcelPreview({ file, fileName: file.name, tableType, result });
+    } catch (e) {
+      alert(`엑셀 파일을 읽을 수 없습니다: ${String(e)}`);
+    }
+  };
+
+  const downloadExcelErrorReport = () => {
+    if (!excelPreview) return;
+    const rows = excelPreview.result.issues.map((it) => ({
+      행: it.row,
+      구분: it.level === "error" ? "오류" : "경고",
+      컬럼: it.column,
+      현재값: it.value || "(빈값)",
+      오류내용: it.message,
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{ 행: "-", 구분: "-", 컬럼: "-", 현재값: "-", 오류내용: "문제 없음" }]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "검증결과");
+    XLSX.writeFile(wb, `업로드검증리포트_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const confirmExcelUpload = async () => {
+    if (!excelPreview) return;
+    if (excelPreview.result.summary.error > 0) return; // 오류 있으면 차단
+    if (excelPreview.result.summary.warning > 0) {
+      if (!window.confirm(`경고 ${excelPreview.result.summary.warning}건이 있습니다. 그래도 업로드하시겠습니까?`)) return;
+    }
+    const file = excelPreview.file;
+    setExcelPreview(null);
+    await uploadExcel(file);
+  };
+
   const uploadExcel = async (file: File) => {
     if (!canEditData(currentUser)) return;
     if (activeTab === "dormContracts") {
@@ -7709,6 +8296,286 @@ const downloadInventoryReport = () => {
   XLSX.writeFile(wb, `비품현황보고서_${today}.xlsx`);
 };
 
+// ============================================
+// PDF 보고서 생성 (브라우저 인쇄 → PDF 저장 방식, 외부 라이브러리 불필요)
+// ============================================
+const PDF_REPORT_LABELS: Record<PdfReportType, string> = {
+  overall: "전체 운영 현황 보고서",
+  occupancy: "기숙사별 입주 현황 보고서",
+  expiring: "계약 만료 예정 보고서",
+  vacancy: "공실/입주율 보고서",
+  cleaning: "청소 점검 보고서",
+  defect: "하자 접수 현황 보고서",
+  inventory: "비품 현황 보고서",
+  settlement: "정산 요약 보고서",
+  military: "예비군/민방위 보고서",
+};
+
+// 값 정제: undefined/null/NaN/빈값 → "-", HTML 이스케이프
+const pdfCell = (v: unknown): string => {
+  if (v === null || v === undefined) return "-";
+  const s = String(v).trim();
+  if (s === "" || s === "NaN" || s === "undefined" || s === "null") return "-";
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+};
+const pdfWon = (n: unknown): string => `${formatNumber(Number(n) || 0)}원`;
+
+const buildPdfReport = (type: PdfReportType): {
+  kpis: Array<{ label: string; value: string }>;
+  headers: string[];
+  rows: string[][];
+  notes: string;
+} => {
+  const period = `${reportYear}-${reportMonth}`;
+  const dongHo = (dong: string, roomHo: string) => `${formatDong(dong)}-${formatRoomHo(roomHo)}`;
+  const dorms_ = operationalDorms.filter(
+    (d) =>
+      (reportSiteFilter === "전체" || d.site === reportSiteFilter) &&
+      (reportGenderFilter === "전체" || d.gender === reportGenderFilter) &&
+      (pdfReportDormId === "전체" || d.id === pdfReportDormId)
+  );
+  const dormIdSet = new Set(dorms_.map((d) => d.id));
+
+  if (type === "occupancy") {
+    const rows = dorms_.map((d) => {
+      const cur = occupancyCountByDorm.get(d.id) || 0;
+      const cap = d.capacity || 0;
+      return [
+        pdfCell(d.site), pdfCell(d.gender), pdfCell(d.buildingName), pdfCell(dongHo(d.dong, d.roomHo)),
+        pdfCell(cap), pdfCell(cur), pdfCell(Math.max(cap - cur, 0)),
+        `${cap > 0 ? Math.round((cur / cap) * 100) : 0}%`, pdfCell(getDormManagerDisplayName(d.id)),
+      ];
+    });
+    const totalCap = dorms_.reduce((s, d) => s + (d.capacity || 0), 0);
+    const totalCur = dorms_.reduce((s, d) => s + (occupancyCountByDorm.get(d.id) || 0), 0);
+    return {
+      kpis: [
+        { label: "총 기숙사", value: `${dorms_.length}개` },
+        { label: "총 정원", value: `${totalCap}명` },
+        { label: "현 거주자", value: `${totalCur}명` },
+        { label: "평균 입주율", value: `${totalCap > 0 ? Math.round((totalCur / totalCap) * 100) : 0}%` },
+      ],
+      headers: ["지역", "성별", "기숙사명", "동-호", "정원", "현인원", "공실", "사용률", "담당자"],
+      rows, notes: "현 거주자 = 거주중 + 만료예정 (퇴실 제외).",
+    };
+  }
+
+  if (type === "expiring") {
+    const sorted = [...dorms_].filter((d) => d.contractEnd).sort((a, b) => daysDiff(a.contractEnd) - daysDiff(b.contractEnd));
+    const rows = sorted.map((d) => {
+      const dd = daysDiff(d.contractEnd);
+      return [
+        pdfCell(d.site), pdfCell(d.buildingName), pdfCell(dongHo(d.dong, d.roomHo)),
+        pdfCell(formatDateOnly(d.contractEnd) || "-"), dd >= 0 ? `D-${dd}` : `D+${Math.abs(dd)}`, pdfCell(d.leaseStatus),
+      ];
+    });
+    const within30 = sorted.filter((d) => daysDiff(d.contractEnd) >= 0 && daysDiff(d.contractEnd) <= 30).length;
+    return {
+      kpis: [
+        { label: "대상 기숙사", value: `${sorted.length}개` },
+        { label: "30일 이내 만료", value: `${within30}건` },
+      ],
+      headers: ["지역", "기숙사명", "동-호", "만료일", "D-Day", "상태"],
+      rows, notes: "계약 만료일이 가까운 순으로 정렬.",
+    };
+  }
+
+  if (type === "vacancy") {
+    const stats = siteGenderStats.filter(
+      (s) => (reportSiteFilter === "전체" || s.site === reportSiteFilter) && (reportGenderFilter === "전체" || s.gender === reportGenderFilter)
+    );
+    const rows = stats.map((s) => [
+      pdfCell(s.site), pdfCell(s.gender), pdfCell(s.totalCapacity), pdfCell(s.currentResidents),
+      pdfCell(s.vacancy), `${s.occupancyRate}%`,
+    ]);
+    const cap = stats.reduce((a, s) => a + s.totalCapacity, 0);
+    const cur = stats.reduce((a, s) => a + s.currentResidents, 0);
+    return {
+      kpis: [
+        { label: "전체 입주율", value: `${cap > 0 ? Math.round((cur / cap) * 100) : 0}%` },
+        { label: "전체 공실률", value: `${cap > 0 ? Math.round(((cap - cur) / cap) * 100) : 0}%` },
+        { label: "총 정원", value: `${cap}명` },
+        { label: "현 거주자", value: `${cur}명` },
+      ],
+      headers: ["지역", "성별", "정원", "현거주자", "공실", "입주율"],
+      rows, notes: "",
+    };
+  }
+
+  if (type === "cleaning") {
+    const list = cleaningReports.filter((r) => !r.isDeleted && (r.reportDate || "").startsWith(period) && (pdfReportDormId === "전체" ? dormIdSet.has(r.dormId) || dormIdSet.size === operationalDorms.length : r.dormId === pdfReportDormId));
+    const rows = list.map((r) => [
+      pdfCell(formatDateOnly(r.reportDate) || "-"), pdfCell(r.buildingName), pdfCell(dongHo(r.dong, r.roomHo)),
+      pdfCell(getDormManagerDisplayName(r.dormId)), pdfCell(r.cleanStatus),
+    ]);
+    return {
+      kpis: [
+        { label: "제출 건수", value: `${list.length}건` },
+        { label: "확인완료", value: `${list.filter((r) => r.cleanStatus === "확인완료").length}건` },
+        { label: "불량", value: `${list.filter((r) => r.cleanStatus === "불량").length}건` },
+      ],
+      headers: ["보고일", "기숙사명", "동-호", "담당자", "상태"],
+      rows, notes: `대상 기간: ${period}`,
+    };
+  }
+
+  if (type === "defect") {
+    const list = defects.filter((d) => !d.isDeleted && (d.receiptDate || "").startsWith(period) && (pdfReportDormId === "전체" || d.dormId === pdfReportDormId));
+    const rows = list.map((d) => [
+      pdfCell(formatDateOnly(d.receiptDate) || "-"), pdfCell(d.buildingName), pdfCell(dongHo(d.dong, d.ho)),
+      pdfCell(d.defectStatus), pdfCell(d.requestText),
+    ]);
+    return {
+      kpis: [
+        { label: "접수", value: `${list.length}건` },
+        { label: "진행중", value: `${list.filter((d) => d.defectStatus === "진행중").length}건` },
+        { label: "완료", value: `${list.filter((d) => d.defectStatus === "완료").length}건` },
+      ],
+      headers: ["접수일", "기숙사명", "동-호", "상태", "내용"],
+      rows, notes: `대상 기간: ${period}`,
+    };
+  }
+
+  if (type === "inventory") {
+    const list = inventory.filter((i) => !i.isDeleted && (pdfReportDormId === "전체" || i.dormId === pdfReportDormId));
+    const rows = list.map((i) => {
+      const dorm = operationalDorms.find((d) => d.id === i.dormId);
+      return [
+        pdfCell(dorm?.buildingName || i.buildingName), pdfCell(i.itemName), pdfCell(i.quantity),
+        pdfCell(i.status), pdfCell(formatDateOnly(i.purchaseDate) || "-"), pdfWon(i.purchaseAmount),
+      ];
+    });
+    return {
+      kpis: [
+        { label: "품목 수", value: `${list.length}건` },
+        { label: "총 구매액", value: pdfWon(list.reduce((s, i) => s + (i.purchaseAmount || 0), 0)) },
+        { label: "고장/노후", value: `${list.filter((i) => ["고장", "노후"].includes(i.status)).length}건` },
+      ],
+      headers: ["기숙사명", "품목", "수량", "상태", "구매일", "구매액"],
+      rows, notes: "",
+    };
+  }
+
+  if (type === "settlement") {
+    const list = settlementManagementStats.filteredDorms;
+    const rows = list.map((r) => [
+      pdfCell(r.dorm.buildingName), pdfCell(r.dorm.site), pdfCell(r.dorm.gender),
+      pdfWon(r.revenue), pdfWon(r.inventoryCost), pdfWon(r.defectCost), pdfWon(r.manualCost), pdfWon(r.settlementAmount),
+    ]);
+    return {
+      kpis: [
+        { label: "대상 기숙사", value: `${list.length}개` },
+        { label: "총 정산액", value: pdfWon(list.reduce((s, r) => s + r.settlementAmount, 0)) },
+      ],
+      headers: ["기숙사명", "지역", "성별", "수입", "비품", "하자", "기타", "정산액"],
+      rows, notes: `정산 기간: ${safeSettlementYear}-${safeSettlementMonth}`,
+    };
+  }
+
+  if (type === "military") {
+    const list = militaryPersonnelSummary;
+    const rows = list.map((p) => [
+      pdfCell(p.name), pdfCell(p.unit), pdfCell(p.currentCategory), pdfCell(p.trainingYear || "-"), pdfCell(p.trainingStatus), pdfCell(p.status),
+    ]);
+    return {
+      kpis: [
+        { label: "예비군", value: `${list.filter((p) => p.currentCategory === "예비군").length}명` },
+        { label: "민방위", value: `${list.filter((p) => p.currentCategory === "민방위").length}명` },
+        { label: "대상아님", value: `${list.filter((p) => p.currentCategory === "대상아님").length}명` },
+      ],
+      headers: ["이름", "부서", "현재구분", "훈련연차", "이수상태", "재직상태"],
+      rows, notes: `기준연도: ${effectiveMilitaryReferenceYear || new Date().getFullYear()}`,
+    };
+  }
+
+  // overall (기본)
+  const stats = siteGenderStats.filter(
+    (s) => (reportSiteFilter === "전체" || s.site === reportSiteFilter) && (reportGenderFilter === "전체" || s.gender === reportGenderFilter)
+  );
+  const rows = stats.map((s) => [
+    pdfCell(s.site), pdfCell(s.gender), pdfCell(s.operationalDormCount), pdfCell(s.currentResidents),
+    pdfCell(s.vacancy), `${s.occupancyRate}%`, pdfCell(s.expiringCount), pdfCell(s.unprocessedDefects), pdfCell(s.unsubmittedCleaning),
+  ]);
+  return {
+    kpis: [
+      { label: "공실률", value: `${reportData.vacancyRate}%` },
+      { label: "청소 제출률", value: `${reportData.cleaningSubmissionRate}%` },
+      { label: "하자 완료율", value: `${reportData.defectCompletionRate}%` },
+      { label: "계약 만료 예정", value: `${reportData.expiringContractCount}건` },
+    ],
+    headers: ["지역", "성별", "기숙사 수", "현거주자", "공실", "입주율", "만료예정", "미처리하자", "청소미제출"],
+    rows, notes: "현 거주자 = 거주중 + 만료예정.",
+  };
+};
+
+const generateReportHtml = (type: PdfReportType): string => {
+  const r = buildPdfReport(type);
+  const title = PDF_REPORT_LABELS[type];
+  const now = new Date();
+  const author = currentUser?.displayName || currentUser?.username || "-";
+  const filterLine = [
+    `기간: ${reportYear}-${reportMonth}`,
+    `지역: ${reportSiteFilter}`,
+    `성별: ${reportGenderFilter}`,
+    `기숙사: ${pdfReportDormId === "전체" ? "전체" : (operationalDorms.find((d) => d.id === pdfReportDormId)?.buildingName || "-")}`,
+  ].join(" · ");
+
+  const kpiHtml = r.kpis
+    .map((k) => `<div class="kpi"><div class="kpi-l">${pdfCell(k.label)}</div><div class="kpi-v">${pdfCell(k.value)}</div></div>`)
+    .join("");
+  const theadHtml = `<tr>${r.headers.map((h) => `<th>${pdfCell(h)}</th>`).join("")}</tr>`;
+  const tbodyHtml = r.rows.length
+    ? r.rows.map((row) => `<tr>${row.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")
+    : `<tr><td colspan="${r.headers.length}" style="text-align:center;color:#888;padding:24px">데이터가 없습니다.</td></tr>`;
+
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${pdfCell(title)}</title>
+<style>
+  *{box-sizing:border-box} body{font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#111;margin:32px}
+  .sys{font-size:12px;color:#666} h1{font-size:20px;margin:4px 0 2px}
+  .meta{font-size:12px;color:#444;margin-top:6px;line-height:1.6}
+  .kpis{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}
+  .kpi{border:1px solid #ddd;border-radius:8px;padding:10px 14px;min-width:120px}
+  .kpi-l{font-size:11px;color:#777} .kpi-v{font-size:18px;font-weight:700;margin-top:4px}
+  table{width:100%;border-collapse:collapse;margin-top:10px;font-size:12px}
+  th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;white-space:nowrap}
+  th{background:#f3f4f6} tr:nth-child(even) td{background:#fafafa}
+  .notes{margin-top:14px;font-size:12px;color:#444} .foot{margin-top:20px;font-size:11px;color:#999}
+  @media print{@page{size:A4 landscape;margin:12mm} body{margin:0}}
+</style></head><body>
+  <div class="sys">기숙사 운영 통합 시스템 (Dorm ERP)</div>
+  <h1>${pdfCell(title)}</h1>
+  <div class="meta">생성일: ${formatDateOnly(now.toISOString())} ${now.toLocaleTimeString("ko-KR")} · 생성자: ${pdfCell(author)}<br/>${pdfCell(filterLine)}</div>
+  <div class="kpis">${kpiHtml}</div>
+  <table><thead>${theadHtml}</thead><tbody>${tbodyHtml}</tbody></table>
+  ${r.notes ? `<div class="notes">비고: ${pdfCell(r.notes)}</div>` : ""}
+  <div class="foot">본 보고서는 시스템에서 자동 생성되었습니다.</div>
+</body></html>`;
+};
+
+const openReportPdf = (type: PdfReportType, autoPrint: boolean) => {
+  const html = generateReportHtml(type);
+  const w = window.open("", "report-pdf", "width=1024,height=768");
+  if (!w) {
+    alert("팝업이 차단되었습니다. 팝업을 허용해주세요.");
+    return;
+  }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+  if (autoPrint) {
+    setTimeout(() => w.print(), 400);
+  }
+  createAuditLog({
+    targetType: "system",
+    targetId: type,
+    actionType: "create",
+    changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+    beforeValue: "",
+    afterValue: JSON.stringify({ report: PDF_REPORT_LABELS[type], period: `${reportYear}-${reportMonth}`, site: reportSiteFilter, gender: reportGenderFilter, mode: autoPrint ? "pdf" : "preview" }),
+    memo: `PDF 보고서 생성: ${PDF_REPORT_LABELS[type]}`,
+  });
+};
+
 const handleDefectRequestPhotos = async (files: FileList | null) => {
     if (!files) return;
 
@@ -8361,8 +9228,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   useEffect(() => {
     if (isMaintenanceAccessUser && activeTab !== "cleaningReports" && activeTab !== "defects") {
       setActiveTab("defects");
+      return;
     }
-  }, [isMaintenanceAccessUser, activeTab]);
+    // 관리자 전용 탭(시스템설정/휴지통·백업/사용자관리)에 비관리자가 진입하면 허용 메뉴로 자동 이동
+    const adminOnlyTabs: TabKey[] = ["settings", "recycleBin", "users", "militarySettings"];
+    if (currentUser && currentUser.role !== "admin" && adminOnlyTabs.includes(activeTab)) {
+      setActiveTab(isMaintenanceAccessUser ? "defects" : "dashboard");
+    }
+  }, [isMaintenanceAccessUser, activeTab, currentUser]);
 
   const isGroupOpen = (group: string) => group === currentMenuGroup || group === expandedMenu || group === hoveredMenu;
   const isMenuActive = (group: string) => group === currentMenuGroup;
@@ -8464,6 +9337,98 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       };
     });
   }, [dorms, operationalDorms, occupants, defects, cleaningReports]);
+
+  // 운영 현황 차트 데이터 (대시보드 시각화) — isDeleted/종료·해지/퇴실 제외, 0분모=0 처리
+  const dashboardChartData = useMemo(() => {
+    const safeRate = (num: number, den: number) => (den > 0 ? Math.round((num / den) * 100) : 0);
+    const now = new Date();
+
+    // 최근 6개월 구간 (오래된 달 → 최근 달 순)
+    const months = Array.from({ length: 6 }, (_, idx) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - (5 - idx), 1);
+      return {
+        ym: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+        label: `${d.getMonth() + 1}월`,
+        start: new Date(d.getFullYear(), d.getMonth(), 1),
+        end: new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59),
+      };
+    });
+    // 향후 6개월 구간 (계약만료 추이)
+    const futureMonths = Array.from({ length: 6 }, (_, idx) => {
+      const d = new Date(now.getFullYear(), now.getMonth() + idx, 1);
+      return {
+        ym: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+        label: `${d.getMonth() + 1}월`,
+      };
+    });
+
+    // 1) 지역별 기숙사 현황 (평택/천안 × 남/여): 총/사용중/공실
+    const regionStatus = siteGenderStats.map((s) => {
+      const regionDorms = operationalDorms.filter((d) => d.site === s.site && d.gender === s.gender);
+      const total = regionDorms.length;
+      const inUse = regionDorms.filter((d) => (occupancyCountByDorm.get(d.id) || 0) > 0).length;
+      return { label: `${s.site} ${s.gender}`, total, inUse, vacant: Math.max(total - inUse, 0) };
+    });
+
+    // 2) 월별 입주율 추이 (최근 6개월): 현 거주자 / 총 정원
+    const totalCapacity = operationalDorms.reduce((sum, d) => sum + (d.capacity || 0), 0);
+    const occupancyTrend = months.map((m) => {
+      const residents = occupants.filter((o) => {
+        if (o.isDeleted) return false;
+        const moveIn = o.moveInDate ? new Date(o.moveInDate) : null;
+        if (!moveIn || Number.isNaN(moveIn.valueOf()) || moveIn > m.end) return false;
+        const out = o.actualMoveOutDate ? new Date(o.actualMoveOutDate) : null;
+        if (out && !Number.isNaN(out.valueOf()) && out < m.start) return false;
+        return true;
+      }).length;
+      return { label: m.label, rate: safeRate(residents, totalCapacity), residents, capacity: totalCapacity };
+    });
+
+    // 3) 계약만료 추이 (향후 6개월): 만료 예정 계약 수
+    const expiryTrend = futureMonths.map((m) => ({
+      label: m.label,
+      ym: m.ym,
+      count: operationalDorms.filter((d) => (d.contractEnd || "").slice(0, 7) === m.ym).length,
+    }));
+
+    // 4) 하자 발생 추이 (최근 6개월): 접수/진행중/완료
+    const defectTrend = months.map((m) => {
+      const md = defects.filter((d) => !d.isDeleted && (d.receiptDate || "").slice(0, 7) === m.ym);
+      return {
+        label: m.label,
+        ym: m.ym,
+        received: md.filter((d) => d.defectStatus === "접수").length,
+        inProgress: md.filter((d) => d.defectStatus === "진행중").length,
+        done: md.filter((d) => d.defectStatus === "완료").length,
+        total: md.length,
+      };
+    });
+
+    // 5) 청소 점수 추이 (최근 6개월): 평균 점수 / 미제출 건수
+    const cleaningTrend = months.map((m) => {
+      const mr = cleaningReports.filter((r) => !r.isDeleted && (r.reportDate || "").slice(0, 7) === m.ym);
+      const scored = mr.filter((r) => r.cleanStatus !== "미제출" && typeof r.score === "number" && r.score > 0);
+      const avg = scored.length > 0 ? Math.round(scored.reduce((sum, r) => sum + r.score, 0) / scored.length) : 0;
+      return { label: m.label, avg, missing: mr.filter((r) => r.cleanStatus === "미제출").length };
+    });
+
+    return { regionStatus, occupancyTrend, expiryTrend, defectTrend, cleaningTrend };
+  }, [siteGenderStats, operationalDorms, occupants, defects, cleaningReports, occupancyCountByDorm]);
+
+  // 월 필터 옵션 (데이터 내 실제 월 + 차트 표시 구간 합집합, 오름차순)
+  const dormContractMonthOptions = useMemo(() => {
+    const set = new Set<string>();
+    dormContracts.forEach((c) => { if (!c.isDeleted && c.contractEnd) set.add(c.contractEnd.slice(0, 7)); });
+    dashboardChartData.expiryTrend.forEach((m) => set.add(m.ym));
+    return ["전체", ...Array.from(set).filter(Boolean).sort()];
+  }, [dormContracts, dashboardChartData]);
+
+  const defectMonthOptions = useMemo(() => {
+    const set = new Set<string>();
+    defects.forEach((d) => { if (!d.isDeleted && d.receiptDate) set.add(d.receiptDate.slice(0, 7)); });
+    dashboardChartData.defectTrend.forEach((m) => set.add(m.ym));
+    return ["전체", ...Array.from(set).filter(Boolean).sort()];
+  }, [defects, dashboardChartData]);
 
   const dashboardStat = {
     dormCount: uniqueActiveDormContracts.length,
@@ -8750,6 +9715,50 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <h1 className="text-2xl font-bold tracking-tight md:text-3xl">운영관리 대시보드 v4</h1>
                 <p className="mt-1 text-sm text-slate-500">기숙사, 입주배정, 비품, 계약, 매각, 하자접수, 운영시뮬레이션까지 한 번에</p>
               </div>
+
+              {/* 통합검색 */}
+              <div className="relative w-full lg:max-w-md lg:flex-1 lg:px-4">
+                <input
+                  type="text"
+                  value={globalSearch}
+                  onChange={(e) => { setGlobalSearch(e.target.value); setShowGlobalResults(true); }}
+                  onFocus={() => setShowGlobalResults(true)}
+                  onBlur={() => setTimeout(() => setShowGlobalResults(false), 200)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { setGlobalSearchResults(computeGlobalSearchResults(globalSearch)); setShowGlobalResults(true); }
+                    if (e.key === "Escape") setShowGlobalResults(false);
+                  }}
+                  placeholder="통합검색: 이름 · 기숙사 · 계약 · 품목 · 군인..."
+                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none focus:border-slate-400 ${theme.darkMode ? "border-slate-600 bg-slate-900 text-slate-100" : "border-slate-300 bg-white text-slate-900"}`}
+                />
+                {showGlobalResults && globalSearch.trim() && (
+                  <div className={`absolute left-0 right-0 z-50 mt-2 max-h-[26rem] overflow-y-auto rounded-2xl border shadow-2xl lg:mx-4 ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                    {globalSearchResults.length > 0 ? (
+                      <>
+                        <div className="px-4 py-2 text-xs text-slate-400">검색 결과 {globalSearchResults.length}건 (최대 20)</div>
+                        {globalSearchResults.map((r) => (
+                          <button
+                            key={r.key}
+                            type="button"
+                            onMouseDown={(e) => { e.preventDefault(); handleGlobalResultClick(r); }}
+                            className={`flex w-full items-center gap-3 px-4 py-2.5 text-left ${theme.darkMode ? "hover:bg-slate-800" : "hover:bg-slate-100"}`}
+                          >
+                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200" : "bg-slate-100 text-slate-600"}`}>{r.category}</span>
+                            <span className="min-w-0 flex-1">
+                              <span className={`block truncate text-sm font-medium ${theme.darkMode ? "text-slate-100" : "text-slate-900"}`} title={r.label}>{r.label}</span>
+                              <span className="block truncate text-xs text-slate-500" title={r.sub}>{r.sub}</span>
+                            </span>
+                            <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" />
+                          </button>
+                        ))}
+                      </>
+                    ) : (
+                      <div className="px-4 py-6 text-center text-sm text-slate-400">검색 결과가 없습니다.</div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div className="flex flex-wrap items-center justify-end gap-3">
                 <button
                   type="button"
@@ -8774,14 +9783,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 >
                   <MessageSquare className="h-5 w-5" />
                 </button>
-                <button
-                  type="button"
-                  title="도움말/설정 보기"
-                  onClick={() => setActiveTab("settings")}
-                  className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl ${theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
-                >
-                  <HelpCircle className="h-5 w-5" />
-                </button>
+                {canManageUsers(currentUser) && (
+                  <button
+                    type="button"
+                    title="도움말/설정 보기"
+                    onClick={() => setActiveTab("settings")}
+                    className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl ${theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                  >
+                    <HelpCircle className="h-5 w-5" />
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setTheme((prev) => ({ ...prev, darkMode: !prev.darkMode }))}
@@ -8794,28 +9805,97 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </button>
               </div>
             </div>
-            <input ref={excelInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) uploadExcel(file); e.currentTarget.value = ""; }} />
+            <input ref={excelInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) prepareExcelUpload(file); e.currentTarget.value = ""; }} />
+
+            {excelPreview && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-sm">
+                <div className={`max-h-[90vh] w-full max-w-4xl overflow-auto rounded-3xl p-5 shadow-2xl ${theme.darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`}>
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-xl font-semibold">엑셀 업로드 검증</h3>
+                      <p className="text-sm text-slate-500">{excelPreview.fileName} · 총 {excelPreview.result.summary.total}행</p>
+                    </div>
+                    <button type="button" onClick={() => setExcelPreview(null)} className={`rounded-2xl border px-4 py-2 text-sm font-semibold ${theme.darkMode ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-50"}`}>닫기</button>
+                  </div>
+
+                  <div className="mb-4 grid grid-cols-3 gap-3">
+                    <div className="rounded-2xl bg-emerald-50 p-3 text-center"><div className="text-xs font-semibold text-emerald-700">정상</div><div className="mt-1 text-2xl font-bold text-emerald-700">{excelPreview.result.summary.valid}</div></div>
+                    <div className="rounded-2xl bg-rose-50 p-3 text-center"><div className="text-xs font-semibold text-rose-700">오류</div><div className="mt-1 text-2xl font-bold text-rose-700">{excelPreview.result.summary.error}</div></div>
+                    <div className="rounded-2xl bg-amber-50 p-3 text-center"><div className="text-xs font-semibold text-amber-700">경고</div><div className="mt-1 text-2xl font-bold text-amber-700">{excelPreview.result.summary.warning}</div></div>
+                  </div>
+
+                  {excelPreview.result.summary.error > 0 && (
+                    <div className="mb-3 rounded-2xl bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700">오류가 있어 업로드할 수 없습니다. 오류를 수정 후 다시 업로드하세요.</div>
+                  )}
+
+                  <div className="erp-table-container max-h-[44vh]">
+                    <table className="erp-table text-left">
+                      <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                        <tr>
+                          <th className="px-3 py-2 erp-col-no">행</th>
+                          <th className="px-3 py-2 erp-col-status">구분</th>
+                          <th className="px-3 py-2 erp-col-name">컬럼</th>
+                          <th className="px-3 py-2 erp-col-name">현재값</th>
+                          <th className="px-3 py-2 erp-col-memo">오류내용</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {excelPreview.result.issues.map((it, idx) => (
+                          <tr key={idx} className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}`}>
+                            <td className="px-3 py-2">{it.row}</td>
+                            <td className="px-3 py-2">
+                              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${it.level === "error" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-700"}`}>{it.level === "error" ? "오류" : "경고"}</span>
+                            </td>
+                            <td className="px-3 py-2" title={it.column}>{it.column}</td>
+                            <td className="px-3 py-2" title={it.value}>{it.value || "(빈값)"}</td>
+                            <td className="px-3 py-2 erp-col-memo" title={it.message}>{it.message}</td>
+                          </tr>
+                        ))}
+                        {excelPreview.result.issues.length === 0 && (
+                          <tr><td colSpan={5} className="px-3 py-8 text-center text-emerald-600">검증 통과 — 오류/경고가 없습니다.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="mt-5 flex flex-wrap justify-end gap-2">
+                    <button type="button" onClick={() => setExcelPreview(null)} className={`rounded-2xl border px-4 py-2 text-sm font-semibold ${theme.darkMode ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-50"}`}>취소</button>
+                    {excelPreview.result.issues.length > 0 && (
+                      <button type="button" onClick={downloadExcelErrorReport} className="rounded-2xl border border-slate-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100">오류 리포트 다운로드</button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={confirmExcelUpload}
+                      disabled={excelPreview.result.summary.error > 0}
+                      className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      업로드 진행
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+              <button type="button" onClick={() => { setDormStatusFilter("사용중"); setDormSiteFilter("전체"); setDormGenderFilter("전체"); setDormSearch(""); setActiveTab("dorms"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">기숙사 수(현재 사용중인 기숙사 수)</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.dormCount}</div>
-              </div>
-              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+              </button>
+              <button type="button" onClick={() => { setOccupantMenuFilterStatus("배정완료"); setOccupantMenuFilterSite("전체"); setOccupantMenuFilterGender("전체"); setOccupantMenuFilterSearch(""); setSelectedDormId(""); setActiveTab("occupants"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">현 거주자</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.currentResidents}</div>
-              </div>
-              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+              </button>
+              <button type="button" onClick={() => { setDormStatusFilter("공실"); setDormSiteFilter("전체"); setDormGenderFilter("전체"); setDormSearch(""); setActiveTab("dorms"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">남은공실</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.totalVacancy}</div>
-              </div>
-              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+              </button>
+              <button type="button" onClick={() => { setDefectStatusFilter("진행중"); setDefectSearch(""); setActiveTab("defects"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">하자 미완료</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.openDefects}</div>
-              </div>
-              <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+              </button>
+              <button type="button" onClick={() => { setInventoryStatusFilter("교체예정"); setInventorySearch(""); setActiveTab("inventory"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">비품 품목</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.inventoryCount}</div>
-              </div>
+              </button>
             </div>
           </header>
 
@@ -9145,32 +10225,32 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           <div className="space-y-6">
             {/* 운영 요약 카드 */}
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-              <button type="button" onClick={() => setActiveTab("newHires")} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-blue-50 to-blue-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-blue-50 to-blue-100 p-4 hover:shadow-lg transition-shadow"}`}>
+              <button type="button" onClick={() => { setNewHireAssignmentFilter("미배정"); setActiveTab("newHires"); }} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-blue-50 to-blue-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-blue-50 to-blue-100 p-4 hover:shadow-lg transition-shadow"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-blue-600">미배정 신입</div>
                 <div className="mt-3 text-3xl font-bold text-blue-700">{dashboardSummaryStats.unassignedCount}</div>
                 <div className="mt-2 text-xs text-blue-600">명 등록 대기</div>
               </button>
-              <button type="button" onClick={() => setActiveTab("dormContracts")} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-amber-50 to-amber-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-amber-50 to-amber-100 p-4 hover:shadow-lg transition-shadow"}`}>
+              <button type="button" onClick={() => { setDormContractStatusFilter("만료예정"); setDormContractSearch(""); setActiveTab("dormContracts"); }} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-amber-50 to-amber-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-amber-50 to-amber-100 p-4 hover:shadow-lg transition-shadow"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-amber-600">계약 만료</div>
                 <div className="mt-3 text-3xl font-bold text-amber-700">{dashboardSummaryStats.expiringCount}</div>
                 <div className="mt-2 text-xs text-amber-600">건 예정 (30일)</div>
               </button>
-              <button type="button" onClick={() => setActiveTab("occupants")} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-purple-50 to-purple-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-purple-50 to-purple-100 p-4 hover:shadow-lg transition-shadow"}`}>
+              <button type="button" onClick={() => { setDormStatusFilter("공실"); setDormSiteFilter("전체"); setDormGenderFilter("전체"); setDormSearch(""); setActiveTab("dorms"); }} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-purple-50 to-purple-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-purple-50 to-purple-100 p-4 hover:shadow-lg transition-shadow"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-purple-600">공실률</div>
                 <div className="mt-3 text-3xl font-bold text-purple-700">{dashboardSummaryStats.vacancyRate}%</div>
                 <div className="mt-2 text-xs text-purple-600">입주 가능</div>
               </button>
-              <button type="button" onClick={() => setActiveTab("defects")} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-red-50 to-red-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-red-50 to-red-100 p-4 hover:shadow-lg transition-shadow"}`}>
+              <button type="button" onClick={() => { setDefectStatusFilter("진행중"); setDefectSearch(""); setActiveTab("defects"); }} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-red-50 to-red-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-red-50 to-red-100 p-4 hover:shadow-lg transition-shadow"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-red-600">미처리 하자</div>
                 <div className="mt-3 text-3xl font-bold text-red-700">{dashboardSummaryStats.unprocessedDefects}</div>
                 <div className="mt-2 text-xs text-red-600">건 처리중</div>
               </button>
-              <button type="button" onClick={() => setActiveTab("cleaningReports")} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-green-50 to-green-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-green-50 to-green-100 p-4 hover:shadow-lg transition-shadow"}`}>
+              <button type="button" onClick={() => { setCleaningStatusFilter("미제출"); setActiveTab("cleaningReports"); }} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-green-50 to-green-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-green-50 to-green-100 p-4 hover:shadow-lg transition-shadow"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-green-600">청소 미보고</div>
                 <div className="mt-3 text-3xl font-bold text-green-700">{dashboardSummaryStats.unreportedCleaning}</div>
                 <div className="mt-2 text-xs text-green-600">건 대기중</div>
               </button>
-              <button type="button" onClick={() => setActiveTab("inventory")} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-cyan-50 to-cyan-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-cyan-50 to-cyan-100 p-4 hover:shadow-lg transition-shadow"}`}>
+              <button type="button" onClick={() => { setInventoryStatusFilter("교체예정"); setInventorySearch(""); setActiveTab("inventory"); }} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-cyan-50 to-cyan-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-cyan-50 to-cyan-100 p-4 hover:shadow-lg transition-shadow"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-cyan-600">비품 노후</div>
                 <div className="mt-3 text-3xl font-bold text-cyan-700">{dashboardSummaryStats.outdatedInventory}</div>
                 <div className="mt-2 text-xs text-cyan-600">개 교체필요</div>
@@ -9391,7 +10471,365 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </table>
               </div>
             </section>
+
+            {/* 운영 현황 차트 (시각화) — PC 2열 / 모바일 세로 */}
+            <div className="grid gap-6 lg:grid-cols-2">
+              {/* 1) 지역별 기숙사 현황 */}
+              <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+                <div className="mb-4">
+                  <h2 className="text-lg font-semibold">지역별 기숙사 현황</h2>
+                  <p className="text-sm text-slate-500">평택·천안 / 남·여 — 사용중·공실 (총 기숙사 기준)</p>
+                </div>
+                <div className="space-y-3">
+                  {dashboardChartData.regionStatus.map((r) => {
+                    const max = Math.max(r.total, 1);
+                    return (
+                      <div key={r.label}>
+                        <div className="mb-1 flex items-center justify-between text-xs">
+                          <span className="font-semibold">{r.label}</span>
+                          <span className="text-slate-500">총 {r.total} · 사용중 {r.inUse} · 공실 {r.vacant}</span>
+                        </div>
+                        <div className={`flex h-5 overflow-hidden rounded-full ${theme.darkMode ? "bg-slate-800" : "bg-slate-100"}`}>
+                          <div className="bg-blue-600 transition-all" style={{ width: `${(r.inUse / max) * 100}%` }} />
+                          <div className="bg-blue-200 transition-all" style={{ width: `${(r.vacant / max) * 100}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {dashboardChartData.regionStatus.every((r) => r.total === 0) && (
+                    <div className="py-8 text-center text-sm text-slate-400">표시할 데이터가 없습니다.</div>
+                  )}
+                </div>
+                <div className="mt-4 flex gap-4 text-xs text-slate-500">
+                  <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-blue-600" /> 사용중</span>
+                  <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-blue-200" /> 공실</span>
+                </div>
+              </section>
+
+              {/* 2) 월별 입주율 추이 */}
+              <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+                <div className="mb-4">
+                  <h2 className="text-lg font-semibold">월별 입주율 추이</h2>
+                  <p className="text-sm text-slate-500">최근 6개월 — 현 거주자 / 총 정원</p>
+                </div>
+                <div className="flex h-44 items-end justify-between gap-2">
+                  {dashboardChartData.occupancyTrend.map((m) => (
+                    <div key={m.label} className="flex flex-1 flex-col items-center justify-end">
+                      <span className="mb-1 text-xs font-semibold text-blue-700">{m.rate}%</span>
+                      <div className="flex w-full items-end justify-center" style={{ height: "120px" }}>
+                        <div className="w-full max-w-[34px] rounded-t-lg bg-gradient-to-t from-blue-600 to-blue-400 transition-all" style={{ height: `${Math.max(m.rate, 0)}%` }} title={`거주 ${m.residents} / 정원 ${m.capacity}`} />
+                      </div>
+                      <span className="mt-1.5 text-xs text-slate-500">{m.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              {/* 3) 계약만료 추이 */}
+              <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+                <div className="mb-4">
+                  <h2 className="text-lg font-semibold">계약만료 추이</h2>
+                  <p className="text-sm text-slate-500">향후 6개월 — 만료 예정 계약 수</p>
+                </div>
+                {(() => {
+                  const max = Math.max(...dashboardChartData.expiryTrend.map((m) => m.count), 1);
+                  return (
+                    <div className="flex h-44 items-end justify-between gap-2">
+                      {dashboardChartData.expiryTrend.map((m) => (
+                        <button key={m.label} type="button" onClick={() => { setDormContractStatusFilter("전체"); setDormContractSiteFilter("전체"); setDormContractSearch(""); setDormContractExpiryMonthFilter(m.ym); setActiveTab("dormContracts"); }} className="flex flex-1 flex-col items-center justify-end rounded-lg p-1 transition hover:bg-slate-100 dark:hover:bg-slate-800" title={`${m.label} 만료 계약 보기`}>
+                          <span className="mb-1 text-xs font-semibold text-amber-700">{m.count}</span>
+                          <div className="flex w-full items-end justify-center" style={{ height: "120px" }}>
+                            <div className="w-full max-w-[34px] rounded-t-lg bg-gradient-to-t from-amber-500 to-amber-300 transition-all" style={{ height: `${(m.count / max) * 100}%` }} />
+                          </div>
+                          <span className="mt-1.5 text-xs text-slate-500">{m.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </section>
+
+              {/* 4) 하자 발생 추이 */}
+              <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+                <div className="mb-4">
+                  <h2 className="text-lg font-semibold">하자 발생 추이</h2>
+                  <p className="text-sm text-slate-500">최근 6개월 — 접수·진행중·완료</p>
+                </div>
+                {(() => {
+                  const max = Math.max(...dashboardChartData.defectTrend.map((m) => m.total), 1);
+                  return (
+                    <div className="flex h-44 items-end justify-between gap-2">
+                      {dashboardChartData.defectTrend.map((m) => (
+                        <button key={m.label} type="button" onClick={() => { setDefectStatusFilter("전체"); setDefectSearch(""); setDefectReceiptMonthFilter(m.ym); setActiveTab("defects"); }} className="flex flex-1 flex-col items-center justify-end rounded-lg p-1 transition hover:bg-slate-100 dark:hover:bg-slate-800" title={`${m.label} 하자 보기`}>
+                          <span className="mb-1 text-xs font-semibold text-slate-600">{m.total}</span>
+                          <div className="flex w-full flex-col-reverse items-center justify-start overflow-hidden rounded-t-lg" style={{ height: "120px" }}>
+                            <div className="w-full max-w-[34px] bg-rose-500 transition-all" style={{ height: `${(m.received / max) * 100}%` }} title={`접수 ${m.received}`} />
+                            <div className="w-full max-w-[34px] bg-amber-400 transition-all" style={{ height: `${(m.inProgress / max) * 100}%` }} title={`진행중 ${m.inProgress}`} />
+                            <div className="w-full max-w-[34px] bg-emerald-500 transition-all" style={{ height: `${(m.done / max) * 100}%` }} title={`완료 ${m.done}`} />
+                          </div>
+                          <span className="mt-1.5 text-xs text-slate-500">{m.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
+                <div className="mt-4 flex gap-4 text-xs text-slate-500">
+                  <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-rose-500" /> 접수</span>
+                  <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-amber-400" /> 진행중</span>
+                  <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-emerald-500" /> 완료</span>
+                </div>
+              </section>
+
+              {/* 5) 청소 점수 추이 */}
+              <section className={`rounded-3xl p-5 shadow-sm ring-1 lg:col-span-2 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+                <div className="mb-4">
+                  <h2 className="text-lg font-semibold">청소 점수 추이</h2>
+                  <p className="text-sm text-slate-500">최근 6개월 — 평균 점수 (막대) · 미제출 건수</p>
+                </div>
+                <div className="flex h-44 items-end justify-between gap-3">
+                  {dashboardChartData.cleaningTrend.map((m) => (
+                    <div key={m.label} className="flex flex-1 flex-col items-center justify-end">
+                      <span className="mb-1 text-xs font-semibold text-indigo-700">{m.avg}점</span>
+                      <div className="flex w-full items-end justify-center" style={{ height: "120px" }}>
+                        <div className="w-full max-w-[48px] rounded-t-lg bg-gradient-to-t from-indigo-600 to-indigo-400 transition-all" style={{ height: `${Math.min(Math.max(m.avg, 0), 100)}%` }} title={`평균 ${m.avg}점`} />
+                      </div>
+                      <span className="mt-1.5 text-xs text-slate-500">{m.label}</span>
+                      <span className={`mt-0.5 text-[0.7rem] font-medium ${m.missing > 0 ? "text-rose-600" : "text-slate-400"}`}>미제출 {m.missing}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
           </div>
+        )}
+
+        {activeTab === "militaryDashboard" && (
+          <div className="space-y-6">
+            {/* KPI 카드 */}
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {([
+                { label: "전체 인원", value: militaryPersonnel.length, sub: "등록 인원", color: "text-slate-700", tab: "personnelManagement" as TabKey },
+                { label: "예비군 대상", value: militaryCategoryCounts.reserve, sub: "예비군", color: "text-blue-700", tab: "personnelManagement" as TabKey },
+                { label: "민방위 대상", value: militaryCategoryCounts.civilDefense, sub: "민방위", color: "text-green-700", tab: "personnelManagement" as TabKey },
+                { label: "대상아님", value: militaryCategoryCounts.none, sub: "비대상", color: "text-slate-500", tab: "personnelManagement" as TabKey },
+                { label: "미이수자", value: militaryTrainingNotCompletedCount, sub: "교육 미이수", color: "text-rose-700", tab: "trainingRecords" as TabKey },
+                { label: "교육예정자", value: militaryTrainingRecords.filter((r) => r.trainingDate && daysDiff(r.trainingDate) >= 0 && !/(완료|이수)/i.test(r.status || "")).length, sub: "예정 일정", color: "text-amber-700", tab: "trainingRecords" as TabKey },
+                { label: "통보서 미발송", value: militaryNotices.filter((n) => !n.publishedDate).length, sub: "미발송", color: "text-purple-700", tab: "militaryNotices" as TabKey },
+                { label: "이번달 교육대상", value: militaryTrainingRecords.filter((r) => (r.trainingDate || "").startsWith(`${reportYear}-${reportMonth}`)).length, sub: `${reportYear}-${reportMonth}`, color: "text-cyan-700", tab: "trainingRecords" as TabKey },
+              ] as Array<{ label: string; value: number; sub: string; color: string; tab: TabKey }>).map((k) => (
+                <button
+                  key={k.label}
+                  type="button"
+                  onClick={() => setActiveTab(k.tab)}
+                  className={`rounded-3xl border p-4 text-left hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}
+                >
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">{k.label}</div>
+                  <div className={`mt-3 text-3xl font-bold ${k.color}`}>{k.value}</div>
+                  <div className="mt-2 text-xs text-slate-500">{k.sub}</div>
+                </button>
+              ))}
+            </div>
+
+            {/* 연차별 / 부서별 / 상태별 현황 */}
+            <div className="grid gap-6 lg:grid-cols-3">
+              {([
+                {
+                  title: "연차별 현황 (예비군)",
+                  rows: (() => {
+                    const m = new Map<string, number>();
+                    militaryPersonnelSummary
+                      .filter((p) => p.currentCategory === "예비군")
+                      .forEach((p) => {
+                        const key = p.trainingYear ? `${p.trainingYear}년차` : "미산정";
+                        m.set(key, (m.get(key) || 0) + 1);
+                      });
+                    return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+                  })(),
+                },
+                {
+                  title: "부서별 현황",
+                  rows: (() => {
+                    const m = new Map<string, number>();
+                    militaryPersonnelSummary.forEach((p) => {
+                      const key = p.unit || "미지정";
+                      m.set(key, (m.get(key) || 0) + 1);
+                    });
+                    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+                  })(),
+                },
+                {
+                  title: "상태별 현황",
+                  rows: (() => {
+                    const m = new Map<string, number>();
+                    militaryPersonnelSummary.forEach((p) => {
+                      const key = p.status || "미지정";
+                      m.set(key, (m.get(key) || 0) + 1);
+                    });
+                    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+                  })(),
+                },
+              ] as Array<{ title: string; rows: Array<[string, number]> }>).map((sec) => (
+                <section key={sec.title} className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+                  <h3 className="mb-3 text-base font-semibold">{sec.title}</h3>
+                  <div className="erp-table-container max-h-72 overflow-y-auto">
+                    <table className="erp-table text-left">
+                      <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                        <tr><th className="px-3 py-2">구분</th><th className="px-3 py-2">인원</th></tr>
+                      </thead>
+                      <tbody>
+                        {sec.rows.map(([k, v]) => (
+                          <tr key={k} className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}`}>
+                            <td className="px-3 py-2" title={k}>{k}</td>
+                            <td className="px-3 py-2">{v}명</td>
+                          </tr>
+                        ))}
+                        {sec.rows.length === 0 && (
+                          <tr><td colSpan={2} className="px-3 py-8 text-center text-slate-400">데이터가 없습니다.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "personnelManagement" && (
+          <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">인사관리</h2>
+                <p className="text-sm text-slate-500">예비군·민방위 대상 인원과 연차·이수 상태를 관리합니다. (전역일 기준 자동 산정)</p>
+              </div>
+              {canEditData(currentUser) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMilitaryPersonnelForm({
+                      id: "", name: "", rank: "", serviceBranch: "", unit: "", phone: "",
+                      birthDate: "", enlistmentDate: "", dischargeDate: "", calculationMode: "auto",
+                      manualCategory: "", manualYear: "", mobilization: false, status: "", notes: "",
+                      createdAt: "", updatedAt: "",
+                    });
+                    setEditingMilitaryPersonnelId(null);
+                    setShowMilitaryPersonnelForm(true);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
+                >
+                  <Plus className="h-4 w-4" /> 인원 등록
+                </button>
+              )}
+            </div>
+
+            {/* KPI */}
+            <div className="grid gap-4 mb-6 md:grid-cols-3 xl:grid-cols-6">
+              <MiniStat label="전체 인원" value={`${militaryPersonnel.length}`} />
+              <MiniStat label="예비군" value={`${militaryCategoryCounts.reserve}`} />
+              <MiniStat label="민방위" value={`${militaryCategoryCounts.civilDefense}`} />
+              <MiniStat label="대상아님" value={`${militaryCategoryCounts.none}`} />
+              <MiniStat label="미이수자" value={`${militaryTrainingNotCompletedCount}`} />
+              <MiniStat label="전역예정(30일)" value={`${militaryUpcomingDischargeCount}`} />
+            </div>
+
+            {/* 필터 */}
+            <div className="mb-4 grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
+              <SelectInput label="부서" value={personnelDeptFilter} onChange={setPersonnelDeptFilter} options={["전체", ...Array.from(new Set(militaryPersonnel.map((p) => p.unit).filter(Boolean)))]} />
+              <SelectInput label="현재구분" value={personnelCategoryFilter} onChange={setPersonnelCategoryFilter} options={["전체", "예비군", "민방위", "대상아님"]} />
+              <SelectInput label="이수상태" value={personnelTrainingFilter} onChange={setPersonnelTrainingFilter} options={["전체", "완료", "미이수", "해당없음", "대상아님"]} />
+              <SelectInput label="연차" value={personnelYearFilter} onChange={setPersonnelYearFilter} options={["전체", ...Array.from(new Set(militaryPersonnelSummary.map((p) => p.trainingYear).filter((y) => y))).sort((a, b) => Number(a) - Number(b)).map((y) => String(y))]} />
+              <SelectInput label="상태" value={militaryPersonnelStatusFilter} onChange={setMilitaryPersonnelStatusFilter} options={["전체", ...Array.from(new Set(militaryPersonnel.map((p) => p.status).filter(Boolean)))]} />
+              <Input label="검색" value={militaryPersonnelSearch} onChange={setMilitaryPersonnelSearch} placeholder="성명/부서/직급" />
+            </div>
+
+            <div className="erp-table-container">
+              <table className="erp-table min-w-[1200px] text-left">
+                <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                  <tr>
+                    <th className="px-3 py-2 erp-col-name">성명</th>
+                    <th className="px-3 py-2">부서</th>
+                    <th className="px-3 py-2">직급</th>
+                    <th className="px-3 py-2 erp-col-phone">연락처</th>
+                    <th className="px-3 py-2 erp-col-date">생년월일</th>
+                    <th className="px-3 py-2 erp-col-date">입대일</th>
+                    <th className="px-3 py-2 erp-col-date">전역일</th>
+                    <th className="px-3 py-2">현재구분</th>
+                    <th className="px-3 py-2">예비군연차</th>
+                    <th className="px-3 py-2">민방위연차</th>
+                    <th className="px-3 py-2 erp-col-status">이수상태</th>
+                    <th className="px-3 py-2 erp-col-status">상태</th>
+                    {canEditData(currentUser) && <th className="px-3 py-2 erp-col-action">작업</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(() => {
+                    const rows = militaryPersonnelSummary.filter((p) => {
+                      if (militaryPersonnelStatusFilter !== "전체" && p.status !== militaryPersonnelStatusFilter) return false;
+                      if (personnelDeptFilter !== "전체" && (p.unit || "") !== personnelDeptFilter) return false;
+                      if (personnelCategoryFilter !== "전체" && p.currentCategory !== personnelCategoryFilter) return false;
+                      if (personnelTrainingFilter !== "전체" && p.trainingStatus !== personnelTrainingFilter) return false;
+                      if (personnelYearFilter !== "전체" && String(p.trainingYear) !== personnelYearFilter) return false;
+                      const q = `${p.name} ${p.unit} ${p.rank} ${p.phone}`.toLowerCase();
+                      return !militaryPersonnelSearch || q.includes(militaryPersonnelSearch.toLowerCase());
+                    });
+                    if (rows.length === 0) {
+                      return (
+                        <tr><td colSpan={canEditData(currentUser) ? 13 : 12} className="px-3 py-12 text-center text-slate-400">인원 데이터가 없습니다.</td></tr>
+                      );
+                    }
+                    return rows.map((p) => (
+                      <tr
+                        key={p.id}
+                        onClick={(e) => handleRowClick(e, () => canEditData(currentUser) && openMilitaryPersonnelEdit(p))}
+                        className={`${theme.darkMode ? "cursor-pointer border-b border-slate-700 hover:bg-slate-950" : "cursor-pointer border-b border-slate-100 hover:bg-slate-50"}`}
+                      >
+                        <td className="px-3 py-2 erp-col-name" title={p.name}>{p.name}</td>
+                        <td translate="no" className="px-3 py-2 notranslate" title={p.unit}>{p.unit || "-"}</td>
+                        <td className="px-3 py-2">{p.rank || "-"}</td>
+                        <td className="px-3 py-2 erp-col-phone">{maskPhone(p.phone)}</td>
+                        <td className="px-3 py-2 erp-col-date">{maskBirth(p.birthDate)}</td>
+                        <td className="px-3 py-2 erp-col-date">{formatDateOnly(p.enlistmentDate) || "-"}</td>
+                        <td className="px-3 py-2 erp-col-date">{formatDateOnly(p.dischargeDate) || "-"}</td>
+                        <td className="px-3 py-2">{p.currentCategory}</td>
+                        <td className="px-3 py-2">{p.currentCategory === "예비군" ? `${p.reserveAnnualLeave || "-"}` : "-"}</td>
+                        <td className="px-3 py-2">{p.currentCategory === "민방위" ? `${p.civilDefenseAnnualLeave || "-"}` : "-"}</td>
+                        <td className="px-3 py-2 erp-col-status">
+                          <span className={`${/완료/.test(p.trainingStatus) ? "text-emerald-500" : /미이수/.test(p.trainingStatus) ? "text-rose-500" : "text-slate-500"}`}>{p.trainingStatus}</span>
+                        </td>
+                        <td className="px-3 py-2 erp-col-status">{p.status || "-"}</td>
+                        {canEditData(currentUser) && (
+                          <td className="px-3 py-2 erp-col-action space-x-2 whitespace-nowrap">
+                            <button type="button" onClick={(e) => { e.stopPropagation(); openMilitaryPersonnelEdit(p); }} className="rounded-xl border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-100">수정</button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (!confirm("해당 인원을 삭제하시겠습니까?")) return;
+                                const existing = militaryPersonnel.find((m) => m.id === p.id);
+                                if (!existing) return;
+                                setMilitaryPersonnel((prev) => prev.filter((m) => m.id !== p.id));
+                                createAuditLog({
+                                  targetType: "militaryPersonnel",
+                                  targetId: p.id,
+                                  actionType: "delete",
+                                  changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+                                  beforeValue: JSON.stringify(existing),
+                                  afterValue: "",
+                                });
+                              }}
+                              className="rounded-xl border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50"
+                            >
+                              삭제
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    ));
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          </section>
         )}
 
         {activeTab === "trainingRecords" && (
@@ -9820,7 +11258,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           </section>
         )}
 
-        {activeTab === "militarySettings" && (
+        {activeTab === "militarySettings" && canManageUsers(currentUser) && (
           <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
             <div className="mb-4">
               <h2 className="text-lg font-semibold">환경설정</h2>
@@ -10303,6 +11741,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   onChange={(v) => setDormContractStatusFilter(v as DormContractStatus | "전체")}
                   options={["전체", "공실", "진행중", "만료예정", "연장", "종료", "해지"]}
                 />
+                <FilterSelect
+                  label="만료월"
+                  value={dormContractExpiryMonthFilter}
+                  onChange={(v) => setDormContractExpiryMonthFilter(v)}
+                  options={dormContractMonthOptions}
+                />
                 <input
                   type="text"
                   placeholder="검색..."
@@ -10722,7 +12166,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.site}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.gender}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.name} {(!h.dormId || !h.buildingName || !h.address) && <span className="ml-1 rounded-full bg-orange-100 px-1 py-0.5 text-xs font-semibold text-orange-700">미배정</span>}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.phone}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{maskPhone(h.phone)}</td>
                       <td translate="no" className="px-2 py-3 whitespace-nowrap text-xs notranslate">{h.department}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{operationalDorms.find((d) => d.id === h.dormId)?.address || dorms.find((d) => d.id === h.dormId)?.address || h.dormId}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.buildingName}</td>
@@ -10800,6 +12244,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   value={dormGenderFilter}
                   onChange={(v) => setDormGenderFilter(v as "남" | "여" | "전체")}
                   options={["전체", "남", "여"]}
+                />
+                <FilterSelect
+                  label="상태"
+                  value={dormStatusFilter}
+                  onChange={(v) => setDormStatusFilter(v as "전체" | "공실" | "사용중")}
+                  options={["전체", "공실", "사용중"]}
                 />
                 <input
                   type="text"
@@ -11143,7 +12593,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         </td>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(o.moveInDate || "") || "-"}</td>
                         <td translate="no" className="px-3 py-3 notranslate whitespace-nowrap overflow-hidden text-ellipsis max-w-[170px]">{o.department}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{o.phone}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{maskPhone(o.phone)}</td>
                         <td className="px-3 py-3">
                           <div className="flex justify-center gap-2">
                             {/* 입주자 수정 기능 제외됨 */}
@@ -11253,7 +12703,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               <td className="px-3 py-3">{formatDateOnly(occupant.moveInDate || "") || "-"}</td>
                               <td className="px-3 py-3">{occupant.status}</td>
                               <td translate="no" className="px-3 py-3 notranslate">{occupant.department}</td>
-                              <td className="px-3 py-3">{occupant.phone}</td>
+                              <td className="px-3 py-3">{maskPhone(occupant.phone)}</td>
                               <td className="px-3 py-3">{formatDateOnly(occupant.moveOutDueDate || "") || "-"}</td>
                               <td className="px-3 py-3">{daysBetween(occupant.moveInDate, occupant.moveOutDueDate)}</td>
                             </tr>
@@ -12012,6 +13462,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
             <div className="mb-4 flex flex-wrap items-center gap-2">
               <DateFilter label="구매일" yearValue={inventoryYearFilter} monthValue={inventoryMonthFilter} dayValue={inventoryDayFilter} onYearChange={setInventoryYearFilter} onMonthChange={setInventoryMonthFilter} onDayChange={setInventoryDayFilter} />
+              <FilterSelect
+                label="상태"
+                value={inventoryStatusFilter}
+                onChange={(v) => setInventoryStatusFilter(v as "전체" | "교체예정")}
+                options={["전체", "교체예정"]}
+              />
               <input
                 type="text"
                 placeholder="검색..."
@@ -12093,8 +13549,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <th className="px-3 py-2">지역</th>
                       <th className="px-3 py-2">건물명</th>
                       <th className="px-3 py-2">관리자명</th>
-                      <th className="px-3 py-2">구매일</th>
-                      <th className="px-3 py-2">구매일</th>
+                      <th className="px-3 py-2 erp-col-date">구매일</th>
                       <th className="px-3 py-2">기숙사 주소</th>
                       <th className="px-3 py-2">비품명</th>
                       <th className="px-3 py-2">수량</th>
@@ -12130,16 +13585,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3">{i.site}</td>
                         <td className="px-3 py-3">{i.buildingName} {i.dong}-{i.roomHo}</td>
                         <td className="px-3 py-3">{getDormManagerDisplayName(i.dormId)}</td>
-                        <td className="px-3 py-3">{i.purchaseDate}</td>
-                        <td className="px-3 py-3">{i.purchaseDate}</td>
+                        <td className="px-3 py-3 erp-col-date">{formatDateOnly(i.purchaseDate) || "-"}</td>
                         <td className="px-3 py-3">{i.dormAddress}</td>
                         <td className="px-3 py-3">{i.itemName}</td>
                         <td className="px-3 py-3">{i.quantity}</td>
                         <td className="px-3 py-3">{i.modelName}</td>
                         <td className="px-3 py-3">{i.maker}</td>
                         <td className="px-3 py-3">{formatNumber(i.purchaseAmount)}</td>
-                        <td className="px-3 py-3">{i.issuedDate}</td>
-                        <td className="px-3 py-3">{i.soldDate || "-"}</td>
+                        <td className="px-3 py-3">{formatDateOnly(i.issuedDate) || "-"}</td>
+                        <td className="px-3 py-3">{formatDateOnly(i.soldDate || "") || "-"}</td>
                         <td className="px-3 py-3 erp-col-memo" title={i.notes}>{i.notes}</td>
                         <td className="px-3 py-3">
                           <div className="flex justify-center gap-2">
@@ -12171,7 +13625,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     ))}
                     {visibleInventory.length === 0 && (
                       <tr>
-                        <td colSpan={15} className="px-4 py-12 text-center text-slate-400">
+                        <td colSpan={16} className="px-4 py-12 text-center text-slate-400">
                           비품 데이터가 없습니다.
                         </td>
                       </tr>
@@ -12861,19 +14315,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </div>
                   <div className="grid gap-4 lg:grid-cols-2">
                     <div className="space-y-4">
-                      <div>
-                        <label className="mb-2 block text-sm font-medium text-slate-700">기숙사 선택</label>
-                        <select
-                          value={settlementItemForm.dormId}
-                          onChange={(e) => setSettlementItemForm((prev) => ({ ...prev, dormId: e.target.value }))}
-                          className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400"
-                        >
-                          <option value="">기숙사를 선택하세요</option>
-                          {operationalDorms.map((dorm) => (
-                            <option key={dorm.id} value={dorm.id}>{`${dorm.buildingName} ${dorm.dong}${dorm.roomHo}`}</option>
-                          ))}
-                        </select>
-                      </div>
+                      <FilteredDormSelector
+                        value={settlementItemForm.dormId}
+                        onChange={(dormId) => setSettlementItemForm((prev) => ({ ...prev, dormId }))}
+                        currentUser={currentUser}
+                        operationalDorms={operationalDorms}
+                        label="기숙사"
+                      />
                       <SelectInput label="항목" value={settlementItemForm.category} onChange={(v) => setSettlementItemForm((prev) => ({ ...prev, category: v as SettlementItemCategory }))} options={settlementItemCategories} />
                       <Input label="세부내용" value={settlementItemForm.details} onChange={(v) => setSettlementItemForm((prev) => ({ ...prev, details: v }))} placeholder="예: 추가 청소 비용" />
                       <Input label="금액" value={settlementItemForm.amount} onChange={(v) => setSettlementItemForm((prev) => ({ ...prev, amount: v }))} placeholder="0" />
@@ -12972,6 +14420,102 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="mt-2 text-sm text-slate-500">2개 이하</div>
               </div>
             </div>
+
+            {/* 알림센터 (상태 관리형) */}
+            <div className={`mt-6 rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+              {(() => {
+                const visibleNotifs = notificationCenterItems
+                  .filter((n) => !notifStates[n.id]?.deleted)
+                  .filter((n) => {
+                    const s = notifStates[n.id] || {};
+                    if (notifStatusFilter === "안읽음") return !s.read;
+                    if (notifStatusFilter === "읽음") return !!s.read;
+                    if (notifStatusFilter === "중요") return !!s.important;
+                    if (notifStatusFilter === "완료") return !!s.done;
+                    return true;
+                  })
+                  .sort((a, b) => (notifSort === "newest" ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date)));
+                const unreadCount = notificationCenterItems.filter((n) => !notifStates[n.id]?.deleted && !notifStates[n.id]?.read).length;
+                const levelColor = (lv: string) => (lv === "중요" ? "bg-rose-500" : lv === "경고" ? "bg-amber-500" : "bg-blue-500");
+                return (
+                  <>
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-sm font-semibold">
+                        알림센터 <span className="ml-1 rounded-full bg-rose-100 px-2 py-0.5 text-xs font-bold text-rose-700">안읽음 {unreadCount}</span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          value={notifStatusFilter}
+                          onChange={(e) => setNotifStatusFilter(e.target.value as typeof notifStatusFilter)}
+                          className={`rounded-2xl border px-3 py-1.5 text-xs outline-none ${theme.darkMode ? "border-slate-600 bg-slate-900 text-slate-100" : "border-slate-300 bg-white text-slate-700"}`}
+                        >
+                          {["전체", "안읽음", "읽음", "중요", "완료"].map((o) => <option key={o} value={o}>{o}</option>)}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => setNotifSort((s) => (s === "newest" ? "oldest" : "newest"))}
+                          className={`rounded-2xl border px-3 py-1.5 text-xs ${theme.darkMode ? "border-slate-600 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"}`}
+                        >
+                          날짜순 {notifSort === "newest" ? "↓ 최신" : "↑ 오래된"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = { ...notifStates };
+                            visibleNotifs.forEach((n) => { next[n.id] = { ...next[n.id], read: true }; });
+                            persistNotifStates(next);
+                          }}
+                          className="rounded-2xl bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
+                        >
+                          전체 읽음
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-2 max-h-[28rem] overflow-y-auto">
+                      {visibleNotifs.map((n) => {
+                        const s = notifStates[n.id] || {};
+                        return (
+                          <div
+                            key={n.id}
+                            className={`rounded-2xl border p-3 ${s.read ? "opacity-70" : ""} ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex items-start gap-2 min-w-0">
+                                <span className={`mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full ${levelColor(n.level)}`} />
+                                <div className="min-w-0">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200" : "bg-slate-100 text-slate-600"}`}>{n.category}</span>
+                                    {!s.read && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700">안읽음</span>}
+                                    {s.read && !s.done && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600">읽음</span>}
+                                    {s.important && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">중요</span>}
+                                    {s.done && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">완료</span>}
+                                  </div>
+                                  <div className={`mt-1 text-sm font-medium ${s.done ? "line-through text-slate-400" : ""}`} title={n.title}>{n.title}</div>
+                                  <div className="text-xs text-slate-500" title={n.detail}>{n.detail}</div>
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 flex-col items-end gap-1">
+                                <span className="text-xs text-slate-400">{formatDateOnly(n.date) || "-"}</span>
+                                <div className="flex flex-wrap justify-end gap-1">
+                                  <button type="button" onClick={() => updateNotifState(n.id, { read: !s.read })} className="rounded-lg border border-slate-300 px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-100">{s.read ? "안읽음" : "읽음"}</button>
+                                  <button type="button" onClick={() => updateNotifState(n.id, { important: !s.important })} className={`rounded-lg border px-2 py-0.5 text-[11px] ${s.important ? "border-amber-300 text-amber-600 bg-amber-50" : "border-slate-300 text-slate-600 hover:bg-slate-100"}`}>중요</button>
+                                  <button type="button" onClick={() => updateNotifState(n.id, { done: !s.done, read: true })} className={`rounded-lg border px-2 py-0.5 text-[11px] ${s.done ? "border-emerald-300 text-emerald-600 bg-emerald-50" : "border-slate-300 text-slate-600 hover:bg-slate-100"}`}>완료</button>
+                                  <button type="button" onClick={() => updateNotifState(n.id, { deleted: true })} className="rounded-lg border border-rose-300 px-2 py-0.5 text-[11px] text-rose-600 hover:bg-rose-50">삭제</button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {visibleNotifs.length === 0 && (
+                        <div className={`rounded-2xl border border-dashed p-6 text-center text-sm ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-400"}`}>표시할 알림이 없습니다.</div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+
             <div className="mt-6 grid gap-4 lg:grid-cols-2">
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>자동 생성 알림 (전체)</div>
@@ -13234,6 +14778,43 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <SelectInput label="성별" value={reportGenderFilter} onChange={(v) => setReportGenderFilter(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
                 </div>
               </div>
+
+              {/* PDF 보고서 생성 */}
+              <div className="w-full mb-3 grid gap-3 sm:grid-cols-3">
+                <SelectInput
+                  label="보고서 종류"
+                  value={PDF_REPORT_LABELS[pdfReportType]}
+                  onChange={(v) => {
+                    const found = (Object.keys(PDF_REPORT_LABELS) as PdfReportType[]).find((k) => PDF_REPORT_LABELS[k] === v);
+                    if (found) setPdfReportType(found);
+                  }}
+                  options={Object.values(PDF_REPORT_LABELS)}
+                />
+                <SearchableSelect
+                  label="기숙사 선택"
+                  value={pdfReportDormId}
+                  onChange={(v) => setPdfReportDormId(v)}
+                  options={["전체", ...operationalDorms.map((d) => d.id)]}
+                  displayOptions={["전체", ...operationalDorms.map((d) => `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`)]}
+                />
+                <div className="flex flex-wrap items-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openReportPdf(pdfReportType, false)}
+                    className="inline-flex items-center gap-1 rounded-2xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+                  >
+                    📄 PDF 미리보기
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openReportPdf(pdfReportType, true)}
+                    className="inline-flex items-center gap-1 rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
+                  >
+                    📥 PDF 저장
+                  </button>
+                </div>
+              </div>
+
               <div className="flex gap-2 flex-wrap">
                 {currentUser?.role === "admin" && (
                   <button onClick={() => window.print()} className={`rounded-2xl px-4 py-2 text-sm font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>🖨️ 프린트</button>
@@ -13471,7 +15052,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.공동현관 || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.세대현관 || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{occupant?.employeeName || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{occupant?.phone || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{maskPhone(occupant?.phone)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(occupant?.moveInDate || "") || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(occupant?.expectedMoveOutDate || occupant?.moveOutDueDate || "") || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm.id)}</td>
@@ -13594,7 +15175,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           </section>
         )}
 
-        {activeTab === "settings" && (
+        {activeTab === "settings" && canManageUsers(currentUser) && (
           <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -14695,15 +16276,150 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           </section>
         )}
 
-        {activeTab === "recycleBin" && (
+        {activeTab === "recycleBin" && canManageUsers(currentUser) && (
           <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-semibold">🗑️ 휴지통 관리</h2>
-                <p className="text-sm text-slate-500">삭제된 데이터를 복원하거나 영구 삭제합니다.</p>
+                <h2 className="text-lg font-semibold">🗑️ 휴지통 / 백업·복원</h2>
+                <p className="text-sm text-slate-500">삭제된 데이터를 복원하거나, 특정 시점으로 전체 복원할 수 있습니다.</p>
               </div>
             </div>
 
+            <div className="mb-6 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setRecycleBinSubTab("trash")}
+                className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${recycleBinSubTab === "trash" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}
+              >
+                휴지통
+              </button>
+              <button
+                type="button"
+                onClick={() => setRecycleBinSubTab("backup")}
+                className={`rounded-2xl px-4 py-2 text-sm font-medium transition ${recycleBinSubTab === "backup" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}
+              >
+                백업/복원
+              </button>
+            </div>
+
+            {recycleBinSubTab === "backup" && (
+              <div className="space-y-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { createBackup("manual"); }}
+                    disabled={!canEditData(currentUser)}
+                    className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Plus className="h-4 w-4" /> 수동 백업 생성
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => backupRestoreInputRef.current?.click()}
+                    disabled={!canEditData(currentUser)}
+                    className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-semibold border ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"} disabled:cursor-not-allowed disabled:opacity-50`}
+                  >
+                    <Upload className="h-4 w-4" /> JSON 파일로 복원
+                  </button>
+                  <input
+                    ref={backupRestoreInputRef}
+                    type="file"
+                    accept="application/json"
+                    className="hidden"
+                    onChange={(e) => { importBackupFile(e.target.files); if (e.currentTarget) e.currentTarget.value = ""; }}
+                  />
+                  <span className="text-xs text-slate-500">자동 백업: 로그인 후 하루 1회 · 최근 {MAX_BACKUPS}개 보관</span>
+                </div>
+                {backupRestoreError && (
+                  <div className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-600">{backupRestoreError}</div>
+                )}
+
+                <div className="erp-table-container">
+                  <table className="erp-table text-left">
+                    <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                      <tr>
+                        <th className="px-3 py-2 erp-col-date">생성일시</th>
+                        <th className="px-3 py-2 erp-col-status">유형</th>
+                        <th className="px-3 py-2 erp-col-name">생성자</th>
+                        <th className="px-3 py-2">버전</th>
+                        <th className="px-3 py-2">항목 수</th>
+                        <th className="px-3 py-2 erp-col-action">작업</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {backups.map((b) => {
+                        const counts =
+                          (b.data.dorms?.length || 0) +
+                          (b.data.occupants?.length || 0) +
+                          (b.data.newHires?.length || 0) +
+                          (b.data.dormContracts?.length || 0) +
+                          (b.data.cleaningReports?.length || 0) +
+                          (b.data.defects?.length || 0) +
+                          (b.data.inventory?.length || 0);
+                        return (
+                          <tr key={b.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
+                            <td className="px-3 py-2 erp-col-date" title={formatDateTimeKorea(b.createdAt)}>{formatDateTimeKorea(b.createdAt)}</td>
+                            <td className="px-3 py-2 erp-col-status">{b.type === "auto" ? "자동" : "수동"}</td>
+                            <td className="px-3 py-2 erp-col-name" title={getUserDisplayName(b.createdBy)}>{getUserDisplayName(b.createdBy)}</td>
+                            <td className="px-3 py-2">{b.version}</td>
+                            <td className="px-3 py-2">{counts}건</td>
+                            <td className="px-3 py-2 erp-col-action space-x-1 whitespace-nowrap">
+                              <button type="button" onClick={() => setSelectedBackupId(selectedBackupId === b.id ? null : b.id)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-100">상세</button>
+                              <button type="button" onClick={() => downloadBackup(b)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-100">다운로드</button>
+                              {canEditData(currentUser) && (
+                                <button type="button" onClick={() => restoreFromBackup(b)} className="rounded-lg border border-orange-300 px-2 py-1 text-xs text-orange-600 hover:bg-orange-50">복원</button>
+                              )}
+                              {canEditData(currentUser) && (
+                                <button type="button" onClick={() => deleteBackup(b.id)} className="rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">삭제</button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {backups.length === 0 && (
+                        <tr><td colSpan={6} className="px-3 py-12 text-center text-slate-400">백업이 없습니다. "수동 백업 생성"으로 시작하세요.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {selectedBackupId && (() => {
+                  const b = backups.find((x) => x.id === selectedBackupId);
+                  if (!b) return null;
+                  const rows: Array<[string, number]> = [
+                    ["기숙사", b.data.dorms?.length || 0],
+                    ["입주자", b.data.occupants?.length || 0],
+                    ["신입사원", b.data.newHires?.length || 0],
+                    ["신규계약", b.data.dormContracts?.length || 0],
+                    ["청소보고서", b.data.cleaningReports?.length || 0],
+                    ["하자접수", b.data.defects?.length || 0],
+                    ["비품", b.data.inventory?.length || 0],
+                    ["감사로그", b.data.auditLogs?.length || 0],
+                    ["정산기록", b.data.settlementRecords?.length || 0],
+                    ["군인", b.data.militaryModuleData?.militaryPersonnel?.length || 0],
+                  ];
+                  return (
+                    <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+                      <div className="mb-3 flex items-center justify-between">
+                        <h3 className="text-base font-semibold">백업 상세 · {formatDateTimeKorea(b.createdAt)}</h3>
+                        <button type="button" onClick={() => setSelectedBackupId(null)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-white">닫기</button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+                        {rows.map(([label, n]) => (
+                          <div key={label} className={`rounded-2xl p-3 ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
+                            <div className="text-xs text-slate-500">{label}</div>
+                            <div className="mt-1 text-lg font-bold">{n}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {recycleBinSubTab === "trash" && (
+            <>
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-6">
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">계약</div>
@@ -15165,6 +16881,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
               </div>
             </div>
+            </>
+            )}
           </section>
         )}
 
@@ -15309,13 +17027,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <MiniStat label="완료" value={`${visibleDefects.filter((d) => d.defectStatus === "완료").length}`} />
             </div>
 
-            <div className="grid gap-3 mb-6 md:grid-cols-3">
+            <div className="grid gap-3 mb-6 md:grid-cols-4">
               <div className="md:col-span-1">
                 <SelectInput
                   label="상태 필터"
                   value={defectStatusFilter}
                   onChange={(v) => setDefectStatusFilter(v as "전체" | "접수" | "진행중" | "완료")}
                   options={["전체", "접수", "진행중", "완료"]}
+                />
+              </div>
+              <div className="md:col-span-1">
+                <SelectInput
+                  label="접수월"
+                  value={defectReceiptMonthFilter}
+                  onChange={(v) => setDefectReceiptMonthFilter(v)}
+                  options={defectMonthOptions}
                 />
               </div>
               <div className="md:col-span-1">
@@ -15694,18 +17420,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           <div className="space-y-6">
             <div className={`rounded-2xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
               <h3 className="text-lg font-semibold mb-4">보고 기본정보</h3>
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <FilteredDormSelector
+                value={cleaningReportForm.dormId}
+                onChange={(_dormId, dorm) => handleCleaningReportDormChange(dorm || null)}
+                currentUser={currentUser}
+                operationalDorms={operationalDorms}
+                defaultSite={cleaningReportForm.site}
+                label="기숙사"
+              />
+              <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <Input label="보고일" type="date-text" value={cleaningReportForm.reportDate} onChange={(v) => setCleaningReportForm((f) => ({ ...f, reportDate: v }))} />
-                <SearchableSelect
-                  label="기숙사 선택"
-                  value={cleaningReportForm.dormId}
-                  onChange={(v) => {
-                    const selected = operationalDorms.find((d) => d.id === v);
-                    handleCleaningReportDormChange(selected || null);
-                  }}
-                  options={getAccessibleOperationalDorms(currentUser, operationalDorms).map((d) => d.id)}
-                  displayOptions={getAccessibleOperationalDorms(currentUser, operationalDorms).map((d) => `${d.buildingName} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`)}
-                />
                 <Input label="청소 담당자" value={cleaningReportForm.cleanerName} onChange={(v) => setCleaningReportForm((f) => ({ ...f, cleanerName: v }))} />
               </div>
             </div>
@@ -16092,18 +17816,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             {/* 거주정보 섹션 */}
             <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950/50 p-4" : "rounded-2xl border border-slate-200 bg-slate-50/50 p-4"}`}>
               <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>거주정보</h4>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <SelectInput label="지역" value={occupantForm.site || ""} onChange={(v) => setOccupantForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
-                <SearchableSelect 
-                  label="기숙사" 
-                  value={occupantForm.dormId} 
-                  onChange={(v) => {
-                    setOccupantForm((f) => ({ ...f, dormId: v }));
-                    if (!v) setAssignManagerToDorm(false);
-                  }} 
-                  options={["", ...getAccessibleOperationalDorms(currentUser, operationalDorms).filter((d) => !occupantForm.site || d.site === occupantForm.site).map((d) => d.id)]} 
-                  displayOptions={["미배정", ...getAccessibleOperationalDorms(currentUser, operationalDorms).filter((d) => !occupantForm.site || d.site === occupantForm.site).map((d) => `${d.site} ${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`)]} 
-                />
+              <FilteredDormSelector
+                value={occupantForm.dormId}
+                onChange={(dormId, dorm) => {
+                  setOccupantForm((f) => ({ ...f, dormId, site: dorm?.site || f.site }));
+                  if (!dormId) setAssignManagerToDorm(false);
+                }}
+                currentUser={currentUser}
+                operationalDorms={operationalDorms}
+                defaultSite={occupantForm.site}
+                label="기숙사"
+              />
+              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input label="입실일" type="date-text" value={occupantForm.moveInDate} onChange={(v) => setOccupantForm((f) => ({ ...f, moveInDate: v }))} />
                 <Input label="거주기한" type="date-text" value={occupantForm.moveOutDueDate} onChange={(v) => setOccupantForm((f) => ({ ...f, moveOutDueDate: v }))} />
                 <Input label="예상입실일" type="date-text" value={occupantForm.expectedMoveInDate || ""} onChange={(v) => setOccupantForm((f) => ({ ...f, expectedMoveInDate: v }))} />
@@ -16151,32 +17875,32 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           <div className="space-y-6">
             <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
               <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>기숙사 선택</h4>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <SearchableSelect
-                  label="기숙사"
-                  value={inventoryForm.dormId}
-                  onChange={(v) => {
-                    const selected = operationalDorms.find((d) => d.id === v);
-                    setInventoryForm((f) => ({
-                      ...f,
-                      dormId: v,
-                      site: selected?.site || f.site,
-                      dormAddress: selected?.address || f.dormAddress,
-                      buildingName: selected?.buildingName || f.buildingName,
-                      dong: selected ? stripDongHoSuffix(selected.dong) : f.dong,
-                      roomHo: selected ? stripDongHoSuffix(selected.roomHo) : f.roomHo,
-                      managerName: selected?.managerUserId ? users.find(u => u.id === selected.managerUserId)?.displayName || f.managerName : f.managerName,
-                    }));
-                  }}
-                  options={operationalDorms.map((d) => d.id)}
-                  displayOptions={operationalDorms.map((d) => `${d.site} ${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`)}
-                />
+              <FilteredDormSelector
+                value={inventoryForm.dormId}
+                onChange={(dormId, dorm) => {
+                  setInventoryForm((f) => ({
+                    ...f,
+                    dormId,
+                    site: dorm?.site || f.site,
+                    dormAddress: dorm?.address || f.dormAddress,
+                    buildingName: dorm?.buildingName || f.buildingName,
+                    dong: dorm ? stripDongHoSuffix(dorm.dong) : f.dong,
+                    roomHo: dorm ? stripDongHoSuffix(dorm.roomHo) : f.roomHo,
+                    managerName: dorm?.managerUserId ? (users.find((u) => u.id === dorm.managerUserId)?.displayName || f.managerName) : f.managerName,
+                  }));
+                }}
+                currentUser={currentUser}
+                operationalDorms={operationalDorms}
+                defaultSite={inventoryForm.site}
+                label="기숙사"
+              />
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 mt-4">
                 <SelectInput label="지역" value={inventoryForm.site} onChange={(v) => setInventoryForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
-                <Input label="주소" value={inventoryForm.dormAddress} onChange={(v) => setInventoryForm((f) => ({ ...f, dormAddress: v }))} />
-                <Input label="건물명" value={inventoryForm.buildingName} onChange={(v) => setInventoryForm((f) => ({ ...f, buildingName: v }))} />
-                <Input label="동" value={inventoryForm.dong} onChange={(v) => setInventoryForm((f) => ({ ...f, dong: stripDongHoSuffix(v) }))} />
-                <Input label="호수" value={inventoryForm.roomHo} onChange={(v) => setInventoryForm((f) => ({ ...f, roomHo: stripDongHoSuffix(v) }))} />
-                <Input label="담당자" value={inventoryForm.managerName} onChange={(v) => setInventoryForm((f) => ({ ...f, managerName: v }))} />
+                <Input label="주소" value={inventoryForm.dormAddress} onChange={(v) => setInventoryForm((f) => ({ ...f, dormAddress: v }))} readOnly />
+                <Input label="건물명" value={inventoryForm.buildingName} onChange={(v) => setInventoryForm((f) => ({ ...f, buildingName: v }))} readOnly />
+                <Input label="동" value={formatDong(inventoryForm.dong)} onChange={(v) => setInventoryForm((f) => ({ ...f, dong: stripDongHoSuffix(v) }))} readOnly />
+                <Input label="호수" value={formatRoomHo(inventoryForm.roomHo)} onChange={(v) => setInventoryForm((f) => ({ ...f, roomHo: stripDongHoSuffix(v) }))} readOnly />
+                <Input label="담당자" value={inventoryForm.managerName} onChange={(v) => setInventoryForm((f) => ({ ...f, managerName: v }))} readOnly />
               </div>
             </div>
 
@@ -16302,6 +18026,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
               <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>위치 정보</h4>
+              {!isViewer && !isMaintenanceReporterWithDorm && (
+                <div className="mb-4">
+                  <FilteredDormSelector
+                    value={defectForm.dormId}
+                    onChange={(dormId, dorm) => {
+                      // dormId 설정 시 기존 useEffect 가 주소/건물명/동/호수 자동 채움
+                      setDefectForm((f) => ({ ...f, dormId, site: dorm?.site || f.site }));
+                    }}
+                    currentUser={currentUser}
+                    operationalDorms={operationalDorms}
+                    defaultSite={defectForm.site}
+                    label="기숙사 (선택 시 주소 자동 입력)"
+                  />
+                </div>
+              )}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <div>
                   <label className={`${theme.darkMode ? "mb-2 block text-sm font-medium text-slate-300" : "mb-2 block text-sm font-medium text-slate-700"}`}>도로명주소</label>
@@ -16701,102 +18440,4 @@ function modalWrap(title: string, body: React.ReactNode, onClose: () => void, on
       </div>
     </div>
   );
-}
-
-function MiniStat({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-2xl border border-slate-200 bg-white p-4"><div className="text-xs font-semibold uppercase tracking-wide text-slate-400">{label}</div><div className="mt-2 text-2xl font-bold">{value}</div></div>;
-}
-
-function CompactField({ label, value, className = "", labelClassName = "", valueClassName = "" }: { label: string; value: string; className?: string; labelClassName?: string; valueClassName?: string }) {
-  return <div className={`rounded-lg bg-slate-50 p-2 ${className}`}><div className={`font-semibold uppercase tracking-wide text-slate-400 text-[0.625rem] leading-4 whitespace-normal ${labelClassName}`}>{label}</div><div className={`mt-1 text-slate-700 text-[0.75rem] leading-5 whitespace-normal ${valueClassName}`}>{value}</div></div>;
-}
-
-function FilterSelect({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: string[] }) {
-  return <div className="lg:col-span-2"><label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-400">{label}</label><select translate="no" lang="en" value={value} onChange={(e) => onChange(e.target.value)} className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400 notranslate">{options.map((option) => <option translate="no" className="notranslate" key={option} value={option}>{option || "미선택"}</option>)}</select></div>;
-}
-
-function SearchableSelect({ label, value, onChange, options, displayOptions }: { label: string; value: string; onChange: (v: string) => void; options: string[]; displayOptions?: string[] }) {
-  const [searchTerm, setSearchTerm] = useState("");
-  const [isOpen, setIsOpen] = useState(false);
-
-  const filteredIndices = options
-    .map((option, index) => ({ option, index }))
-    .filter(({ option, index }) => {
-      const displayText = displayOptions ? displayOptions[index] : option;
-      return displayText.toLowerCase().includes(searchTerm.toLowerCase());
-    });
-
-  const selectedDisplay = displayOptions ? displayOptions[options.indexOf(value)] : value;
-
-  return (
-    <div className="relative notranslate" translate="no" lang="en">
-      <label className="mb-2 block text-sm font-medium text-slate-700">{label}</label>
-      <div className="relative">
-        <input
-          type="text"
-          value={selectedDisplay || ""}
-          onChange={(e) => {
-            setSearchTerm(e.target.value);
-            setIsOpen(true);
-          }}
-          onFocus={() => setIsOpen(true)}
-          onBlur={() => setTimeout(() => setIsOpen(false), 200)}
-          className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400 notranslate"
-          translate="no"
-          placeholder="검색해서 선택하세요"
-        />
-        <button
-          type="button"
-          onClick={() => setIsOpen(!isOpen)}
-          className="absolute right-3 top-1/2 -translate-y-1/2 notranslate"
-          translate="no"
-        >
-          <ChevronRight className={`h-4 w-4 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
-        </button>
-      </div>
-      {isOpen && (
-        <div className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-2xl border border-slate-300 bg-white shadow-lg notranslate" translate="no">
-          {filteredIndices.map(({ option, index }) => {
-            const displayText = displayOptions ? displayOptions[index] : option;
-            return (
-              <button
-                key={option}
-                type="button"
-                onClick={() => {
-                  onChange(option);
-                  setSearchTerm("");
-                  setIsOpen(false);
-                }}
-                className="w-full px-3 py-2 text-left hover:bg-slate-50 notranslate"
-                translate="no"
-              >
-                {displayText}
-              </button>
-            );
-          })}
-          {filteredIndices.length === 0 && (
-            <div className="px-3 py-2 text-slate-500">검색 결과가 없습니다</div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Input({ label, value, onChange, onBlur, type = "text", readOnly = false, placeholder }: { label: string; value: string; onChange?: (v: string) => void; onBlur?: () => void; type?: string; readOnly?: boolean; placeholder?: string }) {
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    let v = e.target.value;
-    if (type === "date-text") {
-      // 숫자 자리 입력 시 YYYY-MM-DD로 변환
-      if (/^\d{8}$/.test(v)) {
-        v = v.slice(0, 4) + '-' + v.slice(4, 6) + '-' + v.slice(6, 8);
-      }
-    }
-    onChange?.(v);
-  };
-  return <div><label className="mb-2 block text-sm font-medium text-slate-700">{label}</label><input type={type === "date-text" ? "date" : type} value={value} onChange={handleChange} onBlur={onBlur} readOnly={readOnly} placeholder={type === "date-text" ? undefined : placeholder} className={`w-full rounded-2xl border border-slate-300 px-3 py-3 outline-none ${readOnly ? 'bg-slate-50' : 'focus:border-slate-400'}`} /></div>;
-}
-
-function SelectInput({ label, value, onChange, options, disabled = false }: { label: string; value: string; onChange: (v: string) => void; options: string[]; disabled?: boolean }) {
-  return <div><label className="mb-2 block text-sm font-medium text-slate-700">{label}</label><select translate="no" lang="en" disabled={disabled} value={value} onChange={(e) => onChange(e.target.value)} className={`w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400 notranslate ${disabled ? "bg-slate-100 text-slate-400" : ""}`}>{options.map((option) => <option translate="no" className="notranslate" key={option || "blank"} value={option}>{option || "미선택"}</option>)}</select></div>;
 }
