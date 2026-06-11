@@ -5861,6 +5861,54 @@ export default function App() {
     setCurrentUser(null);
   };
 
+  // ── 보안: 비활성 자동 로그아웃(30분 무활동) + 절대 세션 만료(8시간) ──
+  // 기존 logout()을 재사용. 웹/모바일/PWA 동일 적용(window 이벤트 기반).
+  const [showInactivityWarning, setShowInactivityWarning] = useState(false);
+  const lastActivityRef = useRef<number>(0); // 실제 시작 시각은 로그인 시 effect에서 설정
+  const loginAtRef = useRef<number>(0);
+
+  const extendSession = () => {
+    lastActivityRef.current = Date.now();
+    setShowInactivityWarning(false);
+  };
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const INACTIVITY_MS = 30 * 60 * 1000;   // 30분 무활동 → 자동 로그아웃
+    const WARNING_MS = 60 * 1000;           // 로그아웃 1분 전 경고 모달
+    const ABSOLUTE_MS = 8 * 60 * 60 * 1000; // 로그인 후 8시간 → 강제 로그아웃(사용 중이어도)
+    const startNow = Date.now();
+    loginAtRef.current = startNow;
+    lastActivityRef.current = startNow;
+
+    // 활동 감지: 마우스 이동/클릭/키보드/터치/스크롤 → ref만 갱신(리렌더 없음)
+    const markActivity = () => { lastActivityRef.current = Date.now(); };
+    const events: Array<keyof WindowEventMap> = ["mousemove", "mousedown", "click", "keydown", "touchstart", "scroll"];
+    events.forEach((evt) => window.addEventListener(evt, markActivity, { passive: true }));
+
+    // 폴링: 백그라운드 탭/절전 복귀 시에도 경과시간으로 자가 보정
+    const interval = window.setInterval(() => {
+      const t = Date.now();
+      const idle = t - lastActivityRef.current;
+      const sessionAge = t - loginAtRef.current;
+      if (sessionAge >= ABSOLUTE_MS || idle >= INACTIVITY_MS) {
+        setShowInactivityWarning(false);
+        logout();
+      } else if (idle >= INACTIVITY_MS - WARNING_MS) {
+        setShowInactivityWarning(true);
+      } else {
+        setShowInactivityWarning(false);
+      }
+    }, 5000);
+
+    return () => {
+      events.forEach((evt) => window.removeEventListener(evt, markActivity));
+      window.clearInterval(interval);
+    };
+    // logout 은 상태 setter만 사용해 안정적 → 의존성에서 제외(로그인 신원 변경 시에만 재설정)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id]);
+
   const saveDorm = () => {
     if (!canEditData(currentUser)) return;
     if (!dormForm.address.trim() || !dormForm.buildingName.trim()) {
@@ -18424,6 +18472,20 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           () => setShowUserForm(false),
           saveUser,
           theme.accentColor
+        )}
+
+        {/* 보안: 비활성 자동 로그아웃 1분 전 경고 모달 */}
+        {showInactivityWarning && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm">
+            <div className={`w-full max-w-sm rounded-3xl p-6 shadow-xl ${theme.darkMode ? "bg-slate-900 text-slate-100 ring-1 ring-slate-700" : "bg-white text-slate-900 ring-1 ring-slate-200"}`}>
+              <h3 className="text-lg font-bold">세션 만료 예정</h3>
+              <p className="mt-2 text-sm text-slate-500">보안을 위해 <b className={theme.darkMode ? "text-slate-100" : "text-slate-900"}>1분 후 자동 로그아웃</b>됩니다. 계속 사용하시려면 세션을 연장하세요.</p>
+              <div className="mt-5 flex gap-2">
+                <button type="button" onClick={extendSession} className="flex-1 rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white hover:bg-blue-500">세션 연장</button>
+                <button type="button" onClick={() => { setShowInactivityWarning(false); logout(); }} className={`rounded-2xl px-4 py-3 text-sm font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>지금 로그아웃</button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>
