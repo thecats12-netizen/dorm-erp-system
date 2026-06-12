@@ -652,7 +652,25 @@ function getAge(birthDate: string, referenceDate?: Date) {
   return age;
 }
 
+// 병역 체계 기준 상수 (스펙 단순화: 민방위 1~5년차를 만 36~40세에 대응)
+const RESERVE_MAX_YEAR = 8;           // 예비군 1~8년차 (전역 후 8년)
+const CIVIL_DEFENSE_AGE_START = 36;   // 민방위 시작 연령(만) → 1년차
+const CIVIL_DEFENSE_AGE_END = 40;     // 민방위 종료 연령(만) → 5년차, 초과 시 종료
+const CIVIL_DEFENSE_MAX_YEAR = CIVIL_DEFENSE_AGE_END - CIVIL_DEFENSE_AGE_START + 1; // 5
+
+// 전역일 기준 예비군 연차(전역연도=1년차). 미전역/미입력이면 null.
+function getReserveYearRaw(person: MilitaryPersonnel, referenceYear?: number): number | null {
+  if (!person.dischargeDate) return null;
+  const dischargeDate = new Date(person.dischargeDate);
+  if (Number.isNaN(dischargeDate.getTime())) return null;
+  const referenceDate = referenceYear ? new Date(referenceYear, 11, 31) : new Date();
+  if (dischargeDate > referenceDate) return null; // 아직 미전역(현역)
+  return referenceDate.getFullYear() - dischargeDate.getFullYear() + 1;
+}
+
+// 현재구분 자동/수동 판정 — 예비군/민방위/대상아님 상호배타
 function getMilitaryCategory(person: MilitaryPersonnel, referenceYear?: number) {
+  // 수동계산 모드: 사용자 지정 구분 우선
   if (person.calculationMode === "manual" && person.manualCategory) {
     return person.manualCategory as "예비군" | "민방위" | "대상아님";
   }
@@ -661,61 +679,52 @@ function getMilitaryCategory(person: MilitaryPersonnel, referenceYear?: number) 
   const referenceDate = referenceYear ? new Date(referenceYear, 11, 31) : new Date();
   const age = getAge(person.birthDate || "", referenceDate);
 
-  const dischargeDate = person.dischargeDate ? new Date(person.dischargeDate) : null;
-
-  if (!dischargeDate || Number.isNaN(dischargeDate.getTime())) {
-    if (/민방위|civil/i.test(branch) || /민방위|civil/i.test(status)) {
-      return "민방위" as const;
-    }
-    return "대상아님" as const;
-  }
-
-  if (dischargeDate > referenceDate) {
-    return "대상아님" as const;
-  }
-
-  const serviceYear = referenceDate.getFullYear() - dischargeDate.getFullYear() + 1;
-  if (serviceYear >= 1 && serviceYear <= 8) {
+  // 1) 예비군: 전역 후 1~8년차 (최우선)
+  const reserveYear = getReserveYearRaw(person, referenceYear);
+  if (reserveYear !== null && reserveYear >= 1 && reserveYear <= RESERVE_MAX_YEAR) {
     return "예비군" as const;
   }
 
-  if (serviceYear > 8) {
-    if (age !== null && age >= 19 && age <= 59) {
-      return "민방위" as const;
-    }
-    return "대상아님" as const;
+  // 2) 민방위: 만 36~40세 (예비군이 아닌 경우, 생년월일 기준)
+  if (age !== null && age >= CIVIL_DEFENSE_AGE_START && age <= CIVIL_DEFENSE_AGE_END) {
+    return "민방위" as const;
   }
 
+  // 3) 부대/상태에 민방위 명시
   if (/민방위|civil/i.test(branch) || /민방위|civil/i.test(status)) {
     return "민방위" as const;
   }
 
+  // 예비군 종료(8년 초과) + 민방위 연령 초과/미달, 또는 대상 정보 없음 → 대상아님
   return "대상아님" as const;
 }
 
+// 훈련유형 판정 등에서 쓰는 예비군 연차(현재구분=예비군일 때만 의미). 수동 연차 반영.
 function getTrainingYear(person: MilitaryPersonnel, referenceYear?: number) {
   if (person.calculationMode === "manual" && person.manualYear) {
     return Number(person.manualYear) || 0;
   }
-  if (!person.dischargeDate) return 0;
-  const dischargeDate = new Date(person.dischargeDate);
-  if (Number.isNaN(dischargeDate.getTime())) return 0;
-  const effectiveYear = referenceYear ?? new Date().getFullYear();
-  return effectiveYear - dischargeDate.getFullYear() + 1;
+  return getReserveYearRaw(person, referenceYear) ?? 0;
 }
 
+// 예비군 연차 1~8 (현재구분=예비군이 아니면 0 → 상호배타)
 function getReserveAnnualLeave(person: MilitaryPersonnel, referenceYear?: number) {
   if (getMilitaryCategory(person, referenceYear) !== "예비군") return 0;
   const years = getTrainingYear(person, referenceYear);
   if (!years) return 0;
-  return Math.max(1, Math.min(15 + (years - 1), 25));
+  return Math.max(1, Math.min(years, RESERVE_MAX_YEAR));
 }
 
+// 민방위 연차 1~5 (현재구분=민방위가 아니면 0 → 상호배타). 수동 연차 반영, 그 외 생년월일 기준.
 function getCivilDefenseAnnualLeave(person: MilitaryPersonnel, referenceYear?: number) {
   if (getMilitaryCategory(person, referenceYear) !== "민방위") return 0;
+  if (person.calculationMode === "manual" && person.manualYear) {
+    return Math.max(1, Math.min(Number(person.manualYear) || 0, CIVIL_DEFENSE_MAX_YEAR));
+  }
   const age = getAge(person.birthDate || "", referenceYear ? new Date(referenceYear, 11, 31) : undefined);
   if (age === null) return 0;
-  return Math.max(1, age - 18);
+  // 만 36세=1년차 ... 만 40세=5년차
+  return Math.max(1, Math.min(age - (CIVIL_DEFENSE_AGE_START - 1), CIVIL_DEFENSE_MAX_YEAR));
 }
 
 function getRequiredTraining(person: MilitaryPersonnel, referenceYear?: number) {
@@ -732,7 +741,7 @@ function getRequiredTraining(person: MilitaryPersonnel, referenceYear?: number) 
       return { label: "기본훈련 + 작계훈련", hours: 14 };
     }
     if (serviceYear >= 7 && serviceYear <= 8) {
-      return { label: "훈련없음", hours: 0 };
+      return { label: "훈련 비대상(7~8년차)", hours: 0 };
     }
     return { label: "예비군 대상아님", hours: 0 };
   }
@@ -1058,6 +1067,24 @@ const MAX_AUDIT_LOGS = 5000;
 // 로그인 아이디 저장(이메일/아이디만, 비밀번호는 절대 저장하지 않음)
 const SAVED_LOGIN_ID_KEY = "erp-saved-login-id";
 
+// 코드값 관리: 내부 저장 key는 유지하고 화면 표시만 한글로 변환
+const CODE_CATEGORY_LABELS: Record<string, string> = {
+  departments: "부서명",
+  employmentStatus: "재직상태",
+  employmentStatuses: "재직상태",
+  militaryCategory: "병역구분",
+  militaryCategories: "병역구분",
+  mobilizationStatus: "동원여부",
+  mobilizationStatuses: "동원여부",
+  trainingType: "훈련유형",
+  trainingTypes: "훈련유형",
+  trainingRound: "차수",
+  trainingRounds: "차수",
+  trainingStatus: "훈련상태",
+  trainingStatuses: "훈련상태",
+};
+const codeCategoryLabel = (key: string): string => CODE_CATEGORY_LABELS[key] || key;
+
 // 저장 스냅샷 직렬화 — 저장 effect와 로드 직후 시드가 동일한 방식을 쓰도록 단일 함수로 통일.
 // (정규화/순서 차이로 인한 오탐을 막기 위해 저장 payload와 동일한 형태를 사용)
 function dormModuleSnapshot(s: { dorms: unknown[]; occupants: unknown[]; dormContracts: unknown[]; newHires: unknown[] }): string {
@@ -1106,6 +1133,12 @@ export default function App() {
   const lastDormSnapshotRef = useRef<string>("");
   const lastOperationalSnapshotRef = useRef<string>("");
   const lastMilitarySnapshotRef = useRef<string>("");
+  // 동기화 실패 alert 중복 방지(동일 오류 메시지는 1회만 표시)
+  const lastDormAlertRef = useRef<string>("");
+  const lastOperationalAlertRef = useRef<string>("");
+  // 군대 모듈 저장 필요 상태(수동 저장 구조) — 변경 시 배지 표시, 저장/로드 시 해제
+  const [militaryDirty, setMilitaryDirty] = useState(false);
+  const [militaryLastSavedAt, setMilitaryLastSavedAt] = useState<string | null>(null);
 
   const applyRealtimeUpdate = <T extends { id: string }>(prev: T[], row: any, toDomain: (row: any) => T): T[] => {
     if (!row?.id) return prev;
@@ -2067,71 +2100,52 @@ export default function App() {
             console.log("[LOAD] Supabase session found:", session.user.id);
             useSupabase = true;
             
-            // Load dorm module from Supabase
-            try {
-              const remoteDormModule = await loadDormModule(tenantId);
-              console.log("[LOAD] remoteDormModule loaded:", {
-                dorms: remoteDormModule?.dorms?.length || 0,
-                occupants: remoteDormModule?.occupants?.length || 0,
-                dormContracts: remoteDormModule?.dormContracts?.length || 0,
-                newHires: remoteDormModule?.newHires?.length || 0,
-              });
-              
-              // Always set state to Supabase result, even if empty
+            // 병렬 로딩: 서로 독립적인 Supabase 요청을 동시에 수행해 로그인 후 대기시간을 단축
+            // (이전: dorm→operational→profile 순차 4왕복 → 변경: 1왕복 시간으로 단축)
+            const [dormRes, opRes, profileRes, authRes] = await Promise.allSettled([
+              loadDormModule(tenantId),
+              loadOperationalModule(tenantId),
+              getProfile(session.user.id),
+              getCurrentAuthUser(),
+            ]);
+
+            // Dorm module
+            if (dormRes.status === "fulfilled") {
+              const remoteDormModule = dormRes.value;
               setDorms(remoteDormModule?.dorms || []);
               setOccupants(remoteDormModule?.occupants || []);
               setDormContracts(remoteDormModule?.dormContracts || []);
               setNewHires(remoteDormModule?.newHires || []);
-              
-              // Use Supabase as source of truth. Do NOT overwrite localStorage with Supabase results.
-              console.log("[LOAD] Dorm module from Supabase: state set (not syncing to localStorage)");
-            } catch (dormError) {
-              console.error("[LOAD] Failed to load dorm module from Supabase:", dormError);
+              console.log("[LOAD] Dorm module from Supabase: state set");
+            } else {
+              console.error("[LOAD] Failed to load dorm module from Supabase:", dormRes.reason);
               useSupabase = false;
             }
-            
-            // Load operational module from Supabase
-            if (useSupabase) {
-              try {
-                const remoteOperationalModule = await loadOperationalModule(tenantId);
-                console.log("[LOAD] remoteOperationalModule loaded:", {
-                  cleaningReports: remoteOperationalModule?.cleaningReports?.length || 0,
-                  defects: remoteOperationalModule?.defects?.length || 0,
-                  inventory: remoteOperationalModule?.inventory?.length || 0,
-                  settlementRecords: remoteOperationalModule?.settlementRecords?.length || 0,
-                  settlementItems: remoteOperationalModule?.settlementItems?.length || 0,
-                  auditLogs: remoteOperationalModule?.auditLogs?.length || 0,
-                });
-                
-                // Always set state to Supabase result, even if empty
-                setCleaningReports(remoteOperationalModule?.cleaningReports || []);
-                setDefects(remoteOperationalModule?.defects || []);
-                setInventory(remoteOperationalModule?.inventory || []);
-                setSettlementRecords(remoteOperationalModule?.settlementRecords || []);
-                setSettlementItems((remoteOperationalModule?.settlementItems as unknown as SettlementItem[]) || []);
-                setAuditLogs(remoteOperationalModule?.auditLogs || []);
-                
-                // Use Supabase as source of truth for operational module. Do NOT sync to localStorage.
-                console.log("[LOAD] Operational module from Supabase: state set (not syncing to localStorage)");
-              } catch (operationalError) {
-                console.error("[LOAD] Failed to load operational module from Supabase:", operationalError);
-                useSupabase = false;
-              }
+
+            // Operational module (dorm 로드 성공 시에만 적용 — source-of-truth 일관성 유지)
+            if (useSupabase && opRes.status === "fulfilled") {
+              const remoteOperationalModule = opRes.value;
+              setCleaningReports(remoteOperationalModule?.cleaningReports || []);
+              setDefects(remoteOperationalModule?.defects || []);
+              setInventory(remoteOperationalModule?.inventory || []);
+              setSettlementRecords(remoteOperationalModule?.settlementRecords || []);
+              setSettlementItems((remoteOperationalModule?.settlementItems as unknown as SettlementItem[]) || []);
+              setAuditLogs(remoteOperationalModule?.auditLogs || []);
+              console.log("[LOAD] Operational module from Supabase: state set");
+            } else if (opRes.status === "rejected") {
+              console.error("[LOAD] Failed to load operational module from Supabase:", opRes.reason);
+              useSupabase = false;
             }
-            
-            // Load user profile
-            if (useSupabase) {
-              try {
-                const authUser = await getCurrentAuthUser();
-                const profile = await getProfile(session.user.id);
-                if (profile) {
-                  console.log("[LOAD] User profile loaded:", profile.id, profile.email);
-                  setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
-                  setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
-                }
-              } catch (profileError) {
-                console.error("[LOAD] Failed to load user profile:", profileError);
-              }
+
+            // User profile
+            if (useSupabase && profileRes.status === "fulfilled" && profileRes.value) {
+              const profile = profileRes.value;
+              const authUser = authRes.status === "fulfilled" ? authRes.value : undefined;
+              console.log("[LOAD] User profile loaded:", profile.id, profile.email);
+              setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
+              setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
+            } else if (profileRes.status === "rejected") {
+              console.error("[LOAD] Failed to load user profile:", profileRes.reason);
             }
           } else {
             console.warn("[LOAD] No Supabase session found, falling back to localStorage");
@@ -2255,6 +2269,26 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoading]);
 
+  // 군대 모듈 "저장 필요" 감지: 현재 상태 스냅샷이 마지막 저장 스냅샷과 다르면 dirty.
+  // (인사/훈련/통보/보고/설정 변경, 자동생성 등 모든 변경을 한 곳에서 포착)
+  useEffect(() => {
+    if (isLoading) return;
+    const snap = JSON.stringify(getMilitaryModuleState());
+    setMilitaryDirty(snap !== lastMilitarySnapshotRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [militaryPersonnel, militaryTrainingRecords, militaryNotices, militaryReports, militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig, militaryLastSavedAt, isLoading]);
+
+  // 저장 필요 상태에서 새로고침/창닫기 경고 (앱 내부 탭 이동은 막지 않음)
+  useEffect(() => {
+    if (!militaryDirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [militaryDirty]);
+
   const loadSupabaseMilitaryModule = async () => {
     if (!isSupabaseAvailable()) {
       setSupabaseSyncStatus("Supabase 환경변수 미설정");
@@ -2298,8 +2332,17 @@ export default function App() {
         setSupabaseSyncStatus("Supabase에 저장된 군대 모듈 데이터가 없습니다.");
       }
     } catch (error) {
-      console.error(error);
-      setSupabaseSyncStatus("Supabase 불러오기 중 오류가 발생했습니다.");
+      const err = error as { status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown };
+      // 실패 원인(권한/RLS vs 테이블/데이터)을 구분할 수 있도록 콘솔에 상세 출력
+      console.error("[MILITARY] Supabase 군대 모듈 불러오기 실패:", {
+        status: err?.status ?? err?.code ?? "(unknown)",
+        message: err?.message ?? String(error),
+        details: err?.details,
+        hint: err?.hint,
+        raw: error,
+      });
+      const friendly = translateSupabaseError((err && err.message) || String(error));
+      setSupabaseSyncStatus(`Supabase 불러오기에 실패했습니다. ${friendly}`);
     } finally {
       setIsSupabaseSyncing(false);
     }
@@ -2313,6 +2356,7 @@ export default function App() {
     // 직전 저장과 동일한 데이터면 Supabase 저장 생략 (동일 데이터 반복 저장 방지)
     const snapshot = JSON.stringify(getMilitaryModuleState());
     if (snapshot === lastMilitarySnapshotRef.current) {
+      setMilitaryDirty(false); // 변경 없음 → 저장 필요 상태 유지하지 않음
       setSupabaseSyncStatus("변경 사항이 없어 저장을 건너뛰었습니다. (이미 최신 상태)");
       return;
     }
@@ -2322,10 +2366,21 @@ export default function App() {
     try {
       await saveMilitaryModule(getMilitaryModuleState());
       lastMilitarySnapshotRef.current = snapshot;
+      const savedAt = new Date().toLocaleString();
+      setMilitaryLastSavedAt(savedAt);   // 마지막 저장 시간
+      setMilitaryDirty(false);           // 저장 성공 → 저장 필요 해제
       setSupabaseSyncStatus("Supabase 저장이 완료되었습니다.");
     } catch (error) {
-      console.error(error);
-      setSupabaseSyncStatus("Supabase 저장 중 오류가 발생했습니다.");
+      const err = error as { status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown };
+      console.error("[MILITARY] Supabase 군대 모듈 저장 실패:", {
+        status: err?.status ?? err?.code ?? "(unknown)",
+        message: err?.message ?? String(error),
+        details: err?.details,
+        hint: err?.hint,
+        raw: error,
+      });
+      const friendly = translateSupabaseError((err && err.message) || String(error));
+      setSupabaseSyncStatus(`Supabase 저장에 실패했습니다. ${friendly}`);
     } finally {
       setIsSupabaseSyncing(false);
     }
@@ -2338,6 +2393,26 @@ export default function App() {
       setSupabaseSyncStatus("Supabase 환경변수 미설정");
     }
   }, [tenantId]);
+
+  // 군대 모듈 자동저장 (Dorm/Operational 모듈과 동일: 500ms 디바운스 + 스냅샷 비교 + Realtime 루프 방지).
+  // 저장 자체는 기존 saveSupabaseMilitaryModule 재사용(동일 데이터 skip·상태표시·오류처리·dirty 갱신 포함).
+  useEffect(() => {
+    if (!isSupabaseAvailable()) return;
+    const timer = setTimeout(() => {
+      if (isLoading) return;
+      if (!canEditData(currentUser)) return; // 군대 데이터는 admin 편집 → 그 외 자동저장 생략
+      // Realtime 수신분은 이미 서버 반영 상태 → 스냅샷만 갱신하고 재저장 생략(루프 방지)
+      if (realtimeUpdateSourceRef.current.has("military_module")) {
+        realtimeUpdateSourceRef.current.delete("military_module");
+        lastMilitarySnapshotRef.current = JSON.stringify(getMilitaryModuleState());
+        return;
+      }
+      // 변경 없으면 saveSupabaseMilitaryModule 내부 스냅샷 비교에서 저장 생략
+      void saveSupabaseMilitaryModule();
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [militaryPersonnel, militaryTrainingRecords, militaryNotices, militaryReports, militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig, currentUser?.role, isLoading]);
 
   const restoreDefaultSystemSettings = () => {
     if (!canEditData(currentUser)) return;
@@ -2555,7 +2630,7 @@ export default function App() {
   const defectRequestPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const defectCompletionPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const cleaningReportBeforePhotoInputRef = useRef<HTMLInputElement | null>(null);
-  const cleaningReportAfterPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  // (청소 사진 통합) 청소 후 사진 전용 ref 제거 — 단일 "사진" 업로드 영역으로 통합
   const excelInputRef = useRef<HTMLInputElement | null>(null);
   const [excelPreview, setExcelPreview] = useState<
     { file: File; fileName: string; tableType: ExcelTableType; result: ExcelValidationResult } | null
@@ -3525,10 +3600,8 @@ export default function App() {
       return "X";
     }
 
-    if (
-      (!report.beforePhotoDataUrls || report.beforePhotoDataUrls.length === 0) ||
-      (!report.afterPhotoDataUrls || report.afterPhotoDataUrls.length === 0)
-    ) {
+    // 사진 통합: 전/후를 합쳐 한 장이라도 있으면 누락 아님
+    if (((report.beforePhotoDataUrls?.length || 0) + (report.afterPhotoDataUrls?.length || 0)) === 0) {
       return "사진누락";
     }
 
@@ -3979,15 +4052,27 @@ export default function App() {
           session.user.id
         );
         lastDormSnapshotRef.current = snapshot;
+        lastDormAlertRef.current = ""; // 성공 시 알림 dedup 초기화
         console.log("[SAVE] contracts saved:", dormContracts.length);
         console.log("[SAVE] newHires saved:", newHires.length);
       } catch (error) {
-        console.error("Supabase dorm module sync failed:", error);
-        try {
-          const message = translateSupabaseError((error && (error as any).message) || String(error));
-          // eslint-disable-next-line no-alert
-          alert(`Supabase 기숙사 모듈 동기화에 실패했습니다. ${message}`);
-        } catch {}
+        const err = error as { status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown };
+        console.error("Supabase dorm module sync failed:", {
+          status: err?.status ?? err?.code ?? "(unknown)",
+          message: err?.message ?? String(error),
+          details: err?.details,
+          hint: err?.hint,
+          payloadSizes: { dorms: dorms.length, occupants: occupants.length, dormContracts: dormContracts.length, newHires: newHires.length },
+          raw: error,
+        });
+        const message = translateSupabaseError((err && err.message) || String(error));
+        if (lastDormAlertRef.current !== message) {
+          lastDormAlertRef.current = message;
+          try {
+            // eslint-disable-next-line no-alert
+            alert(`Supabase 기숙사 모듈 동기화에 실패했습니다. ${message}`);
+          } catch { /* alert 미지원 환경 무시 */ }
+        }
       }
     }, 500);
 
@@ -4055,15 +4140,36 @@ export default function App() {
         lastOperationalSnapshotRef.current = snapshot;
         // clear any previous error on success
         setOperationalSyncError(null);
+        lastOperationalAlertRef.current = ""; // 성공 시 알림 dedup 초기화
       } catch (error) {
-        console.error("Supabase operational module sync failed:", error);
-        const msg = translateSupabaseError((error && (error as any).message) || String(error));
+        const err = error as { status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown };
+        // 어떤 테이블/정책에서 실패했는지 추적할 수 있도록 상세 로그 출력
+        console.error("Supabase operational module sync failed:", {
+          role,
+          status: err?.status ?? err?.code ?? "(unknown)",
+          message: err?.message ?? String(error),
+          details: err?.details,
+          hint: err?.hint,
+          payloadSizes: {
+            cleaningReports: cleaningReports.length,
+            defects: defects.length,
+            inventory: isAdmin ? inventory.length : 0,
+            settlementRecords: isAdmin ? settlementRecords.length : 0,
+            settlementItems: isAdmin ? settlementItems.length : 0,
+            auditLogs: auditLogs.length,
+          },
+          raw: error,
+        });
+        const msg = translateSupabaseError((err && err.message) || String(error));
         setOperationalSyncError(msg);
-        // show immediate visible feedback so QA can notice failures
-        try {
-          // eslint-disable-next-line no-alert
-          alert(`Supabase 운영 모듈 동기화에 실패했습니다. ${msg}`);
-        } catch {}
+        // 동일 오류 메시지는 1회만 alert (반복 저장 실패 시 알림 폭주 방지)
+        if (lastOperationalAlertRef.current !== msg) {
+          lastOperationalAlertRef.current = msg;
+          try {
+            // eslint-disable-next-line no-alert
+            alert(`Supabase 운영 모듈 동기화에 실패했습니다. ${msg}`);
+          } catch { /* alert 미지원 환경 무시 */ }
+        }
       }
     }, 500);
 
@@ -4230,7 +4336,8 @@ export default function App() {
   const computeTrainingStatus = (person: MilitaryPersonnel) => {
     const training = computeRequiredTraining(person);
     if (training.hours === 0) {
-      return training.label === "훈련없음" ? "해당없음" : "대상아님";
+      // 7~8년차 등 '훈련 비대상'은 예비군이지만 해당 시기 훈련이 없음 → "해당없음"
+      return (training.label === "훈련없음" || training.label.includes("비대상(7~8년차)")) ? "해당없음" : "대상아님";
     }
     const personRecords = militaryTrainingRecords.filter((record) => record.personnelId === person.id);
     const completedRecords = personRecords.filter((record) => /(완료|이수|completed)/i.test(record.status));
@@ -5033,7 +5140,7 @@ export default function App() {
     }
 
     if (reports.some((report) => report.cleanStatus === "불량")) return "불량";
-    if (reports.some((report) => report.beforePhotoDataUrls.length === 0 || report.afterPhotoDataUrls.length === 0)) return "사진누락";
+    if (reports.some((report) => ((report.beforePhotoDataUrls?.length || 0) + (report.afterPhotoDataUrls?.length || 0)) === 0)) return "사진누락";
     return "O";
   };
 
@@ -5920,6 +6027,10 @@ export default function App() {
 
 
   const logout = async () => {
+    // 군대 모듈 저장 필요 상태면 로그아웃 전 경고(앱 내부 동작이라 beforeunload 미발생)
+    if (militaryDirty && !window.confirm("군대관리에 저장되지 않은 변경사항이 있습니다.\n저장하지 않고 로그아웃하시겠습니까?")) {
+      return;
+    }
     if (isSupabaseAvailable()) {
       await supabaseSignOut();
     }
@@ -6575,6 +6686,46 @@ export default function App() {
     }));
   };
 
+  // 통합 "사진" 영역에서 개별 사진 삭제 (기존 before/after 필드 구조는 유지)
+  const removeCleaningReportPhoto = (field: "beforePhotoDataUrls" | "afterPhotoDataUrls", idx: number) => {
+    setCleaningReportForm((prev) => ({
+      ...prev,
+      [field]: prev[field].filter((_, i) => i !== idx),
+    }));
+  };
+
+  // 청소보고서의 청소 전/후 사진을 합쳐 단일 "사진" 목록으로 반환 (표시 통합용, 데이터는 그대로)
+  const getCleaningPhotos = (report: { beforePhotoDataUrls?: string[]; afterPhotoDataUrls?: string[] }): string[] => [
+    ...(report.beforePhotoDataUrls || []),
+    ...(report.afterPhotoDataUrls || []),
+  ];
+
+  // 청소보고서 상세 PDF(브라우저 인쇄 → PDF 저장). 외부 라이브러리 없이 기존 인쇄 패턴 재사용.
+  const printCleaningReport = (report: CleaningReport) => {
+    const photos = getCleaningPhotos(report);
+    const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+    const imgs = photos.map((u) => `<img src="${u}" style="width:31%;margin:1%;border:1px solid #ccc;border-radius:4px"/>`).join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>청소보고서</title>
+      <style>body{font-family:Arial,'Malgun Gothic',sans-serif;margin:32px;color:#0f172a}h1{font-size:18px}table{width:100%;border-collapse:collapse;margin-top:12px}td{padding:6px 8px;border:1px solid #ccc;font-size:13px}.label{background:#f1f5f9;width:130px;font-weight:600}.photos{margin-top:16px;display:flex;flex-wrap:wrap}</style>
+      </head><body>
+      <h1>청소보고서</h1>
+      <table>
+        <tr><td class="label">보고일</td><td>${esc(formatDateOnly(report.reportDate) || "-")}</td></tr>
+        <tr><td class="label">기숙사</td><td>${esc(`${report.buildingName} ${report.dong}-${report.roomHo}`)}</td></tr>
+        <tr><td class="label">상태</td><td>${esc(report.cleanStatus)}</td></tr>
+        <tr><td class="label">담당 관리자</td><td>${esc(getDormManagerDisplayName(report.dormId))}</td></tr>
+        <tr><td class="label">청소담당자</td><td>${esc(getUserDisplayName(report.cleanerName || ""))}</td></tr>
+        <tr><td class="label">메모</td><td>${esc(report.memo || "-")}</td></tr>
+      </table>
+      <div class="photos"><h3 style="width:100%;font-size:14px;margin:12px 0 4px">사진 (${photos.length}장)</h3>${imgs || "<div>사진 없음</div>"}</div>
+      <script>setTimeout(function(){window.print();},400);</script>
+      </body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) { alert("팝업이 차단되었습니다. 브라우저 팝업을 허용해 주세요."); return; }
+    w.document.write(html);
+    w.document.close();
+  };
+
   const saveCleaningReport = () => {
     if (!canCreateCleaningReport(currentUser)) return;
     if (!cleaningReportForm.buildingName.trim() || !cleaningReportForm.dong.trim() || !cleaningReportForm.roomHo.trim()) {
@@ -6742,20 +6893,37 @@ export default function App() {
     setShowMilitaryReportForm(true);
   };
 
-  const buildNoticeForTrainingRecord = (record: TrainingRecord, person: MilitaryPersonnel): MilitaryNotice | null => {
-    const title = `${record.trainingType || record.subject || "훈련"} 통보서`;
-    const content = [
-      `이름: ${person.name}`,
-      `부서: ${person.unit || ""}`,
-      `연락처: ${person.phone || ""}`,
-      `훈련유형: ${record.trainingType || record.subject || ""}`,
-      `차수: ${record.trainingRound || ""}`,
-      `훈련예정일: ${record.trainingDate || ""}`,
-      `장소: ${record.location || ""}`,
-      `비고: ${record.notes || ""}`,
-    ].join("\n");
+  // 훈련기록 추적/중복방지용 마커 (저장 구조 변경 없이 content 안에 기록)
+  const noticeRecordMarker = (recordId: string) => `[훈련기록:${recordId}]`;
 
-    const exists = militaryNotices.some((n) => n.personnelIds?.includes(person.id) && n.title === title && n.content === content);
+  // 통보서 내용 템플릿 — 이름/부서/구분/연차/교육정보를 실제값(한글)으로, 날짜는 formatDateOnly
+  const buildNoticeContent = (record: TrainingRecord, person: MilitaryPersonnel, refYear?: number): string => {
+    const category = getMilitaryCategory(person, refYear);
+    const year =
+      category === "예비군" ? getReserveAnnualLeave(person, refYear) :
+      category === "민방위" ? getCivilDefenseAnnualLeave(person, refYear) : 0;
+    return [
+      `[${category} 교육 통보서]`,
+      `성명: ${person.name || ""}`,
+      `부서: ${person.unit || ""}`,
+      `구분: ${category}`,
+      `연차: ${year ? `${year}년차` : "-"}`,
+      `교육명: ${record.subject || record.trainingType || ""}`,
+      `교육유형: ${record.trainingType || record.subject || ""}`,
+      `차수: ${record.trainingRound || "1차"}`,
+      `교육일자: ${record.trainingDate ? (formatDateOnly(record.trainingDate) || record.trainingDate) : "미정"}`,
+      `교육시간: ${record.trainingHours || 0}시간`,
+      `장소: ${record.location || "미정"}`,
+      `비고: ${record.notes || ""}`,
+      noticeRecordMarker(record.id),
+    ].join("\n");
+  };
+
+  const buildNoticeForTrainingRecord = (record: TrainingRecord, person: MilitaryPersonnel, refYear?: number): MilitaryNotice | null => {
+    const title = `${record.trainingType || record.subject || "훈련"} 통보서`;
+    // 중복 방지: 동일 훈련기록ID(마커) 기준
+    const marker = noticeRecordMarker(record.id);
+    const exists = militaryNotices.some((n) => (n.content || "").includes(marker));
     if (exists) return null;
 
     return {
@@ -6765,11 +6933,39 @@ export default function App() {
       category: record.trainingType || record.subject || "통보",
       publishedDate: "",
       expiresDate: "",
-      content,
+      content: buildNoticeContent(record, person, refYear ?? effectiveMilitaryReferenceYear),
       sentStatus: "미발송",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+  };
+
+  // 연차 계산 검증용 샘플 데이터 생성(기존 데이터 삭제 없이 추가, 이름 앞 [샘플] 표시)
+  const generateMilitarySampleData = () => {
+    if (!canEditData(currentUser)) return;
+    if (!window.confirm("연차 계산 검증용 샘플 8건을 추가합니다. (기존 데이터는 삭제되지 않습니다)")) return;
+    const baseYear = effectiveMilitaryReferenceYear || new Date().getFullYear();
+    const now = new Date().toISOString();
+    const mk = (over: Partial<MilitaryPersonnel>): MilitaryPersonnel => ({
+      id: crypto.randomUUID(), name: "", rank: "", serviceBranch: "", unit: "검증샘플", phone: "",
+      birthDate: "", enlistmentDate: "", dischargeDate: "", calculationMode: "auto",
+      manualCategory: "", manualYear: "", mobilization: false, status: "재직", notes: "연차 계산 검증용 샘플",
+      createdAt: now, updatedAt: now, ...over,
+    });
+    const samples: MilitaryPersonnel[] = [
+      // 전역일 기준 (생년월일은 36~40세 밖으로 두어 예비군/대상아님이 명확하도록)
+      mk({ name: "[샘플]예비군1년차_최근전역", birthDate: `${baseYear - 30}-01-01`, dischargeDate: `${baseYear}-03-01` }),
+      mk({ name: "[샘플]예비군3년차", birthDate: `${baseYear - 31}-01-01`, dischargeDate: `${baseYear - 2}-03-01` }),
+      mk({ name: "[샘플]예비군5년차", birthDate: `${baseYear - 32}-01-01`, dischargeDate: `${baseYear - 4}-03-01` }),
+      mk({ name: "[샘플]예비군7년차", birthDate: `${baseYear - 33}-01-01`, dischargeDate: `${baseYear - 6}-03-01` }),
+      mk({ name: "[샘플]예비군종료_9년차", birthDate: `${baseYear - 30}-01-01`, dischargeDate: `${baseYear - 8}-03-01` }),
+      // 생년월일 기준 (전역일 없음 → 연령으로 민방위 판정)
+      mk({ name: "[샘플]민방위1년차", birthDate: `${baseYear - 36}-01-01` }),
+      mk({ name: "[샘플]민방위3년차", birthDate: `${baseYear - 38}-01-01` }),
+      mk({ name: "[샘플]민방위종료", birthDate: `${baseYear - 41}-01-01` }),
+    ];
+    setMilitaryPersonnel((prev) => [...samples, ...prev]);
+    alert("검증용 군대 샘플 8건을 추가했습니다. (이름 앞 [샘플] 표시 — 확인 후 삭제 가능)");
   };
 
   const saveMilitaryPersonnel = () => {
@@ -6938,79 +7134,101 @@ export default function App() {
     setShowMilitaryPersonnelForm(false);
   };
 
+  // 연차 계산(getMilitaryCategory/getReserveAnnualLeave/getCivilDefenseAnnualLeave) 기준으로
+  // 한 사람의 자동 훈련 계획을 산출. 규칙표가 아닌 연차 결과를 1차 기준으로 사용.
+  const buildAutoTrainingPlan = (person: MilitaryPersonnel, refYear?: number): Array<{ trainingType: string; round: string; hours: number; category: string; year: number }> => {
+    const category = getMilitaryCategory(person, refYear);
+    if (category === "예비군") {
+      const y = getReserveAnnualLeave(person, refYear); // 1~8
+      if (y >= 1 && y <= 4) {
+        return [{ trainingType: person.mobilization ? "동원훈련" : "동미참훈련", round: "1차", hours: 28, category, year: y }];
+      }
+      if (y >= 5 && y <= 6) {
+        return [
+          { trainingType: "기본훈련", round: "1차", hours: 8, category, year: y },
+          { trainingType: "작계훈련", round: "1차", hours: 6, category, year: y },
+        ];
+      }
+      return []; // 7~8년차: 훈련 비대상
+    }
+    if (category === "민방위") {
+      const cy = getCivilDefenseAnnualLeave(person, refYear); // 1~5
+      if (cy >= 1) return [{ trainingType: "민방위교육", round: "1차", hours: 4, category, year: cy }];
+      return []; // 종료
+    }
+    return []; // 대상아님
+  };
+
   const generateAllMilitaryTrainingRecords = () => {
     if (!canEditData(currentUser)) return;
+    const refYear = effectiveMilitaryReferenceYear || new Date().getFullYear();
+    const yearKey = String(refYear);
     const existingRecords = militaryTrainingRecords;
     const newRecords: TrainingRecord[] = [];
     const newNotices: MilitaryNotice[] = [];
 
-    const shouldAutoCreateForPerson = (person: MilitaryPersonnel) => {
-      if (!militaryTrainingAutoConfig.enabled) return false;
-      if (!person.status) return false;
-      if (!militaryTrainingAutoConfig.targetStatuses || militaryTrainingAutoConfig.targetStatuses.length === 0) return false;
-      return militaryTrainingAutoConfig.targetStatuses.includes(person.status);
-    };
+    const autoEnabled = !!militaryTrainingAutoConfig.enabled;
+    const targetStatuses = militaryTrainingAutoConfig.targetStatuses || [];
 
-    const isExcludedStatus = (status?: string) => {
-      if (!status) return false;
-      return ["퇴사", "전출", "휴직"].some((s) => status.includes(s));
-    };
+    // 자동생성 OFF → 생성하지 않고 사유 안내
+    if (!autoEnabled) {
+      alert("훈련기록 자동생성 0건\n자동생성이 OFF 상태입니다. (군대설정 > 훈련 자동생성 설정에서 ON 필요)");
+      return;
+    }
+    if (targetStatuses.length === 0) {
+      alert("훈련기록 자동생성 0건\n자동생성 대상 재직상태가 설정되지 않았습니다. (군대설정에서 대상 상태 선택 필요)");
+      return;
+    }
+
+    let dupSkipped = 0;     // 동일 연도/대상자/유형/차수 이미 존재
+    let notTarget = 0;      // 대상아님 / 예비군 7~8년차 / 종료 (교육 비대상)
+    let statusExcluded = 0; // 군대설정 대상 재직상태가 아님
 
     militaryPersonnel.forEach((person) => {
-      if (isExcludedStatus(person.status)) return;
-      if (!shouldAutoCreateForPerson(person)) return;
-      const personYear = getTrainingYear(person, effectiveMilitaryReferenceYear);
-      const applicable = militaryTrainingRules.filter((r) => {
-        try {
-          if (r.currentCategory && r.currentCategory !== getMilitaryCategory(person, effectiveMilitaryReferenceYear)) return false;
-          if (r.yearMin != null && personYear < Number(r.yearMin)) return false;
-          if (r.yearMax != null && personYear > Number(r.yearMax)) return false;
-          if (r.mobilizationOnly && !person.mobilization) return false;
-          if (!r.enabled) return false;
-          return true;
-        } catch {
-          return false;
-        }
-      });
-      let selectedRules = applicable;
-      if (applicable.length > 1) {
-        const hasMobilized = applicable.some((x) => !!x.mobilizationOnly);
-        const hasNonMobilized = applicable.some((x) => !x.mobilizationOnly);
-        if (hasMobilized && hasNonMobilized) {
-          selectedRules = person.mobilization ? applicable.filter((x) => !!x.mobilizationOnly) : applicable.filter((x) => !x.mobilizationOnly);
-        }
-      }
-      selectedRules.forEach((r) => {
-        const yearKey = String(r.year || new Date().getFullYear());
-        const trainingType = r.trainingType || r.name || "훈련";
-        const trainingRound = r.trainingRound || "1차";
-        const exists = existingRecords.find((rec) => rec.personnelId === person.id && rec.trainingYear === yearKey && rec.trainingType === trainingType && (rec.trainingRound || "1차") === trainingRound);
-        if (exists) return;
+      if ((person as { isDeleted?: boolean }).isDeleted) return;
+      if (!person.status || !targetStatuses.includes(person.status)) { statusExcluded += 1; return; }
+      const plan = buildAutoTrainingPlan(person, refYear);
+      if (plan.length === 0) { notTarget += 1; return; }
+      plan.forEach((p) => {
+        // 중복 방지: 동일 연도 + 대상자 + 훈련유형 + 차수 (기존 기록 + 이번 배치 모두 확인)
+        const exists = existingRecords.find((rec) =>
+          rec.personnelId === person.id &&
+          String(rec.trainingYear || "") === yearKey &&
+          ((rec.trainingType || rec.subject) === p.trainingType) &&
+          ((rec.trainingRound || "1차") === p.round)
+        );
+        const dupInBatch = newRecords.find((rec) =>
+          rec.personnelId === person.id && rec.trainingType === p.trainingType && (rec.trainingRound || "1차") === p.round
+        );
+        if (exists || dupInBatch) { dupSkipped += 1; return; }
         const newRec: TrainingRecord = {
           id: crypto.randomUUID(),
           personnelId: person.id,
-          subject: trainingType,
-          trainingType,
-          trainingRound,
+          subject: p.trainingType,
+          trainingType: p.trainingType,
+          trainingRound: p.round,
           trainingYear: yearKey,
-          trainingDate: "",
+          trainingDate: "",      // 기본값: 비움(기준연도 yearKey 보관)
           completionDate: "",
-          trainingHours: Number(r.requiredHours) || 0,
-          location: "",
+          trainingHours: p.hours, // 훈련유형 기준 자동
+          location: "",          // 기본값: 빈 값
           attendees: 0,
-          status: "일정미등록",
-          notes: "자동생성",
+          status: "일정미등록",    // 이수여부: 미이수
+          notes: `자동생성 · ${p.category} ${p.year}년차`,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
         newRecords.push(newRec);
-        const notice = buildNoticeForTrainingRecord(newRec, person);
+        const notice = buildNoticeForTrainingRecord(newRec, person); // 통보서 기본 미발송
         if (notice) newNotices.push(notice);
       });
     });
 
     if (newRecords.length === 0) {
-      alert("새로 생성할 훈련기록이 없습니다.");
+      const reason = dupSkipped > 0
+        ? `대상자는 있으나 모두 이미 생성되어 있습니다. (중복 제외 ${dupSkipped}건)`
+        : `생성 대상(예비군 1~6년차 / 민방위 1~5년차)이 없습니다. (재직상태 제외 ${statusExcluded}명 · 교육 비대상 ${notTarget}명)`;
+      alert(`훈련기록 자동생성 0건\n${reason}`);
       return;
     }
 
@@ -7039,7 +7257,7 @@ export default function App() {
         });
       });
     }
-    alert(`${newRecords.length}개의 훈련기록을 자동생성했습니다.`);
+    alert(`훈련기록 자동생성 완료\n생성 ${newRecords.length}건 / 중복 제외 ${dupSkipped}건 / 재직상태 제외 ${statusExcluded}명 / 교육 비대상 ${notTarget}명${newNotices.length > 0 ? `\n통보서 ${newNotices.length}건 생성` : ""}\n\n※ 생성된 훈련기록은 'Supabase 저장' 버튼을 눌러 반영하세요.`);
   };
 
   const saveMilitaryTraining = () => {
@@ -7140,40 +7358,77 @@ export default function App() {
   // Auto-generate notices from training records
   const generateNoticesFromTrainingRecords = () => {
     if (!canEditData(currentUser)) return;
+    const refYear = effectiveMilitaryReferenceYear || new Date().getFullYear();
     const toCreate: MilitaryNotice[] = [];
+    const batchMarkers = new Set<string>();
+    let dupSkipped = 0;        // 동일 훈련기록(마커) 통보서가 이미 존재
+    let notTarget = 0;         // 현재구분 대상아님
+    let missingPerson = 0;     // 인사정보 누락(또는 isDeleted)
+    let completedSkipped = 0;  // 훈련 이수완료 → 통보 불필요
+
     militaryTrainingRecords.forEach((rec) => {
-      if (!rec.personnelId) return;
-      if (/(관리제외|대상아님)/i.test(rec.status || "")) return;
+      // 훈련완료(이수) 제외 — 미이수 항목만 대상
+      if (/(완료|이수|completed)/i.test(rec.status || "")) { completedSkipped += 1; return; }
+      if (!rec.personnelId) { missingPerson += 1; return; }
       const person = militaryPersonnel.find((p) => p.id === rec.personnelId);
-      if (!person) return;
-      const title = `${rec.trainingType || rec.subject} 통보서`;
-      const content = `이름: ${person.name}\n부서: ${person.unit || ""}\n연락처: ${person.phone || ""}\n훈련유형: ${rec.trainingType || rec.subject || ""}\n차수: ${rec.trainingRound || ""}\n훈련예정일: ${rec.trainingDate || ""}\n장소: ${rec.location || ""}`;
-      // avoid duplicate: check existing notice with same personnelIds + title + content
-      const exists = militaryNotices.find((n) => n.personnelIds?.includes(person.id) && n.title === title && n.content === content);
-      if (exists) return;
+      if (!person || (person as { isDeleted?: boolean }).isDeleted) { missingPerson += 1; return; }
+      // 현재구분 예비군/민방위만 (대상아님 제외)
+      const category = getMilitaryCategory(person, refYear);
+      if (category !== "예비군" && category !== "민방위") { notTarget += 1; return; }
+      // 중복 방지: 동일 훈련기록ID 통보서 존재 시 건너뛰기(미발송/발송 무관, 이미 통보서 보유)
+      const marker = noticeRecordMarker(rec.id);
+      if (militaryNotices.some((n) => (n.content || "").includes(marker)) || batchMarkers.has(marker)) {
+        dupSkipped += 1;
+        return;
+      }
+      batchMarkers.add(marker);
       toCreate.push({
         id: crypto.randomUUID(),
         personnelIds: [person.id],
-        title,
-        category: rec.trainingType || "통보",
+        title: `${rec.trainingType || rec.subject || "훈련"} 통보서`,
+        category: rec.trainingType || rec.subject || "통보",
         publishedDate: "",
         expiresDate: "",
-        content,
+        content: buildNoticeContent(rec, person, refYear),
         sentStatus: "미발송",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
     });
-    if (toCreate.length === 0) return alert("새로 생성할 통보서가 없습니다.");
+
+    if (toCreate.length === 0) {
+      const reason = dupSkipped > 0
+        ? `대상 훈련기록은 있으나 통보서가 모두 이미 생성되어 있습니다. (중복 제외 ${dupSkipped}건)`
+        : `생성 대상 훈련기록이 없습니다. (훈련완료 제외 ${completedSkipped}건 · 대상아님 ${notTarget}건 · 인사정보 누락 ${missingPerson}건)`;
+      alert(`통보서 자동생성 0건\n${reason}`);
+      return;
+    }
+
     setMilitaryNotices((prev) => [...toCreate, ...prev]);
     toCreate.forEach((n) => createAuditLog({ targetType: "militaryNotice", targetId: n.id, actionType: "create", changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "", beforeValue: "", afterValue: JSON.stringify(n) }));
-    alert(`${toCreate.length}개의 통보서를 생성했습니다.`);
+    alert(`통보서 자동생성 완료\n생성 ${toCreate.length}건 / 중복 제외 ${dupSkipped}건 / 대상아님 ${notTarget}건 / 인사정보 누락 ${missingPerson}건 / 훈련완료 제외 ${completedSkipped}건\n\n※ 생성된 통보서는 'Supabase 저장' 버튼을 눌러 반영하세요.`);
   };
 
   const openNoticePrintWindow = (notice: MilitaryNotice) => {
-    const personId = notice.personnelIds?.[0];
-    const person = militaryPersonnel.find((p) => p.id === personId);
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${notice.title}</title><style>body{font-family:Arial;margin:40px}h1{font-size:18px}table{width:100%;border-collapse:collapse;margin-top:12px}td{padding:6px;border:1px solid #ccc} .small{font-size:12px;color:#666}</style></head><body><h1>${notice.title}</h1><div class="small">발행일: ${notice.publishedDate || ''}</div><table><tr><td>이름</td><td>${person?.name || ''}</td></tr><tr><td>부서</td><td>${person?.unit || ''}</td></tr><tr><td>연락처</td><td>${person?.phone || ''}</td></tr><tr><td>훈련유형</td><td>${notice.category || ''}</td></tr><tr><td>차수</td><td>${(notice.content||'').match(/차수: ([^\n]+)/)?.[1] || ''}</td></tr><tr><td>훈련예정일</td><td>${(notice.content||'').match(/훈련예정일: ([^\n]+)/)?.[1] || ''}</td></tr><tr><td>장소</td><td>${(notice.content||'').match(/장소: ([^\n]+)/)?.[1] || ''}</td></tr></table><div style="margin-top:20px">${notice.content?.replace(/\n/g,'<br/>') || ''}</div><script>setTimeout(()=>{window.print();},500);</script></body></html>`;
+    const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+    // content 의 "라벨: 값" 줄을 표로 렌더(추적 마커/대괄호 제목 줄 제외) → 코드가 아닌 실제값(한글) 표시
+    const rows = (notice.content || "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("[") && line.includes(":"))
+      .map((line) => {
+        const idx = line.indexOf(":");
+        return `<tr><td class="label">${esc(line.slice(0, idx).trim())}</td><td>${esc(line.slice(idx + 1).trim())}</td></tr>`;
+      })
+      .join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(notice.title)}</title>
+      <style>body{font-family:Arial,'Malgun Gothic',sans-serif;margin:40px;color:#0f172a}h1{font-size:18px}table{width:100%;border-collapse:collapse;margin-top:12px}td{padding:7px 10px;border:1px solid #ccc;font-size:13px}.label{background:#f1f5f9;width:140px;font-weight:600}.small{font-size:12px;color:#666;margin-top:4px}</style>
+      </head><body>
+      <h1>${esc(notice.title)}</h1>
+      <div class="small">발행일: ${esc(notice.publishedDate ? (formatDateOnly(notice.publishedDate) || notice.publishedDate) : "미발행")} · 발송상태: ${esc(notice.sentStatus || "미발송")}</div>
+      <table>${rows}</table>
+      <script>setTimeout(function(){window.print();},400);</script>
+      </body></html>`;
     const w = window.open("", "notice-print", "width=800,height=900");
     if (!w) return alert('팝업이 차단되었습니다. 팝업을 허용해주세요.');
     w.document.open();
@@ -9643,7 +9898,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-900 to-blue-950 p-6 text-slate-100">
+      <div className="min-h-screen overflow-y-auto flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-900 to-blue-950 p-6 text-slate-100">
         <div className="w-full max-w-md">
           {/* 로고 + 시스템명 */}
           <div className="mb-8 flex flex-col items-center text-center">
@@ -9674,8 +9929,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   if (!currentUser) {
     return (
-      <div className={`min-h-screen ${theme.darkMode ? "bg-slate-950 text-slate-100" : "bg-slate-100 text-slate-900"} p-6 flex items-center justify-center`}>
-        <div className={`w-full max-w-md rounded-3xl p-6 shadow-xl ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+      <div className={`min-h-screen overflow-y-auto ${theme.darkMode ? "bg-slate-950 text-slate-100" : "bg-slate-100 text-slate-900"} p-6 flex items-center justify-center`}>
+        <div className={`w-full max-w-md landscape:max-w-lg rounded-3xl p-6 shadow-xl ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
           <div className="mb-6 text-center">
             <div className={`mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl ${theme.darkMode ? "bg-slate-800" : "bg-slate-100"}`}>
               <Building2 className={`h-7 w-7 ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`} />
@@ -9705,7 +9960,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             Supabase operational sync failed: {operationalSyncError}
           </div>
         )}
-        <aside className={`hidden xl:block fixed left-0 top-0 z-20 h-full w-72 border-r p-6 pt-8 shadow-sm ${theme.darkMode ? "border-slate-800 bg-slate-950" : "border-slate-200 bg-white"}`}>
+        {militaryDirty && ["militaryDashboard", "personnelManagement", "trainingRecords", "militaryNotices", "militaryReports", "militarySettings"].includes(activeTab) && (
+          <div className="fixed inset-x-0 top-0 z-[55] flex flex-wrap items-center justify-center gap-3 border-b border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-900">
+            <span>● 군대관리에 저장되지 않은 변경사항이 있습니다. Supabase에 반영하려면 저장하세요.</span>
+            {activeTab !== "militarySettings" && (
+              <button type="button" onClick={() => setActiveTab("militarySettings")} className="rounded-lg bg-amber-500 px-3 py-1 text-xs font-semibold text-white hover:bg-amber-600">저장하러 가기</button>
+            )}
+          </div>
+        )}
+        <aside className={`hidden xl:block lg:landscape:block fixed left-0 top-0 z-20 h-full w-72 border-r p-6 pt-8 shadow-sm overflow-y-auto ${theme.darkMode ? "border-slate-800 bg-slate-950" : "border-slate-200 bg-white"}`}>
           <div className="mb-8">
             <div className={`mb-4 flex h-14 w-14 items-center justify-center rounded-3xl ${theme.darkMode ? "bg-slate-800" : "bg-slate-100"}`}>
               <Building2 className={`h-7 w-7 ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`} />
@@ -9788,7 +10051,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           </div>
         </aside>
         {mobileMenuOpen && (
-          <div className="fixed inset-0 z-40 flex xl:hidden">
+          <div className="fixed inset-0 z-40 flex xl:hidden lg:landscape:hidden">
             <div className="absolute inset-0 bg-slate-950/50 backdrop-blur-sm" onClick={() => setMobileMenuOpen(false)} />
             <div className={`relative z-50 h-full w-80 overflow-y-auto border-r ${theme.darkMode ? "border-slate-800 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
               <div className="flex items-center justify-between border-b px-5 py-4">
@@ -9838,7 +10101,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
           </div>
         )}
-        <div className="mx-auto max-w-[1800px] pl-0 xl:pl-[280px] p-4 md:p-6 lg:p-8">
+        <div className="mx-auto max-w-[1800px] pl-0 xl:pl-[280px] lg:landscape:pl-[280px] p-4 md:p-6 lg:p-8">
           <header className={`mb-6 rounded-3xl ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"} p-5 shadow-sm ring-1`}>
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
@@ -9894,7 +10157,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   type="button"
                   onClick={() => setMobileMenuOpen(true)}
-                  className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl ${theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"} xl:hidden`}
+                  className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl ${theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"} xl:hidden lg:landscape:hidden`}
                 >
                   <Menu className="h-5 w-5" />
                 </button>
@@ -10006,7 +10269,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
               </div>
             )}
-            <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+            <div className="mt-6 grid gap-4 sm:grid-cols-2 md:landscape:grid-cols-4 xl:grid-cols-5">
               <button type="button" onClick={() => { setDormStatusFilter("사용중"); setDormSiteFilter("전체"); setDormGenderFilter("전체"); setDormSearch(""); setActiveTab("dorms"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">기숙사 수(현재 사용중인 기숙사 수)</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.dormCount}</div>
@@ -10355,7 +10618,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         {activeTab === "dashboard" && (
           <div className="space-y-6">
             {/* 운영 요약 카드 */}
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+            <div className="grid gap-4 md:grid-cols-2 md:landscape:grid-cols-4 lg:grid-cols-3 xl:grid-cols-6">
               <button type="button" onClick={() => { setNewHireAssignmentFilter("미배정"); setActiveTab("newHires"); }} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-blue-50 to-blue-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-blue-50 to-blue-100 p-4 hover:shadow-lg transition-shadow"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-blue-600">미배정 신입</div>
                 <div className="mt-3 text-3xl font-bold text-blue-700">{dashboardSummaryStats.unassignedCount}</div>
@@ -10849,6 +11112,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
                 >
                   <Plus className="h-4 w-4" /> 인원 등록
+                </button>
+              )}
+              {canEditData(currentUser) && (
+                <button
+                  type="button"
+                  onClick={generateMilitarySampleData}
+                  title="연차 계산 검증용 샘플 8건 추가"
+                  className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-2 text-sm font-semibold ${theme.darkMode ? "border-slate-600 text-slate-300 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-100"}`}
+                >
+                  검증 샘플 생성
                 </button>
               )}
             </div>
@@ -11639,13 +11912,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     >
                       자동생성 설정 저장
                     </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {militaryDirty ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800 ring-1 ring-amber-300">● 저장 필요</span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-300">저장 완료</span>
+                      )}
+                      {militaryLastSavedAt && <span className="text-xs text-slate-400">마지막 저장: {militaryLastSavedAt}</span>}
+                    </div>
                     <button
                       type="button"
                       onClick={saveSupabaseMilitaryModule}
                       disabled={!isSupabaseAvailable() || isSupabaseSyncing}
-                      className="rounded-2xl bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      className={`rounded-2xl px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 ${militaryDirty ? "bg-amber-500 hover:bg-amber-600 ring-2 ring-amber-300 animate-pulse" : "bg-green-600 hover:bg-green-700"}`}
                     >
-                      Supabase 저장
+                      {militaryDirty ? "Supabase 저장 (변경사항 있음)" : "Supabase 저장"}
                     </button>
                     <button
                       type="button"
@@ -11775,7 +12056,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           {Object.entries(militaryCodeValues).flatMap(([category, values]) =>
                             values.map((value) => (
                               <tr key={`${category}-${value}`} className={`${theme.darkMode ? "border-slate-700 hover:bg-slate-950" : "border-slate-200 hover:bg-slate-50"}`}>
-                                <td className="px-3 py-2" title={category}>{category}</td>
+                                <td className="px-3 py-2" title={category}>{codeCategoryLabel(category)}</td>
                                 <td translate="no" className="px-3 py-2 notranslate" title={value}>{value}</td>
                                 <td className="px-3 py-2 erp-col-action">
                                   <button
@@ -11850,13 +12131,20 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
 
-            <div className="grid gap-4 mb-6 md:grid-cols-4">
-              <MiniStat label="총 계약 건수" value={`${visibleDormContracts.length}`} />
-              <MiniStat label="진행중" value={`${visibleDormContracts.filter((c) => getDormContractDisplayStatus(c, dorms, occupants) === "진행중").length}`} />
-              <div className="col-span-4 text-xs text-slate-400">집계 기준: '진행중'은 저장된 '진행중'과 '자동선택'의 계산 결과가 '진행중'인 계약을 포함합니다.</div>
-              <MiniStat label="만료예정" value={`${visibleDormContracts.filter((c) => getDormContractDisplayStatus(c, dorms, occupants) === "만료예정").length}`} />
-              <MiniStat label="종료" value={`${visibleDormContracts.filter((c) => getDormContractDisplayStatus(c, dorms, occupants) === "종료").length}`} />
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+              {([
+                { label: "총 계약 건수", value: visibleDormContracts.length },
+                { label: "진행중", value: visibleDormContracts.filter((c) => getDormContractDisplayStatus(c, dorms, occupants) === "진행중").length },
+                { label: "만료예정", value: visibleDormContracts.filter((c) => getDormContractDisplayStatus(c, dorms, occupants) === "만료예정").length },
+                { label: "종료", value: visibleDormContracts.filter((c) => getDormContractDisplayStatus(c, dorms, occupants) === "종료").length },
+              ]).map((s) => (
+                <div key={s.label} className={`rounded-xl border px-3 py-2 ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                  <div className="text-[0.65rem] font-semibold uppercase tracking-wide text-slate-400">{s.label}</div>
+                  <div className="mt-0.5 text-lg font-bold">{s.value}</div>
+                </div>
+              ))}
             </div>
+            <div className="mb-6 text-xs text-slate-400">집계 기준: '진행중'은 저장된 '진행중'과 '자동선택'의 계산 결과가 '진행중'인 계약을 포함합니다.</div>
 
             <div className="mb-6 flex flex-wrap items-center gap-2 justify-between">
               <div className="flex flex-wrap items-center gap-2">
@@ -12355,11 +12643,19 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
 
-            <div className="grid gap-4 mb-6 md:grid-cols-4">
-              <MiniStat label="총 기숙사" value={`${visibleDorms.length}`} />
-              <MiniStat label="평택" value={`${visibleDorms.filter((d) => d.site === "평택").length}`} />
-              <MiniStat label="천안" value={`${visibleDorms.filter((d) => d.site === "천안").length}`} />
-              <MiniStat label="남성" value={`${visibleDorms.filter((d) => d.gender === "남").length}`} />
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-6">
+              {([
+                { label: "총 기숙사", value: visibleDorms.length },
+                { label: "평택", value: visibleDorms.filter((d) => d.site === "평택").length },
+                { label: "천안", value: visibleDorms.filter((d) => d.site === "천안").length },
+                { label: "남성", value: visibleDorms.filter((d) => d.gender === "남").length },
+                { label: "여성", value: visibleDorms.filter((d) => d.gender === "여").length },
+              ]).map((s) => (
+                <div key={s.label} className={`rounded-xl border px-3 py-2 ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                  <div className="text-[0.65rem] font-semibold uppercase tracking-wide text-slate-400">{s.label}</div>
+                  <div className="mt-0.5 text-lg font-bold">{s.value}</div>
+                </div>
+              ))}
             </div>
 
             <div className="mb-6 flex flex-wrap items-center gap-2 justify-between">
@@ -12443,7 +12739,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         />
                       </label>
                       <span
-                        className="rounded-full px-1.5 py-0.5 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 dark:text-white"
+                        className="rounded-full px-1.5 py-0.5 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 status-badge"
                         style={{ backgroundColor: badgeColor(theme, d.leaseStatus) }}
                       >
                         {d.leaseStatus}
@@ -12556,7 +12852,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <div className="mb-2 flex items-center justify-between gap-1">
                       <div className={`${theme.darkMode ? "truncate font-semibold text-slate-100" : "truncate font-semibold text-slate-900"}`}>{dorm.buildingName}</div>
                       <span
-                        className="shrink-0 rounded-full px-1.5 py-0.5 text-[0.65rem] font-medium text-white"
+                        className="shrink-0 rounded-full px-1.5 py-0.5 text-[0.65rem] font-medium status-badge"
                         style={{ backgroundColor: badgeColor(theme, dorm.leaseStatus) }}
                       >
                         {dorm.leaseStatus}
@@ -12716,7 +13012,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{o.employeeName}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
                           <span
-                            className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 dark:text-white"
+                            className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 status-badge"
                             style={{ backgroundColor: badgeColor(theme, o.status) }}
                           >
                             {o.status}
@@ -15275,9 +15571,28 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{report.cleanStatus}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(report.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(report.cleanerName || "")}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{report.beforePhotoDataUrls.length && report.afterPhotoDataUrls.length ? "완료" : "사진누락"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">
+                          {(() => {
+                            const photos = getCleaningPhotos(report);
+                            if (photos.length === 0) return <span className="text-xs text-rose-500">사진없음</span>;
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => setImageLightbox({ urls: photos, index: 0, title: `청소 사진 · ${report.buildingName || ""}` })}
+                                className="inline-flex items-center gap-2"
+                                title="사진 크게 보기"
+                              >
+                                <img src={photos[0]} alt="cleaning" className="h-9 w-9 rounded-md object-cover ring-1 ring-slate-300" />
+                                <span className="text-xs font-medium text-blue-600">사진 {photos.length}장</span>
+                              </button>
+                            );
+                          })()}
+                        </td>
                         <td className="px-3 py-3 whitespace-nowrap">
                           <div className="flex gap-2">
+                            <button onClick={() => printCleaningReport(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`} title="청소보고서 PDF 저장">
+                              PDF
+                            </button>
                             {shouldShowMaintenanceControls(currentUser) && (
                               <button onClick={() => openCleaningReportEdit(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}>
                                 수정
@@ -17305,7 +17620,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-3 py-3 whitespace-nowrap">{d.세대현관}</td>
                       <td className="px-3 py-3">
                         <span
-                          className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 dark:text-white"
+                          className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 status-badge"
                           style={{ backgroundColor: badgeColor(theme, d.defectStatus) }}
                         >
                           {d.defectStatus}
@@ -17581,10 +17896,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
 
             <div className={`rounded-2xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
-              <h3 className="text-lg font-semibold mb-4">청소 사진</h3>
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <h3 className="text-lg font-semibold mb-4">사진</h3>
+              <div className="space-y-3">
                 <div className="space-y-2">
-                  <label className={`${theme.darkMode ? "text-sm font-semibold text-slate-300" : "text-sm font-semibold text-slate-700"}`}>청소 전 사진</label>
+                  <label className={`${theme.darkMode ? "text-sm font-semibold text-slate-300" : "text-sm font-semibold text-slate-700"}`}>사진 업로드</label>
                   <input
                     ref={cleaningReportBeforePhotoInputRef}
                     type="file"
@@ -17593,25 +17908,39 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     onChange={(e) => handleCleaningReportPhotos(e.target.files, "beforePhotoDataUrls")}
                     className={`${theme.darkMode ? "w-full rounded-2xl border border-slate-700 bg-slate-950 px-3 py-2" : "w-full rounded-2xl border border-slate-200 bg-white px-3 py-2"}`}
                   />
+                  <p className="text-xs text-slate-400">청소 사진을 한 곳에서 관리합니다. (기존 전/후 사진도 함께 표시됩니다)</p>
                 </div>
-                <div className="space-y-2">
-                  <label className={`${theme.darkMode ? "text-sm font-semibold text-slate-300" : "text-sm font-semibold text-slate-700"}`}>청소 후 사진</label>
-                  <input
-                    ref={cleaningReportAfterPhotoInputRef}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={(e) => handleCleaningReportPhotos(e.target.files, "afterPhotoDataUrls")}
-                    className={`${theme.darkMode ? "w-full rounded-2xl border border-slate-700 bg-slate-950 px-3 py-2" : "w-full rounded-2xl border border-slate-200 bg-white px-3 py-2"}`}
-                  />
-                </div>
-                <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4 lg:col-span-2" : "rounded-2xl border border-slate-200 bg-slate-50 p-4 lg:col-span-2"}`}>
-                  <div className={`${theme.darkMode ? "text-sm font-semibold text-slate-300" : "text-sm font-semibold text-slate-600"}`}>현재 사진 개수</div>
-                  <div className={`${theme.darkMode ? "mt-3 flex flex-wrap gap-3 text-sm text-slate-300" : "mt-3 flex flex-wrap gap-3 text-sm text-slate-700"}`}>
-                    <div>전: {cleaningReportForm.beforePhotoDataUrls.length}</div>
-                    <div>후: {cleaningReportForm.afterPhotoDataUrls.length}</div>
-                  </div>
-                </div>
+                {(() => {
+                  const merged = [
+                    ...cleaningReportForm.beforePhotoDataUrls.map((url, i) => ({ url, field: "beforePhotoDataUrls" as const, idx: i })),
+                    ...cleaningReportForm.afterPhotoDataUrls.map((url, i) => ({ url, field: "afterPhotoDataUrls" as const, idx: i })),
+                  ];
+                  const urls = merged.map((m) => m.url);
+                  if (merged.length === 0) {
+                    return <div className={`rounded-2xl border border-dashed p-4 text-center text-sm ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-400"}`}>등록된 사진이 없습니다.</div>;
+                  }
+                  return (
+                    <div className="flex flex-wrap gap-2">
+                      {merged.map((m, gi) => (
+                        <div key={`${m.field}-${m.idx}`} className="relative">
+                          <img
+                            src={m.url}
+                            alt={`사진-${gi + 1}`}
+                            onClick={() => setImageLightbox({ urls, index: gi, title: "청소 사진" })}
+                            className="h-20 w-20 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeCleaningReportPhoto(m.field, m.idx)}
+                            className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white hover:bg-rose-500"
+                            title="이 사진 삭제"
+                          >×</button>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+                <div className="text-sm text-slate-500">총 {cleaningReportForm.beforePhotoDataUrls.length + cleaningReportForm.afterPhotoDataUrls.length}장</div>
               </div>
             </div>
 
