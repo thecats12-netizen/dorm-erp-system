@@ -1886,10 +1886,11 @@ export default function App() {
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
 
   const [dormForm, setDormForm] = useState(dormTemplate());
-  const [occupantForm, setOccupantForm] = useState(occupantTemplate());
+  const [occupantForm, setOccupantForm] = useState(() => occupantTemplate());
   const [assignManagerToDorm, setAssignManagerToDorm] = useState(false);
-  const [dormContractForm, setDormContractForm] = useState<DormContractFormState>(dormContractTemplate());
-  const [newHireForm, setNewHireForm] = useState<NewHireFormState>(newHireTemplate());
+  // 지연 초기화: 템플릿(오늘 날짜 포함)을 매 렌더가 아닌 최초 1회만 생성 (불필요한 객체/날짜 재생성 방지)
+  const [dormContractForm, setDormContractForm] = useState<DormContractFormState>(() => dormContractTemplate());
+  const [newHireForm, setNewHireForm] = useState<NewHireFormState>(() => newHireTemplate());
   const [inventoryForm, setInventoryForm] = useState(inventoryTemplate());
   const [leaseForm, setLeaseForm] = useState(leaseTemplate());
   const [saleForm, setSaleForm] = useState(saleTemplate());
@@ -4377,7 +4378,7 @@ export default function App() {
       }
     });
 
-    return Array.from(latestContractByDorm.values())
+    const contractBased = Array.from(latestContractByDorm.values())
       .filter((contract) => !contract.isDeleted)
       .filter((contract) => contract.contractStatus !== "종료" && contract.contractStatus !== "해지")
       .filter((contract) => ["공실", "진행중", "만료예정", "연장"].includes(contract.contractStatus))
@@ -4410,6 +4411,25 @@ export default function App() {
           isDeleted: false,
         } as Dorm;
       });
+
+    // 계약과 매칭되지 않는 독립 기숙사(dorms)도 운영 목록에 포함.
+    // 기숙사 Excel 업로드분이 계약 없이 dorms 에만 존재하는 경우 화면에서 누락되던 문제 보정(데이터 복구).
+    const coveredKeys = new Set(contractBased.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo)));
+    const standalone: Dorm[] = [];
+    dorms.forEach((d) => {
+      if (d.isDeleted) return;
+      if (!String(d.site || "").trim() || !String(d.buildingName || "").trim()) {
+        if (import.meta.env.DEV) console.warn("[operationalDorms] 표시 제외: site/건물명 누락", { id: d.id, site: d.site, buildingName: d.buildingName });
+        return;
+      }
+      if (d.leaseStatus === "해지" || (d.leaseStatus as string) === "종료") return; // 종료/해지 제외
+      const key = getDormKey(d.site, d.buildingName, d.dong, d.roomHo);
+      if (coveredKeys.has(key)) return; // 계약 기반에 이미 포함됨
+      coveredKeys.add(key);
+      standalone.push({ ...d, isDeleted: false });
+    });
+
+    return [...contractBased, ...standalone];
   }, [dormContracts, dorms]);
 
   const reportPeriod = `${reportYear}-${reportMonth}`;
@@ -7650,12 +7670,12 @@ export default function App() {
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "dorm"));
     const mappedDorms: Dorm[] = rows.map((r) => ({
       id: crypto.randomUUID(),
-      site: String(r["지역"] || "평택") as Site,
-      gender: String(r["성별"] || "남") as "남" | "여",
-      buildingName: String(r["건물명"] || ""),
-      address: String(r["주소"] || ""),
-      dong: String(r["동"] || ""),
-      roomHo: String(r["호수"] || r["호"] || ""),
+      site: String(r["지역"] || "평택").trim() as Site,
+      gender: String(r["성별"] || "남").trim() as "남" | "여",
+      buildingName: String(r["건물명"] || "").trim(),
+      address: String(r["주소"] || "").trim(),
+      dong: String(r["동"] || "").trim(),
+      roomHo: String(r["호수"] || r["호"] || "").trim(),
       pyeong: String(r["평수"] || ""),
       capacity: 6,
       managerUserId: undefined,
@@ -7669,6 +7689,7 @@ export default function App() {
       세대현관: String(r["세대현관"] || ""),
       balanceDate: String(r["잔금일"] || ""),
       notes: String(r["비고"] || ""),
+      isDeleted: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }));
@@ -7683,11 +7704,11 @@ export default function App() {
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "dormContract"));
     const mapped = rows.map((r) => ({
       id: crypto.randomUUID(),
-      site: String(r["지역"] || "평택") as Site,
-      address: String(r["도로명주소"] || r["주소"] || ""),
-      buildingName: String(r["건물명"] || ""),
-      dong: String(r["동"] || ""),
-      roomHo: String(r["호수"] || r["호"] || ""),
+      site: String(r["지역"] || "평택").trim() as Site,
+      address: String(r["도로명주소"] || r["주소"] || "").trim(),
+      buildingName: String(r["건물명"] || "").trim(),
+      dong: String(r["동"] || "").trim(),
+      roomHo: String(r["호수"] || r["호"] || "").trim(),
       pyeong: String(r["평수"] || ""),
       landlordName: String(r["임대인명"] || ""),
       landlordPhone: String(r["임대인연락처"] || ""),
@@ -7697,16 +7718,17 @@ export default function App() {
       세대현관: String(r["세대현관"] || ""),
       contractStart: String(r["계약시작일"] || String(r["계약시작"] || "")),
       contractEnd: String(r["계약종료일"] || String(r["계약종료"] || "")),
-      contractStatus: String(r["계약상태"] || r["status"] || "진행중") as DormContractStatus,
+      contractStatus: String(r["계약상태"] || r["status"] || "진행중").trim() as DormContractStatus,
       contractAmount: String(r["계약금액"] || r["contractAmount"] || ""),
       prepaymentDeposit: String(r["선납금"] || r["prepaymentDeposit"] || ""),
       deposit: String(r["보증금"] || r["deposit"] || ""),
       monthlyRentOrMaintenance: String(r["월세/관리비"] || r["월세 or 관리비"] || r["monthlyRentOrMaintenance"] || ""),
       contractType: String(r["계약유형"] || r["contractType"] || "신규") as ContractType,
-      gender: String(r["성별"] || "남") as Gender,
+      gender: String(r["성별"] || "남").trim() as Gender,
       notes: String(r["비고"] || ""),
       registeredBy: String(r["등록자"] || r["registeredBy"] || currentUser?.displayName || ""),
       modifiedBy: String(r["수정자"] || r["modifiedBy"] || currentUser?.displayName || ""),
+      isDeleted: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }));
@@ -7720,25 +7742,38 @@ export default function App() {
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "newHire"));
     const mapped = rows.map((r) => {
+      const site = String(r["지역"] || "평택").trim();
+      const gender = String(r["성별"] || "남").trim();
+      const buildingName = String(r["건물명"] || r["buildingName"] || "").trim();
+      const dong = String(r["동"] || "").trim();
+      const roomHo = String(r["호수"] || r["호"] || r["roomHo"] || "").trim();
       const address = String(r["도로명주소"] || r["주소"] || "").trim();
-      const matchedDorm = dorms.find(
+      // 1차: site+건물명+동+호수 키 매칭(가장 안정), 2차: 주소 매칭 fallback
+      const keyMatch = buildingName
+        ? dorms.find((d) => !d.isDeleted && getDormKey(d.site, d.buildingName, d.dong, d.roomHo) === getDormKey(site, buildingName, dong, roomHo))
+        : undefined;
+      const matchedDorm = keyMatch || dorms.find(
         (d) =>
           d.address === address ||
           `${d.address} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`.trim() === address ||
           `${d.address}${stripDongHoSuffix(d.dong)}${stripDongHoSuffix(d.roomHo)}` === address
       );
+      const resolvedDormId = matchedDorm?.id || String(r["기숙사ID"] || r["dormId"] || "").trim();
+      if (import.meta.env.DEV && !resolvedDormId && (buildingName || dong || roomHo)) {
+        console.warn("[uploadNewHiresExcel] 기숙사 매칭 실패 → 미배정 처리:", { name: r["이름"], site, buildingName, dong, roomHo });
+      }
       return {
       id: crypto.randomUUID(),
-      site: String(r["지역"] || "평택") as Site,
-      gender: String(r["성별"] || "남") as Gender,
-      name: String(r["이름"] || ""),
+      site: site as Site,
+      gender: gender as Gender,
+      name: String(r["이름"] || "").trim(),
       phone: String(r["연락처"] || ""),
-      department: String(r["부서"] || ""),
-      dormId: matchedDorm?.id || String(r["기숙사ID"] || r["dormId"] || ""),
+      department: String(r["부서"] || "").trim(),
+      dormId: resolvedDormId,
       address: matchedDorm?.address || address || "",
-      buildingName: String(r["건물명"] || r["buildingName"] || matchedDorm?.buildingName || ""),
-      dong: String(r["동"] || matchedDorm?.dong || ""),
-      roomHo: String(r["호수"] || r["호"] || r["roomHo"] || matchedDorm?.roomHo || ""),
+      buildingName: buildingName || matchedDorm?.buildingName || "",
+      dong: dong || matchedDorm?.dong || "",
+      roomHo: roomHo || matchedDorm?.roomHo || "",
       공동현관: matchedDorm?.공동현관 || String(r["공동현관"] || ""),
       세대현관: matchedDorm?.세대현관 || String(r["세대현관"] || ""),
       expectedMoveInDate: parseExcelDate(r["예상입실일"] || r["expectedMoveInDate"] || ""),

@@ -95,7 +95,10 @@ export function Input({ label, value, onChange, onBlur, type = "text", readOnly 
     }
     onChange?.(v);
   };
-  return <div><label className="mb-2 block text-sm font-medium text-slate-700">{label}</label><input type={type === "date-text" ? "date" : type} value={value} onChange={handleChange} onBlur={onBlur} readOnly={readOnly} placeholder={type === "date-text" ? undefined : placeholder} className={`w-full rounded-2xl border border-slate-300 px-3 py-3 outline-none ${readOnly ? 'bg-slate-50' : 'focus:border-slate-400'}`} /></div>;
+  // 날짜 입력(type=date)은 값이 YYYY-MM-DD 여야 표시됨. ISO 타임스탬프(예: 2024-03-01T12:00:00Z)나
+  // 시간이 포함된 값은 앞 10자리만 사용해 표시(빈 값으로 보이는 "날짜 초기화" 현상 방지). 폼 상태/저장값은 변경하지 않음.
+  const displayValue = type === "date-text" ? String(value || "").slice(0, 10) : value;
+  return <div><label className="mb-2 block text-sm font-medium text-slate-700">{label}</label><input type={type === "date-text" ? "date" : type} value={displayValue} onChange={handleChange} onBlur={onBlur} readOnly={readOnly} placeholder={type === "date-text" ? undefined : placeholder} className={`w-full rounded-2xl border border-slate-300 px-3 py-3 outline-none ${readOnly ? 'bg-slate-50' : 'focus:border-slate-400'}`} /></div>;
 }
 
 export function SelectInput({ label, value, onChange, options, disabled = false }: { label: string; value: string; onChange: (v: string) => void; options: string[]; disabled?: boolean }) {
