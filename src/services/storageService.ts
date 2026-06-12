@@ -101,9 +101,17 @@ export const loadJson = <T>(key: string, fallback: T, tenantId = "default"): T =
   return safeParse<T>(stored, fallback);
 };
 
-export const saveJson = <T>(key: string, value: T, tenantId = "default") => {
-  if (!isBrowser) return;
-  adapter.setItem(getStorageKey(key, tenantId), JSON.stringify(value));
+// localStorage 저장. 용량 초과(QuotaExceededError) 등 실패 시에도 예외를 던지지 않고
+// 경고만 출력하여 앱 동작이 중단되지 않도록 한다. 성공 여부를 boolean 으로 반환.
+export const saveJson = <T>(key: string, value: T, tenantId = "default"): boolean => {
+  if (!isBrowser) return false;
+  try {
+    adapter.setItem(getStorageKey(key, tenantId), JSON.stringify(value));
+    return true;
+  } catch (e) {
+    console.warn(`[storage] 로컬 저장 실패 (${key}) — 용량 초과 가능:`, e);
+    return false;
+  }
 };
 
 export const removeJson = (key: string, tenantId = "default") => {

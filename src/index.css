@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* 기본 라이트 스킴 고정 — 모바일(특히 Android Chrome) 자동 다크화 방지.
+   다크모드는 앱 루트에 inline color-scheme(dark)로만 적용된다. */
+:root { color-scheme: light; }
+
 .dark-mode .bg-white {
   background-color: #111827 !important;
 }

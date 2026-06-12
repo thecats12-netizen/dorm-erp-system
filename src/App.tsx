@@ -1052,6 +1052,12 @@ function canFileDefect(user: LoginUser | null) {
   return !!user && ["admin", "maintenance_reporter"].includes(user.role);
 }
 
+// 감사로그 최대 보관 건수 — 최근 N건만 유지(localStorage 용량 초과 방지)
+const MAX_AUDIT_LOGS = 5000;
+
+// 로그인 아이디 저장(이메일/아이디만, 비밀번호는 절대 저장하지 않음)
+const SAVED_LOGIN_ID_KEY = "erp-saved-login-id";
+
 // 저장 스냅샷 직렬화 — 저장 effect와 로드 직후 시드가 동일한 방식을 쓰도록 단일 함수로 통일.
 // (정규화/순서 차이로 인한 오탐을 막기 위해 저장 payload와 동일한 형태를 사용)
 function dormModuleSnapshot(s: { dorms: unknown[]; occupants: unknown[]; dormContracts: unknown[]; newHires: unknown[] }): string {
@@ -1405,7 +1411,9 @@ export default function App() {
   const [settlementShowUnpaid, setSettlementShowUnpaid] = useState(false);
   const [inventorySubTab, setInventorySubTab] = useState<"status" | "manage" | "history">("status");
 
-  const [loginForm, setLoginForm] = useState({ username: "admin", password: "admin1234" });
+  // 저장된 로그인 아이디 복원(이메일/아이디만, 비밀번호는 저장하지 않음). tenant 는 항상 "default".
+  const [loginForm, setLoginForm] = useState(() => ({ username: loadJson<string>(SAVED_LOGIN_ID_KEY, "", "default") || "", password: "" }));
+  const [rememberId, setRememberId] = useState(() => !!loadJson<string>(SAVED_LOGIN_ID_KEY, "", "default"));
   const [loginError, setLoginError] = useState("");
   const [_search, _setSearch] = useState("");
   const [userSearch, setUserSearch] = useState("");
@@ -1818,6 +1826,11 @@ export default function App() {
 
   const [tenantId] = useState<string>("default");
   const [isLoading, setIsLoading] = useState(true);
+  // 로그인 직후 Supabase 데이터 강제 재로드 트리거(새로고침 없이 데이터 표시)
+  const [dataReloadKey, setDataReloadKey] = useState(0);
+  // 하자 이미지 라이트박스(저장 없이 즉시 미리보기)
+  const [imageLightbox, setImageLightbox] = useState<{ urls: string[]; index: number; title: string } | null>(null);
+  const [lightboxZoomed, setLightboxZoomed] = useState(false);
   const [operationalSyncError, setOperationalSyncError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -2036,6 +2049,7 @@ export default function App() {
   useEffect(() => {
     const loadInitialData = async () => {
       console.log("[LOAD] === Starting initial data load ===");
+      setIsLoading(true); // 재로드(로그인 직후 등) 시에도 로딩 화면을 보여 빈 화면 방지
       runLegacyLocalStorageMigration(tenantId);
 
       try {
@@ -2201,7 +2215,12 @@ export default function App() {
   };
 
   loadInitialData();
-}, [tenantId]);
+}, [tenantId, dataReloadKey]);
+
+  // 다크모드 ↔ color-scheme 동기화 (모바일 자동 다크화 방지 + 폼/스크롤바 일치)
+  useEffect(() => {
+    document.documentElement.style.colorScheme = theme.darkMode ? "dark" : "light";
+  }, [theme.darkMode]);
 
   const saveSystemSettings = () => {
     if (!canEditData(currentUser)) return;
@@ -2613,13 +2632,23 @@ export default function App() {
   });
 
   const persistBackups = (next: DataBackup[]) => {
-    try {
-      saveJson(BACKUPS_KEY, next, tenantId);
-      setBackupRestoreError(null);
-    } catch (e) {
-      console.warn("백업 저장 실패:", e);
-      setBackupRestoreError("백업 저장 공간이 부족합니다. 오래된 백업을 삭제하거나 JSON으로 내려받아 보관하세요.");
+    // 1) 최근 MAX_BACKUPS 개만 유지 (newest-first 이므로 앞에서부터 자름)
+    let candidate = next.slice(0, MAX_BACKUPS);
+    // 2) 저장 시도 → 용량 초과로 실패하면 가장 오래된 백업(배열 끝)부터 제거 후 재시도
+    while (candidate.length > 0) {
+      if (saveJson(BACKUPS_KEY, candidate, tenantId)) {
+        setBackupRestoreError(null);
+        // 실제 저장된 목록과 메모리 상태 동기화 (오래된 백업이 잘렸을 수 있음)
+        if (candidate.length !== next.length) setBackups(candidate);
+        return;
+      }
+      candidate = candidate.slice(0, candidate.length - 1);
     }
+    // 모든 백업을 비워도 저장 실패 → 경고만 출력(앱 중단 없음)
+    saveJson(BACKUPS_KEY, [], tenantId);
+    setBackups([]);
+    console.warn("백업 저장 실패: 저장 공간이 부족하여 백업을 비웠습니다.");
+    setBackupRestoreError("백업 저장 공간이 부족합니다. 오래된 백업을 삭제하거나 JSON으로 내려받아 보관하세요.");
   };
 
   const createBackup = (type: "manual" | "auto"): DataBackup => {
@@ -4129,7 +4158,7 @@ export default function App() {
   }, [defects, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    if (!isSupabaseAvailable()) saveJson(AUDIT_LOGS_KEY, auditLogs, tenantId);
+    if (!isSupabaseAvailable()) saveJson(AUDIT_LOGS_KEY, auditLogs.slice(0, MAX_AUDIT_LOGS), tenantId);
   }, [auditLogs, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
@@ -5833,6 +5862,8 @@ export default function App() {
         setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
         setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
         setLoginError("");
+        // 로그인 직후 Supabase 데이터 강제 재로드 → 새로고침 없이 데이터 표시
+        setDataReloadKey((k) => k + 1);
         return;
       }
     }
@@ -5853,6 +5884,38 @@ export default function App() {
     setActiveTab(found.role === "maintenance_reporter" ? "defects" : "dashboard");
     setLoginError("");
   };
+
+  // 로그인 버튼 핸들러: 아이디 저장 처리 후 기존 login() 호출 (login 로직 자체는 변경 없음)
+  const handleLoginClick = async () => {
+    const id = loginForm.username.trim();
+    if (rememberId && id) {
+      saveJson(SAVED_LOGIN_ID_KEY, id, tenantId);
+    } else {
+      removeJson(SAVED_LOGIN_ID_KEY, tenantId);
+    }
+    await login();
+  };
+
+  const toggleRememberId = (checked: boolean) => {
+    setRememberId(checked);
+    if (!checked) removeJson(SAVED_LOGIN_ID_KEY, tenantId); // 체크 해제 시 저장된 아이디 즉시 삭제
+  };
+
+  // 이미지(data URL/blob) 즉시 다운로드 — 저장 없이 확인 후 필요 시 내려받기
+  const downloadImage = (url: string, filename: string) => {
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (e) {
+      console.warn("이미지 다운로드 실패:", e);
+      window.open(url, "_blank");
+    }
+  };
+
 
   const logout = async () => {
     if (isSupabaseAvailable()) {
@@ -8911,7 +8974,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const createAuditLog = (params: Omit<AuditLog, "id" | "changedAt">) => {
     const entry = createAuditLogEntry(params);
-    setAuditLogs((prev) => [entry, ...prev]);
+    setAuditLogs((prev) => [entry, ...prev].slice(0, MAX_AUDIT_LOGS));
   };
 
   // ============================================
@@ -9578,10 +9641,30 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   if (isLoading) {
     return (
-      <div className={`min-h-screen flex items-center justify-center ${theme.darkMode ? "bg-slate-950 text-slate-300" : "bg-slate-50 text-slate-700"}`}>
-        <div className={`rounded-2xl border ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"} p-8 shadow-lg`}>
-          <div className="text-2xl font-semibold">데이터 로딩 중...</div>
-          <div className="mt-2 text-sm text-slate-500">SaaS 준비 구조로 저장소와 테넌트 데이터를 초기화하고 있습니다.</div>
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-900 to-blue-950 p-6 text-slate-100">
+        <div className="w-full max-w-md">
+          {/* 로고 + 시스템명 */}
+          <div className="mb-8 flex flex-col items-center text-center">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-600/90 shadow-lg ring-1 ring-blue-400/30">
+              <Building2 className="h-8 w-8 text-white" />
+            </div>
+            <h1 className="mt-4 text-xl font-bold tracking-tight">기숙사 운영관리 ERP</h1>
+            <div className="mt-3 flex items-center gap-2 text-sm text-blue-200">
+              <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-blue-300 border-t-transparent" />
+              데이터를 불러오는 중입니다…
+            </div>
+          </div>
+          {/* 스켈레톤 카드 */}
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-3">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="h-20 animate-pulse rounded-2xl bg-slate-800/70 ring-1 ring-slate-700/50" />
+              ))}
+            </div>
+            <div className="h-28 animate-pulse rounded-2xl bg-slate-800/70 ring-1 ring-slate-700/50" />
+            <div className="h-28 animate-pulse rounded-2xl bg-slate-800/70 ring-1 ring-slate-700/50" />
+          </div>
+          <p className="mt-6 text-center text-xs text-slate-400">잠시만 기다려 주세요. 저장소와 데이터를 초기화하고 있습니다.</p>
         </div>
       </div>
     );
@@ -9599,16 +9682,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <p className="mt-2 text-sm text-slate-500">관리자, 조회전용, 기숙사관리자, 하자접수 전용 계정 지원</p>
           </div>
           <div className="space-y-4">
-            <Input label="아이디" value={loginForm.username} onChange={(v) => setLoginForm((f) => ({ ...f, username: v }))} />
-            <Input label="비밀번호" type="password" value={loginForm.password} onChange={(v) => setLoginForm((f) => ({ ...f, password: v }))} />
+            <Input label="아이디" value={loginForm.username} onChange={(v) => setLoginForm((f) => ({ ...f, username: v }))} placeholder="아이디를 입력하세요" />
+            <Input label="비밀번호" type="password" value={loginForm.password} onChange={(v) => setLoginForm((f) => ({ ...f, password: v }))} placeholder="비밀번호를 입력하세요" />
+            <label className="flex items-center gap-2 text-sm text-slate-600 select-none">
+              <input type="checkbox" checked={rememberId} onChange={(e) => toggleRememberId(e.target.checked)} className="h-4 w-4 rounded border-slate-300" />
+              아이디 저장 <span className="text-xs text-slate-400">(비밀번호는 저장되지 않습니다)</span>
+            </label>
             {loginError && <div className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-600">{loginError}</div>}
-            <button onClick={login} className="w-full rounded-2xl bg-slate-900 px-4 py-3 font-medium text-white hover:bg-slate-800">로그인</button>
-          </div>
-          <div className={`mt-5 rounded-2xl ${theme.darkMode ? "bg-slate-900 text-slate-400" : "bg-slate-50 text-slate-600"} p-4 text-sm`}>
-            <div className={`font-semibold ${theme.darkMode ? "text-slate-200" : "text-slate-800"}`}>기본 계정</div>
-            <div className="mt-2">총관리자: admin / admin1234</div>
-            <div>조회전용: viewer / viewer1234</div>
-            <div>하자접수: defect1 / defect1234</div>
+            <button onClick={handleLoginClick} className="w-full rounded-2xl bg-slate-900 px-4 py-3 font-medium text-white hover:bg-slate-800">로그인</button>
           </div>
         </div>
       </div>
@@ -17240,14 +17321,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-3 py-3">
                         <div className="flex flex-wrap gap-2">
                           {d.requestPhotoDataUrls.map((src, idx) => (
-                            <a
+                            <button
                               key={idx}
-                              href={src}
-                              download={`request-${d.id}-${idx + 1}.png`}
+                              type="button"
+                              onClick={() => setImageLightbox({ urls: d.requestPhotoDataUrls, index: idx, title: `접수 사진 · ${d.buildingName || ""}` })}
                               className={`${theme.darkMode ? "rounded-lg border border-slate-600 px-2 py-1 text-xs hover:bg-slate-950" : "rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"}`}
+                              title="크게 보기"
                             >
                               접수{idx + 1}
-                            </a>
+                            </button>
                           ))}
                           {d.requestPhotoDataUrls.length === 0 && "-"}
                         </div>
@@ -17257,14 +17339,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3">
                           <div className="flex flex-wrap gap-2">
                             {d.completionPhotoDataUrls.map((src, idx) => (
-                              <a
+                              <button
                                 key={idx}
-                                href={src}
-                                download={`completion-${d.id}-${idx + 1}.png`}
+                                type="button"
+                                onClick={() => setImageLightbox({ urls: d.completionPhotoDataUrls, index: idx, title: `완료 사진 · ${d.buildingName || ""}` })}
                                 className={`${theme.darkMode ? "rounded-lg border border-slate-600 px-2 py-1 text-xs hover:bg-slate-950" : "rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"}`}
+                                title="크게 보기"
                               >
                                 완료{idx + 1}
-                              </a>
+                              </button>
                             ))}
                             {d.completionPhotoDataUrls.length === 0 && "-"}
                           </div>
@@ -18473,6 +18556,46 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           saveUser,
           theme.accentColor
         )}
+
+        {/* 하자 이미지 라이트박스 — 저장 없이 즉시 크게 보기 / 확대 / 새 창 / 다운로드 */}
+        {imageLightbox && imageLightbox.urls.length > 0 && (() => {
+          const urls = imageLightbox.urls;
+          const safeIndex = Math.min(Math.max(imageLightbox.index, 0), urls.length - 1);
+          const current = urls[safeIndex];
+          const go = (delta: number) => {
+            setLightboxZoomed(false);
+            setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + delta + lb.urls.length) % lb.urls.length } : lb));
+          };
+          return (
+            <div className="fixed inset-0 z-[110] flex flex-col bg-black/85 backdrop-blur-sm" onClick={() => setImageLightbox(null)}>
+              <div className="flex items-center justify-between gap-2 p-3 text-white" onClick={(e) => e.stopPropagation()}>
+                <div className="min-w-0 truncate text-sm font-medium">
+                  {imageLightbox.title} <span className="text-white/60">({safeIndex + 1}/{urls.length})</span>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <button type="button" onClick={() => window.open(current, "_blank")} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">새 창</button>
+                  <button type="button" onClick={() => downloadImage(current, `defect-image-${safeIndex + 1}.png`)} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold hover:bg-blue-500">다운로드</button>
+                  <button type="button" onClick={() => setImageLightbox(null)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">닫기</button>
+                </div>
+              </div>
+              <div className="relative flex flex-1 items-center justify-center overflow-auto p-4" onClick={(e) => e.stopPropagation()}>
+                {urls.length > 1 && (
+                  <button type="button" onClick={() => go(-1)} className="absolute left-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/15 px-3 py-2 text-xl text-white hover:bg-white/30">‹</button>
+                )}
+                <img
+                  src={current}
+                  alt={imageLightbox.title}
+                  onClick={() => setLightboxZoomed((z) => !z)}
+                  className={lightboxZoomed ? "max-h-none max-w-none cursor-zoom-out" : "max-h-full max-w-full object-contain cursor-zoom-in"}
+                />
+                {urls.length > 1 && (
+                  <button type="button" onClick={() => go(1)} className="absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/15 px-3 py-2 text-xl text-white hover:bg-white/30">›</button>
+                )}
+              </div>
+              <div className="pb-3 text-center text-xs text-white/50">이미지를 클릭하면 확대/축소됩니다 · 바깥을 누르면 닫힙니다</div>
+            </div>
+          );
+        })()}
 
         {/* 보안: 비활성 자동 로그아웃 1분 전 경고 모달 */}
         {showInactivityWarning && (
