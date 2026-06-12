@@ -5862,7 +5862,9 @@ export default function App() {
         setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
         setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
         setLoginError("");
-        // 로그인 직후 Supabase 데이터 강제 재로드 → 새로고침 없이 데이터 표시
+        // 로그인 직후 Supabase 데이터 강제 재로드 → 새로고침 없이 데이터 표시.
+        // isLoading 을 동기로 켜서 빈 인증 화면이 한 프레임도 노출되지 않도록 함(로딩 화면 즉시 표시).
+        setIsLoading(true);
         setDataReloadKey((k) => k + 1);
         return;
       }
