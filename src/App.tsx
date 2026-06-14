@@ -2144,6 +2144,14 @@ export default function App() {
       memo: "메모",
       confirmedBy: "확인자",
       confirmedAt: "확인일",
+      // 보고서/통보서/자동생성 보강
+      report: "보고서",
+      period: "기간",
+      mode: "생성 방식",
+      trainingRecordId: "훈련기록",
+      manualBaseYear: "수동 기준연도",
+      targetId: "대상",
+      backupId: "백업",
     };
 
     return auditFieldLabelMap[normalizedKey] || auditFieldLabelMap[key] || prettifyFieldKey(key);
@@ -3194,6 +3202,35 @@ export default function App() {
         if (parsed.length === 0) return "(없음)";
         return parsed.map((id) => militaryPersonnel.find((m) => m.id === id)?.name || String(id)).join(", ");
       }
+    }
+
+    // 훈련기록 ID → 교육명(대상자명)으로 표시
+    if (normalizedField === "trainingRecordId") {
+      const rec = militaryTrainingRecords.find((r) => r.id === normalized);
+      if (rec) {
+        const pName = militaryPersonnel.find((m) => m.id === rec.personnelId)?.name;
+        return `${rec.subject || rec.trainingType || "훈련"}${pName ? ` (${pName})` : ""}`;
+      }
+      return isUuid(String(normalized)) ? "훈련기록" : String(normalized);
+    }
+
+    // 통보서/공지 내용: 내부 마커([훈련기록:id]) 숨기고 첫 줄 요약만 표시
+    if (normalizedField === "content") {
+      const text = String(normalized).replace(/\[훈련기록:[^\]]*\]/g, "").trim();
+      if (!text) return "(없음)";
+      const firstLine = text.split("\n").map((l) => l.trim()).find((l) => l) || "";
+      const lineCount = text.split("\n").filter((l) => l.trim()).length;
+      return lineCount > 1 ? `${firstLine} …(외 ${lineCount - 1}줄)` : firstLine;
+    }
+
+    // 코드성 값 한글/표준 표기
+    if (typeof normalized === "string") {
+      const codeValueMap: Record<string, string> = {
+        pdf: "PDF", excel: "Excel",
+        auto: "자동계산", manual: "수동(고정)", manualAuto: "수동(자동증가)",
+        미발송: "미발송", 발송완료: "발송완료",
+      };
+      if (codeValueMap[normalized]) return codeValueMap[normalized];
     }
 
     if (normalizedField === "targetId" && targetType) {

@@ -99,15 +99,18 @@ export const saveMilitaryModule = async (payload: MilitaryModuleState): Promise<
   // military_module_data 는 테넌트당 1행 구조이지만 tenant_id 에 unique 제약이 없을 수 있어
   // onConflict:"tenant_id" upsert 가 400(no unique constraint)을 유발한다.
   // → 제약 유무와 무관하게 동작하도록 "존재 여부 확인 후 update/insert"로 처리.
-  const logErr = (stage: string, error: unknown) => {
+  const payloadBytes = (() => { try { return JSON.stringify(payload).length; } catch { return -1; } })();
+  const logErr = (operation: string, error: unknown) => {
     const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
-    console.error(`[saveMilitaryModule] ${stage} 실패`, {
+    console.error(`[saveMilitaryModule] ${operation} 실패`, {
       table: MILITARY_MODULE_TABLE,
+      operation,
       tenantId: payload.tenantId,
       code: e?.code ?? "(unknown)",
       message: e?.message ?? String(error),
       details: e?.details,
       hint: e?.hint,
+      payloadBytes,
     });
   };
 
@@ -117,7 +120,7 @@ export const saveMilitaryModule = async (payload: MilitaryModuleState): Promise<
     .eq("tenant_id", payload.tenantId)
     .limit(1);
   if (selErr) {
-    logErr("기존 행 조회", selErr);
+    logErr("select", selErr);
     throw selErr;
   }
 
@@ -125,7 +128,8 @@ export const saveMilitaryModule = async (payload: MilitaryModuleState): Promise<
     const { error } = await supabase!.from(MILITARY_MODULE_TABLE).update(row).eq("tenant_id", payload.tenantId);
     if (error) { logErr("update", error); throw error; }
   } else {
-    const { error } = await supabase!.from(MILITARY_MODULE_TABLE).insert(row);
+    // created_at default 가 없는 배포 스키마에서도 안전하도록 명시(있으면 무시됨)
+    const { error } = await supabase!.from(MILITARY_MODULE_TABLE).insert({ ...row, created_at: new Date().toISOString() });
     if (error) { logErr("insert", error); throw error; }
   }
 };
