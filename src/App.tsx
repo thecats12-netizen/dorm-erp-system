@@ -258,6 +258,55 @@ const getTabLabel = (tabKey: TabKey) => {
 const getDormKey = (site: string, buildingName: string, dong: string, roomHo: string) =>
   makeDormMatchKey(site, buildingName, dong, roomHo);
 
+// Excel 내보내기용 날짜 정리: ISO/timestamptz/Date → YYYY-MM-DD, 빈 값 → "". 날짜 형식이 아니면 원본 유지.
+// 예) "2026-06-12 00:00:00+00" → "2026-06-12", "2026-06-12T09:00:00Z" → "2026-06-12"
+function formatExcelDate(value: unknown): string {
+  if (value == null) return "";
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return "";
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+  }
+  const s = String(value).trim();
+  if (!s) return "";
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : s;
+}
+
+// Excel 행 정리: 날짜형 문자열/Date → YYYY-MM-DD, null/undefined → "", NaN → "". 그 외(한글 상태값 등) 유지.
+function sanitizeExcelRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (v == null) { out[k] = ""; continue; }
+    if (v instanceof Date) { out[k] = formatExcelDate(v); continue; }
+    if (typeof v === "number") { out[k] = Number.isNaN(v) ? "" : v; continue; }
+    if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}|$)/.test(v)) { out[k] = formatExcelDate(v); continue; }
+    out[k] = v;
+  }
+  return out;
+}
+
+// 공통 공실/사용률 계산(정원 기준). 활성 기숙사 목록(operationalDorms = 종료/해지/isDeleted 제외)과
+// 현재 거주자(거주중/만료예정, 퇴실/과거/삭제 제외) 기준. 정원 0이면 0%(NaN 방지).
+// 공실 수 = 정원 - 현재거주자, 공실률 = 공실/정원*100, 사용률 = 거주자/정원*100.
+function computeVacancyStats(
+  dormList: Array<{ id: string; capacity?: number }>,
+  occupants: Array<{ dormId: string; status: string; isDeleted?: boolean }>
+) {
+  const totalCapacity = dormList.reduce((sum, d) => sum + (d.capacity || 6), 0);
+  const dormIds = new Set(dormList.map((d) => d.id));
+  const currentResidents = occupants.filter(
+    (o) => !o.isDeleted && ["거주중", "만료예정"].includes(o.status) && dormIds.has(o.dormId)
+  ).length;
+  const vacancy = Math.max(totalCapacity - currentResidents, 0);
+  return {
+    totalCapacity,
+    currentResidents,
+    vacancy,
+    occupancyRate: totalCapacity > 0 ? Math.round((currentResidents / totalCapacity) * 100) : 0,
+    vacancyRate: totalCapacity > 0 ? Math.round((vacancy / totalCapacity) * 100) : 0,
+  };
+}
+
 // 입주자 표시 상태: 거주중 / 만료예정 / 퇴실 / 과거거주 / 배정대기
 // (실제 퇴실일이 있으면 과거거주, status=퇴실이면 퇴실, 거주중/신규입주는 거주중)
 function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string }): "거주중" | "만료예정" | "퇴실" | "과거거주" | "배정대기" {
@@ -669,7 +718,7 @@ function getAge(birthDate: string, referenceDate?: Date) {
 // 병역 체계 기준 상수
 const RESERVE_MAX_YEAR = 8;           // 예비군 1~8년차 (전역 후 8년)
 const CIVIL_DEFENSE_END_AGE = 40;     // 민방위 종료 연령(만) — 만40세 초과 시 대상아님
-const CIVIL_DEFENSE_MAX_YEARS = 10;   // 생년월일(나이) 미상 시 전역 기준 민방위 최대 연차 상한
+const CIVIL_DEFENSE_MAX_YEARS = 5;    // 민방위 1~5년차까지만 관리(확정 정책). 6년차 이상은 대상아님(민방위 종료)
 const CIVIL_DEFENSE_AGE_START = 36;   // 전역일이 없을 때 연령 기반 민방위 시작(만) → 1년차
 
 const MILITARY_NONE = { category: "대상아님" as const, reserveYear: 0, civilYear: 0, trainingYear: 0 };
@@ -693,8 +742,9 @@ function fromReserveEquivYear(equivYear: number, age: number | null): MilitarySt
   }
   if (equivYear > RESERVE_MAX_YEAR) {
     const civilYear = equivYear - RESERVE_MAX_YEAR; // 9년차 → 민방위 1년차
-    const withinAge = age == null ? civilYear <= CIVIL_DEFENSE_MAX_YEARS : age <= CIVIL_DEFENSE_END_AGE;
-    if (withinAge && civilYear >= 1) {
+    // 확정 정책: 민방위 1~5년차만 관리(6년차 이상 대상아님), 나이 알 수 있으면 만40세 이하만
+    const valid = civilYear >= 1 && civilYear <= CIVIL_DEFENSE_MAX_YEARS && (age == null || age <= CIVIL_DEFENSE_END_AGE);
+    if (valid) {
       return { category: "민방위", reserveYear: 0, civilYear, trainingYear: civilYear };
     }
   }
@@ -721,12 +771,22 @@ function computeMilitaryStatus(person: MilitaryPersonnel, referenceYear?: number
     }
     if (person.manualCategory === "민방위") {
       const civilYear = Math.max(1, baseYear + increment);
-      const withinAge = age == null ? civilYear <= CIVIL_DEFENSE_MAX_YEARS : age <= CIVIL_DEFENSE_END_AGE;
-      return withinAge
+      // 확정 정책: 민방위 1~5년차만 관리(고정 6년차 이상도 대상아님), 나이 알면 만40세 이하만
+      const valid = civilYear <= CIVIL_DEFENSE_MAX_YEARS && (age == null || age <= CIVIL_DEFENSE_END_AGE);
+      return valid
         ? { category: "민방위", reserveYear: 0, civilYear, trainingYear: civilYear }
         : MILITARY_NONE;
     }
     return MILITARY_NONE;
+  }
+
+  // 확정 정책: 전역일이 기준연도보다 미래이면 아직 전역 전(현역/전역예정) → 대상아님.
+  // (나이 기반 민방위 분기로 넘어가 오분류되는 것을 방지)
+  if (person.dischargeDate) {
+    const dd = new Date(person.dischargeDate);
+    if (!Number.isNaN(dd.getTime()) && dd > referenceDate) {
+      return MILITARY_NONE;
+    }
   }
 
   // 자동계산 — 전역일 기준(9년차부터 민방위 자동 전환)
@@ -1605,7 +1665,8 @@ export default function App() {
   }, [militarySettings, militaryTrainingYearFilter]);
 
   const saveMilitaryTrainingAutoSettings = () => {
-    saveJson(MILITARY_TRAINING_AUTOCREATE_KEY, militaryTrainingAutoConfig, tenantId);
+    // Supabase 모드: 자동저장이 Supabase에 반영(단일 출처). 오프라인일 때만 localStorage에 저장.
+    if (!isSupabaseAvailable()) saveJson(MILITARY_TRAINING_AUTOCREATE_KEY, militaryTrainingAutoConfig, tenantId);
     alert("자동생성 설정을 저장했습니다.");
   };
 
@@ -4308,36 +4369,38 @@ export default function App() {
     if (isLoading) return;
     if (!isSupabaseAvailable()) saveJson(AUDIT_LOGS_KEY, auditLogs.slice(0, MAX_AUDIT_LOGS), tenantId);
   }, [auditLogs, tenantId, isLoading]);
+  // 군대 모듈 localStorage 저장은 오프라인(Supabase 미설정) 시에만 — Supabase 모드에선 자동저장이 단일 출처.
+  // (이전: 무조건 저장 → 기기별 localStorage 사본이 생겨 기기 간 데이터가 달라질 수 있었음)
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isSupabaseAvailable()) return;
     saveJson(MILITARY_PERSONNEL_KEY, militaryPersonnel, tenantId);
   }, [militaryPersonnel, tenantId, isLoading]);
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isSupabaseAvailable()) return;
     saveJson(MILITARY_TRAINING_KEY, militaryTrainingRecords, tenantId);
   }, [militaryTrainingRecords, tenantId, isLoading]);
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isSupabaseAvailable()) return;
     saveJson(MILITARY_NOTICES_KEY, militaryNotices, tenantId);
   }, [militaryNotices, tenantId, isLoading]);
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isSupabaseAvailable()) return;
     saveJson(MILITARY_REPORTS_KEY, militaryReports, tenantId);
   }, [militaryReports, tenantId, isLoading]);
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isSupabaseAvailable()) return;
     saveJson(MILITARY_SETTINGS_KEY, militarySettings, tenantId);
   }, [militarySettings, tenantId, isLoading]);
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isSupabaseAvailable()) return;
     saveJson(MILITARY_TRAINING_RULES_KEY, militaryTrainingRules, tenantId);
   }, [militaryTrainingRules, tenantId, isLoading]);
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isSupabaseAvailable()) return;
     saveJson(MILITARY_CODE_VALUES_KEY, militaryCodeValues, tenantId);
   }, [militaryCodeValues, tenantId, isLoading]);
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isSupabaseAvailable()) return;
     saveJson(MILITARY_TRAINING_AUTOCREATE_KEY, militaryTrainingAutoConfig, tenantId);
   }, [militaryTrainingAutoConfig, tenantId, isLoading]);
 
@@ -4486,7 +4549,8 @@ export default function App() {
   const reportData = useMemo(() => {
     const totalDorms = reportFilteredOperationalDorms.length;
     const vacantDorms = reportFilteredOperationalDorms.filter((dorm) => getVacancyStatus(dorm.id) === "공실").length;
-    const vacancyRate = totalDorms > 0 ? ((vacantDorms / totalDorms) * 100).toFixed(1) : "0";
+    // 공실률: 정원 기준(대시보드와 동일 공통 함수). 빈 호실 수가 아니라 (정원-거주자)/정원.
+    const vacancyRate = computeVacancyStats(reportFilteredOperationalDorms, occupants).vacancyRate.toFixed(1);
     const vacancyDormCount = vacantDorms;
     const totalDormCount = totalDorms;
 
@@ -4495,16 +4559,18 @@ export default function App() {
       reportFilteredOperationalDorms.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo))
     );
 
-    const periodCleaningReports = cleaningReports.filter(
-      (r) => !r.isDeleted && r.reportDate.startsWith(reportPeriod) && relatedDormIds.has(r.dormId)
+    // 청소 제출률 = 제출한 기숙사 수 / 활성(제출 대상) 기숙사 수 (해당 월, 미제출 제외, 0분모 0%)
+    const submittedDormIds = new Set(
+      cleaningReports
+        .filter((r) => !r.isDeleted && r.reportDate.startsWith(reportPeriod) && relatedDormIds.has(r.dormId) && r.cleanStatus !== "미제출")
+        .map((r) => r.dormId)
     );
-    const totalSubmitted = periodCleaningReports.length;
-    const requiredCleaningCount = reportFilteredOperationalDorms.length * 5;
+    const requiredCleaningCount = reportFilteredOperationalDorms.length;
+    const submittedCleaningCount = submittedDormIds.size;
     const cleaningSubmissionRate =
       requiredCleaningCount > 0
-        ? ((totalSubmitted / requiredCleaningCount) * 100).toFixed(1)
+        ? ((submittedCleaningCount / requiredCleaningCount) * 100).toFixed(1)
         : "0";
-    const submittedCleaningCount = totalSubmitted;
 
     const periodDefects = defects.filter(
       (d) => !d.isDeleted && d.receiptDate.startsWith(reportPeriod) && relatedDormIds.has(d.dormId)
@@ -4534,7 +4600,8 @@ export default function App() {
       totalDefectCount,
       expiringContractCount,
     };
-  }, [reportFilteredOperationalDorms, reportPeriod, cleaningReports, defects, dormContracts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportFilteredOperationalDorms, reportPeriod, cleaningReports, defects, dormContracts, occupants]);
 
   const filteredUnassignedNewHires = useMemo(() => {
     return newHires.filter((hire) => {
@@ -5588,8 +5655,9 @@ export default function App() {
 
   const militaryTrainingNotCompletedCount = useMemo(
     () => militaryPersonnel.filter((person) => {
-      // Only count personnel with auto-create target status
-      if (!militaryTrainingAutoConfig.targetStatuses?.includes(person.status)) return false;
+      // 빈 status는 자동생성과 동일하게 "재직"으로 간주(집계 누락 방지)
+      const effStatus = (person.status || "").trim() || "재직";
+      if (!militaryTrainingAutoConfig.targetStatuses?.includes(effStatus)) return false;
       const training = computeRequiredTraining(person);
       return training.hours > 0 && computeTrainingStatus(person) === "미이수";
     }).length,
@@ -5599,7 +5667,7 @@ export default function App() {
   const militaryPendingNoticeCount = useMemo(
     () => {
       const targetPersonnelIds = militaryPersonnel
-        .filter((p) => militaryTrainingAutoConfig.targetStatuses?.includes(p.status))
+        .filter((p) => militaryTrainingAutoConfig.targetStatuses?.includes((p.status || "").trim() || "재직"))
         .map((p) => p.id);
       return militaryNotices.filter((n) => {
         if (n.publishedDate) return false;
@@ -5830,19 +5898,17 @@ export default function App() {
       !h.dormId && (h.residenceStatus === "대기중" || h.moveInType === "대기자")
     ).length;
 
-    // 2. 계약 만료 예정 수 (30일 이내)
+    // 2. 계약 만료 예정 수 (오늘~30일 이내, 종료/해지/삭제/빈 날짜 제외)
     const expiringCount = dormContracts.filter(c => {
       if (c.isDeleted) return false;
+      if (c.contractStatus === "종료" || c.contractStatus === "해지") return false;
+      if (!c.contractEnd) return false;
       const days = daysDiff(c.contractEnd);
       return days >= 0 && days <= 30;
     }).length;
 
-    // 3. 공실률
-    const totalCapacity = dorms.reduce((sum, d) => sum + (d.capacity || 6), 0);
-    const totalOccupied = occupants.filter(o =>
-      !o.isDeleted && ["거주중", "만료예정"].includes(o.status)
-    ).length;
-    const vacancyRate = totalCapacity > 0 ? Math.round((totalCapacity - totalOccupied) / totalCapacity * 100) : 0;
+    // 3. 공실률 (정원 기준, 활성 기숙사 operationalDorms 기준 — 보고서와 동일 공통 함수 사용)
+    const vacancyRate = computeVacancyStats(operationalDorms, occupants).vacancyRate;
 
     // 4. 미처리 하자 수
     const unprocessedDefects = defects.filter(d =>
@@ -8034,7 +8100,7 @@ export default function App() {
       현재값: it.value || "(빈값)",
       오류내용: it.message,
     }));
-    const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{ 행: "-", 구분: "-", 컬럼: "-", 현재값: "-", 오류내용: "문제 없음" }]);
+    const ws = XLSX.utils.json_to_sheet((rows.length ? rows : [{ 행: "-", 구분: "-", 컬럼: "-", 현재값: "-", 오류내용: "문제 없음" }]).map(sanitizeExcelRow));
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "검증결과");
     XLSX.writeFile(wb, `업로드검증리포트_${new Date().toISOString().slice(0, 10)}.xlsx`);
@@ -8464,7 +8530,7 @@ const exportExcel = () => {
       if (headers.length > 0) {
         clearWorksheetRowsAfterHeader(worksheet, 0);
         const convertedRows = rows.map((row) => mapRowToTemplateHeaders(row, tableType as TableType, headers));
-        XLSX.utils.sheet_add_json(worksheet, convertedRows, { skipHeader: true, origin: { r: 1, c: 0 }, header: headers });
+        XLSX.utils.sheet_add_json(worksheet, convertedRows.map(sanitizeExcelRow), { skipHeader: true, origin: { r: 1, c: 0 }, header: headers });
         XLSX.writeFile(templateWorkbook, fileName, { bookType: "xlsx", cellStyles: true });
         return;
       }
@@ -8473,7 +8539,7 @@ const exportExcel = () => {
     }
   }
 
-  const worksheet = XLSX.utils.json_to_sheet(rows);
+  const worksheet = XLSX.utils.json_to_sheet(rows.map(sanitizeExcelRow));
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Sheet1");
   XLSX.writeFile(workbook, fileName);
@@ -8518,7 +8584,7 @@ const exportDormSummaryExcel = () => {
     };
   });
 
-  const worksheet = XLSX.utils.json_to_sheet(rows);
+  const worksheet = XLSX.utils.json_to_sheet(rows.map(sanitizeExcelRow));
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "기숙사별 현황 요약");
   const fileName = `기숙사별_현황_요약_${new Date().toISOString().slice(0, 10)}.xlsx`;
@@ -8624,7 +8690,7 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
     };
   });
 
-  const worksheet = XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [
+  const worksheet = XLSX.utils.json_to_sheet((rows.length > 0 ? rows : [
     {
       주소: dorm.address,
       건물명: dorm.buildingName,
@@ -8643,7 +8709,7 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
       "비품_구매_매각_폐기": `구매:${inventoryPurchaseCost} / 매각:${inventorySaleCost} / 폐기:${inventoryDisposalCost}`,
       비고: manualCost ? `기타 비용 ${manualCost}원` : "",
     },
-  ]);
+  ]).map(sanitizeExcelRow));
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "정산내역");
 
@@ -8660,7 +8726,7 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
         비고: item.memo,
       };
     });
-    const itemWorksheet = XLSX.utils.json_to_sheet(itemSheetRows);
+    const itemWorksheet = XLSX.utils.json_to_sheet(itemSheetRows.map(sanitizeExcelRow));
     XLSX.utils.book_append_sheet(workbook, itemWorksheet, "정산 항목");
   }
 
@@ -8694,7 +8760,7 @@ const downloadOperationalReport = () => {
       "계약만료": dorm.contractEnd,
     };
   });
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const ws = XLSX.utils.json_to_sheet(rows.map(sanitizeExcelRow));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "월간운영");
   const fileName = `월간운영보고서_${reportYear}${reportMonth}_${reportSiteFilter}_${reportGenderFilter}_${today}.xlsx`;
@@ -8712,7 +8778,7 @@ const downloadUnassignedReport = () => {
     "예상입실": h.expectedMoveInDate,
     비고: h.notes,
   }));
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const ws = XLSX.utils.json_to_sheet(rows.map(sanitizeExcelRow));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "미배정");
   XLSX.writeFile(wb, `미배정자보고서_${today}.xlsx`);
@@ -8727,7 +8793,7 @@ const downloadDefectReport = () => {
     "접수일": d.receiptDate,
     내용: d.requestText || d.completeText || "",
   }));
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const ws = XLSX.utils.json_to_sheet(rows.map(sanitizeExcelRow));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "하자처리");
   XLSX.writeFile(wb, `하자처리보고서_${today}.xlsx`);
@@ -8749,7 +8815,7 @@ const downloadCleaningReport = () => {
       "현황": "미보고",
     };
   });
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const ws = XLSX.utils.json_to_sheet(rows.map(sanitizeExcelRow));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "청소미보고");
   XLSX.writeFile(wb, `청소미보고보고서_${today}.xlsx`);
@@ -8768,7 +8834,7 @@ const downloadInventoryReport = () => {
       "구매일": i.purchaseDate,
     };
   });
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const ws = XLSX.utils.json_to_sheet(rows.map(sanitizeExcelRow));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "비품");
   XLSX.writeFile(wb, `비품현황보고서_${today}.xlsx`);
@@ -18841,7 +18907,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <span>예비군연차: {getReserveAnnualLeave(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</span>
                 <span>민방위연차: {getCivilDefenseAnnualLeave(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</span>
                 <span>훈련연차: {getTrainingYear(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</span>
-                <span>교육대상: {["예비군", "민방위"].includes(getMilitaryCategory(militaryPersonnelForm, effectiveMilitaryReferenceYear)) ? "대상" : "비대상"}</span>
+                <span>교육대상: {(() => {
+                  const cat = getMilitaryCategory(militaryPersonnelForm, effectiveMilitaryReferenceYear);
+                  if (cat === "대상아님") return "비대상";
+                  // 예비군 7~8년차 등 훈련 시간이 0이면 "훈련비대상"으로 표기(혼동 방지)
+                  return computeRequiredTraining(militaryPersonnelForm).hours > 0 ? "대상" : "훈련비대상";
+                })()}</span>
                 <span>훈련유형: {computeRequiredTraining(militaryPersonnelForm).label}</span>
               </div>
             </div>
