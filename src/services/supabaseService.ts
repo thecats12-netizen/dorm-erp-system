@@ -91,19 +91,41 @@ export const saveMilitaryModule = async (payload: MilitaryModuleState): Promise<
     console.warn("Supabase environment variables are not configured. Skipping Supabase save.");
     return;
   }
-  const { error } = await supabase!
-    .from(MILITARY_MODULE_TABLE)
-    .upsert(
-      {
-        tenant_id: payload.tenantId,
-        data: payload,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "tenant_id" }
-    );
+  const row = {
+    tenant_id: payload.tenantId,
+    data: payload,
+    updated_at: new Date().toISOString(),
+  };
+  // military_module_data 는 테넌트당 1행 구조이지만 tenant_id 에 unique 제약이 없을 수 있어
+  // onConflict:"tenant_id" upsert 가 400(no unique constraint)을 유발한다.
+  // → 제약 유무와 무관하게 동작하도록 "존재 여부 확인 후 update/insert"로 처리.
+  const logErr = (stage: string, error: unknown) => {
+    const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
+    console.error(`[saveMilitaryModule] ${stage} 실패`, {
+      table: MILITARY_MODULE_TABLE,
+      tenantId: payload.tenantId,
+      code: e?.code ?? "(unknown)",
+      message: e?.message ?? String(error),
+      details: e?.details,
+      hint: e?.hint,
+    });
+  };
 
-  if (error) {
-    console.error("Supabase save error:", error);
-    throw error;
+  const { data: existing, error: selErr } = await supabase!
+    .from(MILITARY_MODULE_TABLE)
+    .select("tenant_id")
+    .eq("tenant_id", payload.tenantId)
+    .limit(1);
+  if (selErr) {
+    logErr("기존 행 조회", selErr);
+    throw selErr;
+  }
+
+  if (existing && existing.length > 0) {
+    const { error } = await supabase!.from(MILITARY_MODULE_TABLE).update(row).eq("tenant_id", payload.tenantId);
+    if (error) { logErr("update", error); throw error; }
+  } else {
+    const { error } = await supabase!.from(MILITARY_MODULE_TABLE).insert(row);
+    if (error) { logErr("insert", error); throw error; }
   }
 };

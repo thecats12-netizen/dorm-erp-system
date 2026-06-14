@@ -194,9 +194,10 @@ export type MilitaryPersonnel = {
   birthDate: string;
   enlistmentDate: string;
   dischargeDate: string;
-  calculationMode?: "auto" | "manual";
+  calculationMode?: "auto" | "manual" | "manualAuto";
   manualCategory?: "예비군" | "민방위" | "대상아님" | "";
   manualYear?: string;
+  manualBaseYear?: string; // 수동 자동증가 기준연도(이 해의 manualYear 연차에서 기준연도마다 +1)
   mobilization?: boolean;
   status: string;
   notes: string;

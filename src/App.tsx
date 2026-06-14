@@ -87,6 +87,7 @@ import { validateExcel, type ExcelTableType, type ExcelValidationResult } from "
 import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
 import FilteredDormSelector from "./components/FilteredDormSelector";
+import { usePagination, PaginationBar } from "./components/Pagination";
 import { Input, SelectInput, SearchableSelect, FilterSelect, MiniStat, CompactField } from "./components/FormControls";
 import { themeDefault } from "./constants/defaultData";
 import {
@@ -96,6 +97,7 @@ import {
 } from "./constants/systemSettings";
 import { TABLE_TYPE_BY_TAB } from "./constants/excelHeaders";
 import { formatDong, formatRoomHo, stripDongHoSuffix } from "./utils/formatUtils";
+import { normText, normSite, normGender, normDong, normRoomHo, normBuilding, makeDormMatchKey } from "./utils/dormMatch";
 import {
   formatActionLabel,
   formatAuditTarget,
@@ -251,8 +253,20 @@ const getTabLabel = (tabKey: TabKey) => {
   }
 };
 
+// 모든 기숙사 매칭은 makeDormMatchKey 로 통일(site 정규화 + 건물명 공백제거 + 동/호 접미사 통일).
+// 기존 데이터(예: "평택시", "행복 아파트")도 저장값 변경 없이 키 차원에서 일관 매칭됨.
 const getDormKey = (site: string, buildingName: string, dong: string, roomHo: string) =>
-  `${site.trim().toLowerCase()}|${buildingName.trim().toLowerCase()}|${stripDongHoSuffix(dong).toLowerCase()}|${stripDongHoSuffix(roomHo).toLowerCase()}`;
+  makeDormMatchKey(site, buildingName, dong, roomHo);
+
+// 입주자 표시 상태: 거주중 / 만료예정 / 퇴실 / 과거거주 / 배정대기
+// (실제 퇴실일이 있으면 과거거주, status=퇴실이면 퇴실, 거주중/신규입주는 거주중)
+function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string }): "거주중" | "만료예정" | "퇴실" | "과거거주" | "배정대기" {
+  if (o.status === "미배정") return "배정대기";
+  if (o.actualMoveOutDate) return "과거거주";
+  if (o.status === "퇴실") return "퇴실";
+  if (o.status === "만료예정") return "만료예정";
+  return "거주중";
+}
 
 const SETTLEMENT_ITEMS_KEY = "settlementItems";
 
@@ -652,11 +666,14 @@ function getAge(birthDate: string, referenceDate?: Date) {
   return age;
 }
 
-// 병역 체계 기준 상수 (스펙 단순화: 민방위 1~5년차를 만 36~40세에 대응)
+// 병역 체계 기준 상수
 const RESERVE_MAX_YEAR = 8;           // 예비군 1~8년차 (전역 후 8년)
-const CIVIL_DEFENSE_AGE_START = 36;   // 민방위 시작 연령(만) → 1년차
-const CIVIL_DEFENSE_AGE_END = 40;     // 민방위 종료 연령(만) → 5년차, 초과 시 종료
-const CIVIL_DEFENSE_MAX_YEAR = CIVIL_DEFENSE_AGE_END - CIVIL_DEFENSE_AGE_START + 1; // 5
+const CIVIL_DEFENSE_END_AGE = 40;     // 민방위 종료 연령(만) — 만40세 초과 시 대상아님
+const CIVIL_DEFENSE_MAX_YEARS = 10;   // 생년월일(나이) 미상 시 전역 기준 민방위 최대 연차 상한
+const CIVIL_DEFENSE_AGE_START = 36;   // 전역일이 없을 때 연령 기반 민방위 시작(만) → 1년차
+
+const MILITARY_NONE = { category: "대상아님" as const, reserveYear: 0, civilYear: 0, trainingYear: 0 };
+type MilitaryStatus = { category: "예비군" | "민방위" | "대상아님"; reserveYear: number; civilYear: number; trainingYear: number };
 
 // 전역일 기준 예비군 연차(전역연도=1년차). 미전역/미입력이면 null.
 function getReserveYearRaw(person: MilitaryPersonnel, referenceYear?: number): number | null {
@@ -668,63 +685,87 @@ function getReserveYearRaw(person: MilitaryPersonnel, referenceYear?: number): n
   return referenceDate.getFullYear() - dischargeDate.getFullYear() + 1;
 }
 
-// 현재구분 자동/수동 판정 — 예비군/민방위/대상아님 상호배타
-function getMilitaryCategory(person: MilitaryPersonnel, referenceYear?: number) {
-  // 수동계산 모드: 사용자 지정 구분 우선
-  if (person.calculationMode === "manual" && person.manualCategory) {
-    return person.manualCategory as "예비군" | "민방위" | "대상아님";
+// 전역연도=1 기준 누적 연차(equivYear)로부터 예비군/민방위/대상아님 판정.
+// 1~8 예비군, 9년차부터 민방위(=equivYear-8년차), 연령(또는 상한) 초과 시 대상아님.
+function fromReserveEquivYear(equivYear: number, age: number | null): MilitaryStatus {
+  if (equivYear >= 1 && equivYear <= RESERVE_MAX_YEAR) {
+    return { category: "예비군", reserveYear: equivYear, civilYear: 0, trainingYear: equivYear };
   }
+  if (equivYear > RESERVE_MAX_YEAR) {
+    const civilYear = equivYear - RESERVE_MAX_YEAR; // 9년차 → 민방위 1년차
+    const withinAge = age == null ? civilYear <= CIVIL_DEFENSE_MAX_YEARS : age <= CIVIL_DEFENSE_END_AGE;
+    if (withinAge && civilYear >= 1) {
+      return { category: "민방위", reserveYear: 0, civilYear, trainingYear: civilYear };
+    }
+  }
+  return MILITARY_NONE;
+}
+
+// 통합 판정 — 자동계산 / 수동(자동증가) / 수동(고정) 모두 처리. 상호배타.
+function computeMilitaryStatus(person: MilitaryPersonnel, referenceYear?: number): MilitaryStatus {
+  const refYear = referenceYear ?? new Date().getFullYear();
+  const referenceDate = new Date(refYear, 11, 31);
+  const age = getAge(person.birthDate || "", referenceDate);
+  const mode = person.calculationMode;
+
+  // 수동 모드(고정 manual / 자동증가 manualAuto)
+  if ((mode === "manual" || mode === "manualAuto") && person.manualCategory) {
+    const baseYear = Number(person.manualYear) || 0;
+    // 자동증가: (현재 기준연도 - 수동 기준연도)만큼 연차 증가. 고정: 증가 없음.
+    const increment =
+      mode === "manualAuto" && person.manualBaseYear
+        ? Math.max(0, refYear - (Number(person.manualBaseYear) || refYear))
+        : 0;
+    if (person.manualCategory === "예비군") {
+      return fromReserveEquivYear(baseYear + increment, age);
+    }
+    if (person.manualCategory === "민방위") {
+      const civilYear = Math.max(1, baseYear + increment);
+      const withinAge = age == null ? civilYear <= CIVIL_DEFENSE_MAX_YEARS : age <= CIVIL_DEFENSE_END_AGE;
+      return withinAge
+        ? { category: "민방위", reserveYear: 0, civilYear, trainingYear: civilYear }
+        : MILITARY_NONE;
+    }
+    return MILITARY_NONE;
+  }
+
+  // 자동계산 — 전역일 기준(9년차부터 민방위 자동 전환)
+  const reserveYearRaw = getReserveYearRaw(person, referenceYear);
+  if (reserveYearRaw != null && reserveYearRaw >= 1) {
+    return fromReserveEquivYear(reserveYearRaw, age);
+  }
+
+  // 전역일 없음 — 연령 기반 민방위 판정(만 36~40세)
+  if (age != null && age >= CIVIL_DEFENSE_AGE_START && age <= CIVIL_DEFENSE_END_AGE) {
+    const civilYear = age - (CIVIL_DEFENSE_AGE_START - 1);
+    return { category: "민방위", reserveYear: 0, civilYear, trainingYear: civilYear };
+  }
+  // 부대/상태에 민방위 명시
   const branch = person.serviceBranch?.toLowerCase() || "";
   const status = person.status?.toLowerCase() || "";
-  const referenceDate = referenceYear ? new Date(referenceYear, 11, 31) : new Date();
-  const age = getAge(person.birthDate || "", referenceDate);
-
-  // 1) 예비군: 전역 후 1~8년차 (최우선)
-  const reserveYear = getReserveYearRaw(person, referenceYear);
-  if (reserveYear !== null && reserveYear >= 1 && reserveYear <= RESERVE_MAX_YEAR) {
-    return "예비군" as const;
-  }
-
-  // 2) 민방위: 만 36~40세 (예비군이 아닌 경우, 생년월일 기준)
-  if (age !== null && age >= CIVIL_DEFENSE_AGE_START && age <= CIVIL_DEFENSE_AGE_END) {
-    return "민방위" as const;
-  }
-
-  // 3) 부대/상태에 민방위 명시
   if (/민방위|civil/i.test(branch) || /민방위|civil/i.test(status)) {
-    return "민방위" as const;
+    return { category: "민방위", reserveYear: 0, civilYear: 1, trainingYear: 1 };
   }
-
-  // 예비군 종료(8년 초과) + 민방위 연령 초과/미달, 또는 대상 정보 없음 → 대상아님
-  return "대상아님" as const;
+  return MILITARY_NONE;
 }
 
-// 훈련유형 판정 등에서 쓰는 예비군 연차(현재구분=예비군일 때만 의미). 수동 연차 반영.
+function getMilitaryCategory(person: MilitaryPersonnel, referenceYear?: number) {
+  return computeMilitaryStatus(person, referenceYear).category;
+}
+
+// 훈련유형 판정용 연차(예비군=예비군연차, 민방위=민방위연차)
 function getTrainingYear(person: MilitaryPersonnel, referenceYear?: number) {
-  if (person.calculationMode === "manual" && person.manualYear) {
-    return Number(person.manualYear) || 0;
-  }
-  return getReserveYearRaw(person, referenceYear) ?? 0;
+  return computeMilitaryStatus(person, referenceYear).trainingYear;
 }
 
-// 예비군 연차 1~8 (현재구분=예비군이 아니면 0 → 상호배타)
+// 예비군 연차 (현재구분=예비군이 아니면 0 → 상호배타)
 function getReserveAnnualLeave(person: MilitaryPersonnel, referenceYear?: number) {
-  if (getMilitaryCategory(person, referenceYear) !== "예비군") return 0;
-  const years = getTrainingYear(person, referenceYear);
-  if (!years) return 0;
-  return Math.max(1, Math.min(years, RESERVE_MAX_YEAR));
+  return computeMilitaryStatus(person, referenceYear).reserveYear;
 }
 
-// 민방위 연차 1~5 (현재구분=민방위가 아니면 0 → 상호배타). 수동 연차 반영, 그 외 생년월일 기준.
+// 민방위 연차 (현재구분=민방위가 아니면 0 → 상호배타)
 function getCivilDefenseAnnualLeave(person: MilitaryPersonnel, referenceYear?: number) {
-  if (getMilitaryCategory(person, referenceYear) !== "민방위") return 0;
-  if (person.calculationMode === "manual" && person.manualYear) {
-    return Math.max(1, Math.min(Number(person.manualYear) || 0, CIVIL_DEFENSE_MAX_YEAR));
-  }
-  const age = getAge(person.birthDate || "", referenceYear ? new Date(referenceYear, 11, 31) : undefined);
-  if (age === null) return 0;
-  // 만 36세=1년차 ... 만 40세=5년차
-  return Math.max(1, Math.min(age - (CIVIL_DEFENSE_AGE_START - 1), CIVIL_DEFENSE_MAX_YEAR));
+  return computeMilitaryStatus(person, referenceYear).civilYear;
 }
 
 function getRequiredTraining(person: MilitaryPersonnel, referenceYear?: number) {
@@ -1474,7 +1515,7 @@ export default function App() {
   const [occupantStatusFilter, setOccupantStatusFilter] = useState<string>("전체");
   const [occupantMenuFilterSite, setOccupantMenuFilterSite] = useState<Site | "전체">("전체");
   const [occupantMenuFilterGender, setOccupantMenuFilterGender] = useState<"남" | "여" | "전체">("전체");
-  const [occupantMenuFilterStatus, setOccupantMenuFilterStatus] = useState<"전체" | "배정완료" | "퇴실자" | "미배정">("전체");
+  const [occupantMenuFilterStatus, setOccupantMenuFilterStatus] = useState<"전체" | "현재거주" | "만료예정" | "퇴실과거" | "배정대기">("전체");
   const [occupantMenuFilterSearch, setOccupantMenuFilterSearch] = useState("");
 
   useEffect(() => {
@@ -4860,6 +4901,14 @@ export default function App() {
     });
   }, [visibleDorms, occupantMenuFilterSite, occupantMenuFilterGender, occupantMenuFilterSearch]);
 
+  // 선택 기숙사(또는 필터된 기숙사들) 기준 입주자 전체 이력(상태 필터 적용 전) — 통계/표시용
+  const occupantScopedList = useMemo(
+    () => visibleOccupants.filter((o) =>
+      selectedDormId ? o.dormId === selectedDormId : filteredDormsForOccupantMenu.some((d) => d.id === o.dormId)
+    ),
+    [visibleOccupants, selectedDormId, filteredDormsForOccupantMenu]
+  );
+
   const visibleUsers = useMemo(() => {
     return users.filter((u) => {
       // 권한 필터링
@@ -5691,6 +5740,29 @@ export default function App() {
     }),
     [militaryReports, militaryReportSearch]
   );
+
+  // ── 목록 페이지네이션(20개씩) — 필터/검색 적용 결과(filtered) 기준, resetKey 변경 시 1페이지 ──
+  const dormContractPg = usePagination(visibleDormContracts, { resetKey: `${dormContractSearch}|${dormContractSiteFilter}|${dormContractStatusFilter}|${dormContractExpiryMonthFilter}` });
+  const newHirePg = usePagination(visibleNewHires, { resetKey: `${newHireSearch}|${newHireSiteFilter}|${newHireGenderFilter}|${newHireAssignmentFilter}` });
+  const cleaningReportPg = usePagination(visibleCleaningReports, { resetKey: `${cleaningYear}|${cleaningMonth}|${cleaningDormSiteFilter}|${cleaningDormSearch}|${cleaningManagerFilter}|${cleaningStatusFilter}` });
+  const defectPg = usePagination(visibleDefects, { resetKey: `${defectSearch}|${defectStatusFilter}|${defectReceiptMonthFilter}` });
+  const militaryTrainingPg = usePagination(filteredMilitaryTrainingRecords, { resetKey: `${militaryTrainingSearch}|${militaryTrainingStatusFilter}|${militaryTrainingYearFilter}|${militaryTrainingPersonFilter}|${militaryTrainingTypeFilter}|${militaryTrainingRoundFilter}|${militaryTrainingDepartmentFilter}` });
+  const militaryNoticePg = usePagination(filteredMilitaryNotices, { resetKey: militaryNoticeSearch });
+  const militaryReportPg = usePagination(filteredMilitaryReports, { resetKey: militaryReportSearch });
+
+  // 군대 인사관리 목록(인라인 필터를 메모로 분리하여 페이지네이션)
+  const filteredPersonnelRows = useMemo(() => militaryPersonnelSummary.filter((p) => {
+    if (militaryPersonnelStatusFilter !== "전체" && p.status !== militaryPersonnelStatusFilter) return false;
+    if (personnelDeptFilter !== "전체" && (p.unit || "") !== personnelDeptFilter) return false;
+    if (personnelCategoryFilter !== "전체" && p.currentCategory !== personnelCategoryFilter) return false;
+    if (personnelTrainingFilter !== "전체" && p.trainingStatus !== personnelTrainingFilter) return false;
+    if (personnelYearFilter !== "전체" && String(p.trainingYear) !== personnelYearFilter) return false;
+    const q = `${p.name} ${p.unit} ${p.rank} ${p.phone}`.toLowerCase();
+    return !militaryPersonnelSearch || q.includes(militaryPersonnelSearch.toLowerCase());
+  }), [militaryPersonnelSummary, militaryPersonnelStatusFilter, personnelDeptFilter, personnelCategoryFilter, personnelTrainingFilter, personnelYearFilter, militaryPersonnelSearch]);
+  const personnelPg = usePagination(filteredPersonnelRows, { resetKey: `${militaryPersonnelStatusFilter}|${personnelDeptFilter}|${personnelCategoryFilter}|${personnelTrainingFilter}|${personnelYearFilter}|${militaryPersonnelSearch}` });
+  // 문서관리: 기숙사별 문서 현황(운영 기숙사 목록)
+  const documentPg = usePagination(operationalDorms, { resetKey: "" });
 
   const dashboardAlerts = useMemo(() => {
     const items: { id: string; title: string; detail: string; when: string; type: string }[] = [];
@@ -6997,6 +7069,8 @@ export default function App() {
     const existing = editingMilitaryPersonnelId ? militaryPersonnel.find((item) => item.id === editingMilitaryPersonnelId) : null;
     const payload: MilitaryPersonnel = {
       ...militaryPersonnelForm,
+      // 재직상태 빈 값 방지: 기본값 "재직" 보정(목록 표시·자동생성 대상 필터 정상화)
+      status: (militaryPersonnelForm.status || "").trim() || "재직",
       id: editingMilitaryPersonnelId || crypto.randomUUID(),
       createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -7022,9 +7096,9 @@ export default function App() {
     // Helper: whether this person should have auto-generation considered
     const shouldAutoCreateFor = (person: MilitaryPersonnel) => {
       if (!militaryTrainingAutoConfig.enabled) return false;
-      if (!person.status) return false;
       if (!militaryTrainingAutoConfig.targetStatuses || militaryTrainingAutoConfig.targetStatuses.length === 0) return false;
-      return militaryTrainingAutoConfig.targetStatuses.includes(person.status);
+      const effStatus = (person.status || "").trim() || "재직"; // 빈 값은 재직으로 간주
+      return militaryTrainingAutoConfig.targetStatuses.includes(effStatus);
     };
 
     // Mark existing records as excluded if person moved to excluded status
@@ -7206,7 +7280,8 @@ export default function App() {
 
     militaryPersonnel.forEach((person) => {
       if ((person as { isDeleted?: boolean }).isDeleted) return;
-      if (!person.status || !targetStatuses.includes(person.status)) { statusExcluded += 1; return; }
+      const effStatus = (person.status || "").trim() || "재직"; // 빈 값은 재직으로 간주
+      if (!targetStatuses.includes(effStatus)) { statusExcluded += 1; return; }
       const plan = buildAutoTrainingPlan(person, refYear);
       if (plan.length === 0) { notTarget += 1; return; }
       plan.forEach((p) => {
@@ -7670,12 +7745,12 @@ export default function App() {
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "dorm"));
     const mappedDorms: Dorm[] = rows.map((r) => ({
       id: crypto.randomUUID(),
-      site: String(r["지역"] || "평택").trim() as Site,
-      gender: String(r["성별"] || "남").trim() as "남" | "여",
-      buildingName: String(r["건물명"] || "").trim(),
-      address: String(r["주소"] || "").trim(),
-      dong: String(r["동"] || "").trim(),
-      roomHo: String(r["호수"] || r["호"] || "").trim(),
+      site: (normSite(r["지역"] || "평택") || "평택") as Site,
+      gender: (normGender(r["성별"] || "남") || "남") as "남" | "여",
+      buildingName: normBuilding(r["건물명"] || r["아파트명"] || r["건물"] || r["기숙사명"] || r["숙소명"] || ""),
+      address: normText(r["도로명주소"] || r["지번주소"] || r["주소"] || r["소재지"] || ""),
+      dong: normDong(r["동"] || ""),
+      roomHo: normRoomHo(r["호수"] || r["호"] || ""),
       pyeong: String(r["평수"] || ""),
       capacity: 6,
       managerUserId: undefined,
@@ -7704,11 +7779,11 @@ export default function App() {
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "dormContract"));
     const mapped = rows.map((r) => ({
       id: crypto.randomUUID(),
-      site: String(r["지역"] || "평택").trim() as Site,
-      address: String(r["도로명주소"] || r["주소"] || "").trim(),
-      buildingName: String(r["건물명"] || "").trim(),
-      dong: String(r["동"] || "").trim(),
-      roomHo: String(r["호수"] || r["호"] || "").trim(),
+      site: (normSite(r["지역"] || "평택") || "평택") as Site,
+      address: normText(r["도로명주소"] || r["지번주소"] || r["주소"] || r["소재지"] || ""),
+      buildingName: normBuilding(r["건물명"] || r["아파트명"] || r["건물"] || r["기숙사명"] || r["숙소명"] || ""),
+      dong: normDong(r["동"] || ""),
+      roomHo: normRoomHo(r["호수"] || r["호"] || ""),
       pyeong: String(r["평수"] || ""),
       landlordName: String(r["임대인명"] || ""),
       landlordPhone: String(r["임대인연락처"] || ""),
@@ -7718,13 +7793,13 @@ export default function App() {
       세대현관: String(r["세대현관"] || ""),
       contractStart: String(r["계약시작일"] || String(r["계약시작"] || "")),
       contractEnd: String(r["계약종료일"] || String(r["계약종료"] || "")),
-      contractStatus: String(r["계약상태"] || r["status"] || "진행중").trim() as DormContractStatus,
+      contractStatus: (normText(r["계약상태"] || r["status"] || "진행중") || "진행중") as DormContractStatus,
       contractAmount: String(r["계약금액"] || r["contractAmount"] || ""),
       prepaymentDeposit: String(r["선납금"] || r["prepaymentDeposit"] || ""),
       deposit: String(r["보증금"] || r["deposit"] || ""),
       monthlyRentOrMaintenance: String(r["월세/관리비"] || r["월세 or 관리비"] || r["monthlyRentOrMaintenance"] || ""),
       contractType: String(r["계약유형"] || r["contractType"] || "신규") as ContractType,
-      gender: String(r["성별"] || "남").trim() as Gender,
+      gender: (normGender(r["성별"] || "남") || "남") as Gender,
       notes: String(r["비고"] || ""),
       registeredBy: String(r["등록자"] || r["registeredBy"] || currentUser?.displayName || ""),
       modifiedBy: String(r["수정자"] || r["modifiedBy"] || currentUser?.displayName || ""),
@@ -7742,22 +7817,22 @@ export default function App() {
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "newHire"));
     const mapped = rows.map((r) => {
-      const site = String(r["지역"] || "평택").trim();
-      const gender = String(r["성별"] || "남").trim();
-      const buildingName = String(r["건물명"] || r["buildingName"] || "").trim();
-      const dong = String(r["동"] || "").trim();
-      const roomHo = String(r["호수"] || r["호"] || r["roomHo"] || "").trim();
-      const address = String(r["도로명주소"] || r["주소"] || "").trim();
-      // 1차: site+건물명+동+호수 키 매칭(가장 안정), 2차: 주소 매칭 fallback
-      const keyMatch = buildingName
-        ? dorms.find((d) => !d.isDeleted && getDormKey(d.site, d.buildingName, d.dong, d.roomHo) === getDormKey(site, buildingName, dong, roomHo))
-        : undefined;
-      const matchedDorm = keyMatch || dorms.find(
-        (d) =>
+      const site = normSite(r["지역"] || "평택") || "평택";
+      const gender = normGender(r["성별"] || "남") || "남";
+      const buildingName = normBuilding(r["건물명"] || r["buildingName"] || r["아파트명"] || r["건물"] || r["기숙사명"] || r["숙소명"] || "");
+      const dong = normDong(r["동"] || "");
+      const roomHo = normRoomHo(r["호수"] || r["호"] || r["roomHo"] || "");
+      const address = normText(r["도로명주소"] || r["지번주소"] || r["주소"] || r["소재지"] || "");
+      const matchKey = buildingName ? makeDormMatchKey(site, buildingName, dong, roomHo) : "";
+      // 1차: operationalDorms 키 매칭(occupant 표시와 동일한 정식 id), 2차: dorms 키, 3차: 주소 매칭
+      const matchedDorm =
+        (matchKey ? operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === matchKey) : undefined) ||
+        (matchKey ? dorms.find((d) => !d.isDeleted && makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === matchKey) : undefined) ||
+        dorms.find((d) =>
           d.address === address ||
           `${d.address} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`.trim() === address ||
           `${d.address}${stripDongHoSuffix(d.dong)}${stripDongHoSuffix(d.roomHo)}` === address
-      );
+        );
       const resolvedDormId = matchedDorm?.id || String(r["기숙사ID"] || r["dormId"] || "").trim();
       if (import.meta.env.DEV && !resolvedDormId && (buildingName || dong || roomHo)) {
         console.warn("[uploadNewHiresExcel] 기숙사 매칭 실패 → 미배정 처리:", { name: r["이름"], site, buildingName, dong, roomHo });
@@ -7766,9 +7841,9 @@ export default function App() {
       id: crypto.randomUUID(),
       site: site as Site,
       gender: gender as Gender,
-      name: String(r["이름"] || "").trim(),
+      name: normText(r["이름"] || ""),
       phone: String(r["연락처"] || ""),
-      department: String(r["부서"] || "").trim(),
+      department: normText(r["부서"] || ""),
       dormId: resolvedDormId,
       address: matchedDorm?.address || address || "",
       buildingName: buildingName || matchedDorm?.buildingName || "",
@@ -10309,7 +10384,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="text-sm font-medium text-slate-500">기숙사 수(현재 사용중인 기숙사 수)</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.dormCount}</div>
               </button>
-              <button type="button" onClick={() => { setOccupantMenuFilterStatus("배정완료"); setOccupantMenuFilterSite("전체"); setOccupantMenuFilterGender("전체"); setOccupantMenuFilterSearch(""); setSelectedDormId(""); setActiveTab("occupants"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+              <button type="button" onClick={() => { setOccupantMenuFilterStatus("현재거주"); setOccupantMenuFilterSite("전체"); setOccupantMenuFilterGender("전체"); setOccupantMenuFilterSearch(""); setSelectedDormId(""); setActiveTab("occupants"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">현 거주자</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.currentResidents}</div>
               </button>
@@ -11202,21 +11277,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </thead>
                 <tbody>
                   {(() => {
-                    const rows = militaryPersonnelSummary.filter((p) => {
-                      if (militaryPersonnelStatusFilter !== "전체" && p.status !== militaryPersonnelStatusFilter) return false;
-                      if (personnelDeptFilter !== "전체" && (p.unit || "") !== personnelDeptFilter) return false;
-                      if (personnelCategoryFilter !== "전체" && p.currentCategory !== personnelCategoryFilter) return false;
-                      if (personnelTrainingFilter !== "전체" && p.trainingStatus !== personnelTrainingFilter) return false;
-                      if (personnelYearFilter !== "전체" && String(p.trainingYear) !== personnelYearFilter) return false;
-                      const q = `${p.name} ${p.unit} ${p.rank} ${p.phone}`.toLowerCase();
-                      return !militaryPersonnelSearch || q.includes(militaryPersonnelSearch.toLowerCase());
-                    });
-                    if (rows.length === 0) {
+                    if (filteredPersonnelRows.length === 0) {
                       return (
                         <tr><td colSpan={canEditData(currentUser) ? 13 : 12} className="px-3 py-12 text-center text-slate-400">인원 데이터가 없습니다.</td></tr>
                       );
                     }
-                    return rows.map((p) => (
+                    return personnelPg.pagedItems.map((p) => (
                       <tr
                         key={p.id}
                         onClick={(e) => handleRowClick(e, () => canEditData(currentUser) && openMilitaryPersonnelEdit(p))}
@@ -11235,7 +11301,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-2 erp-col-status">
                           <span className={`${/완료/.test(p.trainingStatus) ? "text-emerald-500" : /미이수/.test(p.trainingStatus) ? "text-rose-500" : "text-slate-500"}`}>{p.trainingStatus}</span>
                         </td>
-                        <td className="px-3 py-2 erp-col-status">{p.status || "-"}</td>
+                        <td className="px-3 py-2 erp-col-status">{p.status || "재직"}</td>
                         {canEditData(currentUser) && (
                           <td className="px-3 py-2 erp-col-action space-x-2 whitespace-nowrap">
                             <button type="button" onClick={(e) => { e.stopPropagation(); openMilitaryPersonnelEdit(p); }} className="rounded-xl border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-100">수정</button>
@@ -11268,6 +11334,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </tbody>
               </table>
             </div>
+            <PaginationBar page={personnelPg.page} totalPages={personnelPg.totalPages} totalCount={personnelPg.totalCount} onPrev={personnelPg.goPrev} onNext={personnelPg.goNext} onPage={personnelPg.goPage} darkMode={theme.darkMode} />
           </section>
         )}
 
@@ -11402,7 +11469,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredMilitaryTrainingRecords.map((record) => (
+                  {militaryTrainingPg.pagedItems.map((record) => (
                     <tr key={record.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
                         <td className="px-3 py-3 erp-col-name" title={militaryPersonnel.find((person) => person.id === record.personnelId)?.name || ""}>{militaryPersonnel.find((person) => person.id === record.personnelId)?.name || "-"}</td>
                       <td className="px-3 py-3" title={record.subject}>{record.subject}</td>
@@ -11454,6 +11521,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </tbody>
               </table>
             </div>
+            <PaginationBar page={militaryTrainingPg.page} totalPages={militaryTrainingPg.totalPages} totalCount={militaryTrainingPg.totalCount} onPrev={militaryTrainingPg.goPrev} onNext={militaryTrainingPg.goNext} onPage={militaryTrainingPg.goPage} darkMode={theme.darkMode} />
           </section>
         )}
 
@@ -11521,7 +11589,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredMilitaryNotices.map((notice) => {
+                  {militaryNoticePg.pagedItems.map((notice) => {
                     const publishStatus = notice.publishedDate ? "발송됨" : "미발송";
                     return (
                       <tr key={notice.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
@@ -11583,6 +11651,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </tbody>
               </table>
             </div>
+            <PaginationBar page={militaryNoticePg.page} totalPages={militaryNoticePg.totalPages} totalCount={militaryNoticePg.totalCount} onPrev={militaryNoticePg.goPrev} onNext={militaryNoticePg.goNext} onPage={militaryNoticePg.goPage} darkMode={theme.darkMode} />
           </section>
         )}
 
@@ -11649,7 +11718,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredMilitaryReports.map((report) => (
+                  {militaryReportPg.pagedItems.map((report) => (
                     <tr key={report.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
                       <td className="px-3 py-3 erp-col-name" title={report.title}>{report.title}</td>
                       <td className="px-3 py-3 erp-col-date">{formatDateOnly(report.reportDate) || "-"}</td>
@@ -11694,6 +11763,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </tbody>
               </table>
             </div>
+            <PaginationBar page={militaryReportPg.page} totalPages={militaryReportPg.totalPages} totalCount={militaryReportPg.totalCount} onPrev={militaryReportPg.goPrev} onNext={militaryReportPg.goNext} onPage={militaryReportPg.goPage} darkMode={theme.darkMode} />
           </section>
         )}
 
@@ -12294,7 +12364,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) => {
                             setSelectedDormContractIds(() =>
-                              e.target.checked ? visibleDormContracts.map((c) => c.id) : []
+                              e.target.checked ? dormContractPg.pagedItems.map((c) => c.id) : []
                             );
                           }}
                           className="h-5 w-5"
@@ -12328,7 +12398,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleDormContracts.map((c, index) => (
+                  {dormContractPg.pagedItems.map((c, index) => (
                     <tr
                       key={c.id}
                       onClick={(e) => handleRowClick(e, () => openDormContractEdit(c))}
@@ -12386,6 +12456,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </tbody>
               </table>
             </div>
+            <PaginationBar page={dormContractPg.page} totalPages={dormContractPg.totalPages} totalCount={dormContractPg.totalCount} onPrev={dormContractPg.goPrev} onNext={dormContractPg.goNext} onPage={dormContractPg.goPage} darkMode={theme.darkMode} />
           </section>
         )}
 
@@ -12561,7 +12632,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) => {
                             setSelectedNewHireIds(() =>
-                              e.target.checked ? visibleNewHires.map((h) => h.id) : []
+                              e.target.checked ? newHirePg.pagedItems.map((h) => h.id) : []
                             );
                           }}
                           className="h-5 w-5"
@@ -12594,7 +12665,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleNewHires.map((h, index) => (
+                  {newHirePg.pagedItems.map((h, index) => (
                     <tr
                       key={h.id}
                       onClick={(e) => handleRowClick(e, () => openNewHireEdit(h))}
@@ -12666,6 +12737,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </tbody>
               </table>
             </div>
+            <PaginationBar page={newHirePg.page} totalPages={newHirePg.totalPages} totalCount={newHirePg.totalCount} onPrev={newHirePg.goPrev} onNext={newHirePg.goNext} onPage={newHirePg.goPage} darkMode={theme.darkMode} />
           </section>
         )}
 
@@ -12746,10 +12818,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     key={d.id}
                     className={`cursor-pointer rounded-2xl border p-3 ${theme.darkMode ? "border-slate-700 bg-slate-900 hover:shadow-md" : "border-slate-200 bg-white hover:shadow-md transition-shadow"}`}
                     onClick={() => {
-                      const getDormKey = (site: string, buildingName: string, dong: string, roomHo: string) =>
-                        `${site.trim().toLowerCase()}|${buildingName.trim().toLowerCase()}|${stripDongHoSuffix(dong).toLowerCase()}|${stripDongHoSuffix(roomHo).toLowerCase()}`;
                       const matchingContract = dormContracts.find(
-                        (c) => getDormKey(c.site, c.buildingName, c.dong, c.roomHo) === getDormKey(d.site, d.buildingName, d.dong, d.roomHo)
+                        (c) => makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo)
                       );
                       if (matchingContract) {
                         openDormContractEdit(matchingContract);
@@ -12854,17 +12924,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
 
             <div className="grid gap-4 mb-6 md:grid-cols-4">
-              <MiniStat label="총 입주자" value={`${visibleOccupants.length}`} />
-              <MiniStat label="거주중" value={`${visibleOccupants.filter((o) => ["거주중", "만료예정"].includes(o.status)).length}`} />
-              <MiniStat label="만료예정" value={`${visibleOccupants.filter((o) => o.status === "만료예정").length}`} />
-              <MiniStat label="퇴실" value={`${visibleOccupants.filter((o) => o.status === "퇴실").length}`} />
+              <MiniStat label="현재 거주자" value={`${occupantScopedList.filter((o) => ["거주중", "만료예정"].includes(occupantDisplayStatus(o))).length}`} />
+              <MiniStat label="만료예정" value={`${occupantScopedList.filter((o) => occupantDisplayStatus(o) === "만료예정").length}`} />
+              <MiniStat label="퇴실/과거거주" value={`${occupantScopedList.filter((o) => ["퇴실", "과거거주"].includes(occupantDisplayStatus(o))).length}`} />
+              <MiniStat label="총 이력" value={`${occupantScopedList.length}`} />
             </div>
 
             <div className="mb-4 flex flex-wrap items-center gap-2 justify-between">
               <div className="flex flex-wrap items-center gap-2">
                 <FilterSelect label="지역" value={occupantMenuFilterSite} onChange={(v) => setOccupantMenuFilterSite(v as Site | "전체")} options={["전체", "평택", "천안"]} />
                 <FilterSelect label="성별" value={occupantMenuFilterGender} onChange={(v) => setOccupantMenuFilterGender(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
-                <FilterSelect label="상태" value={occupantMenuFilterStatus} onChange={(v) => setOccupantMenuFilterStatus(v as "전체" | "배정완료" | "퇴실자" | "미배정")} options={["전체", "배정완료", "퇴실자", "미배정"]} />
+                <FilterSelect label="상태" value={occupantMenuFilterStatus} onChange={(v) => setOccupantMenuFilterStatus(v as "전체" | "현재거주" | "만료예정" | "퇴실과거" | "배정대기")} options={["전체", "현재거주", "만료예정", "퇴실과거", "배정대기"]} />
                 <input type="text" placeholder="건물명/주소 검색..." value={occupantMenuFilterSearch} onChange={(e) => setOccupantMenuFilterSearch(e.target.value)} className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"}`} />
               </div>
               <div className="text-xs text-slate-500">
@@ -12976,15 +13046,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         }
                         if (!filteredDormsForOccupantMenu.some((d) => d.id === o.dormId)) return false;
                         if (occupantMenuFilterStatus !== "전체") {
-                          if (occupantMenuFilterStatus === "배정완료") {
-                            return ["거주중", "만료예정"].includes(o.status);
-                          } else if (occupantMenuFilterStatus === "퇴실자") {
-                            return o.status === "퇴실";
-                          }
+                          const ds = occupantDisplayStatus(o);
+                          if (occupantMenuFilterStatus === "현재거주") return ds === "거주중";
+                          if (occupantMenuFilterStatus === "만료예정") return ds === "만료예정";
+                          if (occupantMenuFilterStatus === "퇴실과거") return ds === "퇴실" || ds === "과거거주";
+                          if (occupantMenuFilterStatus === "배정대기") return false; // 실제 입주자는 배정대기 아님
                         }
                         return true;
                       }),
-                    ...(occupantMenuFilterStatus === "전체" || occupantMenuFilterStatus === "미배정"
+                    ...(occupantMenuFilterStatus === "전체" || occupantMenuFilterStatus === "배정대기"
                       ? filteredUnassignedNewHires.map((h) => ({
                           id: `newhire-${h.id}`,
                           site: h.site,
@@ -13046,12 +13116,24 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{getOpenDefectCount(dorm?.id || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{o.employeeName}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
-                          <span
-                            className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 status-badge"
-                            style={{ backgroundColor: badgeColor(theme, o.status) }}
-                          >
-                            {o.status}
-                          </span>
+                          {(() => {
+                            const ds = occupantDisplayStatus(o);
+                            const colorKey = ds === "과거거주" ? "퇴실" : ds === "배정대기" ? "공실" : ds;
+                            const outDate = o.actualMoveOutDate || o.moveOutDueDate || (o as { expectedMoveOutDate?: string }).expectedMoveOutDate || "";
+                            return (
+                              <div className="flex flex-col items-start gap-0.5">
+                                <span
+                                  className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 status-badge"
+                                  style={{ backgroundColor: badgeColor(theme, colorKey) }}
+                                >
+                                  {ds}
+                                </span>
+                                {(ds === "퇴실" || ds === "과거거주") && outDate && (
+                                  <span className="text-[0.7rem] text-slate-400">퇴실 {formatDateOnly(outDate)}</span>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(o.moveInDate || "") || "-"}</td>
                         <td translate="no" className="px-3 py-3 notranslate whitespace-nowrap overflow-hidden text-ellipsis max-w-[170px]">{o.department}</td>
@@ -15112,7 +15194,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </tr>
                   </thead>
                   <tbody>
-                    {operationalDorms.map((dorm) => {
+                    {documentPg.pagedItems.map((dorm) => {
                       const dormContractsForDoc = dormContracts.filter(
                         (c) =>
                           c.address === dorm.address &&
@@ -15166,8 +15248,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </tbody>
                 </table>
               </div>
+              <PaginationBar page={documentPg.page} totalPages={documentPg.totalPages} totalCount={documentPg.totalCount} onPrev={documentPg.goPrev} onNext={documentPg.goNext} onPage={documentPg.goPage} darkMode={theme.darkMode} />
             </div>
-            
+
             {/* 최근 업로드 문서 */}
             <div className="mt-6 grid gap-4 lg:grid-cols-3">
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
@@ -15599,7 +15682,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleCleaningReports.map((report) => (
+                    {cleaningReportPg.pagedItems.map((report) => (
                       <tr key={report.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(report.reportDate) || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{`${report.buildingName} ${report.dong}-${report.roomHo}`}</td>
@@ -15652,6 +15735,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </tbody>
                 </table>
               </div>
+              <PaginationBar page={cleaningReportPg.page} totalPages={cleaningReportPg.totalPages} totalCount={cleaningReportPg.totalCount} onPrev={cleaningReportPg.goPrev} onNext={cleaningReportPg.goNext} onPage={cleaningReportPg.goPage} darkMode={theme.darkMode} />
             </div>
           </section>
         )}
@@ -17591,7 +17675,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           selectedDefectIds.length === visibleDefects.length
                         }
                         onChange={(e) => {
-                          if (e.target.checked) setSelectedDefectIds(visibleDefects.map((d) => d.id));
+                          if (e.target.checked) setSelectedDefectIds(defectPg.pagedItems.map((d) => d.id));
                           else setSelectedDefectIds([]);
                         }}
                         className="h-4 w-4"
@@ -17624,7 +17708,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleDefects.map((d, idx) => (
+                  {defectPg.pagedItems.map((d, idx) => (
                     <tr
                       key={d.id}
                       onClick={(e) => handleRowClick(e, () => openDefectEdit(d))}
@@ -17749,6 +17833,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </tbody>
               </table>
             </div>
+            <PaginationBar page={defectPg.page} totalPages={defectPg.totalPages} totalCount={defectPg.totalCount} onPrev={defectPg.goPrev} onNext={defectPg.goNext} onPage={defectPg.goPage} darkMode={theme.darkMode} />
           </section>
         )}
 
@@ -18720,17 +18805,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <label className="mb-2 block text-sm font-medium text-slate-700">계산 모드</label>
               <select
                 value={militaryPersonnelForm.calculationMode || "auto"}
-                onChange={(e) => setMilitaryPersonnelForm((f) => ({ ...f, calculationMode: e.target.value as "auto" | "manual" }))}
+                onChange={(e) => setMilitaryPersonnelForm((f) => ({ ...f, calculationMode: e.target.value as "auto" | "manual" | "manualAuto" }))}
                 className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400"
               >
-                <option value="auto">자동계산</option>
-                <option value="manual">수동관리</option>
+                <option value="auto">자동계산 (전역일 기준)</option>
+                <option value="manualAuto">수동관리 (자동증가)</option>
+                <option value="manual">수동관리 (고정)</option>
               </select>
             </div>
-            {militaryPersonnelForm.calculationMode === "manual" ? (
+            {(militaryPersonnelForm.calculationMode === "manual" || militaryPersonnelForm.calculationMode === "manualAuto") && (
               <>
                 <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">현재구분</label>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">현재구분(최초)</label>
                   <select
                     value={militaryPersonnelForm.manualCategory || ""}
                     onChange={(e) => setMilitaryPersonnelForm((f) => ({ ...f, manualCategory: e.target.value as "예비군" | "민방위" | "대상아님" | "" }))}
@@ -18742,26 +18828,36 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <option value="대상아님">대상아님</option>
                   </select>
                 </div>
-                <Input label="연차" type="number" value={militaryPersonnelForm.manualYear || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, manualYear: v }))} />
+                {militaryPersonnelForm.calculationMode === "manualAuto" && (
+                  <Input label="기준연도" type="number" value={militaryPersonnelForm.manualBaseYear || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, manualBaseYear: v }))} placeholder={String(effectiveMilitaryReferenceYear || new Date().getFullYear())} />
+                )}
+                <Input label="기준연차" type="number" value={militaryPersonnelForm.manualYear || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, manualYear: v }))} />
               </>
-            ) : (
-              <div className="space-y-3 rounded-2xl border border-slate-300 bg-slate-50 p-3">
-                <div className="text-sm font-medium text-slate-700">자동 판정 결과</div>
-                <div className="text-sm text-slate-600">기준연도: {effectiveMilitaryReferenceYear || new Date().getFullYear()}</div>
-                <div className="text-sm text-slate-600">현재구분: {getMilitaryCategory(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</div>
-                <div className="text-sm text-slate-600">훈련연차: {getTrainingYear(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</div>
-              </div>
             )}
+            <div className="space-y-1 rounded-2xl border border-slate-300 bg-slate-50 p-3 md:col-span-2 xl:col-span-3">
+              <div className="text-sm font-medium text-slate-700">판정 결과 (기준연도 {effectiveMilitaryReferenceYear || new Date().getFullYear()})</div>
+              <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm text-slate-600">
+                <span>현재구분: <b className="text-slate-900">{getMilitaryCategory(militaryPersonnelForm, effectiveMilitaryReferenceYear)}</b></span>
+                <span>예비군연차: {getReserveAnnualLeave(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</span>
+                <span>민방위연차: {getCivilDefenseAnnualLeave(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</span>
+                <span>훈련연차: {getTrainingYear(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</span>
+                <span>교육대상: {["예비군", "민방위"].includes(getMilitaryCategory(militaryPersonnelForm, effectiveMilitaryReferenceYear)) ? "대상" : "비대상"}</span>
+                <span>훈련유형: {computeRequiredTraining(militaryPersonnelForm).label}</span>
+              </div>
+            </div>
             <Input label="군별" value={militaryPersonnelForm.serviceBranch} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, serviceBranch: v }))} />
             <div>
               <SelectInput label="재직상태" value={militaryPersonnelForm.status || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, status: v }))} options={militaryCodeValues.employmentStatus || [""]} />
             </div>
-            <div className="flex items-end gap-3">
-              <label className="mb-2 block text-sm font-medium text-slate-700">동원여부</label>
-              <div className="flex items-center gap-3">
-                <label className="flex items-center gap-2 text-sm"><input type="radio" name="mobilization" checked={!!militaryPersonnelForm.mobilization} onChange={() => setMilitaryPersonnelForm((f) => ({ ...f, mobilization: true }))} />동원</label>
-                <label className="flex items-center gap-2 text-sm"><input type="radio" name="mobilization" checked={!militaryPersonnelForm.mobilization} onChange={() => setMilitaryPersonnelForm((f) => ({ ...f, mobilization: false }))} />동원미지정</label>
+            <div>
+              <div className="flex items-end gap-3">
+                <label className="mb-2 block text-sm font-medium text-slate-700">동원여부</label>
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm"><input type="radio" name="mobilization" checked={!!militaryPersonnelForm.mobilization} onChange={() => setMilitaryPersonnelForm((f) => ({ ...f, mobilization: true }))} />동원</label>
+                  <label className="flex items-center gap-2 text-sm"><input type="radio" name="mobilization" checked={!militaryPersonnelForm.mobilization} onChange={() => setMilitaryPersonnelForm((f) => ({ ...f, mobilization: false }))} />동원미지정</label>
+                </div>
               </div>
+              <div className="mt-1 text-xs text-slate-400">예비군 1~4년차만 적용 (5년차 이상은 기본/작계, 동원여부 무관)</div>
             </div>
             <Input label="비고" value={militaryPersonnelForm.notes} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, notes: v }))} />
           </div>,
