@@ -2206,11 +2206,15 @@ export default function App() {
 
         // Step 2: Try Supabase first; fall back to localStorage only if unavailable
         let useSupabase = false;
+        // 유효 세션 존재 여부. 일시적 모듈 로드 실패와 "로그아웃/세션 없음"을 구분해
+        // 네트워크 일시 오류로 화면이 비워지거나 강제 로그아웃되는(보였다 안보였다) 문제를 방지.
+        let hasValidSession = false;
         if (isSupabaseAvailable()) {
           const session = await getCurrentSession();
           if (session?.user?.id) {
             console.log("[LOAD] Supabase session found:", session.user.id);
             useSupabase = true;
+            hasValidSession = true;
             
             // 병렬 로딩: 서로 독립적인 Supabase 요청을 동시에 수행해 로그인 후 대기시간을 단축
             // (이전: dorm→operational→profile 순차 4왕복 → 변경: 1왕복 시간으로 단축)
@@ -2231,7 +2235,9 @@ export default function App() {
               setNewHires(remoteDormModule?.newHires || []);
               console.log("[LOAD] Dorm module from Supabase: state set");
             } else {
-              console.error("[LOAD] Failed to load dorm module from Supabase:", dormRes.reason);
+              // 세션은 유효하나 dorm 모듈 로드가 일시적으로 실패한 경우.
+              // 기존 화면 데이터를 비우지 않고(로그아웃하지 않고) 유지하여 "보였다 안 보였다" 방지.
+              console.error("[LOAD] Failed to load dorm module from Supabase (세션 유지, 기존 데이터 보존):", dormRes.reason);
               useSupabase = false;
             }
 
@@ -2250,8 +2256,8 @@ export default function App() {
               useSupabase = false;
             }
 
-            // User profile
-            if (useSupabase && profileRes.status === "fulfilled" && profileRes.value) {
+            // User profile (세션이 유효하면 dorm/op 로드 실패와 무관하게 로그인 상태를 갱신)
+            if (hasValidSession && profileRes.status === "fulfilled" && profileRes.value) {
               const profile = profileRes.value;
               const authUser = authRes.status === "fulfilled" ? authRes.value : undefined;
               console.log("[LOAD] User profile loaded:", profile.id, profile.email);
@@ -2283,9 +2289,11 @@ export default function App() {
           useSupabase = false;
         }
         
-        // Step 3: If Supabase not used, clear Supabase-linked state to enforce Supabase as single source of truth.
-        if (!useSupabase) {
-          console.log("[LOAD] Supabase unavailable or no session; clearing Supabase-linked state (no localStorage fallback)");
+        // Step 3: 유효 세션이 없을 때만(로그아웃/Supabase 미가용) Supabase 연동 상태를 비운다.
+        // 일시적 모듈 로드 실패(useSupabase=false but hasValidSession=true)에서는 비우지 않아
+        // 네트워크 블립으로 화면이 비거나 강제 로그아웃되는 문제를 방지.
+        if (!hasValidSession) {
+          console.log("[LOAD] No valid session; clearing Supabase-linked state (no localStorage fallback)");
           setDorms([]);
           setOccupants([]);
           setInventory([]);
@@ -4897,6 +4905,50 @@ export default function App() {
       return true;
     });
   }, [operationalDorms, occupants, currentUser, dormSearch, dormSiteFilter, dormGenderFilter, dormStatusFilter]);
+
+  // 기숙사/입주자 데이터가 "안 보이는" 사유를 사용자에게 안내. (담당 기숙사 미지정/불일치 등)
+  // 관리자/뷰어는 전체 표시되므로 안내 대상이 아니다.
+  const dormAccessNotice = useMemo<string | null>(() => {
+    if (!currentUser) return null;
+    const role = currentUser.role;
+    if (role === "admin" || role === "viewer") return null;
+    if (role === "dorm_manager" || role === "maintenance_reporter") {
+      if (!currentUser.dormId) {
+        return "담당 기숙사가 지정되지 않아 기숙사/입주자 데이터가 표시되지 않습니다. 관리자에게 담당 기숙사 지정을 요청하세요.";
+      }
+      // 담당 기숙사 ID는 있으나 운영 기숙사 목록에서 찾지 못하는 경우(데이터 불일치/매칭 누락).
+      const matched = operationalDorms.some((d) => d.id === currentUser.dormId);
+      if (!matched) {
+        return "지정된 담당 기숙사를 현재 데이터에서 찾을 수 없습니다(ID 불일치 가능). 관리자에게 담당 기숙사 재지정을 요청하세요.";
+      }
+    }
+    return null;
+  }, [currentUser, operationalDorms]);
+
+  // 진단: 기숙사/입주자 표시 누락 사유를 콘솔에 기록(개발 모드).
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    if (!currentUser) return;
+    const role = currentUser.role;
+    if (role === "dorm_manager" || role === "maintenance_reporter") {
+      if (!currentUser.dormId) {
+        console.warn("[기숙사 표시 진단] 담당자 계정에 dorm_id(profiles.dorm_id) 미지정 → 기숙사/입주자 전체 미표시", { userId: currentUser.id, role });
+      } else if (!operationalDorms.some((d) => d.id === currentUser.dormId)) {
+        console.warn("[기숙사 표시 진단] dorm_id 가 operationalDorms.id 와 불일치 → 표시 0건", {
+          userId: currentUser.id,
+          role,
+          dormId: currentUser.dormId,
+          operationalDormIds: operationalDorms.slice(0, 20).map((d) => d.id),
+        });
+      }
+    }
+    if (operationalDorms.length > 0 && visibleDorms.length === 0 && (role === "admin" || role === "viewer")) {
+      console.warn("[기숙사 표시 진단] 운영 기숙사는 존재하나 필터 결과 0건(검색/지역/성별/상태 필터 확인)", {
+        operationalDorms: operationalDorms.length,
+        filters: { dormSearch, dormSiteFilter, dormGenderFilter, dormStatusFilter },
+      });
+    }
+  }, [currentUser, operationalDorms, visibleDorms.length, dormSearch, dormSiteFilter, dormGenderFilter, dormStatusFilter]);
 
   const visibleDormContracts = useMemo(() => {
     return dormContracts.filter((c) => {
@@ -12869,6 +12921,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
 
+            {dormAccessNotice && (
+              <div className="mb-4 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                {dormAccessNotice}
+              </div>
+            )}
+
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-6">
               {([
                 { label: "총 기숙사", value: visibleDorms.length },
@@ -13030,6 +13088,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <h2 className="text-lg font-semibold">기숙사별 인원 / 입실일</h2>
                 <p className="text-sm text-slate-500">선택된 기숙사 기준 입주자 상세 관리</p>
                 <p className="text-xs text-slate-400 mt-1">집계 기준: "거주중"은 거주중·만료예정만 포함합니다.</p>
+                {dormAccessNotice && (
+                  <div className="mt-2 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    {dormAccessNotice}
+                  </div>
+                )}
               </div>
               {canEditData(currentUser) && (
                 <button
