@@ -181,6 +181,23 @@ export const getProfile = async (userId: string): Promise<Profile | null> => {
 };
 
 /**
+ * 전체 프로필 목록 조회 (사용자관리용). RLS에 따라 admin은 전체, 일반 사용자는 본인 행만 반환될 수 있음.
+ */
+export const listProfiles = async (): Promise<Profile[]> => {
+  if (!isSupabaseAvailable()) return [];
+  const { data, error } = await supabase!
+    .from("profiles")
+    .select("*")
+    .order("created_at", { ascending: true });
+  if (error) {
+    const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
+    console.error("[AuthService] listProfiles error:", { code: e.code, message: e.message, details: e.details, hint: e.hint });
+    throw error;
+  }
+  return (data || []) as Profile[];
+};
+
+/**
  * 프로필 생성 또는 수정 (profiles 테이블)
  * @param profile - 생성/수정할 프로필 객체
  * @returns { data: Profile | null; error: any }

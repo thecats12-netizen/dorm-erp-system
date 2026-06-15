@@ -78,6 +78,7 @@ import {
   getCurrentSession,
   getCurrentAuthUser,
   getProfile,
+  listProfiles,
   updateProfileOnly,
   createUserViaEdgeFunction,
   type Profile,
@@ -208,8 +209,8 @@ const getRoleLabel = (role: UserRole) => {
   switch (role) {
     case "admin": return "관리자";
     case "viewer": return "뷰어";
-    case "dorm_manager": return "하자처리 담당자";
-    case "maintenance_reporter": return "기숙사 관리자";
+    case "dorm_manager": return "기숙사 관리자";
+    case "maintenance_reporter": return "하자접수 담당자";
   }
 };
 
@@ -217,8 +218,8 @@ const getRoleValue = (label: string): UserRole => {
   switch (label) {
     case "관리자": return "admin";
     case "뷰어": return "viewer";
-    case "하자처리 담당자": return "dorm_manager";
-    case "기숙사 관리자": return "maintenance_reporter";
+    case "기숙사 관리자": return "dorm_manager";
+    case "하자접수 담당자": return "maintenance_reporter";
     default: return "viewer";
   }
 };
@@ -2213,11 +2214,12 @@ export default function App() {
             
             // 병렬 로딩: 서로 독립적인 Supabase 요청을 동시에 수행해 로그인 후 대기시간을 단축
             // (이전: dorm→operational→profile 순차 4왕복 → 변경: 1왕복 시간으로 단축)
-            const [dormRes, opRes, profileRes, authRes] = await Promise.allSettled([
+            const [dormRes, opRes, profileRes, authRes, profilesListRes] = await Promise.allSettled([
               loadDormModule(tenantId),
               loadOperationalModule(tenantId),
               getProfile(session.user.id),
               getCurrentAuthUser(),
+              listProfiles(),
             ]);
 
             // Dorm module
@@ -2257,6 +2259,20 @@ export default function App() {
               setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
             } else if (profileRes.status === "rejected") {
               console.error("[LOAD] Failed to load user profile:", profileRes.reason);
+            }
+
+            // 사용자관리: Supabase profiles 를 단일 출처로 사용(localStorage 샘플 사용자 대체).
+            // RLS상 admin은 전체, 일반 사용자는 본인 행만 반환될 수 있음.
+            if (profilesListRes.status === "fulfilled" && Array.isArray(profilesListRes.value) && profilesListRes.value.length > 0) {
+              setUsers(profilesListRes.value.map((p) => mapProfileToLoginUser(p)));
+              console.log("[LOAD] Users from Supabase profiles:", profilesListRes.value.length);
+            } else if (profilesListRes.status === "rejected") {
+              console.error("[LOAD] Failed to load profiles list:", profilesListRes.reason);
+              // 실패 시 최소한 본인 프로필만이라도 표시(localStorage 샘플은 사용하지 않음)
+              if (profileRes.status === "fulfilled" && profileRes.value) {
+                const authUser = authRes.status === "fulfilled" ? authRes.value : undefined;
+                setUsers([mapProfileToLoginUser(profileRes.value, authUser?.email ?? undefined)]);
+              }
             }
           } else {
             console.warn("[LOAD] No Supabase session found, falling back to localStorage");
@@ -19077,7 +19093,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
               <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>권한정보</h4>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                <SelectInput label="권한" value={getRoleLabel(userForm.role)} onChange={(v) => setUserForm((f) => ({ ...f, role: getRoleValue(v) }))} options={["관리자", "뷰어", "하자처리 담당자", "기숙사 관리자"]} />
+                <SelectInput label="권한" value={getRoleLabel(userForm.role)} onChange={(v) => setUserForm((f) => ({ ...f, role: getRoleValue(v) }))} options={["관리자", "뷰어", "기숙사 관리자", "하자접수 담당자"]} />
                 <SelectInput label="지역 권한" value={userForm.siteAccess} onChange={(v) => setUserForm((f) => ({ ...f, siteAccess: v as Site | "전체" }))} options={["전체", "평택", "천안"]} />
                 <SelectInput label="성별 권한" value={userForm.genderAccess || "전체"} onChange={(v) => setUserForm((f) => ({ ...f, genderAccess: v as "남" | "여" | "전체" }))} options={["전체", "남", "여"]} />
               </div>
