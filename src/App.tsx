@@ -3338,11 +3338,17 @@ export default function App() {
   // 기숙사/입주자/하자접수/계약/운영시뮬 등 모든 화면이 이 함수로 동일하게 관리자명을 자동 표시한다.
   const getDormManagerUser = (dormId?: string): LoginUser | null => {
     if (!dormId) return null;
-    const fromProfiles = users.find(
+    // 1순위: 기숙사 관리자 (profiles.role === "dorm_manager" AND dorm_id === dorm.id AND is_active)
+    const manager = users.find(
       (u) => u.role === "dorm_manager" && u.dormId === dormId && u.isActive !== false
     );
-    if (fromProfiles) return fromProfiles;
-    // 레거시 호환: 과거 dorms.managerUserId 로만 지정된 데이터 표시(신규 지정은 profiles.dorm_id 사용)
+    if (manager) return manager;
+    // 2순위: 하자접수 담당자 (profiles.role === "maintenance_reporter" AND dorm_id === dorm.id AND is_active)
+    const reporter = users.find(
+      (u) => u.role === "maintenance_reporter" && u.dormId === dormId && u.isActive !== false
+    );
+    if (reporter) return reporter;
+    // 레거시 보조: 과거 dorms.managerUserId 로만 지정된 데이터 표시(신규 지정은 profiles.dorm_id 사용)
     const dorm = dorms.find((d) => d.id === dormId);
     if (dorm?.managerUserId) {
       const legacy = users.find((u) => u.id === dorm.managerUserId);
@@ -3354,6 +3360,37 @@ export default function App() {
   const getDormManagerDisplayName = (dormId?: string): string => {
     const manager = getDormManagerUser(dormId);
     return manager ? manager.displayName || manager.username || "-" : "-";
+  };
+
+  // 입주자 계약만료일 단일 기준: 입주자가 배정된 기숙사의 "유효 계약 종료일".
+  // 입주일+2년/예정퇴실일(개인 날짜)로 계산하지 않는다.
+  const getDormEffectiveContractEnd = (dormId?: string): string => {
+    if (!dormId) return "";
+    const dorm = operationalDorms.find((d) => d.id === dormId) || dorms.find((d) => d.id === dormId);
+    if (!dorm) return "";
+    const key = makeDormMatchKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+    // 같은 호실의 최신 유효 계약(종료/해지/삭제 제외)
+    const validContract = dormContracts
+      .filter((c) => !c.isDeleted)
+      .filter((c) => c.contractStatus !== "종료" && c.contractStatus !== "해지")
+      .filter((c) => !!c.contractEnd)
+      .filter((c) => makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === key)
+      .sort((a, b) => (Date.parse(b.updatedAt || "") || 0) - (Date.parse(a.updatedAt || "") || 0))[0];
+    if (validContract?.contractEnd) return validContract.contractEnd;
+    // 보조: operationalDorm(계약 기반) 의 contractEnd
+    return dorm.contractEnd || "";
+  };
+
+  const getDormContractEndLabel = (dormId?: string): string => {
+    const end = getDormEffectiveContractEnd(dormId);
+    return end ? formatDateOnly(end) || "-" : "-";
+  };
+
+  const getDormContractRemainLabel = (dormId?: string): string => {
+    const end = getDormEffectiveContractEnd(dormId);
+    if (!end) return "-";
+    const d = daysDiff(end);
+    return d < 0 ? "만료" : String(d);
   };
 
   // 개인정보 마스킹: 조회전용(viewer)에게 연락처 가운데 자리 마스킹 (admin/담당자는 원본)
@@ -8416,7 +8453,9 @@ const exportExcel = () => {
           부서: o.department,
           연락처: o.phone,
           입실일: o.moveInDate,
-          잔여일: daysBetween(o.moveInDate, o.moveOutDueDate),
+          계약만료일: getDormContractEndLabel(o.dormId),
+          잔여일: getDormContractRemainLabel(o.dormId),
+          담당관리자: getDormManagerDisplayName(o.dormId),
           예상입실일: o.expectedMoveInDate,
           예상퇴실일: o.expectedMoveOutDate,
           실제퇴실일: o.actualMoveOutDate,
@@ -13386,8 +13425,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{dorm?.공동현관 || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm?.세대현관 || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm?.leaseStatus || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(dorm?.contractEnd || "") || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{dorm ? daysDiff(dorm.contractEnd) : "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(o.dormId)}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{getDormContractRemainLabel(o.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm?.id)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm ? (isCleaningMissing(dorm) ? "미보고" : "정상") : "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getOpenDefectCount(dorm?.id || "")}</td>
@@ -13482,6 +13521,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                       <h4 className="mb-3 text-base font-semibold">운영정보</h4>
                       <dl className={`${theme.darkMode ? "grid gap-2 text-sm text-slate-300 sm:grid-cols-2" : "grid gap-2 text-sm text-slate-700 sm:grid-cols-2"}`}>
+                        <div><dt className="font-medium">담당 관리자</dt><dd>{getDormManagerDisplayName(selectedDetailDorm.id)}</dd></div>
                         <div><dt className="font-medium">현재인원</dt><dd>{occupancyCountByDorm.get(selectedDetailDorm.id) || 0} / {selectedDetailDorm.capacity}</dd></div>
                         <div><dt className="font-medium">공실수</dt><dd>{Math.max(selectedDetailDorm.capacity - (occupancyCountByDorm.get(selectedDetailDorm.id) || 0), 0)}</dd></div>
                         <div><dt className="font-medium">청소상태</dt><dd>{isCleaningMissing(selectedDetailDorm) ? "미보고" : "정상"}</dd></div>
@@ -13525,8 +13565,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               <td className="px-3 py-3">{occupant.status}</td>
                               <td translate="no" className="px-3 py-3 notranslate">{occupant.department}</td>
                               <td className="px-3 py-3">{maskPhone(occupant.phone)}</td>
-                              <td className="px-3 py-3">{formatDateOnly(occupant.moveOutDueDate || "") || "-"}</td>
-                              <td className="px-3 py-3">{daysBetween(occupant.moveInDate, occupant.moveOutDueDate)}</td>
+                              <td className="px-3 py-3">{getDormContractEndLabel(occupant.dormId)}</td>
+                              <td className="px-3 py-3">{getDormContractRemainLabel(occupant.dormId)}</td>
                             </tr>
                           ))}
                           {selectedDetailOccupants.length === 0 && (
