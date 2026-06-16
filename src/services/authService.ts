@@ -11,7 +11,7 @@ export interface Profile {
   display_name?: string;
   role?: UserRole;
   is_active?: boolean;
-  dorm_id?: string;
+  dorm_id?: string | null;
   site_access?: Site | "전체";
   gender_access?: "남" | "여" | "전체";
   created_at?: string;

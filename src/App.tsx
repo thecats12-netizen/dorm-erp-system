@@ -3334,12 +3334,26 @@ export default function App() {
     return matchedUser ? formatUserDisplay(matchedUser) : formatUserDisplay(normalized);
   };
 
-  const getDormManagerDisplayName = (dormId?: string): string => {
-    if (!dormId) return "-";
+  // 기숙사 관리자 단일 기준(SoT): profiles.role === "dorm_manager" AND profiles.dorm_id === dorm.id (활성 사용자).
+  // 기숙사/입주자/하자접수/계약/운영시뮬 등 모든 화면이 이 함수로 동일하게 관리자명을 자동 표시한다.
+  const getDormManagerUser = (dormId?: string): LoginUser | null => {
+    if (!dormId) return null;
+    const fromProfiles = users.find(
+      (u) => u.role === "dorm_manager" && u.dormId === dormId && u.isActive !== false
+    );
+    if (fromProfiles) return fromProfiles;
+    // 레거시 호환: 과거 dorms.managerUserId 로만 지정된 데이터 표시(신규 지정은 profiles.dorm_id 사용)
     const dorm = dorms.find((d) => d.id === dormId);
-    if (!dorm || !dorm.managerUserId) return "-";
-    const manager = users.find((u) => u.id === dorm.managerUserId);
-    return manager?.displayName || manager?.username || "-";
+    if (dorm?.managerUserId) {
+      const legacy = users.find((u) => u.id === dorm.managerUserId);
+      if (legacy) return legacy;
+    }
+    return null;
+  };
+
+  const getDormManagerDisplayName = (dormId?: string): string => {
+    const manager = getDormManagerUser(dormId);
+    return manager ? manager.displayName || manager.username || "-" : "-";
   };
 
   // 개인정보 마스킹: 조회전용(viewer)에게 연락처 가운데 자리 마스킹 (admin/담당자는 원본)
@@ -4137,7 +4151,9 @@ export default function App() {
   }, [theme, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    saveJson(USERS_KEY, users, tenantId);
+    // Supabase 모드에서는 profiles 가 단일 출처. localStorage 로 users 를 다시 저장하면
+    // 재실행 시 샘플/이전 계정이 병합·재생성될 수 있어 차단한다. (dorms 등과 동일 정책)
+    if (!isSupabaseAvailable()) saveJson(USERS_KEY, users, tenantId);
   }, [users, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
@@ -7038,6 +7054,52 @@ export default function App() {
     softDeleteItem(cleaningReports, setCleaningReports, reportId, "cleaningReport");
   };
 
+  // Supabase profiles 를 단일 출처로 users state 를 재동기화. (추가/수정/삭제 후 호출)
+  const refreshUsersFromSupabase = async () => {
+    if (!isSupabaseAvailable()) return;
+    try {
+      const fresh = await listProfiles();
+      if (Array.isArray(fresh)) setUsers(fresh.map((p) => mapProfileToLoginUser(p)));
+    } catch (err) {
+      const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
+      console.error("[refreshUsersFromSupabase] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
+    }
+  };
+
+  // 사용자 "삭제": Auth/profiles 행을 실제 삭제하지 않고 profiles.is_active=false 로 비활성 처리.
+  // (조건: Auth 사용자 실제 삭제 금지, profiles 데이터 삭제 금지)
+  const deactivateUsersPermanent = async (ids: string[]) => {
+    if (!canManageUsers(currentUser)) return;
+    const targets = ids.filter((id) => id && id !== currentUser?.id); // 본인 계정은 제외
+    if (targets.length === 0) return;
+    if (!confirm(`선택한 ${targets.length}명을 삭제(비활성)할까요?\nSupabase profiles 에 is_active=false 로 영구 반영됩니다.`)) return;
+
+    if (!isSupabaseAvailable()) {
+      // 오프라인 fallback: localStorage 기준 비활성 처리
+      setUsers((prev) => prev.map((u) => (targets.includes(u.id) ? { ...u, isActive: false } : u)));
+      setSelectedUserIds([]);
+      return;
+    }
+
+    const prevUsers = users;
+    // optimistic update
+    setUsers((prev) => prev.map((u) => (targets.includes(u.id) ? { ...u, isActive: false } : u)));
+    try {
+      for (const id of targets) {
+        const { error } = await updateProfileOnly(id, { is_active: false });
+        if (error) throw error;
+      }
+      await refreshUsersFromSupabase(); // Supabase 기준 재조회로 최종 동기화
+    } catch (err) {
+      const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
+      console.error("[deactivateUsersPermanent] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
+      alert(`사용자 삭제(비활성) 실패: ${translateSupabaseError(e?.message || String(err))}`);
+      setUsers(prevUsers); // 실패 시 되돌림
+      return;
+    }
+    setSelectedUserIds([]);
+  };
+
   const saveUser = async () => {
     if (!canManageUsers(currentUser)) return;
     if (!userForm.displayName.trim() || !userForm.username.trim()) {
@@ -7059,6 +7121,22 @@ export default function App() {
     if (dup) {
       alert("이미 사용 중인 아이디입니다.");
       return;
+    }
+
+    // 기숙사 관리자 1명 제한(SoT: profiles.dorm_id). 동일 기숙사에 다른 활성 관리자가 있으면 경고 후 교체.
+    let releasePrevManagerId: string | null = null;
+    if ((userForm.role as string) === "dorm_manager" && userForm.dormId) {
+      const existing = users.find(
+        (u) => u.role === "dorm_manager" && u.dormId === userForm.dormId && u.isActive !== false && u.id !== editingUserId
+      );
+      if (existing) {
+        const dormName = dorms.find((d) => d.id === userForm.dormId)?.buildingName || "해당 기숙사";
+        const ok = window.confirm(
+          `현재 "${existing.displayName || existing.username}" 님이\n${dormName}의 기숙사 관리자 및 담당자로 지정되어 있습니다.\n\n변경하시겠습니까?`
+        );
+        if (!ok) return; // 아니오 → 변경 취소
+        releasePrevManagerId = existing.id; // 예 → 기존 관리자 자동 해제
+      }
     }
 
     const payload: LoginUser = {
@@ -7114,11 +7192,24 @@ export default function App() {
             return;
           }
         }
+
+        // 1명 제한: 동일 기숙사의 기존 관리자 자동 해제 (profiles.dorm_id 비움)
+        if (releasePrevManagerId) {
+          const { error: releaseError } = await updateProfileOnly(releasePrevManagerId, { dorm_id: null });
+          if (releaseError) {
+            console.error("기존 관리자 해제 실패:", releaseError);
+            alert(`기존 관리자 해제 실패: ${translateSupabaseError((releaseError as any).message || String(releaseError))}`);
+            return;
+          }
+        }
       } catch (err) {
         console.error("Supabase user save failed:", err);
         alert(`Supabase 저장 실패: ${translateSupabaseError(String(err))}`);
         return;
       }
+    } else if (releasePrevManagerId) {
+      // 오프라인 fallback: 로컬에서 기존 관리자 해제
+      setUsers((prev) => prev.map((u) => (u.id === releasePrevManagerId ? { ...u, dormId: undefined } : u)));
     }
 
     // 로컬 상태 업데이트 (비밀번호는 저장하지 않음)
@@ -7130,6 +7221,8 @@ export default function App() {
     setUserForm(userTemplate());
     setEditingUserId(null);
     setShowUserForm(false);
+    // 저장 후 Supabase profiles 기준으로 재동기화(활성/비활성/권한 등 실제 저장값 반영)
+    await refreshUsersFromSupabase();
   };
 
   const openMilitaryPersonnelEdit = (person: MilitaryPersonnel) => {
@@ -12566,6 +12659,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <th className="px-2 py-2 whitespace-nowrap text-xs">등록</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">수정</th>
                     <th className="px-2 py-2 whitespace-nowrap text-xs">등록자</th>
+                    <th className="px-2 py-2 whitespace-nowrap text-xs">담당관리자</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -12615,11 +12709,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.createdAt)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.updatedAt)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.registeredBy}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{getDormManagerDisplayName(operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo))?.id)}</td>
                     </tr>
                   ))}
                   {visibleDormContracts.length === 0 && (
                     <tr>
-                      <td colSpan={canEditData(currentUser) ? 25 : 24} className="px-4 py-12 text-center text-slate-400">
+                      <td colSpan={canEditData(currentUser) ? 26 : 25} className="px-4 py-12 text-center text-slate-400">
                         기숙사 계약 정보가 없습니다.
                       </td>
                     </tr>
@@ -18059,8 +18154,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 {selectedUserIds.length > 0 && (
                   <button
                     onClick={() => {
-                      setUsers((prev) => prev.filter((u) => !selectedUserIds.includes(u.id)));
-                      setSelectedUserIds([]);
+                      void deactivateUsersPermanent(selectedUserIds);
                     }}
                     className="inline-flex items-center gap-2 rounded-2xl bg-rose-600 px-4 py-2 text-white hover:bg-rose-700"
                   >
@@ -18140,7 +18234,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  deleteById(setUsers, u.id);
+                                  void deactivateUsersPermanent([u.id]);
                                 }}
                                 className="rounded-xl border border-rose-300 p-2 text-rose-600 hover:bg-rose-50"
                               >
