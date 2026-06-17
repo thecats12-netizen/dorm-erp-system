@@ -19,6 +19,8 @@ export type LoginUser = {
   세대현관?: string;
   manualActiveOverride?: boolean;
   dormId?: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
   createdAt: string;
 };
 

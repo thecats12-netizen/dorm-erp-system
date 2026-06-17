@@ -14,6 +14,8 @@ export interface Profile {
   dorm_id?: string | null;
   site_access?: Site | "전체";
   gender_access?: "남" | "여" | "전체";
+  is_deleted?: boolean | null;
+  deleted_at?: string | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -310,6 +312,8 @@ export const updateProfileOnly = async (
     if (profile.dorm_id !== undefined) patch.dorm_id = profile.dorm_id;
     if (profile.site_access !== undefined) patch.site_access = profile.site_access;
     if (profile.gender_access !== undefined) patch.gender_access = profile.gender_access;
+    if (profile.is_deleted !== undefined) patch.is_deleted = profile.is_deleted;
+    if (profile.deleted_at !== undefined) patch.deleted_at = profile.deleted_at;
 
     const { data, error } = await supabase!
       .from("profiles")
@@ -350,7 +354,7 @@ export const createUserViaEdgeFunction = async (payload: {
   display_name: string;
   role: string;
   is_active: boolean;
-  dorm_id?: string;
+  dorm_id?: string | null;
   site_access: string;
   gender_access: string;
   tenant_id: string;

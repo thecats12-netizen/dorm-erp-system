@@ -170,6 +170,9 @@ function mapProfileToLoginUser(profile: Profile, authUserEmail?: string): LoginU
     genderAccess: profile.gender_access || "전체",
     createdAt: profile.created_at || new Date().toISOString(),
     dormId: profile.dorm_id || undefined,
+    // 숨김(삭제) 판정: is_deleted 우선, 없으면 deleted_at 존재 여부로 판단
+    isDeleted: profile.is_deleted === true || !!profile.deleted_at,
+    deletedAt: profile.deleted_at || undefined,
   } as LoginUser;
 }
 
@@ -1553,6 +1556,7 @@ export default function App() {
   const [_search, _setSearch] = useState("");
   const [userSearch, setUserSearch] = useState("");
   const [showInactiveUsers, setShowInactiveUsers] = useState(false); // 사용자관리: 비활성 사용자 보기 토글(기본 OFF)
+  const [showDeletedUsers, setShowDeletedUsers] = useState(false); // 사용자관리: 삭제(숨김) 사용자 보기 토글(기본 OFF)
   const [_siteFilter, _setSiteFilter] = useState<Site | "전체">("전체");
   const [selectedDormId, setSelectedDormId] = useState<string>("");
   const [selectedDormDetailId, setSelectedDormDetailId] = useState<string>("");
@@ -5156,13 +5160,18 @@ export default function App() {
         return false;
       }
 
-      // 기본 목록은 활성 사용자만 표시. "비활성 사용자 보기" 토글 ON 시 비활성도 표시.
-      if (!showInactiveUsers && u.isActive === false) return false;
+      // 삭제(숨김) 사용자는 기본/비활성보기에서 모두 숨김. "삭제 사용자 보기" 토글에서만 표시.
+      if (u.isDeleted === true) {
+        if (!showDeletedUsers) return false;
+      } else {
+        // 기본 목록은 활성만. "비활성 사용자 보기" ON 시 비활성도 표시.
+        if (!showInactiveUsers && u.isActive === false) return false;
+      }
 
       const text = `${u.displayName} ${u.username}`.toLowerCase();
       return !userSearch || text.includes(userSearch.toLowerCase());
     });
-  }, [users, userSearch, currentUser, showInactiveUsers]);
+  }, [users, userSearch, currentUser, showInactiveUsers, showDeletedUsers]);
 
   const visibleInventory = useMemo(() => {
     return inventory.filter((i) => {
@@ -7119,61 +7128,88 @@ export default function App() {
     }
   };
 
-  // 사용자 "삭제": Auth/profiles 행을 실제 삭제하지 않고 profiles.is_active=false 로 비활성 처리.
-  // (조건: Auth 사용자 실제 삭제 금지, profiles 데이터 삭제 금지)
+  // 컬럼 미존재(스키마 차이) 오류 판정: is_deleted/deleted_at 컬럼이 없는 배포 대비.
+  const isMissingColumnError = (err: unknown): boolean => {
+    const e = err as { code?: string; message?: string };
+    const msg = String(e?.message || "").toLowerCase();
+    return e?.code === "42703" || e?.code === "PGRST204" || /column .* does not exist|could not find the .* column/.test(msg);
+  };
+
+  // 사용자 "삭제": Auth/profiles 행을 실제 삭제하지 않고 숨김 처리.
+  // is_deleted=true(우선) + deleted_at + is_active=false 저장. 컬럼 없으면 단계적 폴백.
   const deactivateUsersPermanent = async (ids: string[]) => {
     if (!canManageUsers(currentUser)) return;
     const targets = ids.filter((id) => id && id !== currentUser?.id); // 본인 계정은 제외
     if (targets.length === 0) return;
-    if (!confirm(`선택한 ${targets.length}명을 삭제(비활성)할까요?\nSupabase profiles 에 is_active=false 로 영구 반영됩니다.`)) return;
+    if (!confirm(`선택한 ${targets.length}명을 삭제할까요?\n목록에서 숨김 처리되며 Supabase profiles 에 영구 반영됩니다.`)) return;
+
+    const nowIso = new Date().toISOString();
 
     if (!isSupabaseAvailable()) {
-      // 오프라인 fallback: localStorage 기준 비활성 처리
-      setUsers((prev) => prev.map((u) => (targets.includes(u.id) ? { ...u, isActive: false } : u)));
+      // 오프라인 fallback
+      setUsers((prev) => prev.map((u) => (targets.includes(u.id) ? { ...u, isActive: false, isDeleted: true, deletedAt: nowIso } : u)));
       setSelectedUserIds([]);
       return;
     }
 
-    const prevUsers = users;
-    // optimistic update
-    setUsers((prev) => prev.map((u) => (targets.includes(u.id) ? { ...u, isActive: false } : u)));
-    try {
-      for (const id of targets) {
-        const { error } = await updateProfileOnly(id, { is_active: false });
-        if (error) throw error;
+    // 배포 스키마에 따라 단계적으로 시도: 전체 → deleted_at만 → is_active만
+    const deleteOne = async (id: string) => {
+      let res = await updateProfileOnly(id, { is_active: false, is_deleted: true, deleted_at: nowIso });
+      if (res.error && isMissingColumnError(res.error)) {
+        res = await updateProfileOnly(id, { is_active: false, deleted_at: nowIso });
       }
+      if (res.error && isMissingColumnError(res.error)) {
+        res = await updateProfileOnly(id, { is_active: false });
+      }
+      if (res.error) throw res.error;
+    };
+
+    const prevUsers = users;
+    // optimistic update (목록에서 즉시 숨김)
+    setUsers((prev) => prev.map((u) => (targets.includes(u.id) ? { ...u, isActive: false, isDeleted: true, deletedAt: nowIso } : u)));
+    try {
+      for (const id of targets) await deleteOne(id);
       await refreshUsersFromSupabase(); // Supabase 기준 재조회로 최종 동기화
     } catch (err) {
       const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
       console.error("[deactivateUsersPermanent] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
-      alert(`사용자 삭제(비활성) 실패: ${translateSupabaseError(e?.message || String(err))}`);
+      alert(`사용자 삭제 실패: ${translateSupabaseError(e?.message || String(err))}`);
       setUsers(prevUsers); // 실패 시 되돌림
       return;
     }
     setSelectedUserIds([]);
   };
 
-  // 사용자 "복구/활성화": profiles.is_active=true 로 저장 후 재조회.
+  // 사용자 "복구": is_deleted=false + deleted_at=null + is_active=true 저장 후 재조회.
   const reactivateUser = async (userId: string) => {
     if (!canManageUsers(currentUser)) return;
     if (!userId) return;
 
     if (!isSupabaseAvailable()) {
-      // 오프라인 fallback
-      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, isActive: true } : u)));
+      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, isActive: true, isDeleted: false, deletedAt: undefined } : u)));
       return;
     }
 
+    const restoreOne = async () => {
+      let res = await updateProfileOnly(userId, { is_active: true, is_deleted: false, deleted_at: null });
+      if (res.error && isMissingColumnError(res.error)) {
+        res = await updateProfileOnly(userId, { is_active: true, deleted_at: null });
+      }
+      if (res.error && isMissingColumnError(res.error)) {
+        res = await updateProfileOnly(userId, { is_active: true });
+      }
+      if (res.error) throw res.error;
+    };
+
     const prevUsers = users;
-    setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, isActive: true } : u))); // optimistic
+    setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, isActive: true, isDeleted: false, deletedAt: undefined } : u))); // optimistic
     try {
-      const { error } = await updateProfileOnly(userId, { is_active: true });
-      if (error) throw error;
+      await restoreOne();
       await refreshUsersFromSupabase();
     } catch (err) {
       const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
       console.error("[reactivateUser] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
-      alert(`사용자 복구(활성화) 실패: ${translateSupabaseError(e?.message || String(err))}`);
+      alert(`사용자 복구 실패: ${translateSupabaseError(e?.message || String(err))}`);
       setUsers(prevUsers); // 실패 시 되돌림
     }
   };
@@ -7217,9 +7253,13 @@ export default function App() {
       }
     }
 
+    // 담당 기숙사 미선택은 null 로 저장(빈 문자열 "" 저장 금지).
+    const normalizedDormId: string | null = userForm.dormId && userForm.dormId.trim() ? userForm.dormId : null;
+
     const payload: LoginUser = {
       id: editingUserId || crypto.randomUUID(),
       ...userForm,
+      dormId: normalizedDormId || undefined,
       username: userForm.username.trim(),
       displayName: userForm.displayName.trim(),
       createdAt: editingUserId ? users.find((u) => u.id === editingUserId)?.createdAt || new Date().toISOString() : new Date().toISOString(),
@@ -7238,7 +7278,7 @@ export default function App() {
             display_name: userForm.displayName.trim(),
             role: (userForm.role as any) || "viewer",
             is_active: userForm.isActive ?? true,
-            dorm_id: userForm.dormId,
+            dorm_id: normalizedDormId,
             site_access: userForm.siteAccess || "전체",
             gender_access: userForm.genderAccess || "전체",
             tenant_id: tenantId,
@@ -7259,7 +7299,7 @@ export default function App() {
             display_name: userForm.displayName.trim(),
             role: (userForm.role as any) || "viewer",
             is_active: userForm.isActive ?? true,
-            dorm_id: userForm.dormId,
+            dorm_id: normalizedDormId,
             site_access: userForm.siteAccess || "전체",
             gender_access: userForm.genderAccess || "전체",
           });
@@ -18236,6 +18276,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   />
                   비활성 사용자 보기
                 </label>
+                <label className={`inline-flex items-center gap-2 rounded-2xl border px-3 py-2 text-sm ${theme.darkMode ? "border-slate-600 text-slate-300" : "border-slate-300 text-slate-700"}`}>
+                  <input
+                    type="checkbox"
+                    checked={showDeletedUsers}
+                    onChange={(e) => setShowDeletedUsers(e.target.checked)}
+                    className="h-4 w-4"
+                  />
+                  삭제 사용자 보기
+                </label>
                 <button
                   onClick={() => {
                     setUserForm(userTemplate());
@@ -19371,7 +19420,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 label="기숙사"
                 value={userForm.dormId || ""}
                 onChange={(dormId) => {
-                  const dorm = visibleDorms.find((d) => d.id === dormId);
+                  const dorm = dormId ? visibleDorms.find((d) => d.id === dormId) : undefined;
+                  if (!dormId) {
+                    // 미선택: 담당 기숙사 해제(저장 시 dorm_id=null). 파생 정보도 초기화.
+                    setUserForm((f) => ({ ...f, dormId: "", roadAddress: "", buildingName: "", dong: "", roomHo: "", 공동현관: "", 세대현관: "" }));
+                    return;
+                  }
                   setUserForm((f) => ({
                     ...f,
                     dormId,
@@ -19384,8 +19438,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     세대현관: dorm ? dorm.세대현관 : f.세대현관,
                   }));
                 }}
-                options={visibleDorms.map((d) => d.id)}
-                displayOptions={visibleDorms.map((d) => `${d.site} ${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)} (${d.address})`)}
+                options={["", ...visibleDorms.map((d) => d.id)]}
+                displayOptions={["미선택", ...visibleDorms.map((d) => `${d.site} ${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)} (${d.address})`)]}
               />
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 mt-4">
                 <Input label="도로명 주소" value={userForm.roadAddress || ""} onChange={(v) => setUserForm((f) => ({ ...f, roadAddress: v }))} readOnly />
