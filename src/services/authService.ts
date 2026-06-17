@@ -302,30 +302,34 @@ export const updateProfileOnly = async (
   }
 
   try {
+    // undefined 필드는 보내지 않도록 정리(부분 업데이트). null 은 명시적 비움으로 전송.
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (profile.display_name !== undefined) patch.display_name = profile.display_name;
+    if (profile.role !== undefined) patch.role = profile.role;
+    if (profile.is_active !== undefined) patch.is_active = profile.is_active;
+    if (profile.dorm_id !== undefined) patch.dorm_id = profile.dorm_id;
+    if (profile.site_access !== undefined) patch.site_access = profile.site_access;
+    if (profile.gender_access !== undefined) patch.gender_access = profile.gender_access;
+
     const { data, error } = await supabase!
       .from("profiles")
-      .update({
-        display_name: profile.display_name,
-        role: profile.role,
-        is_active: profile.is_active,
-        dorm_id: profile.dorm_id,
-        site_access: profile.site_access,
-        gender_access: profile.gender_access,
-        updated_at: new Date().toISOString(),
-      })
+      .update(patch)
       .eq("id", userId)
-      .select()
-      .single();
+      .select(); // .single() 제거: RLS로 representation이 0행이어도(업데이트는 성공) 오류로 처리되지 않도록 함
 
     if (error) {
-      console.error("[AuthService] Update profile error:", error);
-      return {
-        data: null,
-        error: new Error(translateSupabaseError(error.message || String(error))),
-      };
+      console.error("[AuthService] Update profile error:", {
+        code: (error as any)?.code,
+        message: (error as any)?.message,
+        details: (error as any)?.details,
+        hint: (error as any)?.hint,
+        userId,
+      });
+      // 원본 오류를 그대로 반환하여 호출부에서 code/message/details/hint 를 확인할 수 있게 함.
+      return { data: null, error };
     }
 
-    return { data: data as Profile, error: null };
+    return { data: (Array.isArray(data) ? (data[0] as Profile) : (data as Profile)) ?? null, error: null };
   } catch (err) {
     console.error("[AuthService] Update profile exception:", err);
     return {
