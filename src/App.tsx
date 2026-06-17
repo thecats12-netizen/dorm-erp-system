@@ -1552,6 +1552,7 @@ export default function App() {
   const [loginError, setLoginError] = useState("");
   const [_search, _setSearch] = useState("");
   const [userSearch, setUserSearch] = useState("");
+  const [showInactiveUsers, setShowInactiveUsers] = useState(false); // 사용자관리: 비활성 사용자 보기 토글(기본 OFF)
   const [_siteFilter, _setSiteFilter] = useState<Site | "전체">("전체");
   const [selectedDormId, setSelectedDormId] = useState<string>("");
   const [selectedDormDetailId, setSelectedDormDetailId] = useState<string>("");
@@ -2259,10 +2260,19 @@ export default function App() {
             // User profile (세션이 유효하면 dorm/op 로드 실패와 무관하게 로그인 상태를 갱신)
             if (hasValidSession && profileRes.status === "fulfilled" && profileRes.value) {
               const profile = profileRes.value;
-              const authUser = authRes.status === "fulfilled" ? authRes.value : undefined;
-              console.log("[LOAD] User profile loaded:", profile.id, profile.email);
-              setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
-              setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
+              // 비활성 계정(is_active=false)은 세션이 남아 있어도 새로고침 우회를 차단: 즉시 로그아웃.
+              if (profile.is_active === false) {
+                console.warn("[LOAD] 비활성 계정 세션 차단 → 로그아웃:", profile.id);
+                await supabaseSignOut();
+                setCurrentUser(null);
+                setLoginError("비활성화된 계정입니다.\n관리자에게 문의하세요.");
+                hasValidSession = false; // 아래 Step 3에서 Supabase 연동 상태 정리
+              } else {
+                const authUser = authRes.status === "fulfilled" ? authRes.value : undefined;
+                console.log("[LOAD] User profile loaded:", profile.id, profile.email);
+                setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
+                setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
+              }
             } else if (profileRes.status === "rejected") {
               console.error("[LOAD] Failed to load user profile:", profileRes.reason);
             }
@@ -5146,10 +5156,13 @@ export default function App() {
         return false;
       }
 
+      // 기본 목록은 활성 사용자만 표시. "비활성 사용자 보기" 토글 ON 시 비활성도 표시.
+      if (!showInactiveUsers && u.isActive === false) return false;
+
       const text = `${u.displayName} ${u.username}`.toLowerCase();
       return !userSearch || text.includes(userSearch.toLowerCase());
     });
-  }, [users, userSearch, currentUser]);
+  }, [users, userSearch, currentUser, showInactiveUsers]);
 
   const visibleInventory = useMemo(() => {
     return inventory.filter((i) => {
@@ -6279,7 +6292,10 @@ export default function App() {
           return;
         }
         if (profile.is_active === false) {
-          setLoginError("계정이 비활성화되어 있습니다.");
+          // 비활성 계정: Supabase 세션을 즉시 종료해 새로고침 우회를 차단.
+          await supabaseSignOut();
+          setCurrentUser(null);
+          setLoginError("비활성화된 계정입니다.\n관리자에게 문의하세요.");
           return;
         }
         setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
@@ -7135,6 +7151,31 @@ export default function App() {
       return;
     }
     setSelectedUserIds([]);
+  };
+
+  // 사용자 "복구/활성화": profiles.is_active=true 로 저장 후 재조회.
+  const reactivateUser = async (userId: string) => {
+    if (!canManageUsers(currentUser)) return;
+    if (!userId) return;
+
+    if (!isSupabaseAvailable()) {
+      // 오프라인 fallback
+      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, isActive: true } : u)));
+      return;
+    }
+
+    const prevUsers = users;
+    setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, isActive: true } : u))); // optimistic
+    try {
+      const { error } = await updateProfileOnly(userId, { is_active: true });
+      if (error) throw error;
+      await refreshUsersFromSupabase();
+    } catch (err) {
+      const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
+      console.error("[reactivateUser] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
+      alert(`사용자 복구(활성화) 실패: ${translateSupabaseError(e?.message || String(err))}`);
+      setUsers(prevUsers); // 실패 시 되돌림
+    }
   };
 
   const saveUser = async () => {
@@ -18185,7 +18226,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400 flex-1 max-w-md" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400 flex-1 max-w-md"}`}
               />
 
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-2 items-center">
+                <label className={`inline-flex items-center gap-2 rounded-2xl border px-3 py-2 text-sm ${theme.darkMode ? "border-slate-600 text-slate-300" : "border-slate-300 text-slate-700"}`}>
+                  <input
+                    type="checkbox"
+                    checked={showInactiveUsers}
+                    onChange={(e) => setShowInactiveUsers(e.target.checked)}
+                    className="h-4 w-4"
+                  />
+                  비활성 사용자 보기
+                </label>
                 <button
                   onClick={() => {
                     setUserForm(userTemplate());
@@ -18276,16 +18326,28 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             >
                               <Edit3 className="h-4 w-4" />
                             </button>
-                            {u.id !== currentUser.id && (
+                            {u.isActive === false ? (
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  void deactivateUsersPermanent([u.id]);
+                                  void reactivateUser(u.id);
                                 }}
-                                className="rounded-xl border border-rose-300 p-2 text-rose-600 hover:bg-rose-50"
+                                className="rounded-xl border border-emerald-300 px-3 py-2 text-xs font-semibold text-emerald-600 hover:bg-emerald-50"
                               >
-                                <Trash2 className="h-4 w-4" />
+                                복구/활성화
                               </button>
+                            ) : (
+                              u.id !== currentUser.id && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void deactivateUsersPermanent([u.id]);
+                                  }}
+                                  className="rounded-xl border border-rose-300 p-2 text-rose-600 hover:bg-rose-50"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              )
                             )}
                           </div>
                         </td>
