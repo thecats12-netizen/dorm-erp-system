@@ -18375,7 +18375,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             >
                               <Edit3 className="h-4 w-4" />
                             </button>
-                            {u.isActive === false ? (
+                            {u.isDeleted === true ? (
+                              // 삭제(숨김)된 사용자: 복구만 노출
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -18383,20 +18384,35 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 }}
                                 className="rounded-xl border border-emerald-300 px-3 py-2 text-xs font-semibold text-emerald-600 hover:bg-emerald-50"
                               >
-                                복구/활성화
+                                복구
                               </button>
                             ) : (
-                              u.id !== currentUser.id && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    void deactivateUsersPermanent([u.id]);
-                                  }}
-                                  className="rounded-xl border border-rose-300 p-2 text-rose-600 hover:bg-rose-50"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
-                              )
+                              <>
+                                {/* 비활성(미삭제) 사용자: 활성화 버튼 추가 노출 */}
+                                {u.isActive === false && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void reactivateUser(u.id);
+                                    }}
+                                    className="rounded-xl border border-emerald-300 px-3 py-2 text-xs font-semibold text-emerald-600 hover:bg-emerald-50"
+                                  >
+                                    활성화
+                                  </button>
+                                )}
+                                {/* 삭제 버튼: 활성/비활성 모두 동일하게 노출(본인 제외) */}
+                                {u.id !== currentUser.id && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void deactivateUsersPermanent([u.id]);
+                                    }}
+                                    className="rounded-xl border border-rose-300 p-2 text-rose-600 hover:bg-rose-50"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                )}
+                              </>
                             )}
                           </div>
                         </td>
