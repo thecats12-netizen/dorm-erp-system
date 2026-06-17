@@ -3352,15 +3352,12 @@ export default function App() {
   // 기숙사/입주자/하자접수/계약/운영시뮬 등 모든 화면이 이 함수로 동일하게 관리자명을 자동 표시한다.
   const getDormManagerUser = (dormId?: string): LoginUser | null => {
     if (!dormId) return null;
-    // 1순위: 기숙사 관리자 (profiles.role === "dorm_manager" AND dorm_id === dorm.id AND is_active)
-    const manager = users.find(
-      (u) => u.role === "dorm_manager" && u.dormId === dormId && u.isActive !== false
-    );
+    // 단일 기준: profiles.dorm_id === dorm.id, role 은 dorm_manager/maintenance_reporter 둘 다 담당자로 인정,
+    // isActive=true, isDeleted=false 인 사용자만. (1순위 dorm_manager → 2순위 maintenance_reporter)
+    const isEligible = (u: LoginUser) => u.dormId === dormId && u.isActive !== false && u.isDeleted !== true;
+    const manager = users.find((u) => u.role === "dorm_manager" && isEligible(u));
     if (manager) return manager;
-    // 2순위: 하자접수 담당자 (profiles.role === "maintenance_reporter" AND dorm_id === dorm.id AND is_active)
-    const reporter = users.find(
-      (u) => u.role === "maintenance_reporter" && u.dormId === dormId && u.isActive !== false
-    );
+    const reporter = users.find((u) => u.role === "maintenance_reporter" && isEligible(u));
     if (reporter) return reporter;
     // 레거시 보조: 과거 dorms.managerUserId 로만 지정된 데이터 표시(신규 지정은 profiles.dorm_id 사용)
     const dorm = dorms.find((d) => d.id === dormId);
@@ -6721,7 +6718,7 @@ export default function App() {
     setShowDormContractForm(false);
   };
 
-  const saveNewHire = () => {
+  const saveNewHire = async () => {
     if (!canEditData(currentUser)) return;
     if (!newHireForm.name.trim()) {
       alert("이름은 필수입니다.");
@@ -6738,26 +6735,6 @@ export default function App() {
     if (newHireForm.expectedMoveInDate && newHireForm.expectedMoveOutDate && new Date(newHireForm.expectedMoveInDate) > new Date(newHireForm.expectedMoveOutDate)) {
       alert("예상 입주일은 예상 퇴실일 이전이어야 합니다.");
       return;
-    }
-
-    // 기존 담당자 중복 체크
-    if (newHireForm.managerUserId && newHireForm.dormId) {
-      const existingManager = dorms.find((d) => d.id === newHireForm.dormId)?.managerUserId;
-      if (existingManager) {
-        const existingManagerUser = users.find((u) => u.id === existingManager);
-        const newManagerName = newHireForm.name;
-        const existingManagerName = existingManagerUser?.displayName || "담당자";
-
-        if (currentUser?.role === "admin") {
-          const confirmed = window.confirm(
-            `이미 이 기숙사에는 ${existingManagerName} 님이 기숙사 담당자로 지정되어 있습니다.\n그래도 ${newManagerName} 님으로 변경하시겠습니까?`
-          );
-          if (!confirmed) return;
-        } else {
-          alert(`이 기숙사는 이미 ${existingManagerName} 님이 담당자로 지정되어 있습니다.\n관리자에게 문의하세요.`);
-          return;
-        }
-      }
     }
 
     const dorm = newHireForm.dormId ? dorms.find((d) => d.id === newHireForm.dormId) : null;
@@ -6829,24 +6806,9 @@ export default function App() {
       afterValue: JSON.stringify(payload),
     });
 
-    if (payload.managerUserId && payload.dormId && dorm) {
-      const existingManagerId = dorm.managerUserId;
-      const existingManager = existingManagerId ? users.find((u) => u.id === existingManagerId) : null;
-      const needNewManager = !existingManager || existingManager.displayName !== payload.name;
-      if (needNewManager) {
-        const manager = createMaintenanceReporter(
-          payload.name,
-          payload.dormId,
-          dorm.buildingName,
-          dorm.dong,
-          dorm.roomHo,
-          dorm.address,
-          dorm.공동현관,
-          dorm.세대현관
-        );
-        setUsers((prev) => [manager, ...prev]);
-        setupDormManager(dorm.id, manager.id, existingManagerId);
-      }
+    // "기숙사 담당자로 지정" 체크 시: profiles.dorm_id 단일 기준으로 지정(1명 제한 + 기존 자동 해제).
+    if (payload.managerUserId && payload.dormId) {
+      await assignDormManagerToProfile(payload.name, payload.dormId);
     }
 
     setNewHireForm(newHireTemplate());
@@ -7211,6 +7173,57 @@ export default function App() {
       console.error("[reactivateUser] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
       alert(`사용자 복구 실패: ${translateSupabaseError(e?.message || String(err))}`);
       setUsers(prevUsers); // 실패 시 되돌림
+    }
+  };
+
+  // 신입사원 "기숙사 담당자로 지정" → profiles.dorm_id 단일 기준으로 담당자 지정.
+  // 같은 기숙사 기존 담당자 1명 제한: 있으면 경고 → 예: 기존 dorm_id=null 후 지정, 아니오: 지정 취소.
+  const assignDormManagerToProfile = async (name: string, dormId: string) => {
+    const existing = getDormManagerUser(dormId); // 기존 담당자(profiles 단일 기준)
+    // 새 담당자가 될 profiles 사용자(이름 일치, 활성/미삭제)
+    const target = users.find((u) => u.displayName === name && u.isActive !== false && u.isDeleted !== true);
+
+    if (existing && (!target || existing.id !== target.id)) {
+      const ok = window.confirm(
+        `현재 ${existing.displayName || existing.username}님이 해당 기숙사 담당자로 지정되어 있습니다. ${name}님으로 변경하시겠습니까?`
+      );
+      if (!ok) return; // 아니오 → 담당자 지정만 취소(신입사원 저장은 유지)
+    }
+
+    if (!target) {
+      alert(`${name} 님의 계정이 없어 기숙사 담당자로 지정할 수 없습니다.\n사용자관리에서 계정을 먼저 생성한 뒤 담당자로 지정하세요.`);
+      return;
+    }
+
+    // 담당자 역할 보장: 담당자 역할(또는 admin)은 그대로 두고, viewer 등은 maintenance_reporter 로 승격(권한 강등 방지).
+    const newRole: UserRole =
+      target.role === "dorm_manager" || target.role === "maintenance_reporter" || target.role === "admin"
+        ? target.role
+        : "maintenance_reporter";
+
+    if (!isSupabaseAvailable()) {
+      setUsers((prev) =>
+        prev.map((u) => {
+          if (existing && existing.id !== target.id && u.id === existing.id) return { ...u, dormId: undefined };
+          if (u.id === target.id) return { ...u, dormId, isActive: true, role: newRole };
+          return u;
+        })
+      );
+      return;
+    }
+
+    try {
+      if (existing && existing.id !== target.id) {
+        const { error } = await updateProfileOnly(existing.id, { dorm_id: null }); // 기존 담당자 해제
+        if (error) throw error;
+      }
+      const { error } = await updateProfileOnly(target.id, { dorm_id: dormId, is_active: true, role: newRole });
+      if (error) throw error;
+      await refreshUsersFromSupabase();
+    } catch (err) {
+      const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
+      console.error("[assignDormManagerToProfile] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
+      alert(`담당자 지정 실패: ${translateSupabaseError(e?.message || String(err))}`);
     }
   };
 
