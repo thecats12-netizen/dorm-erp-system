@@ -13552,7 +13552,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             <th className="px-3 py-2">상태</th>
                             <th className="px-3 py-2">부서</th>
                             <th className="px-3 py-2">연락처</th>
-                            <th className="px-3 py-2">계약만료일</th>
+                            <th className="px-3 py-2">퇴실일</th>
                             <th className="px-3 py-2">남은일수</th>
                           </tr>
                         </thead>
@@ -13565,8 +13565,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               <td className="px-3 py-3">{occupant.status}</td>
                               <td translate="no" className="px-3 py-3 notranslate">{occupant.department}</td>
                               <td className="px-3 py-3">{maskPhone(occupant.phone)}</td>
-                              <td className="px-3 py-3">{getDormContractEndLabel(occupant.dormId)}</td>
-                              <td className="px-3 py-3">{getDormContractRemainLabel(occupant.dormId)}</td>
+                              <td className="px-3 py-3">{formatDateOnly(occupant.actualMoveOutDate || occupant.moveOutDueDate || "") || "-"}</td>
+                              <td className="px-3 py-3">
+                                {occupant.actualMoveOutDate
+                                  ? "퇴실완료"
+                                  : occupant.moveOutDueDate
+                                    ? (daysDiff(occupant.moveOutDueDate) < 0 ? "만료" : String(daysDiff(occupant.moveOutDueDate)))
+                                    : "-"}
+                              </td>
                             </tr>
                           ))}
                           {selectedDetailOccupants.length === 0 && (
