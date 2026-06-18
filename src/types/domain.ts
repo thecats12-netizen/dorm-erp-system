@@ -203,6 +203,8 @@ export type MilitaryPersonnel = {
   mobilization?: boolean;
   status: string;
   notes: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -221,6 +223,8 @@ export type TrainingRecord = {
   attendees: string | number;
   status: string;
   notes: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
   createdAt: string;
   updatedAt: string;
 };

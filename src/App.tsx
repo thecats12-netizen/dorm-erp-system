@@ -7277,21 +7277,27 @@ export default function App() {
       return;
     }
 
+    // 실패 단계 추적(사용자 안내 구분용)
+    let step: "release" | "update" | "edge" | "insert" = "update";
     try {
       // 기존 담당자 해제(다른 사람일 때만)
       if (existing && (!target || existing.id !== target.id)) {
+        step = "release";
         const { error } = await updateProfileOnly(existing.id, { dorm_id: null });
         if (error) throw error;
       }
 
       if (target) {
+        // 기존 profiles 계정에 dorm_id 지정(update)
+        step = "update";
         const { error } = await updateProfileOnly(target.id, { dorm_id: dormId, is_active: true, role: resolveRole(target) });
         if (error) throw error;
       } else {
         // 계정 없음 → 자동 생성
         alert(`${name}님의 사용자 계정이 없어 자동으로 생성한 뒤 기숙사 담당자로 지정합니다.`);
         const tempPassword = `Temp${Math.random().toString(36).slice(2, 8)}!${last4 || "0000"}`;
-        const { user_id, error } = await createUserViaEdgeFunction({
+        step = "edge";
+        const { user_id, error: edgeError } = await createUserViaEdgeFunction({
           email: generatedEmail,
           password: tempPassword,
           display_name: name,
@@ -7302,8 +7308,10 @@ export default function App() {
           gender_access: genderAccess,
           tenant_id: tenantId,
         });
-        if (error || !user_id) {
-          // Edge Function 미연결/실패 → profiles 행만 생성(로그인은 관리자 확인 필요)
+        if (edgeError || !user_id) {
+          // Edge Function 미연결/실패 → 원인 로깅 후 profiles 행만 생성 시도
+          console.error("[assignDormManagerToProfile] Edge Function 실패", edgeError);
+          step = "insert";
           const { error: upErr } = await upsertProfile({
             id: crypto.randomUUID(),
             email: generatedEmail,
@@ -7322,8 +7330,35 @@ export default function App() {
       alert(`${name}님을 해당 기숙사 담당자로 지정했습니다.`);
     } catch (err) {
       const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
-      console.error("[assignDormManagerToProfile] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
-      alert("담당자 지정 중 오류가 발생했습니다. 사용자관리 또는 Supabase 권한을 확인해주세요.");
+      console.error("[assignDormManagerToProfile] 실패", {
+        step,
+        code: e?.code,
+        message: e?.message,
+        details: e?.details,
+        hint: e?.hint,
+        targetId: target?.id,
+        dormId,
+      });
+      // 원인 한글 구분
+      const codeStr = String(e?.code ?? "");
+      const msgStr = String(e?.message ?? "").toLowerCase();
+      let reason: string;
+      if (codeStr === "42501" || /row-level security|violates row-level|permission denied|not authorized|\brls\b/.test(msgStr)) {
+        reason = "RLS 권한 오류입니다. admin 이 profiles 를 수정할 수 있도록 정책을 적용해주세요(scripts/supabase-profiles-rls.sql).";
+      } else if (codeStr === "23503" || /foreign key/.test(msgStr)) {
+        reason = "profiles 계정이 없습니다. Auth 계정 연결이 필요합니다(Edge Function 또는 사용자관리에서 계정 생성).";
+      } else if (codeStr === "23505" || /duplicate key|unique constraint/.test(msgStr)) {
+        reason = "이미 존재하는 이메일/계정입니다.";
+      } else if (step === "edge") {
+        reason = "Edge Function(계정 생성) 호출에 실패했습니다.";
+      } else if (step === "insert") {
+        reason = "profiles 계정 생성(insert)에 실패했습니다.";
+      } else if (step === "release") {
+        reason = "기존 담당자 해제(update)에 실패했습니다.";
+      } else {
+        reason = "profiles 담당자 지정(update)에 실패했습니다.";
+      }
+      alert(`담당자 지정 실패 — ${reason}\n\n상세: ${translateSupabaseError(e?.message || String(err))}`);
     }
   };
 
@@ -8613,6 +8648,7 @@ const exportExcel = () => {
 
   if (activeTab === "dorms") {
     rows = visibleDorms.map((d) => ({
+      담당기숙사ID: d.id,
       지역: d.site,
       성별: d.gender,
       건물명: d.buildingName,
@@ -8620,15 +8656,18 @@ const exportExcel = () => {
       동: d.dong,
       호수: d.roomHo,
       평수: d.pyeong,
-      계약시작: d.contractStart,
-      계약종료: d.contractEnd,
+      계약시작: formatDateOnly(d.contractStart || ""),
+      계약종료: formatDateOnly(d.contractEnd || ""),
+      계약만료일: getDormContractEndLabel(d.id),
+      남은일수: getDormContractRemainLabel(d.id),
       계약금액: d.contractAmount,
       상태: d.leaseStatus,
       공동현관: d.공동현관,
       세대현관: d.세대현관,
+      담당관리자: getDormManagerDisplayName(d.id),
       선납계약금: d.prepaymentDeposit,
       부동산명: d.realEstateName,
-      잔금일: d.balanceDate,
+      잔금일: formatDateOnly(d.balanceDate || ""),
       비고: d.notes,
     }));
     fileName = "기숙사목록.xlsx";
@@ -8639,21 +8678,23 @@ const exportExcel = () => {
         // 기숙사 기준 단일 조회(dormId 우선, 실패 시 호실키 재매칭).
         const dorm = getOccupantDorm(o);
         return {
+          담당기숙사ID: dorm?.id || o.dormId || "",
           지역: dorm?.site || "",
           기숙사: dorm?.buildingName || "",
           이름: o.employeeName,
           성별: o.gender,
           부서: o.department,
           연락처: o.phone,
-          입실일: o.moveInDate,
+          입실일: formatDateOnly(o.moveInDate || ""),
           공동현관: dormCommonEntrance(dorm),
           세대현관: dormUnitEntrance(dorm),
           계약만료일: getDormContractEndLabel(o.dormId),
-          잔여일: getDormContractRemainLabel(o.dormId),
+          남은일수: getDormContractRemainLabel(o.dormId),
           담당관리자: getDormManagerDisplayName(o.dormId),
-          예상입실일: o.expectedMoveInDate,
-          예상퇴실일: o.expectedMoveOutDate,
-          실제퇴실일: o.actualMoveOutDate,
+          예상입실일: formatDateOnly(o.expectedMoveInDate || ""),
+          퇴실예정일: formatDateOnly(o.moveOutDueDate || ""),
+          예상퇴실일: formatDateOnly(o.expectedMoveOutDate || ""),
+          실제퇴실일: formatDateOnly(o.actualMoveOutDate || ""),
           상태: o.status,
           비고: o.notes,
         };
@@ -8676,20 +8717,33 @@ const exportExcel = () => {
     }));
     fileName = "운영시뮬레이션.xlsx";
   } else if (activeTab === "inventory") {
-    rows = inventory.map((i) => ({
-      관리자명: getDormManagerDisplayName(i.dormId),
-      계약일: i.purchaseDate,
-      만료일: i.purchaseDate,
-      기숙사주소: i.dormAddress,
-      비품명: i.itemName,
-      수량: i.quantity,
-      모델명: i.modelName,
-      메이커: i.maker,
-      구매액: i.purchaseAmount,
-      지급일: i.issuedDate,
-      매각일: i.soldDate,
-      비고: i.notes,
-    }));
+    rows = inventory
+      .filter((i) => !i.isDeleted)
+      .map((i) => {
+        const dorm = operationalDorms.find((d) => d.id === i.dormId) || dorms.find((d) => d.id === i.dormId) || null;
+        return {
+          담당기숙사ID: i.dormId || "",
+          지역: dorm?.site || "",
+          건물명: dorm?.buildingName || i.buildingName || "",
+          기숙사주소: dorm?.address || i.dormAddress,
+          동: dorm?.dong || "",
+          호수: dorm?.roomHo || "",
+          공동현관: dormCommonEntrance(dorm),
+          세대현관: dormUnitEntrance(dorm),
+          담당관리자: getDormManagerDisplayName(i.dormId),
+          계약만료일: getDormContractEndLabel(i.dormId),
+          남은일수: getDormContractRemainLabel(i.dormId),
+          비품명: i.itemName,
+          수량: i.quantity,
+          모델명: i.modelName,
+          메이커: i.maker,
+          구매액: i.purchaseAmount,
+          구매일: formatDateOnly(i.purchaseDate || ""),
+          지급일: formatDateOnly(i.issuedDate || ""),
+          매각일: formatDateOnly(i.soldDate || ""),
+          비고: i.notes,
+        };
+      });
     fileName = "비품현황.xlsx";
   } else if (activeTab === "leases") {
     rows = leases.map((l) => ({
@@ -8804,23 +8858,29 @@ const exportExcel = () => {
     rows = visibleNewHires.map((h) => {
       const dorm =
         operationalDorms.find((d) => d.id === h.dormId) ||
-        dorms.find((d) => d.id === h.dormId);
+        dorms.find((d) => d.id === h.dormId) || null;
       return {
+        담당기숙사ID: dorm?.id || h.dormId || "",
         지역: dorm?.site || h.site,
         성별: h.gender,
         이름: h.name,
         연락처: h.phone,
         부서: h.department,
-        도로명주소: dorm?.address || h.dormId,
-        건물명: h.buildingName,
-        동: h.dong,
-        호수: h.roomHo,
-        예상입실일: h.expectedMoveInDate,
-        입실일: h.moveInDate,
-        예상퇴실일: h.expectedMoveOutDate,
-        퇴실일: h.moveOutDate,
-        실제퇴실일: h.actualMoveOutDate,
-        천안이동일: h.cheonanMoveDate,
+        도로명주소: dorm?.address || "",
+        건물명: dorm?.buildingName || h.buildingName,
+        동: dorm?.dong || h.dong,
+        호수: dorm?.roomHo || h.roomHo,
+        공동현관: dormCommonEntrance(dorm),
+        세대현관: dormUnitEntrance(dorm),
+        담당관리자: getDormManagerDisplayName(h.dormId),
+        예상입실일: formatDateOnly(h.expectedMoveInDate || ""),
+        입실일: formatDateOnly(h.moveInDate || ""),
+        예상퇴실일: formatDateOnly(h.expectedMoveOutDate || ""),
+        퇴실예정일: formatDateOnly(h.moveOutDate || ""),
+        실제퇴실일: formatDateOnly(h.actualMoveOutDate || ""),
+        천안이동일: formatDateOnly(h.cheonanMoveDate || ""),
+        계약만료일: getDormContractEndLabel(h.dormId),
+        남은일수: getDormContractRemainLabel(h.dormId),
         거주상태: h.residenceStatus,
         입주유형: h.moveInType,
         연장사유: h.extensionReason,
@@ -8934,6 +8994,35 @@ const exportExcel = () => {
       완료사진수: d.completionPhotoDataUrls.length,
     }));
     fileName = "하자접수현황.xlsx";
+  } else if (activeTab === "cleaningReports") {
+    rows = cleaningReports
+      .filter((r) => !r.isDeleted)
+      .map((r) => {
+        const dorm = operationalDorms.find((d) => d.id === r.dormId) || dorms.find((d) => d.id === r.dormId) || null;
+        const common = dormCommonEntrance(dorm);
+        const unit = dormUnitEntrance(dorm);
+        return {
+          담당기숙사ID: r.dormId || "",
+          보고일: formatDateOnly(r.reportDate || ""),
+          지역: dorm?.site || r.site || "",
+          건물명: dorm?.buildingName || r.buildingName || "",
+          동: dorm?.dong || r.dong || "",
+          호수: dorm?.roomHo || r.roomHo || "",
+          공동현관: common !== "-" ? common : (r.공동현관 || "-"),
+          세대현관: unit !== "-" ? unit : (r.세대현관 || "-"),
+          담당관리자: getDormManagerDisplayName(r.dormId),
+          청소담당자: getUserDisplayName(r.cleanerName || ""),
+          주차: r.weekLabel || "",
+          월: r.monthLabel || "",
+          청소상태: r.cleanStatus || "",
+          확인결과: r.checkResult || "",
+          점수: r.score ?? "",
+          메모: r.memo || "",
+          등록일: formatDateOnly(r.createdAt),
+          수정일: formatDateOnly(r.updatedAt),
+        };
+      });
+    fileName = "청소관리현황.xlsx";
   } else {
     rows = visibleDorms.map((d) => ({
       지역: d.site,
@@ -11079,8 +11168,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["지역", "성별", "이름", "연락처", "부서", "도로명주소", "건물명", "동", "호수", "예상입실일", "입실일", "예상퇴실일", "퇴실일", "실제퇴실일", "천안이동일", "거주상태", "입주유형", "연장사유", "특이사항 메모", "등록일", "수정일"],
-                      ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+                      ["담당기숙사ID", "지역", "성별", "이름", "연락처", "부서", "도로명주소", "건물명", "동", "호수", "공동현관", "세대현관", "담당관리자", "예상입실일", "입실일", "예상퇴실일", "퇴실예정일", "실제퇴실일", "천안이동일", "계약만료일", "남은일수", "거주상태", "입주유형", "연장사유", "특이사항 메모", "등록일", "수정일"],
+                      [],
                     ]);
                     const wb = XLSX.utils.book_new();
                     XLSX.utils.book_append_sheet(wb, ws, "신입사원명단");
@@ -11093,8 +11182,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["지역", "성별", "건물명", "주소", "동", "호수", "평수", "계약시작", "계약종료", "계약금액", "상태", "공동현관", "세대현관", "선납계약금", "부동산명", "잔금일", "비고"],
-                      ["", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+                      ["담당기숙사ID", "지역", "성별", "건물명", "주소", "동", "호수", "평수", "계약시작", "계약종료", "계약만료일", "남은일수", "계약금액", "상태", "공동현관", "세대현관", "담당관리자", "선납계약금", "부동산명", "잔금일", "비고"],
+                      [],
                     ]);
                     const wb = XLSX.utils.book_new();
                     XLSX.utils.book_append_sheet(wb, ws, "기숙사");
@@ -11107,8 +11196,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["지역", "기숙사", "이름", "성별", "부서", "연락처", "입실일", "잔여일", "예상입실일", "예상퇴실일", "실제퇴실일", "상태", "비고"],
-                      ["", "", "", "", "", "", "", "", "", "", "", "", ""],
+                      ["담당기숙사ID", "지역", "기숙사", "이름", "성별", "부서", "연락처", "입실일", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "예상입실일", "퇴실예정일", "예상퇴실일", "실제퇴실일", "상태", "비고"],
+                      [],
                     ]);
                     const wb = XLSX.utils.book_new();
                     XLSX.utils.book_append_sheet(wb, ws, "입주자");
@@ -11121,8 +11210,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["관리자명", "계약일", "만료일", "기숙사주소", "비품명", "수량", "모델명", "메이커", "구매액", "지급일", "매각일", "비고"],
-                      ["", "", "", "", "", "", "", "", "", "", "", ""],
+                      ["담당기숙사ID", "지역", "건물명", "기숙사주소", "동", "호수", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "비품명", "수량", "모델명", "메이커", "구매액", "구매일", "지급일", "매각일", "비고"],
+                      [],
                     ]);
                     const wb = XLSX.utils.book_new();
                     XLSX.utils.book_append_sheet(wb, ws, "비품현황");
@@ -11145,6 +11234,20 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
                 >
                   📋 비품매각
+                </button>
+                <button
+                  onClick={() => {
+                    const ws = XLSX.utils.aoa_to_sheet([
+                      ["담당기숙사ID", "보고일", "지역", "건물명", "동", "호수", "공동현관", "세대현관", "담당관리자", "청소담당자", "주차", "월", "청소상태", "확인결과", "점수", "메모"],
+                      [],
+                    ]);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "청소관리");
+                    XLSX.writeFile(wb, "청소관리_양식.xlsx");
+                  }}
+                  className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
+                >
+                  📋 청소관리
                 </button>
               </div>
             </div>
@@ -17952,6 +18055,111 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           </button>
                           <button
                             onClick={() => permanentlyDeleteItem(defects, setDefects, d.id, "defect")}
+                            className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
+                          >
+                            영구삭제
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 사용자 휴지통 (Auth/profiles 실제 삭제 없음 — is_deleted 숨김 복구/유지) */}
+              {users.filter((u) => u.isDeleted).length > 0 && (
+                <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-800">삭제된 사용자</h3>
+                      <p className="text-sm text-slate-500">복구하면 활성 계정으로 되돌립니다. 영구삭제는 Auth 계정을 지우지 않고 숨김 상태로 유지합니다.</p>
+                    </div>
+                  </div>
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {users.filter((u) => u.isDeleted).map((u) => (
+                      <div key={u.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
+                        <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
+                          {u.displayName || u.username} <span className="text-xs text-slate-400">({getRoleLabel(u.role)})</span>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => void reactivateUser(u.id)}
+                            className="rounded-2xl bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200"
+                          >
+                            복구
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (window.confirm(`${u.displayName || u.username} 계정을 영구삭제(숨김 유지) 처리할까요?\nAuth/profiles 행은 삭제하지 않고 is_deleted=true 숨김 상태로 유지됩니다.`)) {
+                                alert("Auth/계정은 삭제하지 않고 숨김(is_deleted) 상태로 유지됩니다.");
+                              }
+                            }}
+                            className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
+                          >
+                            영구삭제
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 군대 인원 휴지통 */}
+              {militaryPersonnel.filter((p) => p.isDeleted).length > 0 && (
+                <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-800">삭제된 군대 인원</h3>
+                      <p className="text-sm text-slate-500">삭제된 예비군/민방위 인원을 복원하거나 영구 삭제하세요.</p>
+                    </div>
+                  </div>
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {militaryPersonnel.filter((p) => p.isDeleted).map((p) => (
+                      <div key={p.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
+                        <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{p.name} <span className="text-xs text-slate-400">({p.unit || "-"})</span></div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => restoreItem(militaryPersonnel, setMilitaryPersonnel, p.id, "militaryPersonnel")}
+                            className="rounded-2xl bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200"
+                          >
+                            복원
+                          </button>
+                          <button
+                            onClick={() => permanentlyDeleteItem(militaryPersonnel, setMilitaryPersonnel, p.id, "militaryPersonnel")}
+                            className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
+                          >
+                            영구삭제
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 군대 훈련기록 휴지통 */}
+              {militaryTrainingRecords.filter((r) => r.isDeleted).length > 0 && (
+                <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-800">삭제된 훈련기록</h3>
+                      <p className="text-sm text-slate-500">삭제된 훈련기록을 복원하거나 영구 삭제하세요.</p>
+                    </div>
+                  </div>
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {militaryTrainingRecords.filter((r) => r.isDeleted).map((r) => (
+                      <div key={r.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
+                        <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{militaryPersonnel.find((p) => p.id === r.personnelId)?.name || "-"} · {r.subject || r.trainingType || "훈련"}</div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => restoreItem(militaryTrainingRecords, setMilitaryTrainingRecords, r.id, "trainingRecord")}
+                            className="rounded-2xl bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200"
+                          >
+                            복원
+                          </button>
+                          <button
+                            onClick={() => permanentlyDeleteItem(militaryTrainingRecords, setMilitaryTrainingRecords, r.id, "trainingRecord")}
                             className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
                           >
                             영구삭제
