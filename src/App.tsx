@@ -1774,6 +1774,16 @@ export default function App() {
   const [assignmentGenderFilter, setAssignmentGenderFilter] = useState<"남" | "여" | "전체">("전체");
   const [assignmentNewHireSearch, setAssignmentNewHireSearch] = useState("");
 
+  // 공통 알림/확인 모달(브라우저 기본 팝업 대체 — 한글 실무 문구, 개발자 용어 노출 방지)
+  const [appModal, setAppModal] = useState<null | {
+    title: string;
+    message: string;
+    confirmText: string;
+    cancelText?: string; // 없으면 단순 알림(확인 버튼만)
+    tone?: "default" | "danger";
+    resolve: (ok: boolean) => void;
+  }>(null);
+
   // 변경이력 모달 관련 state
   const [showAuditLogModal, setShowAuditLogModal] = useState(false);
   const [selectedAuditLogId, setSelectedAuditLogId] = useState<string | null>(null);
@@ -2786,6 +2796,7 @@ export default function App() {
     { file: File; fileName: string; tableType: ExcelTableType; result: ExcelValidationResult } | null
   >(null);
   const backupInputRef = useRef<HTMLInputElement | null>(null);
+  const trashBackupInputRef = useRef<HTMLInputElement | null>(null);
   const templateInputRef = useRef<HTMLInputElement | null>(null);
   const [backupImportError, setBackupImportError] = useState<string | null>(null);
 
@@ -2841,6 +2852,108 @@ export default function App() {
   };
   const backupRestoreInputRef = useRef<HTMLInputElement | null>(null);
   const autoBackupDoneRef = useRef(false);
+
+  // 공통 모달 헬퍼: 단순 알림(appAlert) / 확인(appConfirm). Promise 기반.
+  const closeAppModal = (ok: boolean) => {
+    setAppModal((m) => {
+      m?.resolve(ok);
+      return null;
+    });
+  };
+  const appAlert = (title: string, message: string): Promise<void> =>
+    new Promise((resolve) => setAppModal({ title, message, confirmText: "확인", resolve: () => resolve() }));
+  const appConfirm = (
+    title: string,
+    message: string,
+    opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger" }
+  ): Promise<boolean> =>
+    new Promise((resolve) =>
+      setAppModal({
+        title,
+        message,
+        confirmText: opts?.confirmText ?? "확인",
+        cancelText: opts?.cancelText ?? "취소",
+        tone: opts?.tone,
+        resolve,
+      })
+    );
+
+  // JSON 파일 다운로드 + 타임스탬프(파일명용)
+  const downloadJsonFile = (data: unknown, filename: string) => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const backupTimestamp = () => {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  };
+
+  // 휴지통 백업(JSON) 다운로드 — 삭제(숨김) 항목만
+  const downloadTrashBackup = () => {
+    if (!canManageUsers(currentUser)) { void appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    downloadJsonFile(
+      {
+        kind: "dorm-erp-trash-backup",
+        version: BACKUP_VERSION,
+        exportedAt: new Date().toISOString(),
+        data: {
+          users: users.filter((u) => u.isDeleted).map((u) => ({ ...u, password: "" })),
+          dorms: dorms.filter((d) => d.isDeleted),
+          occupants: occupants.filter((o) => o.isDeleted),
+          dormContracts: dormContracts.filter((c) => c.isDeleted),
+          newHires: newHires.filter((h) => h.isDeleted),
+          inventory: inventory.filter((i) => i.isDeleted),
+          cleaningReports: cleaningReports.filter((r) => r.isDeleted),
+          defects: defects.filter((d) => d.isDeleted),
+          militaryPersonnel: militaryPersonnel.filter((p) => p.isDeleted),
+          militaryTrainingRecords: militaryTrainingRecords.filter((r) => r.isDeleted),
+        },
+      },
+      `dorm-erp-trash-backup-${backupTimestamp()}.json`
+    );
+    void appAlert("휴지통 관리", "휴지통 백업 파일을 내려받았습니다.");
+  };
+
+  // 휴지통 백업(JSON) 복원 — 항목을 "삭제 상태(휴지통)"로 다시 추가. 일반 목록으로 즉시 복구하지 않음.
+  const restoreTrashBackup = async (file: File) => {
+    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (!parsed || parsed.kind !== "dorm-erp-trash-backup" || !parsed.data) {
+        await appAlert("백업 및 복원", "올바른 휴지통 백업 파일이 아닙니다. 파일을 다시 확인해주세요.");
+        return;
+      }
+      const d = parsed.data;
+      const mergeDeleted = <T extends { id: string }>(incoming: unknown, setter: React.Dispatch<React.SetStateAction<T[]>>, existing: T[]) => {
+        if (!Array.isArray(incoming)) return;
+        const ids = new Set(existing.map((x) => x.id));
+        const add = incoming
+          .filter((x): x is T => !!x && typeof (x as { id?: unknown }).id === "string" && !ids.has((x as T).id))
+          .map((x) => ({ ...(x as T), isDeleted: true }));
+        if (add.length) setter((prev) => [...add, ...prev]);
+      };
+      mergeDeleted(d.users, setUsers, users);
+      mergeDeleted(d.dorms, setDorms, dorms);
+      mergeDeleted(d.occupants, setOccupants, occupants);
+      mergeDeleted(d.dormContracts, setDormContracts, dormContracts);
+      mergeDeleted(d.newHires, setNewHires, newHires);
+      mergeDeleted(d.inventory, setInventory, inventory);
+      mergeDeleted(d.cleaningReports, setCleaningReports, cleaningReports);
+      mergeDeleted(d.defects, setDefects, defects);
+      mergeDeleted(d.militaryPersonnel, setMilitaryPersonnel, militaryPersonnel);
+      mergeDeleted(d.militaryTrainingRecords, setMilitaryTrainingRecords, militaryTrainingRecords);
+      await appAlert("휴지통 관리", "휴지통 백업을 복원했습니다.\n\n항목은 삭제 상태로 추가되었으며, 휴지통에서 항목별로 복구할 수 있습니다.");
+    } catch (err) {
+      console.error("[restoreTrashBackup] 실패", err);
+      await appAlert("기숙사 ERP 알림", "처리 중 오류가 발생했습니다. 파일 형식을 확인하거나 관리자에게 문의해주세요.");
+    }
+  };
 
   const buildBackupData = (): DataBackup["data"] => ({
     dorms,
@@ -7152,7 +7265,12 @@ export default function App() {
     if (!canManageUsers(currentUser)) return;
     const targets = ids.filter((id) => id && id !== currentUser?.id); // 본인 계정은 제외
     if (targets.length === 0) return;
-    if (!confirm(`선택한 ${targets.length}명을 삭제할까요?\n목록에서 숨김 처리되며 Supabase profiles 에 영구 반영됩니다.`)) return;
+    const ok = await appConfirm(
+      "사용자 관리",
+      "사용자를 삭제하시겠습니까?\n\n삭제된 사용자는 일반 목록에서 표시되지 않으며, 휴지통에서만 확인할 수 있습니다.",
+      { confirmText: "삭제", tone: "danger" }
+    );
+    if (!ok) return;
 
     const nowIso = new Date().toISOString();
 
@@ -7184,20 +7302,28 @@ export default function App() {
     } catch (err) {
       const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
       console.error("[deactivateUsersPermanent] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
-      alert(`사용자 삭제 실패: ${translateSupabaseError(e?.message || String(err))}`);
       setUsers(prevUsers); // 실패 시 되돌림
+      await appAlert("기숙사 ERP 알림", "처리 중 오류가 발생했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해주세요.");
       return;
     }
     setSelectedUserIds([]);
+    await appAlert("사용자 관리", "사용자가 삭제되었습니다.\n\n삭제된 사용자는 휴지통으로 이동되었으며, 필요 시 복구할 수 있습니다.");
   };
 
   // 사용자 "복구": is_deleted=false + deleted_at=null + is_active=true 저장 후 재조회.
   const reactivateUser = async (userId: string) => {
     if (!canManageUsers(currentUser)) return;
     if (!userId) return;
+    const ok = await appConfirm(
+      "사용자 관리",
+      "사용자를 복구하시겠습니까?\n\n복구 후 사용자 목록에 다시 표시되며, 시스템 사용이 가능합니다.",
+      { confirmText: "복구" }
+    );
+    if (!ok) return;
 
     if (!isSupabaseAvailable()) {
       setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, isActive: true, isDeleted: false, deletedAt: undefined } : u)));
+      await appAlert("사용자 관리", "사용자가 정상적으로 복구되었습니다.");
       return;
     }
 
@@ -7220,9 +7346,11 @@ export default function App() {
     } catch (err) {
       const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
       console.error("[reactivateUser] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
-      alert(`사용자 복구 실패: ${translateSupabaseError(e?.message || String(err))}`);
       setUsers(prevUsers); // 실패 시 되돌림
+      await appAlert("기숙사 ERP 알림", "처리 중 오류가 발생했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해주세요.");
+      return;
     }
+    await appAlert("사용자 관리", "사용자가 정상적으로 복구되었습니다.");
   };
 
   // 신입사원 "기숙사 담당자로 지정" → profiles.dorm_id 단일 기준으로 담당자 지정.
@@ -7245,8 +7373,10 @@ export default function App() {
     );
 
     if (existing && (!target || existing.id !== target.id)) {
-      const ok = window.confirm(
-        `현재 ${existing.displayName || existing.username}님이 해당 기숙사 담당자로 지정되어 있습니다. ${name}님으로 변경하시겠습니까?`
+      const ok = await appConfirm(
+        "사용자 관리",
+        `현재 ${existing.displayName || existing.username}님이 해당 기숙사 담당자로 지정되어 있습니다.\n\n${name}님으로 변경하시겠습니까?`,
+        { confirmText: "변경" }
       );
       if (!ok) return; // 아니오 → 담당자 지정만 취소(신입사원 저장은 유지)
     }
@@ -7273,7 +7403,7 @@ export default function App() {
         };
         setUsers((prev) => [created, ...(existing ? prev.map((u) => (u.id === existing.id ? { ...u, dormId: undefined } : u)) : prev)]);
       }
-      alert(`${name}님을 해당 기숙사 담당자로 지정했습니다.`);
+      await appAlert("사용자 관리", `${name}님을 해당 기숙사 담당자로 지정했습니다.`);
       return;
     }
 
@@ -7294,7 +7424,7 @@ export default function App() {
         if (error) throw error;
       } else {
         // 계정 없음 → 자동 생성
-        alert(`${name}님의 사용자 계정이 없어 자동으로 생성한 뒤 기숙사 담당자로 지정합니다.`);
+        await appAlert("사용자 관리", `${name}님의 사용자 계정이 없어 자동으로 생성한 뒤 기숙사 담당자로 지정합니다.`);
         const tempPassword = `Temp${Math.random().toString(36).slice(2, 8)}!${last4 || "0000"}`;
         step = "edge";
         const { user_id, error: edgeError } = await createUserViaEdgeFunction({
@@ -7323,11 +7453,11 @@ export default function App() {
             gender_access: genderAccess,
           });
           if (upErr) throw upErr;
-          alert(`${name}님 계정을 생성했습니다. 로그인은 관리자 확인이 필요합니다.`);
+          await appAlert("사용자 관리", `${name}님 계정을 생성했습니다. 로그인은 관리자 확인이 필요합니다.`);
         }
       }
       await refreshUsersFromSupabase(); // 사용자관리/담당자 표시 즉시 갱신
-      alert(`${name}님을 해당 기숙사 담당자로 지정했습니다.`);
+      await appAlert("사용자 관리", `${name}님을 해당 기숙사 담당자로 지정했습니다.`);
     } catch (err) {
       const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
       console.error("[assignDormManagerToProfile] 실패", {
@@ -7339,26 +7469,22 @@ export default function App() {
         targetId: target?.id,
         dormId,
       });
-      // 원인 한글 구분
+      // 개발자용 상세 분류는 console 에만 기록(사용자 화면엔 노출하지 않음)
       const codeStr = String(e?.code ?? "");
       const msgStr = String(e?.message ?? "").toLowerCase();
-      let reason: string;
+      let devReason: string;
       if (codeStr === "42501" || /row-level security|violates row-level|permission denied|not authorized|\brls\b/.test(msgStr)) {
-        reason = "RLS 권한 오류입니다. admin 이 profiles 를 수정할 수 있도록 정책을 적용해주세요(scripts/supabase-profiles-rls.sql).";
+        devReason = "RLS update policy required (scripts/supabase-profiles-rls.sql)";
       } else if (codeStr === "23503" || /foreign key/.test(msgStr)) {
-        reason = "profiles 계정이 없습니다. Auth 계정 연결이 필요합니다(Edge Function 또는 사용자관리에서 계정 생성).";
+        devReason = "missing auth user (FK) — Edge Function needed";
       } else if (codeStr === "23505" || /duplicate key|unique constraint/.test(msgStr)) {
-        reason = "이미 존재하는 이메일/계정입니다.";
-      } else if (step === "edge") {
-        reason = "Edge Function(계정 생성) 호출에 실패했습니다.";
-      } else if (step === "insert") {
-        reason = "profiles 계정 생성(insert)에 실패했습니다.";
-      } else if (step === "release") {
-        reason = "기존 담당자 해제(update)에 실패했습니다.";
+        devReason = "duplicate email/account";
       } else {
-        reason = "profiles 담당자 지정(update)에 실패했습니다.";
+        devReason = `step=${step}`;
       }
-      alert(`담당자 지정 실패 — ${reason}\n\n상세: ${translateSupabaseError(e?.message || String(err))}`);
+      console.error("[assignDormManagerToProfile] devReason:", devReason);
+      // 사용자 화면: 개발자 용어 없는 한글 안내
+      await appAlert("기숙사 ERP 알림", "담당자 지정 중 오류가 발생했습니다. 사용자 권한 또는 계정 상태를 확인해주세요.");
     }
   };
 
@@ -14252,6 +14378,37 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         )}
 
         {/* 변경이력 모달 */}
+        {/* 공통 알림/확인 모달 (브라우저 기본 팝업 대체) */}
+        {appModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm" onClick={() => closeAppModal(false)}>
+            <div
+              className={`w-full max-w-md rounded-3xl p-6 shadow-2xl ring-1 ${theme.darkMode ? "bg-slate-900 text-slate-100 ring-slate-700" : "bg-white text-slate-900 ring-slate-200"}`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold">{appModal.title}</h3>
+              <p className="mt-3 whitespace-pre-line text-sm text-slate-500">{appModal.message}</p>
+              <div className="mt-6 flex justify-end gap-2">
+                {appModal.cancelText && (
+                  <button
+                    type="button"
+                    onClick={() => closeAppModal(false)}
+                    className={`rounded-2xl border px-4 py-2 text-sm font-medium ${theme.darkMode ? "border-slate-600 text-slate-200 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-50"}`}
+                  >
+                    {appModal.cancelText}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => closeAppModal(true)}
+                  className={`rounded-2xl px-4 py-2 text-sm font-semibold text-white ${appModal.tone === "danger" ? "bg-rose-600 hover:bg-rose-500" : "bg-slate-900 hover:bg-slate-800"}`}
+                >
+                  {appModal.confirmText}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {showAuditLogModal && selectedAuditLogId && (
           <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4 backdrop-blur-sm">
             <div className={`${theme.darkMode ? "mx-auto max-w-4xl rounded-3xl bg-slate-950 p-6 shadow-2xl ring-1 ring-slate-200" : "mx-auto max-w-4xl rounded-3xl bg-white p-6 shadow-2xl ring-1 ring-slate-200"}`}>
@@ -17707,7 +17864,34 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="mb-4 flex items-center justify-between gap-3">
                 <div>
                   <h3 className="text-base font-semibold text-slate-800">완전삭제 관리</h3>
-                  <p className="text-sm text-slate-500">삭제된 데이터 리스트에서 복원 및 영구 삭제를 처리합니다.</p>
+                  <p className="text-sm text-slate-500">삭제된 데이터 리스트에서 복원 및 삭제 상태 유지를 처리합니다.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={downloadTrashBackup}
+                    className={`${theme.darkMode ? "rounded-2xl border border-slate-600 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100" : "rounded-2xl border border-slate-300 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100"}`}
+                  >
+                    휴지통 백업 다운로드
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => trashBackupInputRef.current?.click()}
+                    className={`${theme.darkMode ? "rounded-2xl border border-slate-600 bg-slate-950 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-900" : "rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"}`}
+                  >
+                    휴지통 백업 복원
+                  </button>
+                  <input
+                    ref={trashBackupInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) void restoreTrashBackup(file);
+                      if (e.currentTarget) e.currentTarget.value = "";
+                    }}
+                  />
                 </div>
               </div>
               <div className="grid gap-6 lg:grid-cols-2">
@@ -18089,14 +18273,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             복구
                           </button>
                           <button
-                            onClick={() => {
-                              if (window.confirm(`${u.displayName || u.username} 계정을 영구삭제(숨김 유지) 처리할까요?\nAuth/profiles 행은 삭제하지 않고 is_deleted=true 숨김 상태로 유지됩니다.`)) {
-                                alert("Auth/계정은 삭제하지 않고 숨김(is_deleted) 상태로 유지됩니다.");
-                              }
+                            onClick={async () => {
+                              const ok = await appConfirm(
+                                "휴지통 관리",
+                                "선택한 항목을 삭제 상태로 유지합니다.\n\n삭제된 항목은 일반 목록에 표시되지 않으며, 휴지통에서만 관리할 수 있습니다.",
+                                { confirmText: "유지" }
+                              );
+                              if (ok) await appAlert("휴지통 관리", "삭제 상태로 유지됩니다. 필요 시 휴지통에서 복구할 수 있습니다.");
                             }}
                             className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
                           >
-                            영구삭제
+                            삭제 상태 유지
                           </button>
                         </div>
                       </div>
