@@ -81,6 +81,7 @@ import {
   listProfiles,
   updateProfileOnly,
   createUserViaEdgeFunction,
+  upsertProfile,
   type Profile,
 } from "./services/authService";
 import { createAuditLogEntry, getChangedFields } from "./services/auditService";
@@ -3402,6 +3403,26 @@ export default function App() {
     if (!end) return "-";
     const d = daysDiff(end);
     return d < 0 ? "만료" : String(d);
+  };
+
+  // 입주자가 배정된 기숙사 조회(단일 기준). dormId 우선, 실패 시 연결 신입사원의 호실키로 재매칭.
+  // 공동현관/세대현관/건물 등 기숙사 파생 표시는 모두 이 기숙사 데이터를 사용(입주자 개인값 사용 금지).
+  const getOccupantDorm = (o: Occupant): Dorm | OperationalDorm | null => {
+    if (o.dormId) {
+      const byId = operationalDorms.find((d) => d.id === o.dormId) || dorms.find((d) => d.id === o.dormId);
+      if (byId) return byId;
+    }
+    // dormId 없음/불일치(엑셀 업로드 등) → 연결 신입사원의 site/건물/동/호로 키 재매칭
+    const hire = o.sourceNewHireId ? newHires.find((h) => h.id === o.sourceNewHireId) : undefined;
+    if (hire && (hire.buildingName || hire.dong || hire.roomHo)) {
+      const key = makeDormMatchKey(hire.site, hire.buildingName, hire.dong, hire.roomHo);
+      return (
+        operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key) ||
+        dorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key) ||
+        null
+      );
+    }
+    return null;
   };
 
   // 개인정보 마스킹: 조회전용(viewer)에게 연락처 가운데 자리 마스킹 (admin/담당자는 원본)
@@ -6806,9 +6827,9 @@ export default function App() {
       afterValue: JSON.stringify(payload),
     });
 
-    // "기숙사 담당자로 지정" 체크 시: profiles.dorm_id 단일 기준으로 지정(1명 제한 + 기존 자동 해제).
+    // "기숙사 담당자로 지정" 체크 시: profiles.dorm_id 단일 기준으로 지정(계정 없으면 자동 생성 + 1명 제한).
     if (payload.managerUserId && payload.dormId) {
-      await assignDormManagerToProfile(payload.name, payload.dormId);
+      await assignDormManagerToProfile(payload);
     }
 
     setNewHireForm(newHireTemplate());
@@ -7177,11 +7198,23 @@ export default function App() {
   };
 
   // 신입사원 "기숙사 담당자로 지정" → profiles.dorm_id 단일 기준으로 담당자 지정.
-  // 같은 기숙사 기존 담당자 1명 제한: 있으면 경고 → 예: 기존 dorm_id=null 후 지정, 아니오: 지정 취소.
-  const assignDormManagerToProfile = async (name: string, dormId: string) => {
+  // 계정이 없으면 자동 생성. 같은 기숙사 기존 담당자 1명 제한(경고 → 예: 해제 후 지정 / 아니오: 지정 취소).
+  const assignDormManagerToProfile = async (hire: NewHireEmployee) => {
+    const dormId = hire.dormId;
+    const name = hire.name;
+    if (!dormId || !name) return;
+    const norm = (s?: string) => String(s || "").trim().toLowerCase();
+    const last4 = String(hire.phone || "").replace(/\D/g, "").slice(-4);
+    // 이메일 입력 필드가 없으므로 생성 규칙(이름+휴대폰뒤4자리@dormerpsystem.com) 사용
+    const generatedEmail = `${name}${last4}@dormerpsystem.com`;
+    const genderAccess: "남" | "여" | "전체" = hire.gender === "남" || hire.gender === "여" ? hire.gender : "전체";
+
     const existing = getDormManagerUser(dormId); // 기존 담당자(profiles 단일 기준)
-    // 새 담당자가 될 profiles 사용자(이름 일치, 활성/미삭제)
-    const target = users.find((u) => u.displayName === name && u.isActive !== false && u.isDeleted !== true);
+    // 이름/이메일(로그인ID) 기준으로 기존 profiles 계정 검색(활성·미삭제). 연락처는 profiles 미보관.
+    const target = users.find(
+      (u) => u.isDeleted !== true && u.isActive !== false &&
+        (norm(u.displayName) === norm(name) || norm(u.username) === norm(generatedEmail))
+    );
 
     if (existing && (!target || existing.id !== target.id)) {
       const ok = window.confirm(
@@ -7190,40 +7223,79 @@ export default function App() {
       if (!ok) return; // 아니오 → 담당자 지정만 취소(신입사원 저장은 유지)
     }
 
-    if (!target) {
-      alert(`${name} 님의 계정이 없어 기숙사 담당자로 지정할 수 없습니다.\n사용자관리에서 계정을 먼저 생성한 뒤 담당자로 지정하세요.`);
-      return;
-    }
+    // 담당자 역할 보장: 담당자/admin 역할은 유지, viewer 등은 maintenance_reporter 로 승격(권한 강등 방지).
+    const resolveRole = (u?: LoginUser): UserRole =>
+      u && (u.role === "dorm_manager" || u.role === "maintenance_reporter" || u.role === "admin") ? u.role : "maintenance_reporter";
 
-    // 담당자 역할 보장: 담당자 역할(또는 admin)은 그대로 두고, viewer 등은 maintenance_reporter 로 승격(권한 강등 방지).
-    const newRole: UserRole =
-      target.role === "dorm_manager" || target.role === "maintenance_reporter" || target.role === "admin"
-        ? target.role
-        : "maintenance_reporter";
-
+    // 오프라인(Supabase 미연결) fallback: 로컬 users 만 갱신
     if (!isSupabaseAvailable()) {
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (existing && existing.id !== target.id && u.id === existing.id) return { ...u, dormId: undefined };
-          if (u.id === target.id) return { ...u, dormId, isActive: true, role: newRole };
-          return u;
-        })
-      );
+      if (target) {
+        setUsers((prev) =>
+          prev.map((u) => {
+            if (existing && existing.id !== target.id && u.id === existing.id) return { ...u, dormId: undefined };
+            if (u.id === target.id) return { ...u, dormId, isActive: true, role: resolveRole(target) };
+            return u;
+          })
+        );
+      } else {
+        const created: LoginUser = {
+          id: crypto.randomUUID(), username: generatedEmail, password: "", role: "maintenance_reporter",
+          displayName: name, isActive: true, siteAccess: hire.site, genderAccess, dormId,
+          createdAt: new Date().toISOString(),
+        };
+        setUsers((prev) => [created, ...(existing ? prev.map((u) => (u.id === existing.id ? { ...u, dormId: undefined } : u)) : prev)]);
+      }
+      alert(`${name}님을 해당 기숙사 담당자로 지정했습니다.`);
       return;
     }
 
     try {
-      if (existing && existing.id !== target.id) {
-        const { error } = await updateProfileOnly(existing.id, { dorm_id: null }); // 기존 담당자 해제
+      // 기존 담당자 해제(다른 사람일 때만)
+      if (existing && (!target || existing.id !== target.id)) {
+        const { error } = await updateProfileOnly(existing.id, { dorm_id: null });
         if (error) throw error;
       }
-      const { error } = await updateProfileOnly(target.id, { dorm_id: dormId, is_active: true, role: newRole });
-      if (error) throw error;
-      await refreshUsersFromSupabase();
+
+      if (target) {
+        const { error } = await updateProfileOnly(target.id, { dorm_id: dormId, is_active: true, role: resolveRole(target) });
+        if (error) throw error;
+      } else {
+        // 계정 없음 → 자동 생성
+        alert(`${name}님의 사용자 계정이 없어 자동으로 생성한 뒤 기숙사 담당자로 지정합니다.`);
+        const tempPassword = `Temp${Math.random().toString(36).slice(2, 8)}!${last4 || "0000"}`;
+        const { user_id, error } = await createUserViaEdgeFunction({
+          email: generatedEmail,
+          password: tempPassword,
+          display_name: name,
+          role: "maintenance_reporter",
+          is_active: true,
+          dorm_id: dormId,
+          site_access: hire.site,
+          gender_access: genderAccess,
+          tenant_id: tenantId,
+        });
+        if (error || !user_id) {
+          // Edge Function 미연결/실패 → profiles 행만 생성(로그인은 관리자 확인 필요)
+          const { error: upErr } = await upsertProfile({
+            id: crypto.randomUUID(),
+            email: generatedEmail,
+            display_name: name,
+            role: "maintenance_reporter",
+            is_active: true,
+            dorm_id: dormId,
+            site_access: hire.site,
+            gender_access: genderAccess,
+          });
+          if (upErr) throw upErr;
+          alert(`${name}님 계정을 생성했습니다. 로그인은 관리자 확인이 필요합니다.`);
+        }
+      }
+      await refreshUsersFromSupabase(); // 사용자관리/담당자 표시 즉시 갱신
+      alert(`${name}님을 해당 기숙사 담당자로 지정했습니다.`);
     } catch (err) {
       const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
       console.error("[assignDormManagerToProfile] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
-      alert(`담당자 지정 실패: ${translateSupabaseError(e?.message || String(err))}`);
+      alert("담당자 지정 중 오류가 발생했습니다. 사용자관리 또는 Supabase 권한을 확인해주세요.");
     }
   };
 
@@ -8536,9 +8608,8 @@ const exportExcel = () => {
     rows = visibleOccupants
       .filter((o) => !selectedDormId || o.dormId === selectedDormId)
       .map((o) => {
-        const dorm =
-          operationalDorms.find((d) => d.id === o.dormId) ||
-          dorms.find((d) => d.id === o.dormId);
+        // 기숙사 기준 단일 조회(dormId 우선, 실패 시 호실키 재매칭).
+        const dorm = getOccupantDorm(o);
         return {
           지역: dorm?.site || "",
           기숙사: dorm?.buildingName || "",
@@ -8547,6 +8618,8 @@ const exportExcel = () => {
           부서: o.department,
           연락처: o.phone,
           입실일: o.moveInDate,
+          공동현관: dorm?.공동현관 || "-",
+          세대현관: dorm?.세대현관 || "-",
           계약만료일: getDormContractEndLabel(o.dormId),
           잔여일: getDormContractRemainLabel(o.dormId),
           담당관리자: getDormManagerDisplayName(o.dormId),
@@ -13488,9 +13561,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       : [])
                   ]
                     .map((o) => {
-                      const dorm =
-                        operationalDorms.find((d) => d.id === o.dormId) ||
-                        dorms.find((d) => d.id === o.dormId);
+                      // 기숙사 기준 단일 조회(dormId 우선, 실패 시 호실키 재매칭). 공동현관/세대현관 등 파생값에 사용.
+                      const dorm = getOccupantDorm(o);
                       return (
                         <tr
                           key={o.id}
