@@ -5170,16 +5170,21 @@ export default function App() {
     : [];
 
   // 입주자 메뉴의 기숙사 범위: 기숙사 메뉴 검색(dormSearch)과 독립.
-  // operationalDorms + 권한 + 입주자메뉴 지역/성별 필터만 사용(검색어는 입주자 행에만 적용).
+  // 검색어 없으면 권한+지역/성별 범위의 전체 기숙사, 검색 시에는 "검색에 매칭되는 입주자가 있는 기숙사"만.
   const filteredDormsForOccupantMenu = useMemo(() => {
-    return operationalDorms.filter((dorm) => {
+    const base = operationalDorms.filter((dorm) => {
       if (!hasAccessToDorm(currentUser, dorm.id)) return false;
       if (occupantMenuFilterSite !== "전체" && dorm.site !== occupantMenuFilterSite) return false;
       if (occupantMenuFilterGender !== "전체" && dorm.gender !== occupantMenuFilterGender) return false;
       return true;
     });
+    if (!occupantMenuFilterSearch.trim()) return base;
+    const matchedDormIds = new Set(
+      visibleOccupants.filter((o) => o.dormId && occupantMatchesMenuSearch(o)).map((o) => o.dormId)
+    );
+    return base.filter((d) => matchedDormIds.has(d.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operationalDorms, currentUser, occupantMenuFilterSite, occupantMenuFilterGender]);
+  }, [operationalDorms, currentUser, occupantMenuFilterSite, occupantMenuFilterGender, occupantMenuFilterSearch, visibleOccupants]);
 
   // 선택 기숙사(또는 필터된 기숙사들) 기준 입주자 전체 이력(상태 필터 적용 전) — 통계/표시용
   const occupantScopedList = useMemo(
