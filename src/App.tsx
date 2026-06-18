@@ -3425,6 +3425,29 @@ export default function App() {
     return null;
   };
 
+  // 공동현관/세대현관: 기숙사 데이터 기준(여러 필드명 호환). 입주자 개인값 사용 금지. 없으면 "-".
+  const dormCommonEntrance = (d: Dorm | OperationalDorm | null): string => {
+    const x = d as unknown as Record<string, unknown> | null;
+    return (x?.["공동현관"] as string) || (x?.["sharedEntry"] as string) || (x?.["commonEntrance"] as string) || "-";
+  };
+  const dormUnitEntrance = (d: Dorm | OperationalDorm | null): string => {
+    const x = d as unknown as Record<string, unknown> | null;
+    return (x?.["세대현관"] as string) || (x?.["unitEntry"] as string) || (x?.["unitEntrance"] as string) || "-";
+  };
+
+  // 입주자 메뉴 검색: 입주자 + 기숙사(파생) + 담당자 전반을 대상으로 매칭. 검색어 없으면 통과.
+  const occupantMatchesMenuSearch = (o: Occupant): boolean => {
+    const term = occupantMenuFilterSearch.trim().toLowerCase();
+    if (!term) return true;
+    const d = getOccupantDorm(o);
+    const parts = [
+      o.employeeName, o.gender, o.department, o.phone, occupantDisplayStatus(o),
+      d?.site, d?.buildingName, d?.address, d?.dong, d?.roomHo,
+      dormCommonEntrance(d), dormUnitEntrance(d), getDormManagerDisplayName(o.dormId),
+    ];
+    return parts.map((v) => String(v ?? "")).join(" ").toLowerCase().includes(term);
+  };
+
   // 개인정보 마스킹: 조회전용(viewer)에게 연락처 가운데 자리 마스킹 (admin/담당자는 원본)
   const maskPhone = (phone?: string): string => {
     const p = String(phone || "").trim();
@@ -5146,17 +5169,17 @@ export default function App() {
     ? inventory.filter((item) => item.dormId === selectedDormDetailId && !item.isDeleted)
     : [];
 
+  // 입주자 메뉴의 기숙사 범위: 기숙사 메뉴 검색(dormSearch)과 독립.
+  // operationalDorms + 권한 + 입주자메뉴 지역/성별 필터만 사용(검색어는 입주자 행에만 적용).
   const filteredDormsForOccupantMenu = useMemo(() => {
-    return visibleDorms.filter((dorm) => {
+    return operationalDorms.filter((dorm) => {
+      if (!hasAccessToDorm(currentUser, dorm.id)) return false;
       if (occupantMenuFilterSite !== "전체" && dorm.site !== occupantMenuFilterSite) return false;
       if (occupantMenuFilterGender !== "전체" && dorm.gender !== occupantMenuFilterGender) return false;
-      if (occupantMenuFilterSearch) {
-        const text = `${dorm.buildingName} ${dorm.address} ${dorm.dong} ${dorm.roomHo}`.toLowerCase();
-        if (!text.includes(occupantMenuFilterSearch.toLowerCase())) return false;
-      }
       return true;
     });
-  }, [visibleDorms, occupantMenuFilterSite, occupantMenuFilterGender, occupantMenuFilterSearch]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalDorms, currentUser, occupantMenuFilterSite, occupantMenuFilterGender]);
 
   // 선택 기숙사(또는 필터된 기숙사들) 기준 입주자 전체 이력(상태 필터 적용 전) — 통계/표시용
   const occupantScopedList = useMemo(
@@ -8618,8 +8641,8 @@ const exportExcel = () => {
           부서: o.department,
           연락처: o.phone,
           입실일: o.moveInDate,
-          공동현관: dorm?.공동현관 || "-",
-          세대현관: dorm?.세대현관 || "-",
+          공동현관: dormCommonEntrance(dorm),
+          세대현관: dormUnitEntrance(dorm),
           계약만료일: getDormContractEndLabel(o.dormId),
           잔여일: getDormContractRemainLabel(o.dormId),
           담당관리자: getDormManagerDisplayName(o.dormId),
@@ -13418,7 +13441,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <FilterSelect label="지역" value={occupantMenuFilterSite} onChange={(v) => setOccupantMenuFilterSite(v as Site | "전체")} options={["전체", "평택", "천안"]} />
                 <FilterSelect label="성별" value={occupantMenuFilterGender} onChange={(v) => setOccupantMenuFilterGender(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
                 <FilterSelect label="상태" value={occupantMenuFilterStatus} onChange={(v) => setOccupantMenuFilterStatus(v as "전체" | "현재거주" | "만료예정" | "퇴실과거" | "배정대기")} options={["전체", "현재거주", "만료예정", "퇴실과거", "배정대기"]} />
-                <input type="text" placeholder="건물명/주소 검색..." value={occupantMenuFilterSearch} onChange={(e) => setOccupantMenuFilterSearch(e.target.value)} className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"}`} />
+                <input type="text" placeholder="이름/부서/연락처/건물/동/호/현관 검색..." value={occupantMenuFilterSearch} onChange={(e) => setOccupantMenuFilterSearch(e.target.value)} className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"}`} />
               </div>
               <div className="text-xs text-slate-500">
                 총 기숙사: {filteredDormsForOccupantMenu.length} · 선택: {selectedDormId ? (operationalDorms.find((d) => d.id === selectedDormId)?.buildingName || "-") : "없음"}
@@ -13524,6 +13547,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   {[
                     ...visibleOccupants
                       .filter((o) => {
+                        if (!occupantMatchesMenuSearch(o)) return false; // 입주자 행 종합 검색
                         if (selectedDormId) {
                           return o.dormId === selectedDormId;
                         }
@@ -13557,7 +13581,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           sourceNewHireId: h.id,
                           createdAt: new Date().toISOString(),
                           updatedAt: new Date().toISOString(),
-                        } as Occupant))
+                        } as Occupant)).filter((o) => occupantMatchesMenuSearch(o))
                       : [])
                   ]
                     .map((o) => {
@@ -13588,8 +13612,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{dorm?.buildingName || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDong(dorm?.dong) || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{formatRoomHo(dorm?.roomHo) || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{dorm?.공동현관 || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{dorm?.세대현관 || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dormCommonEntrance(dorm)}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dormUnitEntrance(dorm)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm?.leaseStatus || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(o.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractRemainLabel(o.dormId)}</td>
