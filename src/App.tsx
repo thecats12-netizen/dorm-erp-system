@@ -1781,8 +1781,10 @@ export default function App() {
     confirmText: string;
     cancelText?: string; // 없으면 단순 알림(확인 버튼만)
     tone?: "default" | "danger";
+    requireText?: string; // 입력하면 확인 활성화되는 검증 문구(예: "전체초기화")
     resolve: (ok: boolean) => void;
   }>(null);
+  const [appModalInput, setAppModalInput] = useState("");
 
   // 변경이력 모달 관련 state
   const [showAuditLogModal, setShowAuditLogModal] = useState(false);
@@ -2397,9 +2399,10 @@ export default function App() {
   }, [theme.darkMode]);
 
   const saveSystemSettings = () => {
-    if (!canEditData(currentUser)) return;
+    if (!canManageUsers(currentUser)) { void appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
     saveJson(SYSTEM_SETTINGS_KEY, systemSettings, tenantId);
     setSettingsSavedAt(new Date().toLocaleString());
+    void appAlert("시스템 설정", "설정이 저장되었습니다.");
   };
 
   const getMilitaryModuleState = (): MilitaryModuleState => ({
@@ -2574,12 +2577,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [militaryPersonnel, militaryTrainingRecords, militaryNotices, militaryReports, militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig, currentUser?.role, isLoading]);
 
-  const restoreDefaultSystemSettings = () => {
-    if (!canEditData(currentUser)) return;
+  const restoreDefaultSystemSettings = async () => {
+    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    const ok = await appConfirm(
+      "시스템 설정",
+      "시스템 설정을 기본값으로 복원하시겠습니까?\n\n메뉴·권한·화면 설정만 초기화되며, 기숙사·입주자·계약·신입사원·비품·청소·하자·군대 데이터는 삭제되지 않습니다.",
+      { confirmText: "복원" }
+    );
+    if (!ok) return;
     const defaults = getDefaultSystemSettings();
     setSystemSettings(defaults);
     saveJson(SYSTEM_SETTINGS_KEY, defaults, tenantId);
     setSettingsSavedAt(new Date().toLocaleString());
+    await appAlert("시스템 설정", "시스템 설정이 기본값으로 복원되었습니다. 운영 데이터는 그대로 유지됩니다.");
   };
 
   const exportLocalStorageBackup = () => {
@@ -2612,9 +2622,10 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `dorm-erp-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `dorm-erp-backup-${backupTimestamp()}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    void appAlert("백업 및 복원", "로컬 백업 파일을 내려받았습니다.");
   };
 
   const importLocalStorageBackup = async (files: FileList | null) => {
@@ -2673,118 +2684,141 @@ export default function App() {
     }
   };
 
-  const resetAllData = () => {
-    if (!canEditData(currentUser)) {
-      alert("전체 데이터 초기화는 관리자만 실행할 수 있습니다.");
-      return;
+  const resetAllData = async () => {
+    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    const ok = await appConfirm(
+      "시스템 설정",
+      "전체 데이터를 초기화하시겠습니까?\n\n기숙사·입주자·계약·신입사원·비품·청소·하자·군대 데이터가 삭제 상태로 정리됩니다.\n관리자 계정과 시스템 기본 설정은 유지됩니다.\n\n계속하려면 아래에 \"전체초기화\"를 입력하세요.",
+      { confirmText: "초기화", tone: "danger", requireText: "전체초기화" }
+    );
+    if (!ok) return;
+    try {
+      const nowIso = new Date().toISOString();
+      const by = currentUser?.displayName || currentUser?.username || "system";
+      // 운영 데이터는 삭제하지 않고 soft delete(is_deleted=true) — 자동 저장 effect 가 Supabase 에 반영.
+      const softDel = <T,>(arr: T[]): T[] => arr.map((x) => ({ ...x, isDeleted: true, deletedAt: nowIso }) as T);
+      setDorms((prev) => softDel(prev));
+      setOccupants((prev) => softDel(prev));
+      setDormContracts((prev) => softDel(prev));
+      setNewHires((prev) => softDel(prev));
+      setInventory((prev) => softDel(prev));
+      setCleaningReports((prev) => softDel(prev));
+      setDefects((prev) => softDel(prev));
+      setLeases((prev) => softDel(prev));
+      setSales((prev) => softDel(prev));
+      // 군대 모듈: 기본 빈 구조로 초기화
+      setMilitaryPersonnel([]);
+      setMilitaryTrainingRecords([]);
+      setMilitaryNotices([]);
+      setMilitaryReports([]);
+      setMilitarySettings({});
+      setMilitaryTrainingRules(defaultMilitaryTrainingRules);
+      setMilitaryCodeValues(defaultMilitaryCodeValues);
+      setMilitaryTrainingAutoConfig({ enabled: true, targetStatuses: ["재직"] });
+      // audit_logs: 초기화 기록 1건 추가(기존 이력 보존)
+      const resetLog: AuditLog = {
+        id: crypto.randomUUID(),
+        targetType: "system",
+        targetId: "system",
+        actionType: "delete",
+        changedBy: by,
+        changedAt: nowIso,
+        beforeValue: "",
+        afterValue: "전체 데이터 초기화",
+        memo: "전체 데이터 초기화 실행",
+      };
+      setAuditLogs((prev) => [resetLog, ...prev]);
+      // 시스템 설정 기본값(운영 데이터/관리자 계정은 유지)
+      setSystemSettings(getDefaultSystemSettings());
+      saveJson(SYSTEM_SETTINGS_KEY, getDefaultSystemSettings(), tenantId);
+      // 군대 모듈 Supabase 즉시 반영(블롭 비우기)
+      if (isSupabaseAvailable()) {
+        try {
+          await saveMilitaryModule({
+            tenantId,
+            militaryPersonnel: [],
+            militaryTrainingRecords: [],
+            militaryNotices: [],
+            militaryReports: [],
+            militarySettings: {},
+            militaryTrainingRules: defaultMilitaryTrainingRules,
+            militaryCodeValues: defaultMilitaryCodeValues,
+            militaryTrainingAutoConfig: { enabled: true, targetStatuses: ["재직"] },
+          });
+        } catch (e) {
+          console.error("[resetAllData] military reset 실패", e);
+        }
+      }
+      setSettingsSavedAt(new Date().toLocaleString());
+      await appAlert("시스템 설정", "전체 데이터가 초기화되었습니다.\n\n운영 데이터는 삭제 상태로 정리되었으며, 관리자 계정과 기본 설정은 유지됩니다.");
+    } catch (err) {
+      console.error("[resetAllData] 실패", err);
+      await appAlert("기숙사 ERP 알림", "처리 중 오류가 발생했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해주세요.");
     }
-    if (!window.confirm("전체 데이터를 초기화하시겠습니까? 이 작업은 되돌릴 수 없습니다.")) return;
-    setUsers([]);
-    setDorms([]);
-    setOccupants([]);
-    setInventory([]);
-    setLeases([]);
-    setDormContracts([]);
-    setNewHires([]);
-    setSales([]);
-    setDefects([]);
-    setCleaningReports([]);
-    setAuditLogs([]);
-    setMilitaryPersonnel([]);
-    setMilitaryTrainingRecords([]);
-    setMilitaryNotices([]);
-    setMilitaryReports([]);
-    setMilitarySettings({});
-    setMilitaryTrainingRules(defaultMilitaryTrainingRules);
-    setMilitaryCodeValues(defaultMilitaryCodeValues);
-    setMilitaryTrainingAutoConfig({ enabled: true, targetStatuses: ["재직"] });
-    setCustomTemplates([]);
-    setCurrentUser(null);
-    setSystemSettings(getDefaultSystemSettings());
-    setTheme(themeDefault);
-    [USERS_KEY, DORMS_KEY, OCCUPANTS_KEY, INVENTORY_KEY, LEASES_KEY, DORM_CONTRACTS_KEY, NEW_HIRES_KEY, SALES_KEY, DEFECTS_KEY, CLEANING_REPORTS_KEY, CLEANING_SETTINGS_KEY, AUDIT_LOGS_KEY, MILITARY_PERSONNEL_KEY, MILITARY_TRAINING_KEY, MILITARY_NOTICES_KEY, MILITARY_REPORTS_KEY, MILITARY_SETTINGS_KEY, THEME_KEY, SYSTEM_SETTINGS_KEY, CUSTOM_TEMPLATES_KEY, AUTH_KEY].forEach((key) => removeJson(key, tenantId));
-    setSettingsSavedAt(new Date().toLocaleString());
   };
 
-  const resetDemoData = () => {
-    if (!canEditData(currentUser)) {
-      alert("데모 데이터 초기화는 관리자만 실행할 수 있습니다.");
-      return;
-    }
-    if (!window.confirm("데모 데이터를 로드하시겠습니까? 현재 데이터는 덮어쓰기됩니다.")) return;
-    setUsers([]);
-    setDorms([]);
-    setOccupants([]);
-    setInventory([]);
-    setLeases([]);
-    setDormContracts([]);
-    setNewHires([]);
-    setSales([]);
-    setDefects([]);
-    setCleaningReports([]);
-    setAuditLogs([]);
-    setMilitaryPersonnel([]);
-    setMilitaryTrainingRecords([]);
-    setMilitaryNotices([]);
-    setMilitaryReports([]);
-    setMilitarySettings({});
-    setMilitaryTrainingRules(defaultMilitaryTrainingRules);
-    setMilitaryCodeValues(defaultMilitaryCodeValues);
-    setMilitaryTrainingAutoConfig({ enabled: true, targetStatuses: ["재직"] });
-    setMilitaryTrainingRules(defaultMilitaryTrainingRules);
-    setMilitaryCodeValues(defaultMilitaryCodeValues);
-    setMilitaryTrainingAutoConfig({ enabled: true, targetStatuses: ["재직"] });
-    setCustomTemplates([]);
-    setSystemSettings(getDefaultSystemSettings());
-    setTheme(themeDefault);
-    saveJson(USERS_KEY, [], tenantId);
-    saveJson(DORMS_KEY, [], tenantId);
-    saveJson(OCCUPANTS_KEY, [], tenantId);
-    saveJson(INVENTORY_KEY, [], tenantId);
-    saveJson(LEASES_KEY, [], tenantId);
-    saveJson(DORM_CONTRACTS_KEY, [], tenantId);
-    saveJson(NEW_HIRES_KEY, [], tenantId);
-    saveJson(SALES_KEY, [], tenantId);
-    saveJson(DEFECTS_KEY, [], tenantId);
-    saveJson(CLEANING_REPORTS_KEY, [], tenantId);
-    saveJson(AUDIT_LOGS_KEY, [], tenantId);
-    saveJson(MILITARY_PERSONNEL_KEY, [], tenantId);
-    saveJson(MILITARY_TRAINING_KEY, [], tenantId);
-    saveJson(MILITARY_NOTICES_KEY, [], tenantId);
-    saveJson(MILITARY_REPORTS_KEY, [], tenantId);
-    saveJson(MILITARY_SETTINGS_KEY, {}, tenantId);
-    saveJson(CUSTOM_TEMPLATES_KEY, [], tenantId);
-    saveJson(THEME_KEY, themeDefault, tenantId);
-    saveJson(SYSTEM_SETTINGS_KEY, getDefaultSystemSettings(), tenantId);
-    setSettingsSavedAt(new Date().toLocaleString());
-  };
-
-  const resetAdminAccount = () => {
-    if (!canEditData(currentUser)) {
-      alert("관리자 계정 초기화는 관리자만 실행할 수 있습니다.");
-      return;
-    }
-    if (!window.confirm("관리자 계정을 기본값으로 초기화하시겠습니까?")) return;
-    const adminUser: LoginUser = {
-      id: crypto.randomUUID(),
-      username: "admin",
-      password: "admin1234",
-      role: "admin",
-      displayName: "총관리자",
-      isActive: true,
-      siteAccess: "전체",
-      createdAt: new Date().toISOString(),
-    };
-    setUsers((prev) => {
-      const filtered = prev.filter((u) => u.username !== "admin");
-      return [adminUser, ...filtered];
+  const resetDemoData = async () => {
+    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    const ok = await appConfirm(
+      "시스템 설정",
+      "샘플(데모) 데이터를 불러오시겠습니까?\n\n기존 운영 데이터는 삭제하지 않고, [샘플] 표시가 붙은 데모 데이터를 추가합니다.",
+      { confirmText: "샘플 추가" }
+    );
+    if (!ok) return;
+    const now = new Date().toISOString();
+    const today = now.slice(0, 10);
+    const stamp = Date.now();
+    const mkDorm = (n: number): Dorm => ({
+      id: `demo-dorm-${stamp}-${n}`, site: "평택", gender: "남",
+      buildingName: `[샘플] 데모기숙사 ${n}`, address: `평택시 샘플로 ${n}`, dong: "101", roomHo: `${n}01`,
+      pyeong: "24", capacity: 6, managerUserId: "", contractStart: today, contractEnd: "2027-12-31",
+      contractAmount: "0", leaseStatus: "사용중", 공동현관: "1234", 세대현관: "5678", prepaymentDeposit: 0,
+      realEstateName: "[샘플] 부동산", balanceDate: "", notes: "데모 데이터", createdAt: now, updatedAt: now, isDeleted: false,
     });
-    const savedUsers = loadJson<LoginUser[]>(USERS_KEY, [], tenantId);
-    const updatedUsers = Array.isArray(savedUsers)
-      ? [{ ...adminUser }, ...savedUsers.filter((u: any) => u.username !== "admin")]
-      : [adminUser];
-    saveJson(USERS_KEY, updatedUsers, tenantId);
+    const d1 = mkDorm(1), d2 = mkDorm(2);
+    const mkOcc = (dorm: Dorm, name: string): Occupant => ({
+      id: `demo-occ-${stamp}-${name}`, dormId: dorm.id, site: dorm.site, employeeName: `[샘플] ${name}`,
+      gender: "남", department: "[샘플]부서", phone: "010-0000-0000", moveInDate: today, moveOutDueDate: "",
+      status: "거주중", isNewHireAssignment: false, notes: "데모 데이터", createdAt: now, updatedAt: now, isDeleted: false,
+    });
+    setDorms((prev) => [d1, d2, ...prev]);
+    setOccupants((prev) => [mkOcc(d1, "홍길동"), mkOcc(d2, "김철수"), ...prev]);
     setSettingsSavedAt(new Date().toLocaleString());
+    await appAlert("시스템 설정", "샘플(데모) 데이터를 추가했습니다.\n\n목록에서 [샘플] 표시로 확인할 수 있으며, 휴지통/삭제로 정리할 수 있습니다.");
+  };
+
+  const resetAdminAccount = async () => {
+    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    const ok = await appConfirm(
+      "시스템 설정",
+      "관리자 계정을 복구하시겠습니까?\n\n관리자 계정을 활성 상태(관리자 권한)로 되돌립니다. 기존 계정은 삭제되지 않습니다.",
+      { confirmText: "복구" }
+    );
+    if (!ok) return;
+    // 대상: admin@dormerpsystem.com → 현재 로그인 관리자 → 임의 관리자
+    const target =
+      users.find((u) => (u.username || "").toLowerCase() === "admin@dormerpsystem.com") ||
+      (currentUser?.role === "admin" ? currentUser : undefined) ||
+      users.find((u) => u.role === "admin");
+    if (!target) {
+      await appAlert("시스템 설정", "복구할 관리자 계정을 찾을 수 없습니다. 관리자에게 문의해주세요.");
+      return;
+    }
+    setUsers((prev) => prev.map((u) => (u.id === target.id ? { ...u, role: "admin", isActive: true, isDeleted: false, deletedAt: undefined } : u)));
+    if (isSupabaseAvailable()) {
+      try {
+        let res = await updateProfileOnly(target.id, { role: "admin", is_active: true, is_deleted: false, deleted_at: null });
+        if (res.error && isMissingColumnError(res.error)) res = await updateProfileOnly(target.id, { role: "admin", is_active: true });
+        if (res.error) throw res.error;
+        await refreshUsersFromSupabase();
+      } catch (err) {
+        console.error("[resetAdminAccount] 실패", err);
+        await appAlert("기숙사 ERP 알림", "처리 중 오류가 발생했습니다. 사용자 권한 또는 계정 상태를 확인해주세요.");
+        return;
+      }
+    }
+    setSettingsSavedAt(new Date().toLocaleString());
+    await appAlert("시스템 설정", "관리자 계정이 정상적으로 복구되었습니다.");
   };
 
   const defectRequestPhotoInputRef = useRef<HTMLInputElement | null>(null);
@@ -2855,6 +2889,7 @@ export default function App() {
 
   // 공통 모달 헬퍼: 단순 알림(appAlert) / 확인(appConfirm). Promise 기반.
   const closeAppModal = (ok: boolean) => {
+    setAppModalInput("");
     setAppModal((m) => {
       m?.resolve(ok);
       return null;
@@ -2865,18 +2900,20 @@ export default function App() {
   const appConfirm = (
     title: string,
     message: string,
-    opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger" }
+    opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger"; requireText?: string }
   ): Promise<boolean> =>
-    new Promise((resolve) =>
+    new Promise((resolve) => {
+      setAppModalInput("");
       setAppModal({
         title,
         message,
         confirmText: opts?.confirmText ?? "확인",
         cancelText: opts?.cancelText ?? "취소",
         tone: opts?.tone,
+        requireText: opts?.requireText,
         resolve,
-      })
-    );
+      });
+    });
 
   // JSON 파일 다운로드 + 타임스탬프(파일명용)
   const downloadJsonFile = (data: unknown, filename: string) => {
@@ -3080,19 +3117,27 @@ export default function App() {
 
   const importBackupFile = async (files: FileList | null) => {
     if (!files?.length) return;
-    if (!canEditData(currentUser)) {
-      alert("복원은 관리자만 실행할 수 있습니다.");
-      return;
-    }
+    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    const ok = await appConfirm(
+      "백업 및 복원",
+      "백업 파일로 데이터를 복원하시겠습니까?\n\n현재 데이터가 백업 파일 내용으로 대체됩니다.",
+      { confirmText: "복원" }
+    );
+    if (!ok) return;
     try {
       const text = await files[0].text();
       const parsed = JSON.parse(text) as DataBackup;
       if (!parsed || typeof parsed !== "object" || !parsed.data || !Array.isArray(parsed.data.dorms)) {
-        throw new Error("유효한 백업 파일이 아닙니다. (data.dorms 누락)");
+        await appAlert("백업 및 복원", "올바른 백업 파일이 아닙니다. 파일을 다시 확인해주세요.");
+        return;
       }
       restoreFromBackup(parsed);
+      setBackupRestoreError(null);
+      await appAlert("백업 및 복원", "백업 데이터를 복원했습니다. 화면에 즉시 반영되며, 새로고침 후에도 유지됩니다.");
     } catch (e) {
+      console.error("[importBackupFile] 실패", e);
       setBackupRestoreError(String(e));
+      await appAlert("기숙사 ERP 알림", "처리 중 오류가 발생했습니다. 파일 형식을 확인하거나 관리자에게 문의해주세요.");
     }
   };
 
@@ -14387,6 +14432,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             >
               <h3 className="text-lg font-semibold">{appModal.title}</h3>
               <p className="mt-3 whitespace-pre-line text-sm text-slate-500">{appModal.message}</p>
+              {appModal.requireText && (
+                <input
+                  type="text"
+                  autoFocus
+                  value={appModalInput}
+                  onChange={(e) => setAppModalInput(e.target.value)}
+                  placeholder={`"${appModal.requireText}" 입력`}
+                  className={`mt-4 w-full rounded-2xl border px-3 py-2 text-sm outline-none ${theme.darkMode ? "border-slate-600 bg-slate-950 text-slate-100 focus:border-slate-400" : "border-slate-300 bg-white text-slate-900 focus:border-slate-400"}`}
+                />
+              )}
               <div className="mt-6 flex justify-end gap-2">
                 {appModal.cancelText && (
                   <button
@@ -14399,8 +14454,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
                 <button
                   type="button"
+                  disabled={!!appModal.requireText && appModalInput.trim() !== appModal.requireText}
                   onClick={() => closeAppModal(true)}
-                  className={`rounded-2xl px-4 py-2 text-sm font-semibold text-white ${appModal.tone === "danger" ? "bg-rose-600 hover:bg-rose-500" : "bg-slate-900 hover:bg-slate-800"}`}
+                  className={`rounded-2xl px-4 py-2 text-sm font-semibold text-white ${appModal.tone === "danger" ? "bg-rose-600 hover:bg-rose-500" : "bg-slate-900 hover:bg-slate-800"} ${!!appModal.requireText && appModalInput.trim() !== appModal.requireText ? "cursor-not-allowed opacity-50" : ""}`}
                 >
                   {appModal.confirmText}
                 </button>
