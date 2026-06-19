@@ -4866,10 +4866,13 @@ export default function App() {
       .map((contract) => {
         const key = getDormKey(contract.site, contract.buildingName, contract.dong, contract.roomHo);
         const matchedDorm = dorms.find((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo) === key && !d.isDeleted);
+        // 성별 정규화: "여","여성","F","female" 등 → "여" (KPI/필터에서 즉시 집계되도록). 인식 불가 시 매칭 dorm 또는 "남".
+        const ng = normGender(contract.gender);
+        const normalizedGender: "남" | "여" = ng === "여" ? "여" : ng === "남" ? "남" : (matchedDorm?.gender || "남");
         return {
           id: matchedDorm?.id || contract.id,
           site: contract.site,
-          gender: contract.gender,
+          gender: normalizedGender,
           buildingName: contract.buildingName,
           address: matchedDorm?.address || contract.address || "",
           dong: contract.dong,
@@ -4894,7 +4897,7 @@ export default function App() {
         } as Dorm;
       });
 
-    // 진단(#8): 표시에서 제외된 계약의 사유를 출력 — id/건물명/동/호/contractStatus/제외 사유
+    // 진단(#8/#10): 표시 제외 또는 성별 비정상 계약을 id/site/gender/건물/동/호/contractStatus/사유로 출력
     if (import.meta.env.DEV) {
       const latestIds = new Set(Array.from(latestContractByDorm.values()).map((c) => c.id));
       dormContracts.forEach((c) => {
@@ -4902,9 +4905,12 @@ export default function App() {
         if (c.isDeleted) reason = "삭제됨(휴지통)";
         else if (c.contractStatus === "종료" || c.contractStatus === "해지") reason = `계약상태=${c.contractStatus}`;
         else if (!latestIds.has(c.id)) reason = "동일 호실의 최신 계약으로 대체됨(중복)";
+        else if (normGender(c.gender) !== "남" && normGender(c.gender) !== "여") reason = `성별 인식 불가(gender=${c.gender})`;
         if (reason) {
-          console.warn("[operationalDorms] 계약 표시 제외", {
+          console.warn("[operationalDorms] 계약 표시/집계 주의", {
             id: c.id,
+            site: c.site,
+            gender: c.gender,
             buildingName: c.buildingName,
             dong: c.dong,
             roomHo: c.roomHo,
