@@ -189,6 +189,7 @@ export const demoDormContracts: DormContract[] = [
     landlordPhone: "010-1234-5678",
     realEstateName: "평택부동산",
     realEstatePhone: "031-123-4567",
+    managementOfficePhone: "031-123-0000",
     공동현관: "A동 1층",
     세대현관: "2002호",
     contractStart: "",

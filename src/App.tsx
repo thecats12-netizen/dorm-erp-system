@@ -462,6 +462,7 @@ function dormContractTemplate(): DormContractFormState {
     landlordPhone: "",
     realEstateName: "",
     realEstatePhone: "",
+    managementOfficePhone: "",
     공동현관: "",
     세대현관: "",
     contractStart: "",
@@ -999,6 +1000,23 @@ function badgeColor(theme: ThemeSettings, value: string) {
   return theme.colorMap[value] || "#E5E7EB";
 }
 
+// 성별 정규화 + 색상(정산관리 등): 남=파랑, 여=분홍, 혼합=보라, 미지정=회색
+function normalizeGenderLabel(g?: string): "남" | "여" | "혼합" | "미지정" {
+  const s = String(g || "").trim().toLowerCase();
+  if (s === "남" || s === "남성" || s === "m" || s === "male") return "남";
+  if (s === "여" || s === "여성" || s === "f" || s === "female") return "여";
+  if (s === "혼합" || s === "혼성" || s === "공용" || s === "mixed") return "혼합";
+  return "미지정";
+}
+function genderColor(g?: string): string {
+  switch (normalizeGenderLabel(g)) {
+    case "남": return "#3b82f6";
+    case "여": return "#ec4899";
+    case "혼합": return "#8b5cf6";
+    default: return "#9ca3af";
+  }
+}
+
 type MilitaryTrainingRule = {
   id: string;
   year: string;
@@ -1321,6 +1339,7 @@ export default function App() {
     landlordPhone: row.landlord_phone || "",
     realEstateName: row.real_estate_name || "",
     realEstatePhone: row.real_estate_phone || "",
+    managementOfficePhone: row.management_office_phone || "",
     공동현관: row.shared_entry || "",
     세대현관: row.unit_entry || "",
     contractStart: row.contract_start || "",
@@ -1508,6 +1527,24 @@ export default function App() {
       default:
         break;
     }
+  };
+
+  // 군대 모듈 Realtime: military_module_data 는 tenant 당 1행(JSON 블롭). INSERT/UPDATE 시 전체 상태 갱신.
+  const handleMilitaryRealtimeRow = (payload: any) => {
+    const newRow = payload.new ?? payload.record;
+    if (!newRow || newRow.tenant_id !== tenantId) return; // 현재 tenant 데이터만
+    const data = newRow.data;
+    if (!data || typeof data !== "object") return;
+    // 자기 기기 저장분의 재저장/깜빡임 방지(저장 effect 가 이 플래그를 보고 재저장 생략)
+    realtimeUpdateSourceRef.current.add("military_module");
+    if (Array.isArray(data.militaryPersonnel)) setMilitaryPersonnel(data.militaryPersonnel);
+    if (Array.isArray(data.militaryTrainingRecords)) setMilitaryTrainingRecords(data.militaryTrainingRecords);
+    if (Array.isArray(data.militaryNotices)) setMilitaryNotices(data.militaryNotices);
+    if (Array.isArray(data.militaryReports)) setMilitaryReports(data.militaryReports);
+    if (data.militarySettings && typeof data.militarySettings === "object") setMilitarySettings(data.militarySettings);
+    if (Array.isArray(data.militaryTrainingRules)) setMilitaryTrainingRules(data.militaryTrainingRules);
+    if (data.militaryCodeValues && typeof data.militaryCodeValues === "object") setMilitaryCodeValues(data.militaryCodeValues);
+    if (data.militaryTrainingAutoConfig && typeof data.militaryTrainingAutoConfig === "object") setMilitaryTrainingAutoConfig(data.militaryTrainingAutoConfig);
   };
 
   const militaryReferenceYear = Number(militarySettings["기준연도"]);
@@ -3593,6 +3630,13 @@ export default function App() {
     return (x?.["세대현관"] as string) || (x?.["unitEntry"] as string) || (x?.["unitEntrance"] as string) || "-";
   };
 
+  // 관리사무소 연락처 표시(기숙사 기준, operationalDorms 우선). 부동산/현관 연락처와 분리된 별도 필드.
+  const getDormManagementOfficePhone = (dormId?: string): string => {
+    if (!dormId) return "-";
+    const dorm = operationalDorms.find((d) => d.id === dormId) || dorms.find((d) => d.id === dormId);
+    return dorm?.managementOfficePhone || "-";
+  };
+
   // 입주자 메뉴 검색: 입주자 + 기숙사(파생) + 담당자 전반을 대상으로 매칭. 검색어 없으면 통과.
   const occupantMatchesMenuSearch = (o: Occupant): boolean => {
     const term = occupantMenuFilterSearch.trim().toLowerCase();
@@ -4652,6 +4696,11 @@ export default function App() {
           { event: "*", schema: "public", table: "inventory_items", filter: `tenant_id=eq.${tenantId}` },
           (payload) => handleRealtimeTableRow("inventory_items", payload)
         )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "military_module_data", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleMilitaryRealtimeRow(payload)
+        )
         .subscribe();
     };
 
@@ -4835,6 +4884,7 @@ export default function App() {
           세대현관: contract.세대현관 || matchedDorm?.세대현관 || "",
           prepaymentDeposit: matchedDorm?.prepaymentDeposit ?? Number(contract.prepaymentDeposit || 0),
           realEstateName: contract.realEstateName || matchedDorm?.realEstateName || "",
+          managementOfficePhone: contract.managementOfficePhone || matchedDorm?.managementOfficePhone || "",
           balanceDate: matchedDorm?.balanceDate || "",
           notes: matchedDorm?.notes || "",
           createdAt: matchedDorm?.createdAt || contract.createdAt || new Date().toISOString(),
@@ -5235,7 +5285,7 @@ export default function App() {
       const status = getDormContractDisplayStatus(c, dorms, occupants);
       if (dormContractStatusFilter !== "전체" && status !== dormContractStatusFilter) return false;
       if (dormContractSearch) {
-        const text = `${c.site} ${c.address} ${c.buildingName} ${c.dong} ${c.roomHo} ${c.pyeong} ${c.landlordName} ${c.landlordPhone} ${c.realEstateName} ${c.realEstatePhone} ${c.contractStart} ${c.contractEnd} ${status} ${c.contractAmount} ${c.prepaymentDeposit} ${c.deposit} ${c.monthlyRentOrMaintenance} ${c.contractType} ${c.notes} ${c.registeredBy} ${c.modifiedBy}`.toLowerCase();
+        const text = `${c.site} ${c.address} ${c.buildingName} ${c.dong} ${c.roomHo} ${c.pyeong} ${c.landlordName} ${c.landlordPhone} ${c.realEstateName} ${c.realEstatePhone} ${c.managementOfficePhone} ${c.contractStart} ${c.contractEnd} ${status} ${c.contractAmount} ${c.prepaymentDeposit} ${c.deposit} ${c.monthlyRentOrMaintenance} ${c.contractType} ${c.notes} ${c.registeredBy} ${c.modifiedBy}`.toLowerCase();
         return text.includes(dormContractSearch.toLowerCase());
       }
       return true;
@@ -5730,12 +5780,22 @@ export default function App() {
   const occupancyCountByDorm = useMemo(() => {
     const map = new Map<string, number>();
     occupants.forEach((o) => {
-      if (["거주중", "만료예정"].includes(o.status)) {
+      if (!o.isDeleted && ["거주중", "만료예정"].includes(o.status)) {
         map.set(o.dormId, (map.get(o.dormId) || 0) + 1);
       }
     });
     return map;
   }, [occupants]);
+
+  // 카드 상태 표시는 계약상태 텍스트가 아니라 "실제 현재 인원" 기준으로 우선 계산.
+  // 0명=공실, 정원 미만=사용중, 정원 이상=만실.
+  const getOccupancyStatus = (dormId: string, capacity?: number): "공실" | "사용중" | "만실" => {
+    const count = occupancyCountByDorm.get(dormId) || 0;
+    const cap = capacity && capacity > 0 ? capacity : 6;
+    if (count <= 0) return "공실";
+    if (count >= cap) return "만실";
+    return "사용중";
+  };
 
   const expiringDormsTop10 = useMemo(() => {
     return [...operationalDorms]
@@ -8490,6 +8550,7 @@ export default function App() {
       landlordPhone: String(r["임대인연락처"] || ""),
       realEstateName: String(r["부동산명"] || ""),
       realEstatePhone: String(r["부동산연락처"] || ""),
+      managementOfficePhone: String(r["관리사무소연락처"] || r["관리사무소 연락처"] || ""),
       공동현관: String(r["공동현관"] || ""),
       세대현관: String(r["세대현관"] || ""),
       contractStart: String(r["계약시작일"] || String(r["계약시작"] || "")),
@@ -8943,6 +9004,7 @@ const exportExcel = () => {
       임대인연락처: c.landlordPhone,
       부동산명: c.realEstateName,
       부동산연락처: c.realEstatePhone,
+      관리사무소연락처: c.managementOfficePhone,
       공동현관: c.공동현관,
       세대현관: c.세대현관,
       계약시작일: c.contractStart,
@@ -11325,7 +11387,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["지역", "도로명주소", "건물명", "동", "호수", "평수", "임대인명", "임대인연락처", "부동산명", "부동산연락처", "계약시작일", "계약종료일", "계약상태", "계약금액", "공동현관", "세대현관", "선납금", "보증금", "월세/관리비", "계약유형", "성별", "비고", "등록일", "수정일", "등록자"],
+                      ["지역", "도로명주소", "건물명", "동", "호수", "평수", "임대인명", "임대인연락처", "부동산명", "부동산연락처", "관리사무소연락처", "계약시작일", "계약종료일", "계약상태", "계약금액", "공동현관", "세대현관", "선납금", "보증금", "월세/관리비", "계약유형", "성별", "비고", "등록일", "수정일", "등록자"],
                       ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
                     ]);
                     const wb = XLSX.utils.book_new();
@@ -13080,6 +13142,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         landlordPhone: selected.landlordPhone,
                         realEstateName: selected.realEstateName,
                         realEstatePhone: selected.realEstatePhone,
+                        managementOfficePhone: selected.managementOfficePhone,
                         공동현관: selected.공동현관,
                         세대현관: selected.세대현관,
                         contractStart: "",
@@ -13623,12 +13686,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           className={`h-5 w-5 rounded ${theme.darkMode ? "border-slate-600 text-slate-100" : "border-slate-300 text-slate-900"}`}
                         />
                       </label>
-                      <span
-                        className="rounded-full px-1.5 py-0.5 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 status-badge"
-                        style={{ backgroundColor: badgeColor(theme, d.leaseStatus) }}
-                      >
-                        {d.leaseStatus}
-                      </span>
+                      {(() => {
+                        const occStatus = getOccupancyStatus(d.id, d.capacity);
+                        return (
+                          <span
+                            className="rounded-full px-1.5 py-0.5 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 status-badge"
+                            style={{ backgroundColor: badgeColor(theme, occStatus === "만실" ? "사용중" : occStatus) }}
+                          >
+                            {occStatus}
+                          </span>
+                        );
+                      })()}
                     </div>
                     <div className="mb-3">
                       <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">{d.site} · {d.gender}</div>
@@ -13741,12 +13809,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   >
                     <div className="mb-2 flex items-center justify-between gap-1">
                       <div className={`${theme.darkMode ? "truncate font-semibold text-slate-100" : "truncate font-semibold text-slate-900"}`}>{dorm.buildingName}</div>
-                      <span
-                        className="shrink-0 rounded-full px-1.5 py-0.5 text-[0.65rem] font-medium status-badge"
-                        style={{ backgroundColor: badgeColor(theme, dorm.leaseStatus) }}
-                      >
-                        {dorm.leaseStatus}
-                      </span>
+                      {(() => {
+                        const occStatus = getOccupancyStatus(dorm.id, dorm.capacity);
+                        return (
+                          <span
+                            className="shrink-0 rounded-full px-1.5 py-0.5 text-[0.65rem] font-medium status-badge"
+                            style={{ backgroundColor: badgeColor(theme, occStatus === "만실" ? "사용중" : occStatus) }}
+                          >
+                            {occStatus}
+                          </span>
+                        );
+                      })()}
                     </div>
                     <div className="mb-2 text-[0.7rem] text-slate-500">{dorm.site} / {dorm.gender} · {formatDong(dorm.dong)} {formatRoomHo(dorm.roomHo)}</div>
                     <div className="flex flex-wrap gap-1">
@@ -13985,6 +14058,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <div><dt className="font-medium">계약상태</dt><dd>{selectedDetailDorm.leaseStatus}</dd></div>
                         <div><dt className="font-medium">계약금액</dt><dd>{selectedDetailDorm.contractAmount || "-"}</dd></div>
                         <div><dt className="font-medium">부동산</dt><dd>{selectedDetailDorm.realEstateName || "-"}</dd></div>
+                        <div><dt className="font-medium">관리사무소 연락처</dt><dd>{getDormManagementOfficePhone(selectedDetailDorm.id)}</dd></div>
                       </dl>
                     </div>
                     <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
@@ -15359,7 +15433,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             <div key={dorm.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4 hover:bg-slate-900 transition" : "rounded-2xl border border-slate-200 bg-slate-50 p-4 hover:bg-slate-100 transition"}`}>
                               <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
                                 <div className="flex items-center gap-3">
-                                  <div className="w-2 h-8 rounded-full" style={{ backgroundColor: dorm.site === "평택" ? "#3b82f6" : "#ec4899" }}></div>
+                                  <div className="w-2 h-8 rounded-full" style={{ backgroundColor: genderColor(dorm.gender) }} title={`성별: ${normalizeGenderLabel(dorm.gender)}`}></div>
                                   <div>
                                     <div className={`${theme.darkMode ? "font-semibold text-slate-100" : "font-semibold text-slate-900"}`}>{dorm.buildingName}</div>
                                     <div className="text-xs text-slate-500">{dorm.dong} | {dorm.address}</div>
@@ -19219,6 +19293,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input label="부동산명" value={dormContractForm.realEstateName} onChange={(v) => setDormContractForm((f) => ({ ...f, realEstateName: v }))} />
                 <Input label="부동산연락처" value={dormContractForm.realEstatePhone} onChange={(v) => setDormContractForm((f) => ({ ...f, realEstatePhone: v }))} />
+                <Input label="관리사무소 연락처" value={dormContractForm.managementOfficePhone} onChange={(v) => setDormContractForm((f) => ({ ...f, managementOfficePhone: v }))} />
                 <Input label="공동현관" value={dormContractForm.공동현관} onChange={(v) => setDormContractForm((f) => ({ ...f, 공동현관: v }))} />
                 <Input label="세대현관" value={dormContractForm.세대현관} onChange={(v) => setDormContractForm((f) => ({ ...f, 세대현관: v }))} />
                 <Input label="비고" value={dormContractForm.notes} onChange={(v) => setDormContractForm((f) => ({ ...f, notes: v }))} />

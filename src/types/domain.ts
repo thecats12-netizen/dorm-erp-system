@@ -43,6 +43,7 @@ export type Dorm = {
   세대현관: string;
   prepaymentDeposit: number;
   realEstateName: string;
+  managementOfficePhone?: string;
   balanceDate: string;
   notes: string;
   createdAt: string;
@@ -151,6 +152,7 @@ export type DormContract = {
   landlordPhone: string;
   realEstateName: string;
   realEstatePhone: string;
+  managementOfficePhone: string;
   공동현관: string;
   세대현관: string;
   contractStart: string;
