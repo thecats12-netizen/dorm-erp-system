@@ -4847,8 +4847,16 @@ export default function App() {
   }, [currentUser, tenantId, isLoading]);
 
   const operationalDorms = useMemo<OperationalDorm[]>(() => {
+    // 표시 기준: isDeleted=true 제외, 계약상태 종료/해지 제외. 그 외(진행중/공실/만료예정/연장 등)는 모두 표시.
+    // 중요: "유효 계약만 먼저 필터" 후 호실별 최신 1건을 고른다.
+    // (전체 계약으로 먼저 dedup 하면, 같은 호실의 종료/해지 기록이 updatedAt 이 더 최신일 때
+    //  유효 계약을 덮어써서 카드가 누락되던 버그 수정 → 신규계약 유효 수와 카드 수 일치)
+    const validContracts = dormContracts
+      .filter((c) => !c.isDeleted)
+      .filter((c) => c.contractStatus !== "종료" && c.contractStatus !== "해지");
+
     const latestContractByDorm = new Map<string, DormContract>();
-    dormContracts.forEach((contract) => {
+    validContracts.forEach((contract) => {
       const key = getDormKey(contract.site, contract.buildingName, contract.dong, contract.roomHo);
       const existing = latestContractByDorm.get(key);
       const currentUpdatedAt = contract.updatedAt ? Date.parse(contract.updatedAt) : 0;
@@ -4858,11 +4866,7 @@ export default function App() {
       }
     });
 
-    // 표시 기준: isDeleted=true 제외, 계약상태 종료/해지 제외. 그 외(진행중/공실/만료예정/연장 등)는 모두 표시.
-    // (화이트리스트 대신 종료/해지만 제외 → 신규계약 유효 건수와 기숙사 카드 수 일치)
     const contractBased = Array.from(latestContractByDorm.values())
-      .filter((contract) => !contract.isDeleted)
-      .filter((contract) => contract.contractStatus !== "종료" && contract.contractStatus !== "해지")
       .map((contract) => {
         const key = getDormKey(contract.site, contract.buildingName, contract.dong, contract.roomHo);
         const matchedDorm = dorms.find((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo) === key && !d.isDeleted);
@@ -19343,6 +19347,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>기본정보</h4>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input label="이름" value={newHireForm.name} onChange={(v) => setNewHireForm((f) => ({ ...f, name: v }))} />
+                <SelectInput label="지역" value={newHireForm.site} onChange={(v) => setNewHireForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
                 <SelectInput label="성별" value={newHireForm.gender} onChange={(v) => setNewHireForm((f) => ({ ...f, gender: v as Gender }))} options={["남", "여"]} />
                 <Input label="부서" value={newHireForm.department} onChange={(v) => setNewHireForm((f) => ({ ...f, department: v }))} />
                 <Input label="연락처" value={newHireForm.phone} onChange={(v) => setNewHireForm((f) => ({ ...f, phone: v }))} />
