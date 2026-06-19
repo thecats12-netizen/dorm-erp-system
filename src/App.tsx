@@ -4858,10 +4858,11 @@ export default function App() {
       }
     });
 
+    // 표시 기준: isDeleted=true 제외, 계약상태 종료/해지 제외. 그 외(진행중/공실/만료예정/연장 등)는 모두 표시.
+    // (화이트리스트 대신 종료/해지만 제외 → 신규계약 유효 건수와 기숙사 카드 수 일치)
     const contractBased = Array.from(latestContractByDorm.values())
       .filter((contract) => !contract.isDeleted)
       .filter((contract) => contract.contractStatus !== "종료" && contract.contractStatus !== "해지")
-      .filter((contract) => ["공실", "진행중", "만료예정", "연장"].includes(contract.contractStatus))
       .map((contract) => {
         const key = getDormKey(contract.site, contract.buildingName, contract.dong, contract.roomHo);
         const matchedDorm = dorms.find((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo) === key && !d.isDeleted);
@@ -4892,6 +4893,27 @@ export default function App() {
           isDeleted: false,
         } as Dorm;
       });
+
+    // 진단(#8): 표시에서 제외된 계약의 사유를 출력 — id/건물명/동/호/contractStatus/제외 사유
+    if (import.meta.env.DEV) {
+      const latestIds = new Set(Array.from(latestContractByDorm.values()).map((c) => c.id));
+      dormContracts.forEach((c) => {
+        let reason = "";
+        if (c.isDeleted) reason = "삭제됨(휴지통)";
+        else if (c.contractStatus === "종료" || c.contractStatus === "해지") reason = `계약상태=${c.contractStatus}`;
+        else if (!latestIds.has(c.id)) reason = "동일 호실의 최신 계약으로 대체됨(중복)";
+        if (reason) {
+          console.warn("[operationalDorms] 계약 표시 제외", {
+            id: c.id,
+            buildingName: c.buildingName,
+            dong: c.dong,
+            roomHo: c.roomHo,
+            contractStatus: c.contractStatus,
+            reason,
+          });
+        }
+      });
+    }
 
     // 계약과 매칭되지 않는 독립 기숙사(dorms)도 운영 목록에 포함.
     // 기숙사 Excel 업로드분이 계약 없이 dorms 에만 존재하는 경우 화면에서 누락되던 문제 보정(데이터 복구).
