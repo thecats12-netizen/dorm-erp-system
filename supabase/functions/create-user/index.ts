@@ -131,20 +131,22 @@ Deno.serve(async (req) => {
       }
     }
 
-    // 4) profiles upsert — 기존/신규 모두 role/display_name/dorm_id/site_access/gender_access/is_active=true 갱신.
+    // 4) profiles upsert — 기존/신규 모두 role/display_name/dorm_id/site_access/gender_access/is_active 덮어쓰기.
+    //    재사용(email_exists) 흐름에서도 is_active 를 반드시 반영(기본 true).
     const profileObj: Record<string, any> = {
       id: userId,
       email: authEmail,
       display_name: payload.display_name,
       role: payload.role,
-      is_active: true,
+      is_active: payload.is_active ?? true,
       site_access: payload.site_access,
       gender_access: payload.gender_access,
       updated_at: new Date().toISOString(),
     };
     // 재사용 계정은 created_at 을 덮어쓰지 않음(신규일 때만 설정)
     if (isNewUser) profileObj.created_at = new Date().toISOString();
-    if (payload.dorm_id) profileObj.dorm_id = payload.dorm_id;
+    // dorm_id 는 항상 덮어쓰기(미선택 시 null 로 비움)
+    profileObj.dorm_id = payload.dorm_id ?? null;
     if (payload.tenant_id) profileObj.tenant_id = payload.tenant_id;
 
     const { error: profileError } = await supabase.from("profiles").upsert(profileObj);

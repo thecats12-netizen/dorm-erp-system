@@ -7391,14 +7391,19 @@ export default function App() {
   };
 
   // Supabase profiles 를 단일 출처로 users state 를 재동기화. (추가/수정/삭제 후 호출)
-  const refreshUsersFromSupabase = async () => {
-    if (!isSupabaseAvailable()) return;
+  const refreshUsersFromSupabase = async (): Promise<Profile[] | null> => {
+    if (!isSupabaseAvailable()) return null;
     try {
       const fresh = await listProfiles();
-      if (Array.isArray(fresh)) setUsers(fresh.map((p) => mapProfileToLoginUser(p)));
+      if (Array.isArray(fresh)) {
+        setUsers(fresh.map((p) => mapProfileToLoginUser(p)));
+        return fresh;
+      }
+      return null;
     } catch (err) {
       const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
       console.error("[refreshUsersFromSupabase] 실패", { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint });
+      return null;
     }
   };
 
@@ -7764,7 +7769,13 @@ export default function App() {
     setEditingUserId(null);
     setShowUserForm(false);
     // 저장 후 Supabase profiles 기준으로 재동기화(활성/비활성/권한 등 실제 저장값 반영)
-    await refreshUsersFromSupabase();
+    const fresh = await refreshUsersFromSupabase();
+    // 진단: 저장된 계정의 실제 is_active 값 확인(활성 저장이 반영됐는지)
+    const savedProfile = fresh?.find((p) => p.id === payload.id);
+    console.log("[saveUser] 저장 후 isActive 확인", { id: payload.id, isActive: savedProfile?.is_active, expected: userForm.isActive ?? true });
+    if (savedProfile && (savedProfile.is_active ?? true) !== (userForm.isActive ?? true)) {
+      console.warn("[saveUser] is_active 불일치 — RLS update 정책/Edge 재배포를 확인하세요.", { id: payload.id, saved: savedProfile.is_active, expected: userForm.isActive ?? true });
+    }
   };
 
   const openMilitaryPersonnelEdit = (person: MilitaryPersonnel) => {
