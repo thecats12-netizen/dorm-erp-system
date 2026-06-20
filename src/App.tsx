@@ -7560,8 +7560,14 @@ export default function App() {
         const { error } = await updateProfileOnly(target.id, { dorm_id: dormId, is_active: true, role: resolveRole(target) });
         if (error) throw error;
       } else {
-        // 계정 없음 → 자동 생성
-        await appAlert("사용자 관리", `${name}님의 사용자 계정이 없어 자동으로 생성한 뒤 기숙사 담당자로 지정합니다.`);
+        // 계정 없음 → 자동 생성 여부 선택(취소 시 신입사원만 저장, 담당자 지정 보류)
+        const createNew = await appConfirm(
+          "사용자 관리",
+          `${name}님의 사용자 계정이 없습니다.\n\n새 담당자 계정을 자동으로 생성해 지정할까요?\n취소하면 담당자 지정 없이 신입사원만 저장됩니다.\n(기존 계정을 쓰려면 사용자관리에서 계정 생성 후 지정하세요.)`,
+          { confirmText: "새 계정 생성", cancelText: "지정 없이 저장" }
+        );
+        if (!createNew) return; // 담당자 지정 보류 — 신입사원 저장은 이미 완료됨
+
         const tempPassword = `Temp${Math.random().toString(36).slice(2, 8)}!${last4 || "0000"}`;
         step = "edge";
         const { user_id, error: edgeError } = await createUserViaEdgeFunction({
@@ -7576,8 +7582,11 @@ export default function App() {
           tenant_id: tenantId,
         });
         if (edgeError || !user_id) {
-          // Edge Function 미연결/실패 → 원인 로깅 후 profiles 행만 생성 시도
-          console.error("[assignDormManagerToProfile] Edge Function 실패", edgeError);
+          // Edge Function 미배포/실패 → 상세 로깅 후 profiles-only 생성 시도(폴백)
+          const ee = edgeError as { code?: unknown; message?: string; details?: unknown; hint?: unknown } | undefined;
+          console.error("[assignDormManagerToProfile] Edge Function 실패", {
+            step, code: ee?.code, message: ee?.message, details: ee?.details, hint: ee?.hint, targetName: name, dormId,
+          });
           step = "insert";
           const { error: upErr } = await upsertProfile({
             id: crypto.randomUUID(),
@@ -7590,38 +7599,40 @@ export default function App() {
             gender_access: genderAccess,
           });
           if (upErr) throw upErr;
-          await appAlert("사용자 관리", `${name}님 계정을 생성했습니다. 로그인은 관리자 확인이 필요합니다.`);
+          await refreshUsersFromSupabase();
+          await appAlert("사용자 관리", `${name}님 계정을 생성하고 담당자로 지정했습니다.\n\n로그인 사용을 위해서는 관리자 확인(비밀번호 설정)이 필요합니다.`);
+          return;
         }
       }
       await refreshUsersFromSupabase(); // 사용자관리/담당자 표시 즉시 갱신
       await appAlert("사용자 관리", `${name}님을 해당 기숙사 담당자로 지정했습니다.`);
     } catch (err) {
       const e = err as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
+      const codeStr = String(e?.code ?? "");
+      const msgStr = String(e?.message ?? "").toLowerCase();
+      // 개발자용 상세 로그(step/code/message/details/hint/targetName/dormId)
       console.error("[assignDormManagerToProfile] 실패", {
         step,
         code: e?.code,
         message: e?.message,
         details: e?.details,
         hint: e?.hint,
+        targetName: name,
         targetId: target?.id,
         dormId,
       });
-      // 개발자용 상세 분류는 console 에만 기록(사용자 화면엔 노출하지 않음)
-      const codeStr = String(e?.code ?? "");
-      const msgStr = String(e?.message ?? "").toLowerCase();
-      let devReason: string;
+      // 신입사원 저장은 이미 완료된 상태 → 담당자 지정만 보류. 사용자 화면은 한글 실무형 + 원인별 안내.
+      let userMsg: string;
       if (codeStr === "42501" || /row-level security|violates row-level|permission denied|not authorized|\brls\b/.test(msgStr)) {
-        devReason = "RLS update policy required (scripts/supabase-profiles-rls.sql)";
+        userMsg = "권한이 없어 담당자 지정에 실패했습니다.\n\n신입사원은 정상 저장되었습니다. 관리자 권한(프로필 수정 권한)을 확인한 뒤 사용자관리에서 담당자를 지정해주세요.";
       } else if (codeStr === "23503" || /foreign key/.test(msgStr)) {
-        devReason = "missing auth user (FK) — Edge Function needed";
+        userMsg = "담당자 계정 자동 생성에 실패했습니다.\n\n신입사원은 정상 저장되었습니다. 사용자관리에서 계정을 먼저 만든 뒤 담당자로 지정해주세요.";
       } else if (codeStr === "23505" || /duplicate key|unique constraint/.test(msgStr)) {
-        devReason = "duplicate email/account";
+        userMsg = "이미 동일한 계정이 있어 자동 생성에 실패했습니다.\n\n신입사원은 정상 저장되었습니다. 사용자관리에서 해당 계정을 담당자로 지정해주세요.";
       } else {
-        devReason = `step=${step}`;
+        userMsg = "담당자 지정 중 오류가 발생했습니다.\n\n신입사원은 정상 저장되었습니다. 사용자관리에서 담당자를 지정해주세요.";
       }
-      console.error("[assignDormManagerToProfile] devReason:", devReason);
-      // 사용자 화면: 개발자 용어 없는 한글 안내
-      await appAlert("기숙사 ERP 알림", "담당자 지정 중 오류가 발생했습니다. 사용자 권한 또는 계정 상태를 확인해주세요.");
+      await appAlert("기숙사 ERP 알림", userMsg);
     }
   };
 
