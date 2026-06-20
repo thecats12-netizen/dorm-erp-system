@@ -1731,6 +1731,8 @@ export default function App() {
   const [showSaleForm, setShowSaleForm] = useState(false);
   const [showDefectForm, setShowDefectForm] = useState(false);
   const [showUserForm, setShowUserForm] = useState(false);
+  // 신입사원 담당자 지정 → 사용자관리 계정 생성 연결용. 계정 저장 시 해당 신입사원에 담당자 계정 id 연결.
+  const [pendingManagerLink, setPendingManagerLink] = useState<{ newHireId: string; dormId: string } | null>(null);
   const [showMilitaryPersonnelForm, setShowMilitaryPersonnelForm] = useState(false);
   const [showMilitaryTrainingForm, setShowMilitaryTrainingForm] = useState(false);
   const [showMilitaryNoticeForm, setShowMilitaryNoticeForm] = useState(false);
@@ -7524,7 +7526,9 @@ export default function App() {
 
     // 오프라인(Supabase 미연결) fallback: 로컬 users 만 갱신
     if (!isSupabaseAvailable()) {
+      let linkedId = "";
       if (target) {
+        linkedId = target.id;
         setUsers((prev) =>
           prev.map((u) => {
             if (existing && existing.id !== target.id && u.id === existing.id) return { ...u, dormId: undefined };
@@ -7538,8 +7542,10 @@ export default function App() {
           displayName: name, isActive: true, siteAccess: hire.site, genderAccess, dormId,
           createdAt: new Date().toISOString(),
         };
+        linkedId = created.id;
         setUsers((prev) => [created, ...(existing ? prev.map((u) => (u.id === existing.id ? { ...u, dormId: undefined } : u)) : prev)]);
       }
+      if (linkedId) setNewHires((prev) => prev.map((h) => (h.id === hire.id ? { ...h, managerUserId: linkedId } : h)));
       await appAlert("사용자 관리", `${name}님을 해당 기숙사 담당자로 지정했습니다.`);
       return;
     }
@@ -7559,6 +7565,8 @@ export default function App() {
         step = "update";
         const { error } = await updateProfileOnly(target.id, { dorm_id: dormId, is_active: true, role: resolveRole(target) });
         if (error) throw error;
+        // 신입사원에 담당자 계정 id 연결(체크 유지 + 실제 지정 반영)
+        setNewHires((prev) => prev.map((h) => (h.id === hire.id ? { ...h, managerUserId: target.id } : h)));
       } else {
         // 계정 없음: 자동 생성/Edge Function 호출하지 않고 사용자관리 계정 생성 화면으로 안내.
         // (FK/Edge 미배포로 인한 자동 생성 실패를 사전에 방지 — 로그인 가능한 계정은 사용자관리에서 생성)
@@ -7569,6 +7577,8 @@ export default function App() {
         );
         if (goCreate) {
           // 계정 생성 화면으로 이동 + 신입사원 정보 프리필(담당 기숙사/지역/성별 포함)
+          // 계정 저장 시 이 신입사원에 담당자 계정 id 를 연결하기 위해 pending 연결 정보 보관.
+          setPendingManagerLink({ newHireId: hire.id, dormId });
           setUserForm({ ...userTemplate(), displayName: name, role: "maintenance_reporter", dormId, siteAccess: hire.site, genderAccess });
           setEditingUserId(null);
           setShowUserForm(true);
@@ -7631,19 +7641,19 @@ export default function App() {
       return;
     }
 
-    // 기숙사 관리자 1명 제한(SoT: profiles.dorm_id). 동일 기숙사에 다른 활성 관리자가 있으면 경고 후 교체.
+    // 기숙사 담당자 1명 제한(SoT: profiles.dorm_id). dorm_manager/maintenance_reporter 모두 1명.
+    // 동일 기숙사에 다른 활성 담당자가 있으면 경고 후 교체.
     let releasePrevManagerId: string | null = null;
-    if ((userForm.role as string) === "dorm_manager" && userForm.dormId) {
-      const existing = users.find(
-        (u) => u.role === "dorm_manager" && u.dormId === userForm.dormId && u.isActive !== false && u.id !== editingUserId
-      );
-      if (existing) {
+    const assigningManagerRole = (userForm.role as string) === "dorm_manager" || (userForm.role as string) === "maintenance_reporter";
+    if (assigningManagerRole && userForm.dormId) {
+      const existing = getDormManagerUser(userForm.dormId);
+      if (existing && existing.id !== editingUserId) {
         const dormName = dorms.find((d) => d.id === userForm.dormId)?.buildingName || "해당 기숙사";
         const ok = window.confirm(
-          `현재 "${existing.displayName || existing.username}" 님이\n${dormName}의 기숙사 관리자 및 담당자로 지정되어 있습니다.\n\n변경하시겠습니까?`
+          `현재 "${existing.displayName || existing.username}" 님이\n${dormName}의 기숙사 담당자로 지정되어 있습니다.\n\n변경하시겠습니까?`
         );
         if (!ok) return; // 아니오 → 변경 취소
-        releasePrevManagerId = existing.id; // 예 → 기존 관리자 자동 해제
+        releasePrevManagerId = existing.id; // 예 → 기존 담당자 자동 해제
       }
     }
 
@@ -7730,6 +7740,15 @@ export default function App() {
         ? prev.map((u) => (u.id === editingUserId ? { ...payload, password: "" } : u))
         : [{ ...payload, password: "" }, ...prev]
     );
+    // 신입사원 담당자 연결: 사용자관리에서 생성한 계정을 해당 신입사원의 담당자(managerUserId)로 연결.
+    // (newHire.managerUserId 에 실제 계정 uuid 저장 → 새로고침/재편집 시 "담당자로 지정" 체크 유지)
+    if (!editingUserId && pendingManagerLink && normalizedDormId && pendingManagerLink.dormId === normalizedDormId) {
+      const linkedNewHireId = pendingManagerLink.newHireId;
+      const newUserId = payload.id;
+      setNewHires((prev) => prev.map((h) => (h.id === linkedNewHireId ? { ...h, managerUserId: newUserId, updatedAt: new Date().toISOString().slice(0, 10) } : h)));
+      setPendingManagerLink(null);
+    }
+
     setUserForm(userTemplate());
     setEditingUserId(null);
     setShowUserForm(false);
