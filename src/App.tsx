@@ -5830,6 +5830,17 @@ export default function App() {
     return "사용중";
   };
 
+  // 계약 표시 상태 통일: 종료/해지/만료예정/연장 등 생명주기 상태는 유지(수동값 우선),
+  // 그 외(진행중/공실 등 활성)는 기숙사/입주자 메뉴와 동일하게 실제 입주자 수 기준(공실/사용중/만실)으로 표시.
+  const getContractDisplayStatus = (c: DormContract): string => {
+    if (c.contractStatus === "종료" || c.contractStatus === "해지" || c.contractStatus === "만료예정" || c.contractStatus === "연장") {
+      return c.contractStatus;
+    }
+    const key = makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo);
+    const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
+    return dorm ? getOccupancyStatus(dorm.id, dorm.capacity) : "공실";
+  };
+
   const expiringDormsTop10 = useMemo(() => {
     return [...operationalDorms]
       .filter((d) => d.contractEnd && daysDiff(d.contractEnd) >= 0)
@@ -9043,7 +9054,7 @@ const exportExcel = () => {
       세대현관: c.세대현관,
       계약시작일: c.contractStart,
       계약종료일: c.contractEnd,
-      계약상태: c.contractStatus,
+      계약상태: getContractDisplayStatus(c),
       계약금액: c.contractAmount,
       선납금: c.prepaymentDeposit,
       보증금: c.deposit,
@@ -13304,7 +13315,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.realEstatePhone}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.contractStart)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.contractEnd)}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{getDormContractDisplayStatus(c, dorms, occupants)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{getContractDisplayStatus(c)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractAmount}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.prepaymentDeposit}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.deposit}</td>

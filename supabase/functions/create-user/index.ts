@@ -14,7 +14,24 @@ interface CreateUserRequest {
 
 interface CreateUserResponse {
   user_id?: string;
+  reused?: boolean;
   error?: string;
+}
+
+// admin.listUsers 로 email 에 해당하는 Auth user id 조회(페이지네이션).
+async function findAuthUserIdByEmail(supabase: any, email: string): Promise<string | undefined> {
+  const target = email.toLowerCase();
+  for (let page = 1; page <= 20; page++) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage: 1000 });
+    if (error) {
+      console.error("listUsers error:", error);
+      return undefined;
+    }
+    const found = (data?.users || []).find((u: any) => String(u.email || "").toLowerCase() === target);
+    if (found?.id) return found.id;
+    if (!data?.users || data.users.length < 1000) break;
+  }
+  return undefined;
 }
 
 export const corsHeaders = {
@@ -51,83 +68,102 @@ Deno.serve(async (req) => {
     // 1. 이메일 검증 및 변환 (username이 전달되는 경우 도메인 추가)
     const authEmail = payload.email.includes("@") ? payload.email : `${payload.email}@dormerpsystem.com`;
 
-    // 2. Auth 사용자 생성
-    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
-      email: authEmail,
-      password: payload.password,
-      email_confirm: true,
-    });
+    let userId: string | undefined;
+    let reusedExistingUser = false;
+    let isNewUser = false;
 
-    if (authError) {
-      console.error("Auth creation error:", {
-        providedEmail: payload.email,
-        authEmail,
-        payload,
-        authError,
-        authData,
+    // 1) profiles 에서 email 조회 — 있으면 기존 계정 재사용(Auth 생성 안 함)
+    const { data: existingProfile } = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("email", authEmail)
+      .maybeSingle();
+
+    if (existingProfile?.id) {
+      userId = existingProfile.id;
+      reusedExistingUser = true;
+    } else {
+      // 2) Auth 사용자 생성 시도
+      const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+        email: authEmail,
+        password: payload.password,
+        email_confirm: true,
       });
-      return new Response(
-        JSON.stringify({
-          error: `Auth creation failed: ${authError.message}`,
-        } as CreateUserResponse),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
 
-    let userId = authData.user?.id;
-
-    if (!userId) {
-      // createUser didn't return id — try to find existing user by email
-      const { data: existingUserData, error: getUserErr } = await supabase.auth.admin.getUserByEmail(authEmail).catch(() => ({ data: null, error: null }));
-      if (getUserErr || !existingUserData?.user?.id) {
-        console.error("User creation returned no ID and existing user not found", { authEmail, payload, authData, getUserErr });
-        return new Response(
-          JSON.stringify({ error: "User created but no ID returned" } as CreateUserResponse),
-          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+      if (authError) {
+        const code = (authError as any).code || "";
+        const msg = authError.message || "";
+        const isEmailExists = code === "email_exists" || /already.*registered|already.*been registered|email_exists|duplicate/i.test(msg);
+        if (isEmailExists) {
+          // 3) email_exists → 오류가 아니라 기존 Auth 계정 재사용. listUsers 로 user id 조회 후 profiles upsert.
+          const foundId = await findAuthUserIdByEmail(supabase, authEmail);
+          if (!foundId) {
+            console.error("email_exists but auth user not found via listUsers", { authEmail });
+            return new Response(
+              JSON.stringify({ error: "기존 계정을 찾을 수 없습니다." } as CreateUserResponse),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          userId = foundId;
+          reusedExistingUser = true;
+        } else {
+          console.error("Auth creation error:", { providedEmail: payload.email, authEmail, code, authError });
+          return new Response(
+            JSON.stringify({ error: `Auth creation failed: ${msg}` } as CreateUserResponse),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+      } else {
+        userId = authData.user?.id;
+        isNewUser = true;
+        if (!userId) {
+          const foundId = await findAuthUserIdByEmail(supabase, authEmail);
+          if (!foundId) {
+            return new Response(
+              JSON.stringify({ error: "User created but no ID returned" } as CreateUserResponse),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          userId = foundId;
+          reusedExistingUser = true;
+          isNewUser = false;
+        }
       }
-      userId = existingUserData.user.id;
     }
 
-    // 3. profiles 테이블에 프로필 저장 — 동적 객체 구성 (존재하지 않는 컬럼을 참조하지 않도록)
+    // 4) profiles upsert — 기존/신규 모두 role/display_name/dorm_id/site_access/gender_access/is_active=true 갱신.
     const profileObj: Record<string, any> = {
       id: userId,
       email: authEmail,
       display_name: payload.display_name,
       role: payload.role,
-      is_active: payload.is_active,
+      is_active: true,
       site_access: payload.site_access,
       gender_access: payload.gender_access,
-      created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
+    // 재사용 계정은 created_at 을 덮어쓰지 않음(신규일 때만 설정)
+    if (isNewUser) profileObj.created_at = new Date().toISOString();
     if (payload.dorm_id) profileObj.dorm_id = payload.dorm_id;
     if (payload.tenant_id) profileObj.tenant_id = payload.tenant_id;
 
     const { error: profileError } = await supabase.from("profiles").upsert(profileObj);
 
     if (profileError) {
-      // 프로필 생성 실패: 만약 이미 Auth에 동일 이메일이 존재하면 user id로 profiles만 재시도
-      console.error("Profile creation error:", { authEmail, payload, profileError });
-
-      // 기존 사용자 아이디가 있으면 profiles에 id로 insert/update 재시도
-      if (userId) {
-        const { error: retryErr } = await supabase.from("profiles").upsert({ ...profileObj }).catch(() => ({ error: null }));
-        if (!retryErr) {
-          return new Response(JSON.stringify({ user_id: userId } as CreateUserResponse), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-        }
-      }
-
+      console.error("Profile upsert error:", { authEmail, userId, reusedExistingUser, profileError });
       return new Response(
         JSON.stringify({ error: `Profile creation failed: ${profileError.message}` } as CreateUserResponse),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // 성공 응답
+    console.log("create-user success", { userId, email: authEmail, reusedExistingUser, dorm_id: payload.dorm_id });
+
+    // 성공 응답(기존 계정 재사용도 200 성공)
     return new Response(
       JSON.stringify({
         user_id: userId,
+        reused: reusedExistingUser,
       } as CreateUserResponse),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
