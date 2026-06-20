@@ -3946,17 +3946,16 @@ export default function App() {
   // 기존 관리자 isActive = false
   // ============================================
   const deactivateStaleManagers = (): void => {
-    const validDormIds = new Set<string>();
-    dorms.forEach((dorm) => validDormIds.add(dorm.id));
-
-    const activeManagerIds = new Set<string>(operationalDorms.filter((dorm) => dorm.managerUserId).map((dorm) => dorm.managerUserId!));
+    // 담당자 유효성은 profiles.dorm_id 단일 기준: 담당 기숙사가 운영 목록(operationalDorms)에 존재하면 유효.
+    // (과거 dorms.managerUserId 기준으로 비활성화하던 로직 제거 — 신규 profiles 기반 담당자가
+    //  활성 저장 직후 다시 비활성화되던 문제 수정.)
     const activeDormIds = new Set<string>(operationalDorms.map((dorm) => dorm.id));
 
     const updatedUsers = users.map((user) => {
       if (user.role !== "maintenance_reporter" || !user.dormId) return user;
       if (user.manualActiveOverride) return user;
+      // 담당 기숙사가 더 이상 운영 목록에 없을 때만 비활성화(계약 종료/해지/삭제 등).
       if (!activeDormIds.has(user.dormId)) return { ...user, isActive: false };
-      if (!activeManagerIds.has(user.id)) return { ...user, isActive: false };
       return user;
     });
 
@@ -10203,8 +10202,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   };
 
   const openUserEdit = (u: LoginUser) => {
-    const { id: _id, createdAt: _c, password: _p, ...rest } = u;
-    setUserForm({ ...rest, password: "" });
+    // 최신 users state 의 값을 우선 사용(저장 직후 갱신분 반영). 활성 여부는 is_active!==false 로 정규화.
+    const latest = users.find((x) => x.id === u.id) || u;
+    const { id: _id, createdAt: _c, password: _p, ...rest } = latest;
+    setUserForm({ ...rest, isActive: latest.isActive !== false, password: "" });
     setEditingUserId(u.id);
     setShowUserForm(true);
   };
