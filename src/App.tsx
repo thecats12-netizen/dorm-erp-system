@@ -81,7 +81,6 @@ import {
   listProfiles,
   updateProfileOnly,
   createUserViaEdgeFunction,
-  upsertProfile,
   type Profile,
 } from "./services/authService";
 import { createAuditLogEntry, getChangedFields } from "./services/auditService";
@@ -7105,7 +7104,8 @@ export default function App() {
       afterValue: JSON.stringify(payload),
     });
 
-    // "기숙사 담당자로 지정" 체크 시: profiles.dorm_id 단일 기준으로 지정(계정 없으면 자동 생성 + 1명 제한).
+    // "기숙사 담당자로 지정" 체크 시: 기존 계정이 있으면 자동 지정, 없으면 사용자관리 계정 생성 안내(1명 제한).
+    // 담당자 지정 실패와 무관하게 신입사원 저장은 위에서 이미 완료된다.
     if (payload.managerUserId && payload.dormId) {
       await assignDormManagerToProfile(payload);
     }
@@ -7560,49 +7560,21 @@ export default function App() {
         const { error } = await updateProfileOnly(target.id, { dorm_id: dormId, is_active: true, role: resolveRole(target) });
         if (error) throw error;
       } else {
-        // 계정 없음 → 자동 생성 여부 선택(취소 시 신입사원만 저장, 담당자 지정 보류)
-        const createNew = await appConfirm(
+        // 계정 없음: 자동 생성/Edge Function 호출하지 않고 사용자관리 계정 생성 화면으로 안내.
+        // (FK/Edge 미배포로 인한 자동 생성 실패를 사전에 방지 — 로그인 가능한 계정은 사용자관리에서 생성)
+        const goCreate = await appConfirm(
           "사용자 관리",
-          `${name}님의 사용자 계정이 없습니다.\n\n새 담당자 계정을 자동으로 생성해 지정할까요?\n취소하면 담당자 지정 없이 신입사원만 저장됩니다.\n(기존 계정을 쓰려면 사용자관리에서 계정 생성 후 지정하세요.)`,
-          { confirmText: "새 계정 생성", cancelText: "지정 없이 저장" }
+          `${name}님의 사용자 계정이 없어 담당자로 지정할 수 없습니다.\n\n[1단계] 사용자관리에서 계정을 생성하세요.\n[2단계] 생성한 계정을 해당 기숙사 담당자로 지정하세요.\n\n지금 사용자관리 계정 생성 화면으로 이동할까요?\n(닫기를 누르면 신입사원만 저장되고 담당자 지정은 보류됩니다.)`,
+          { confirmText: "사용자관리로 이동", cancelText: "닫기" }
         );
-        if (!createNew) return; // 담당자 지정 보류 — 신입사원 저장은 이미 완료됨
-
-        const tempPassword = `Temp${Math.random().toString(36).slice(2, 8)}!${last4 || "0000"}`;
-        step = "edge";
-        const { user_id, error: edgeError } = await createUserViaEdgeFunction({
-          email: generatedEmail,
-          password: tempPassword,
-          display_name: name,
-          role: "maintenance_reporter",
-          is_active: true,
-          dorm_id: dormId,
-          site_access: hire.site,
-          gender_access: genderAccess,
-          tenant_id: tenantId,
-        });
-        if (edgeError || !user_id) {
-          // Edge Function 미배포/실패 → 상세 로깅 후 profiles-only 생성 시도(폴백)
-          const ee = edgeError as { code?: unknown; message?: string; details?: unknown; hint?: unknown } | undefined;
-          console.error("[assignDormManagerToProfile] Edge Function 실패", {
-            step, code: ee?.code, message: ee?.message, details: ee?.details, hint: ee?.hint, targetName: name, dormId,
-          });
-          step = "insert";
-          const { error: upErr } = await upsertProfile({
-            id: crypto.randomUUID(),
-            email: generatedEmail,
-            display_name: name,
-            role: "maintenance_reporter",
-            is_active: true,
-            dorm_id: dormId,
-            site_access: hire.site,
-            gender_access: genderAccess,
-          });
-          if (upErr) throw upErr;
-          await refreshUsersFromSupabase();
-          await appAlert("사용자 관리", `${name}님 계정을 생성하고 담당자로 지정했습니다.\n\n로그인 사용을 위해서는 관리자 확인(비밀번호 설정)이 필요합니다.`);
-          return;
+        if (goCreate) {
+          // 계정 생성 화면으로 이동 + 신입사원 정보 프리필(담당 기숙사/지역/성별 포함)
+          setUserForm({ ...userTemplate(), displayName: name, role: "maintenance_reporter", dormId, siteAccess: hire.site, genderAccess });
+          setEditingUserId(null);
+          setShowUserForm(true);
+          setActiveTab("users");
         }
+        return; // 신입사원 저장은 유지, 담당자 지정은 사용자관리에서 진행
       }
       await refreshUsersFromSupabase(); // 사용자관리/담당자 표시 즉시 갱신
       await appAlert("사용자 관리", `${name}님을 해당 기숙사 담당자로 지정했습니다.`);
