@@ -5840,6 +5840,18 @@ export default function App() {
     return dorm ? getOccupancyStatus(dorm.id, dorm.capacity) : "공실";
   };
 
+  // 계약 등록/수정 폼의 자동계산 상태(안내문용): 종료/해지(수동) → 그대로, 만료일 경과 → 만료, 그 외 → 실제 인원 기준(공실/사용중/만실).
+  const computeFormContractStatus = (f: DormContractFormState): "공실" | "사용중" | "만실" | "만료" | "종료" | "해지" => {
+    if (f.contractStatus === "종료") return "종료";
+    if (f.contractStatus === "해지") return "해지";
+    const today = new Date().toISOString().slice(0, 10);
+    const end = f.contractEnd || "";
+    if (end && end < today) return "만료";
+    const key = makeDormMatchKey(f.site, f.buildingName, f.dong, f.roomHo);
+    const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
+    return dorm ? getOccupancyStatus(dorm.id, dorm.capacity) : "공실";
+  };
+
   const expiringDormsTop10 = useMemo(() => {
     return [...operationalDorms]
       .filter((d) => d.contractEnd && daysDiff(d.contractEnd) >= 0)
@@ -19293,10 +19305,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     onChange={(v) => setDormContractForm((f) => ({ ...f, contractStatus: v as DormContractStatus | "자동선택" }))}
                     options={["자동선택", "공실", "진행중", "만료예정", "연장", "종료", "해지"]}
                   />
-                  <div className="text-xs text-slate-500">자동선택 시 날짜 기준으로 자동 계산됩니다. 직접 선택하면 수동값이 우선 적용됩니다.</div>
-                  {dormContractForm.contractStatus === "자동선택" && (
-                    <div className="text-xs text-slate-500">자동계산: {calculateDormContractStatus(dormContractForm, dorms, occupants)}</div>
-                  )}
+                  <div className="text-xs text-slate-500">자동선택 시 입주자 수/날짜 기준으로 자동 계산됩니다. 직접 선택하면 수동값이 우선 적용됩니다.</div>
+                  <div className="text-xs text-slate-500">자동계산: {computeFormContractStatus(dormContractForm)}{dormContractForm.contractStatus !== "자동선택" ? " (참고값 · 저장은 수동 선택값 우선)" : ""}</div>
                 </div>
                 <Input label="계약금액" value={dormContractForm.contractAmount} onChange={(v) => setDormContractForm((f) => ({ ...f, contractAmount: v }))} />
                 <Input label="선납금" value={dormContractForm.prepaymentDeposit} onChange={(v) => setDormContractForm((f) => ({ ...f, prepaymentDeposit: v }))} />
@@ -19310,9 +19320,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     options={["자동선택", "신규", "연장", "재계약", "해지후신규"]}
                   />
                   <div className="text-xs text-slate-500">자동선택 시 날짜 기준으로 자동 계산됩니다. 직접 선택하면 수동값이 우선 적용됩니다.</div>
-                  {dormContractForm.contractType === "자동선택" && (
-                    <div className="text-xs text-slate-500">자동계산: {calculateDormContractType(dormContractForm, dormContracts, editingDormContractId)}</div>
-                  )}
+                  <div className="text-xs text-slate-500">자동계산: {calculateDormContractType(dormContractForm, dormContracts, editingDormContractId)}{dormContractForm.contractType !== "자동선택" ? " (참고값 · 저장은 수동 선택값 우선)" : ""}</div>
                 </div>
               </div>
             </div>
@@ -19418,17 +19426,33 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <label className={`${theme.darkMode ? "inline-flex items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 mt-4" : "inline-flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 mt-4"}`}>
                 <input
                   type="checkbox"
-                  checked={newHireForm.managerUserId ? true : false}
-                  onChange={(e) => {
-                    if (e.target.checked && !newHireForm.dormId) {
-                      alert("기숙사 배정 후 담당자로 지정할 수 있습니다.");
+                  checked={(() => {
+                    // 체크 상태는 profiles 기준: 세션 내 임시(synthetic) 또는 연결된 계정이 해당 기숙사의 담당자일 때만 체크.
+                    if (!newHireForm.managerUserId) return false;
+                    if (newHireForm.managerUserId === `${newHireForm.dormId}_manager`) return true;
+                    return getDormManagerUser(newHireForm.dormId)?.id === newHireForm.managerUserId;
+                  })()}
+                  onChange={async (e) => {
+                    const checked = e.target.checked;
+                    if (!checked) {
+                      setNewHireForm((f) => ({ ...f, managerUserId: "" }));
                       return;
                     }
-                    if (e.target.checked && newHireForm.dormId) {
-                      setNewHireForm((f) => ({ ...f, managerUserId: `${f.dormId}_manager` }));
-                    } else {
-                      setNewHireForm((f) => ({ ...f, managerUserId: "" }));
+                    if (!newHireForm.dormId) {
+                      await appAlert("사용자 관리", "기숙사 배정 후 담당자로 지정할 수 있습니다.");
+                      return;
                     }
+                    // 중복 지정 금지(dorm_manager/maintenance_reporter 공통). 기존 담당자가 다른 사람이면 변경 확인.
+                    const existingMgr = getDormManagerUser(newHireForm.dormId);
+                    if (existingMgr && (existingMgr.displayName || "").trim() !== (newHireForm.name || "").trim()) {
+                      const ok = await appConfirm(
+                        "사용자 관리",
+                        `현재 ${existingMgr.displayName || existingMgr.username}님이 해당 기숙사 담당자로 지정되어 있습니다.\n\n${newHireForm.name || "이 신입사원"}님으로 변경하시겠습니까?`,
+                        { confirmText: "변경" }
+                      );
+                      if (!ok) return; // 아니오 → 체크 해제(지정 안 함)
+                    }
+                    setNewHireForm((f) => ({ ...f, managerUserId: `${f.dormId}_manager` }));
                   }}
                   disabled={!newHireForm.dormId}
                   className="h-4 w-4"
