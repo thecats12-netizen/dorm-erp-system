@@ -692,6 +692,39 @@ function formatNumber(n: number) {
   return new Intl.NumberFormat("ko-KR").format(n || 0);
 }
 
+// 금액 표시 공통: 숫자/문자(콤마 포함) 입력을 2,000,000 형식으로. 빈 값은 "". 숫자 아님이면 원본 유지.
+function formatWon(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || String(value).trim() === "") return "";
+  const n = typeof value === "number" ? value : Number(String(value).replace(/[^0-9.-]/g, ""));
+  if (!Number.isFinite(n)) return String(value);
+  return new Intl.NumberFormat("ko-KR").format(n);
+}
+// Excel 등 숫자 서식이 필요한 곳: 콤마 포함 문자열 → 숫자(없으면 빈 문자열).
+function toWonNumber(value: string | number | null | undefined): number | "" {
+  if (value === null || value === undefined || String(value).trim() === "") return "";
+  const n = typeof value === "number" ? value : Number(String(value).replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(n) ? n : "";
+}
+
+// 운영시뮬레이션 계산값 설정 타입/기본값/저장키
+type SimCostSettings = {
+  utilityPerResident: number;   // 1인당 월 공과금 추정액
+  cleaningPerDorm: number;      // 호실당 월 청소비
+  maintenancePerDorm: number;   // 호실당 월 유지보수비
+  inventoryPerDorm: number;     // 호실당 월 비품 감가/교체비
+  rentBasis: "monthly" | "contractDiv12"; // 월세/관리비 계산 방식
+  vacancyLossBasis: "rent";     // 공실 손실 = 공실 호실의 월 임대료/관리비
+};
+const DEFAULT_SIM_COST_SETTINGS: SimCostSettings = {
+  utilityPerResident: 60000,
+  cleaningPerDorm: 100000,
+  maintenancePerDorm: 50000,
+  inventoryPerDorm: 30000,
+  rentBasis: "monthly",
+  vacancyLossBasis: "rent",
+};
+const SIM_COST_SETTINGS_KEY = "dorm-sim-cost-settings-v1";
+
 function clearWorksheetRowsAfterHeader(worksheet: XLSX.WorkSheet, headerRowIndex = 0) {
   const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1");
   for (let row = headerRowIndex + 1; row <= range.e.r; row += 1) {
@@ -2108,6 +2141,12 @@ export default function App() {
   const [systemSettings, setSystemSettings] = useState<SystemSettings>(() =>
     loadJson<SystemSettings>(SYSTEM_SETTINGS_KEY, getDefaultSystemSettings(), tenantId)
   );
+
+  // 운영시뮬레이션 계산값 설정(관리자 편집, localStorage 저장).
+  const [simCostSettings, setSimCostSettings] = useState<SimCostSettings>(() =>
+    loadJson<SimCostSettings>(SIM_COST_SETTINGS_KEY, DEFAULT_SIM_COST_SETTINGS, tenantId)
+  );
+  const [showSimCostSettings, setShowSimCostSettings] = useState(false);
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   const normalizeFieldKey = (key: string) =>
@@ -4495,6 +4534,10 @@ export default function App() {
   }, [theme, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
+    saveJson(SIM_COST_SETTINGS_KEY, simCostSettings, tenantId);
+  }, [simCostSettings, tenantId, isLoading]);
+  useEffect(() => {
+    if (isLoading) return;
     // Supabase 모드에서는 profiles 가 단일 출처. localStorage 로 users 를 다시 저장하면
     // 재실행 시 샘플/이전 계정이 병합·재생성될 수 있어 차단한다. (dorms 등과 동일 정책)
     if (!isSupabaseAvailable()) saveJson(USERS_KEY, users, tenantId);
@@ -6199,10 +6242,7 @@ export default function App() {
 
   // 운영시뮬레이션: 월 예상 운영비/공실 손실 실무형 추정(지역/성별/월 필터 반영).
   const simulationCost = useMemo(() => {
-    const UTILITY_PER_RESIDENT = 60000;   // 1인당 월 공과금 추정
-    const CLEANING_PER_DORM = 100000;     // 호실당 월 청소비
-    const MAINTENANCE_PER_DORM = 50000;   // 호실당 월 유지보수비
-    const INVENTORY_PER_DORM = 30000;     // 호실당 월 비품 감가/교체비
+    const s = simCostSettings;
     const parseMoney = (v: unknown) => Number(String(v ?? "").replace(/[^0-9.-]/g, "")) || 0;
 
     const inScope = operationalDorms.filter(
@@ -6222,10 +6262,10 @@ export default function App() {
           !c.isDeleted && c.contractStatus !== "종료" && c.contractStatus !== "해지" &&
           makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === key
       );
-      // 월 비용: 월세/관리비 우선, 없으면 계약금액의 1/12 추정
-      const rent = contract
-        ? parseMoney(contract.monthlyRentOrMaintenance) || Math.round(parseMoney(contract.contractAmount) / 12)
-        : 0;
+      // 월 비용 계산 방식: 설정값에 따라 (월세/관리비 우선) 또는 (계약금액 ÷ 12)
+      const monthly = contract ? parseMoney(contract.monthlyRentOrMaintenance) : 0;
+      const div12 = contract ? Math.round(parseMoney(contract.contractAmount) / 12) : 0;
+      const rent = s.rentBasis === "contractDiv12" ? (div12 || monthly) : (monthly || div12);
       monthlyRent += rent;
       const cnt = occupancyCountByDorm.get(d.id) || 0;
       residents += cnt;
@@ -6236,19 +6276,25 @@ export default function App() {
     });
 
     const dormCount = inScope.length;
-    const utilities = residents * UTILITY_PER_RESIDENT;
-    const cleaning = dormCount * CLEANING_PER_DORM;
-    const maintenance = dormCount * MAINTENANCE_PER_DORM;
-    const inventoryCost = dormCount * INVENTORY_PER_DORM;
+    const utilities = residents * s.utilityPerResident;
+    const cleaning = dormCount * s.cleaningPerDorm;
+    const maintenance = dormCount * s.maintenancePerDorm;
+    const inventoryCost = dormCount * s.inventoryPerDorm;
     const operatingCost = monthlyRent + utilities + cleaning + maintenance + inventoryCost;
     return {
       dormCount, residents, vacancyUnits,
       monthlyRent, utilities, cleaning, maintenance, inventoryCost,
       operatingCost, vacancyLoss,
-      constants: { UTILITY_PER_RESIDENT, CLEANING_PER_DORM, MAINTENANCE_PER_DORM, INVENTORY_PER_DORM },
+      constants: {
+        UTILITY_PER_RESIDENT: s.utilityPerResident,
+        CLEANING_PER_DORM: s.cleaningPerDorm,
+        MAINTENANCE_PER_DORM: s.maintenancePerDorm,
+        INVENTORY_PER_DORM: s.inventoryPerDorm,
+        rentBasis: s.rentBasis,
+      },
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operationalDorms, dormContracts, occupancyCountByDorm, simulationSiteFilter, simulationGenderFilter, simulationMonth]);
+  }, [operationalDorms, dormContracts, occupancyCountByDorm, simulationSiteFilter, simulationGenderFilter, simulationMonth, simCostSettings]);
 
   const visibleDashboard = useMemo(() => {
     return expiringDormsTop10.filter((d) => {
@@ -8709,7 +8755,7 @@ export default function App() {
       contractEnd: String(r["계약종료"] || String(r["만료일"] || "")),
       contractAmount: String(r["계약금액"] || ""),
       leaseStatus: String(r["상태"] || "사용중") as Dorm["leaseStatus"],
-      prepaymentDeposit: Number(r["선납계약금"] || 0),
+      prepaymentDeposit: Number(toWonNumber(String(r["선납계약금"] ?? "")) || 0),
       realEstateName: String(r["부동산명"] || ""),
       공동현관: String(r["공동현관"] || ""),
       세대현관: String(r["세대현관"] || ""),
@@ -9082,12 +9128,12 @@ const exportExcel = () => {
       계약종료: formatDateOnly(d.contractEnd || ""),
       계약만료일: getDormContractEndLabel(d.id),
       남은일수: getDormContractRemainLabel(d.id),
-      계약금액: d.contractAmount,
+      계약금액: formatWon(d.contractAmount),
       상태: d.leaseStatus,
       공동현관: d.공동현관,
       세대현관: d.세대현관,
       담당관리자: getDormManagerDisplayName(d.id),
-      선납계약금: d.prepaymentDeposit,
+      선납계약금: formatWon(d.prepaymentDeposit),
       부동산명: d.realEstateName,
       잔금일: formatDateOnly(d.balanceDate || ""),
       비고: d.notes,
@@ -9159,7 +9205,7 @@ const exportExcel = () => {
           수량: i.quantity,
           모델명: i.modelName,
           메이커: i.maker,
-          구매액: i.purchaseAmount,
+          구매액: formatWon(i.purchaseAmount),
           구매일: formatDateOnly(i.purchaseDate || ""),
           지급일: formatDateOnly(i.issuedDate || ""),
           매각일: formatDateOnly(i.soldDate || ""),
@@ -9200,10 +9246,10 @@ const exportExcel = () => {
       계약시작일: c.contractStart,
       계약종료일: c.contractEnd,
       계약상태: getContractDisplayStatus(c),
-      계약금액: c.contractAmount,
-      선납금: c.prepaymentDeposit,
-      보증금: c.deposit,
-      "월세/관리비": c.monthlyRentOrMaintenance,
+      계약금액: formatWon(c.contractAmount),
+      선납금: formatWon(c.prepaymentDeposit),
+      보증금: formatWon(c.deposit),
+      "월세/관리비": formatWon(c.monthlyRentOrMaintenance),
       계약유형: c.contractType,
       성별: c.gender,
       비고: c.notes,
@@ -9391,9 +9437,9 @@ const exportExcel = () => {
     rows = sales.map((s) => ({
       일자: s.saleDate,
       품목: s.itemName,
-      단가: s.unitPrice,
+      단가: formatWon(s.unitPrice),
       수량: s.quantity,
-      합계: s.totalAmount,
+      합계: formatWon(s.totalAmount),
       매각업체: s.buyerCompany,
       비고: s.notes,
     }));
@@ -13463,10 +13509,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.contractStart)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.contractEnd)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{getContractDisplayStatus(c)}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractAmount}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.prepaymentDeposit}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.deposit}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.monthlyRentOrMaintenance}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatWon(c.contractAmount)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatWon(c.prepaymentDeposit)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatWon(c.deposit)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{formatWon(c.monthlyRentOrMaintenance)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractType}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs erp-col-memo" title={c.notes}>{c.notes}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.createdAt)}</td>
@@ -13903,7 +13949,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         className="p-3 min-h-[4rem]"
                         valueClassName="text-[0.78rem] leading-5"
                       />
-                      <CompactField label="계약금액" value={d.contractAmount || "-"} />
+                      <CompactField label="계약금액" value={d.contractAmount ? formatWon(d.contractAmount) : "-"} />
                       <CompactField
                         label="평수"
                         value={d.pyeong || "-"}
@@ -14961,8 +15007,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <MiniStat label="입주율" value={`${simulationTotal.usageRate}%`} />
               <MiniStat label="공실률" value={`${simulationTotal.vacancyRate}%`} />
               <MiniStat label="전체 TO" value={String(simulationTotal.residentTo)} />
-              <MiniStat label="월 예상 운영비" value={`${simulationCost.operatingCost.toLocaleString()}원`} />
-              <MiniStat label="공실 손실 추정" value={`${simulationCost.vacancyLoss.toLocaleString()}원`} />
               <MiniStat label="계약 만료 위험" value={String(simulationTotal.totalExpireRisk)} />
               <MiniStat label="평택 부족 TO" value={String(simulationTotal.siteShortage.평택)} />
               <MiniStat label="천안 부족 TO" value={String(simulationTotal.siteShortage.천안)} />
@@ -14986,8 +15030,73 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className={`mb-6 rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-base font-semibold">월 예상 운영비 / 공실 손실 (선택 범위 기준)</h3>
-                <div className="text-sm text-slate-500">대상 호실 {simulationCost.dormCount}곳 · 거주자 {simulationCost.residents}명 · 공실 {simulationCost.vacancyUnits}곳</div>
+                <div className="flex items-center gap-3">
+                  <div className="text-sm text-slate-500">대상 호실 {simulationCost.dormCount}곳 · 거주자 {simulationCost.residents}명 · 공실 {simulationCost.vacancyUnits}곳</div>
+                  {canManageUsers(currentUser) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowSimCostSettings((v) => !v)}
+                      className={`rounded-2xl border px-3 py-1.5 text-xs font-semibold ${theme.darkMode ? "border-slate-600 text-slate-200 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-100"}`}
+                    >
+                      {showSimCostSettings ? "계산값 설정 닫기" : "계산값 설정"}
+                    </button>
+                  )}
+                </div>
               </div>
+
+              {showSimCostSettings && canManageUsers(currentUser) && (
+                <div className={`mb-4 rounded-2xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                  <div className="mb-3 text-sm font-semibold">계산값 설정 (관리자 전용 · 저장 시 새로고침 후에도 유지)</div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {([
+                      ["1인당 공과금(원/월)", "utilityPerResident"],
+                      ["호실당 청소비(원/월)", "cleaningPerDorm"],
+                      ["호실당 유지보수비(원/월)", "maintenancePerDorm"],
+                      ["호실당 비품 감가/교체(원/월)", "inventoryPerDorm"],
+                    ] as [string, keyof SimCostSettings][]).map(([label, k]) => (
+                      <label key={k} className="block">
+                        <span className="mb-1 block text-xs text-slate-500">{label}</span>
+                        <input
+                          type="number"
+                          value={String(simCostSettings[k] as number)}
+                          onChange={(e) => setSimCostSettings((s) => ({ ...s, [k]: Number(e.target.value || 0) }))}
+                          className={`w-full rounded-2xl border px-3 py-2 text-sm outline-none ${theme.darkMode ? "border-slate-600 bg-slate-950 text-slate-100" : "border-slate-300 bg-white text-slate-900"}`}
+                        />
+                      </label>
+                    ))}
+                    <label className="block">
+                      <span className="mb-1 block text-xs text-slate-500">월세/관리비 계산 방식</span>
+                      <select
+                        value={simCostSettings.rentBasis}
+                        onChange={(e) => setSimCostSettings((s) => ({ ...s, rentBasis: e.target.value as SimCostSettings["rentBasis"] }))}
+                        className={`w-full rounded-2xl border px-3 py-2 text-sm outline-none ${theme.darkMode ? "border-slate-600 bg-slate-950 text-slate-100" : "border-slate-300 bg-white text-slate-900"}`}
+                      >
+                        <option value="monthly">월세/관리비 우선(없으면 계약금액÷12)</option>
+                        <option value="contractDiv12">계약금액÷12 우선(없으면 월세/관리비)</option>
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs text-slate-500">공실 손실 계산 기준</span>
+                      <input
+                        value="공실 호실의 월 임대료/관리비 합계"
+                        readOnly
+                        className={`w-full rounded-2xl border px-3 py-2 text-sm outline-none ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-400" : "border-slate-200 bg-slate-50 text-slate-500"}`}
+                      />
+                    </label>
+                  </div>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { setSimCostSettings(DEFAULT_SIM_COST_SETTINGS); }}
+                      className={`rounded-2xl border px-3 py-1.5 text-xs font-medium ${theme.darkMode ? "border-slate-600 text-slate-300 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-50"}`}
+                    >
+                      기본값 복원
+                    </button>
+                    <span className="self-center text-xs text-slate-400">변경 시 운영비/공실 손실이 즉시 재계산됩니다.</span>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                 {([
                   ["월세/관리비", simulationCost.monthlyRent],
