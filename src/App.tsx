@@ -885,12 +885,6 @@ function calculateDormContractStatus(contract: DormContractFormLike, dorms: Dorm
   return "공실";
 }
 
-function getDormContractDisplayStatus(contract: DormContract, _dorms: Dorm[], _occupants: Occupant[]): DormContractStatus {
-  if ((contract as any).contractStatus === "자동선택") {
-    return calculateDormContractStatus(contract as any, _dorms, _occupants);
-  }
-  return contract.contractStatus;
-}
 
 function calculateNewHireResidenceStatus(employee: NewHireFormLike): NewHireResidenceStatus {
   const today = new Date().toISOString().slice(0, 10);
@@ -939,6 +933,20 @@ function calculateMoveInType(
   }
 
   return "재입주";
+}
+
+// 신입사원 상태/유형/미배정 단일 기준(대시보드·메뉴·필터·Excel 공통).
+// 저장값 우선, "자동선택"일 때만 계산값 사용. 미배정 = 삭제 아님 + 퇴실 아님 + dormId 없음.
+function getNewHireStatus(h: NewHireEmployee): NewHireResidenceStatus {
+  return (h.residenceStatus as string) === "자동선택" ? calculateNewHireResidenceStatus(h) : h.residenceStatus;
+}
+function getNewHireType(h: NewHireEmployee, allEmployees: NewHireEmployee[]): MoveInType {
+  return (h.moveInType as string) === "자동선택" ? calculateMoveInType(h, allEmployees) : h.moveInType;
+}
+function isUnassignedNewHire(h: NewHireEmployee): boolean {
+  if (h.isDeleted) return false;
+  if (getNewHireStatus(h) === "퇴실") return false; // 퇴실자는 미배정 통계에서 제외
+  return !(h.dormId && h.dormId.trim());
 }
 
 function addDays(dateText: string, days: number) {
@@ -1492,13 +1500,32 @@ export default function App() {
     const newRow = payload.new ?? payload.record;
     const oldRow = payload.old ?? payload.old_record;
     const row = eventType === "DELETE" ? (oldRow ?? newRow) : (newRow ?? oldRow);
-    if (!row || row.tenant_id !== tenantId) return;
+    // tenant 불일치만 제외(legacy tenant_id 없음(null)은 안전하게 반영). 채널 필터로 1차 제한됨.
+    if (!row?.id || (row.tenant_id != null && row.tenant_id !== tenantId)) return;
 
     if (["dorms", "occupants", "new_hires", "dorm_contracts"].includes(table)) {
       realtimeUpdateSourceRef.current.add("dorm_module");
     }
-    if (["cleaning_reports", "defect_requests", "inventory_items"].includes(table)) {
+    if (["cleaning_reports", "defect_requests", "inventory_items", "audit_logs"].includes(table)) {
       realtimeUpdateSourceRef.current.add("operational_module");
+    }
+
+    // 하드 DELETE: id 기준 즉시 제거(소프트 삭제 is_deleted=true 는 applyRealtimeUpdate 가 처리).
+    if (eventType === "DELETE") {
+      const removeById = <T extends { id: string }>(setter: React.Dispatch<React.SetStateAction<T[]>>) =>
+        setter((prev) => prev.filter((x) => x.id !== row.id));
+      switch (table) {
+        case "dorms": removeById(setDorms); break;
+        case "occupants": removeById(setOccupants); break;
+        case "new_hires": removeById(setNewHires); break;
+        case "dorm_contracts": removeById(setDormContracts); break;
+        case "cleaning_reports": removeById(setCleaningReports); break;
+        case "defect_requests": removeById(setDefects); break;
+        case "inventory_items": removeById(setInventory); break;
+        case "audit_logs": removeById(setAuditLogs); break;
+        default: break;
+      }
+      return;
     }
 
     switch (table) {
@@ -1523,9 +1550,31 @@ export default function App() {
       case "inventory_items":
         setInventory((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeInventoryItem));
         break;
+      case "audit_logs":
+        setAuditLogs((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeAuditLog));
+        break;
       default:
         break;
     }
+  };
+
+  // 변경이력(audit_logs) Realtime 매퍼(주로 INSERT). id 기준 dedupe 는 applyRealtimeUpdate 가 처리.
+  const toDomainRealtimeAuditLog = (row: any): AuditLog => ({
+    id: row.id,
+    targetType: row.target_type,
+    targetId: row.target_id,
+    actionType: row.action_type,
+    changedBy: row.changed_by,
+    changedAt: row.changed_at || row.created_at || "",
+    beforeValue: row.before_value || "",
+    afterValue: row.after_value || "",
+    memo: row.memo || undefined,
+    changes: row.changes || undefined,
+  });
+
+  // profiles Realtime: 사용자관리/담당자 표시는 Supabase profiles 단일 출처 → 변경 시 재조회로 동기화.
+  const handleProfilesRealtime = () => {
+    void refreshUsersFromSupabase();
   };
 
   // 군대 모듈 Realtime: military_module_data 는 tenant 당 1행(JSON 블롭). INSERT/UPDATE 시 전체 상태 갱신.
@@ -1666,7 +1715,8 @@ export default function App() {
   const [simulationMonth, setSimulationMonth] = useState<string>((new Date().getMonth() + 1).toString().padStart(2, "0"));
   const [dormContractSearch, setDormContractSearch] = useState("");
   const [dormContractSiteFilter, setDormContractSiteFilter] = useState<Site | "전체">("전체");
-  const [dormContractStatusFilter, setDormContractStatusFilter] = useState<DormContractStatus | "전체">("전체");
+  // 계약 상태 필터는 표시 상태(getContractDisplayStatus)와 동일 값 사용: 공실/사용중/만실/만료예정/연장/종료/해지.
+  const [dormContractStatusFilter, setDormContractStatusFilter] = useState<string>("전체");
   const [dormContractExpiryMonthFilter, setDormContractExpiryMonthFilter] = useState<string>("전체");
   const [newHireSearch, setNewHireSearch] = useState("");
   const [newHireSiteFilter, setNewHireSiteFilter] = useState<Site | "전체">("전체");
@@ -4701,7 +4751,25 @@ export default function App() {
           { event: "*", schema: "public", table: "military_module_data", filter: `tenant_id=eq.${tenantId}` },
           (payload) => handleMilitaryRealtimeRow(payload)
         )
-        .subscribe();
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "audit_logs", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("audit_logs", payload)
+        )
+        // profiles 는 tenant_id 컬럼이 없을 수 있어 필터 없이 구독(RLS 로 범위 제한). 변경 시 재조회.
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "profiles" },
+          () => handleProfilesRealtime()
+        )
+        .subscribe((status: string, err?: Error) => {
+          if (status === "SUBSCRIBED") {
+            console.log("[Realtime] 구독 완료:", `realtime-${tenantId}`);
+          } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+            console.error("[Realtime] 구독 상태 이상:", { status, error: err?.message });
+            setSupabaseSyncStatus("실시간 동기화 연결이 불안정합니다. 네트워크를 확인하거나 새로고침해주세요.");
+          }
+        });
     };
 
     subscribeRealtime();
@@ -4945,6 +5013,21 @@ export default function App() {
     return [...contractBased, ...standalone];
   }, [dormContracts, dorms]);
 
+  // 계약 표시 상태 단일 helper(테이블/필터/KPI/Excel 공통). 종료/해지/만료예정/연장은 유지,
+  // 그 외(공실/진행중 등 활성)는 실제 입주자 수 기준(0=공실, 정원미만=사용중, 정원이상=만실).
+  // operationalDorms 직후에 정의해 visibleDormContracts 등에서 안전하게 사용(자체 입주자 카운트).
+  const getContractDisplayStatus = (c: DormContract): string => {
+    if (c.contractStatus === "종료" || c.contractStatus === "해지" || c.contractStatus === "만료예정" || c.contractStatus === "연장") {
+      return c.contractStatus;
+    }
+    const key = makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo);
+    const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
+    if (!dorm) return "공실";
+    const count = occupants.filter((o) => !o.isDeleted && o.dormId === dorm.id && ["거주중", "만료예정"].includes(o.status)).length;
+    const cap = dorm.capacity && dorm.capacity > 0 ? dorm.capacity : 6;
+    return count <= 0 ? "공실" : count >= cap ? "만실" : "사용중";
+  };
+
   const reportPeriod = `${reportYear}-${reportMonth}`;
 
   const reportFilteredOperationalDorms = useMemo(() => {
@@ -5014,7 +5097,7 @@ export default function App() {
 
   const filteredUnassignedNewHires = useMemo(() => {
     return newHires.filter((hire) => {
-      const isUnassigned = !hire.dormId || hire.dormId.trim() === "";
+      if (!isUnassignedNewHire(hire)) return false; // 공통 미배정 기준
       const siteMatched =
         assignmentSiteFilter === "전체" || hire.site === assignmentSiteFilter;
       const genderMatched =
@@ -5024,7 +5107,7 @@ export default function App() {
         hire.department.toLowerCase().includes(assignmentNewHireSearch.toLowerCase()) ||
         hire.phone.toLowerCase().includes(assignmentNewHireSearch.toLowerCase());
 
-      return !hire.isDeleted && isUnassigned && siteMatched && genderMatched && searchMatched;
+      return siteMatched && genderMatched && searchMatched;
     });
   }, [newHires, assignmentSiteFilter, assignmentGenderFilter, assignmentNewHireSearch]);
 
@@ -5314,7 +5397,7 @@ export default function App() {
 
       if (dormContractSiteFilter !== "전체" && c.site !== dormContractSiteFilter) return false;
       if (dormContractExpiryMonthFilter !== "전체" && (c.contractEnd || "").slice(0, 7) !== dormContractExpiryMonthFilter) return false;
-      const status = getDormContractDisplayStatus(c, dorms, occupants);
+      const status = getContractDisplayStatus(c);
       if (dormContractStatusFilter !== "전체" && status !== dormContractStatusFilter) return false;
       if (dormContractSearch) {
         const text = `${c.site} ${c.address} ${c.buildingName} ${c.dong} ${c.roomHo} ${c.pyeong} ${c.landlordName} ${c.landlordPhone} ${c.realEstateName} ${c.realEstatePhone} ${c.managementOfficePhone} ${c.contractStart} ${c.contractEnd} ${status} ${c.contractAmount} ${c.prepaymentDeposit} ${c.deposit} ${c.monthlyRentOrMaintenance} ${c.contractType} ${c.notes} ${c.registeredBy} ${c.modifiedBy}`.toLowerCase();
@@ -5342,7 +5425,7 @@ export default function App() {
       const site = dorm?.site || h.site;
       if (newHireSiteFilter !== "전체" && site !== newHireSiteFilter) return false;
       if (newHireGenderFilter !== "전체" && h.gender !== newHireGenderFilter) return false;
-      const isUnassigned = !h.dormId || !h.buildingName || !h.address;
+      const isUnassigned = isUnassignedNewHire(h); // 공통 미배정 기준(대시보드와 동일)
       if (newHireAssignmentFilter === "배정완료" && isUnassigned) return false;
       if (newHireAssignmentFilter === "미배정" && !isUnassigned) return false;
       if (newHireSearch) {
@@ -5829,17 +5912,6 @@ export default function App() {
     return "사용중";
   };
 
-  // 계약 표시 상태 통일: 종료/해지/만료예정/연장 등 생명주기 상태는 유지(수동값 우선),
-  // 그 외(진행중/공실 등 활성)는 기숙사/입주자 메뉴와 동일하게 실제 입주자 수 기준(공실/사용중/만실)으로 표시.
-  const getContractDisplayStatus = (c: DormContract): string => {
-    if (c.contractStatus === "종료" || c.contractStatus === "해지" || c.contractStatus === "만료예정" || c.contractStatus === "연장") {
-      return c.contractStatus;
-    }
-    const key = makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo);
-    const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
-    return dorm ? getOccupancyStatus(dorm.id, dorm.capacity) : "공실";
-  };
-
   // 계약 등록/수정 폼의 자동계산 상태(안내문용): 종료/해지(수동) → 그대로, 만료일 경과 → 만료, 그 외 → 실제 인원 기준(공실/사용중/만실).
   const computeFormContractStatus = (f: DormContractFormState): "공실" | "사용중" | "만실" | "만료" | "종료" | "해지" => {
     if (f.contractStatus === "종료") return "종료";
@@ -6125,6 +6197,59 @@ export default function App() {
     };
   }, [simulationMonthlyStats, simulationYear, simulationMonth]);
 
+  // 운영시뮬레이션: 월 예상 운영비/공실 손실 실무형 추정(지역/성별/월 필터 반영).
+  const simulationCost = useMemo(() => {
+    const UTILITY_PER_RESIDENT = 60000;   // 1인당 월 공과금 추정
+    const CLEANING_PER_DORM = 100000;     // 호실당 월 청소비
+    const MAINTENANCE_PER_DORM = 50000;   // 호실당 월 유지보수비
+    const INVENTORY_PER_DORM = 30000;     // 호실당 월 비품 감가/교체비
+    const parseMoney = (v: unknown) => Number(String(v ?? "").replace(/[^0-9.-]/g, "")) || 0;
+
+    const inScope = operationalDorms.filter(
+      (d) =>
+        (simulationSiteFilter === "전체" || d.site === simulationSiteFilter) &&
+        (simulationGenderFilter === "전체" || d.gender === simulationGenderFilter)
+    );
+
+    let monthlyRent = 0;
+    let residents = 0;
+    let vacancyUnits = 0;
+    let vacancyLoss = 0;
+    inScope.forEach((d) => {
+      const key = makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo);
+      const contract = dormContracts.find(
+        (c) =>
+          !c.isDeleted && c.contractStatus !== "종료" && c.contractStatus !== "해지" &&
+          makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === key
+      );
+      // 월 비용: 월세/관리비 우선, 없으면 계약금액의 1/12 추정
+      const rent = contract
+        ? parseMoney(contract.monthlyRentOrMaintenance) || Math.round(parseMoney(contract.contractAmount) / 12)
+        : 0;
+      monthlyRent += rent;
+      const cnt = occupancyCountByDorm.get(d.id) || 0;
+      residents += cnt;
+      if (cnt === 0) {
+        vacancyUnits += 1;
+        vacancyLoss += rent; // 공실 손실 = 그 호실의 월 임대료/관리비
+      }
+    });
+
+    const dormCount = inScope.length;
+    const utilities = residents * UTILITY_PER_RESIDENT;
+    const cleaning = dormCount * CLEANING_PER_DORM;
+    const maintenance = dormCount * MAINTENANCE_PER_DORM;
+    const inventoryCost = dormCount * INVENTORY_PER_DORM;
+    const operatingCost = monthlyRent + utilities + cleaning + maintenance + inventoryCost;
+    return {
+      dormCount, residents, vacancyUnits,
+      monthlyRent, utilities, cleaning, maintenance, inventoryCost,
+      operatingCost, vacancyLoss,
+      constants: { UTILITY_PER_RESIDENT, CLEANING_PER_DORM, MAINTENANCE_PER_DORM, INVENTORY_PER_DORM },
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalDorms, dormContracts, occupancyCountByDorm, simulationSiteFilter, simulationGenderFilter, simulationMonth]);
+
   const visibleDashboard = useMemo(() => {
     return expiringDormsTop10.filter((d) => {
       if (dashboardSiteFilter !== "전체" && d.site !== dashboardSiteFilter) return false;
@@ -6392,10 +6517,8 @@ export default function App() {
 
   // 대시보드 요약 통계
   const dashboardSummaryStats = useMemo(() => {
-    // 1. 미배정 신입사원 수
-    const unassignedCount = newHires.filter(h =>
-      !h.dormId && (h.residenceStatus === "대기중" || h.moveInType === "대기자")
-    ).length;
+    // 1. 미배정 신입사원 수(공통 helper 기준 — 신입사원 메뉴와 동일)
+    const unassignedCount = newHires.filter(isUnassignedNewHire).length;
 
     // 2. 계약 만료 예정 수 (오늘~30일 이내, 종료/해지/삭제/빈 날짜 제외)
     const expiringCount = dormContracts.filter(c => {
@@ -6455,14 +6578,12 @@ export default function App() {
         (o.actualMoveOutDate === today || (!o.actualMoveOutDate && o.moveOutDueDate === today))
     ).length;
 
-    const isUnassigned = (h: NewHireEmployee) => !h.dormId || !h.buildingName || !h.address;
-
-    const unassignedNewHires = newHires.filter((h) => !h.isDeleted && isUnassigned(h));
+    const unassignedNewHires = newHires.filter(isUnassignedNewHire);
 
     // 전체 신입사원 배정 현황 (미배정 우선 정렬, isDeleted 제외)
     const newHireAssignments = newHires
       .filter((h) => !h.isDeleted)
-      .map((h) => ({ hire: h, assigned: !isUnassigned(h) }))
+      .map((h) => ({ hire: h, assigned: !isUnassignedNewHire(h) }))
       .sort((a, b) => {
         if (a.assigned !== b.assigned) return a.assigned ? 1 : -1;
         const aDate = a.hire.expectedMoveInDate || a.hire.moveInDate || "";
@@ -7676,11 +7797,13 @@ export default function App() {
       const existing = getDormManagerUser(userForm.dormId);
       if (existing && existing.id !== editingUserId) {
         const dormName = dorms.find((d) => d.id === userForm.dormId)?.buildingName || "해당 기숙사";
-        const ok = window.confirm(
-          `현재 "${existing.displayName || existing.username}" 님이\n${dormName}의 기숙사 담당자로 지정되어 있습니다.\n\n변경하시겠습니까?`
+        const ok = await appConfirm(
+          "사용자 관리",
+          `현재 ${existing.displayName || existing.username}님이 ${dormName}의 기숙사 담당자로 지정되어 있습니다.\n\n${userForm.displayName.trim() || "이 사용자"}님으로 변경하시겠습니까?`,
+          { confirmText: "변경" }
         );
-        if (!ok) return; // 아니오 → 변경 취소
-        releasePrevManagerId = existing.id; // 예 → 기존 담당자 자동 해제
+        if (!ok) return; // 아니오 → 기존 담당자 유지
+        releasePrevManagerId = existing.id; // 예 → 기존 담당자 해제 후 신규 지정
       }
     }
 
@@ -9181,8 +9304,8 @@ const exportExcel = () => {
         천안이동일: formatDateOnly(h.cheonanMoveDate || ""),
         계약만료일: getDormContractEndLabel(h.dormId),
         남은일수: getDormContractRemainLabel(h.dormId),
-        거주상태: h.residenceStatus,
-        입주유형: h.moveInType,
+        거주상태: getNewHireStatus(h),
+        입주유형: getNewHireType(h, newHires),
         연장사유: h.extensionReason,
         "특이사항 메모": h.notes,
         등록일: formatDateOnly(h.createdAt),
@@ -13142,9 +13265,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
               {([
                 { label: "총 계약 건수", value: visibleDormContracts.length },
-                { label: "진행중", value: visibleDormContracts.filter((c) => getDormContractDisplayStatus(c, dorms, occupants) === "진행중").length },
-                { label: "만료예정", value: visibleDormContracts.filter((c) => getDormContractDisplayStatus(c, dorms, occupants) === "만료예정").length },
-                { label: "종료", value: visibleDormContracts.filter((c) => getDormContractDisplayStatus(c, dorms, occupants) === "종료").length },
+                { label: "사용중", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "사용중").length },
+                { label: "만실", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "만실").length },
+                { label: "공실", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "공실").length },
               ]).map((s) => (
                 <div key={s.label} className={`rounded-xl border px-3 py-2 ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
                   <div className="text-[0.65rem] font-semibold uppercase tracking-wide text-slate-400">{s.label}</div>
@@ -13165,8 +13288,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <FilterSelect
                   label="상태"
                   value={dormContractStatusFilter}
-                  onChange={(v) => setDormContractStatusFilter(v as DormContractStatus | "전체")}
-                  options={["전체", "공실", "진행중", "만료예정", "연장", "종료", "해지"]}
+                  onChange={(v) => setDormContractStatusFilter(v)}
+                  options={["전체", "공실", "사용중", "만실", "만료예정", "연장", "종료", "해지"]}
                 />
                 <FilterSelect
                   label="만료월"
@@ -13380,9 +13503,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className="grid gap-4 mb-6 md:grid-cols-4">
               <MiniStat label="총 신입사원" value={`${visibleNewHires.length}`} />
-              <MiniStat label="거주중" value={`${visibleNewHires.filter((h) => h.residenceStatus === "거주중").length}`} />
-              <MiniStat label="퇴실" value={`${visibleNewHires.filter((h) => h.residenceStatus === "퇴실").length}`} />
-              <MiniStat label="만료예정" value={`${visibleNewHires.filter((h) => h.residenceStatus === "만료예정").length}`} />
+              <MiniStat label="거주중" value={`${visibleNewHires.filter((h) => getNewHireStatus(h) === "거주중").length}`} />
+              <MiniStat label="퇴실" value={`${visibleNewHires.filter((h) => getNewHireStatus(h) === "퇴실").length}`} />
+              <MiniStat label="만료예정" value={`${visibleNewHires.filter((h) => getNewHireStatus(h) === "만료예정").length}`} />
+              <MiniStat label="미배정" value={`${visibleNewHires.filter((h) => isUnassignedNewHire(h)).length}`} />
             </div>
 
             <div className="mb-6 flex flex-wrap items-center gap-2 justify-between">
@@ -13609,8 +13733,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.moveOutDate)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.actualMoveOutDate)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.cheonanMoveDate)}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{calculateNewHireResidenceStatus(h)}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{h.moveInType}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{(h.residenceStatus as string) === "자동선택" ? calculateNewHireResidenceStatus(h) : h.residenceStatus}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{(h.moveInType as string) === "자동선택" ? calculateMoveInType(h, newHires) : h.moveInType}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.extensionReason || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs erp-col-memo" title={h.notes || ""}>{h.notes || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.createdAt)}</td>
@@ -14837,8 +14961,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <MiniStat label="입주율" value={`${simulationTotal.usageRate}%`} />
               <MiniStat label="공실률" value={`${simulationTotal.vacancyRate}%`} />
               <MiniStat label="전체 TO" value={String(simulationTotal.residentTo)} />
-              <MiniStat label="월 예상 운영비" value={`${simulationTotal.totalOperatingCost.toLocaleString()}원`} />
-              <MiniStat label="공실 손실 추정" value={`${simulationTotal.totalVacancyLoss.toLocaleString()}원`} />
+              <MiniStat label="월 예상 운영비" value={`${simulationCost.operatingCost.toLocaleString()}원`} />
+              <MiniStat label="공실 손실 추정" value={`${simulationCost.vacancyLoss.toLocaleString()}원`} />
               <MiniStat label="계약 만료 위험" value={String(simulationTotal.totalExpireRisk)} />
               <MiniStat label="평택 부족 TO" value={String(simulationTotal.siteShortage.평택)} />
               <MiniStat label="천안 부족 TO" value={String(simulationTotal.siteShortage.천안)} />
@@ -14856,6 +14980,40 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 onChange={(e) => setSimulationSearch(e.target.value)}
                 className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"}`}
               />
+            </div>
+
+            {/* 월 예상 운영비 / 공실 손실 — 실무형 추정(지역/성별/월 필터 즉시 반영) */}
+            <div className={`mb-6 rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-base font-semibold">월 예상 운영비 / 공실 손실 (선택 범위 기준)</h3>
+                <div className="text-sm text-slate-500">대상 호실 {simulationCost.dormCount}곳 · 거주자 {simulationCost.residents}명 · 공실 {simulationCost.vacancyUnits}곳</div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                {([
+                  ["월세/관리비", simulationCost.monthlyRent],
+                  ["공과금(추정)", simulationCost.utilities],
+                  ["청소비", simulationCost.cleaning],
+                  ["유지보수비", simulationCost.maintenance],
+                  ["비품 감가/교체", simulationCost.inventoryCost],
+                  ["월 예상 운영비 합계", simulationCost.operatingCost],
+                ] as [string, number][]).map(([label, val]) => (
+                  <div key={label} className={`rounded-2xl p-3 ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
+                    <div className="text-[0.7rem] text-slate-500">{label}</div>
+                    <div className="mt-1 text-sm font-bold">{val.toLocaleString()}원</div>
+                  </div>
+                ))}
+              </div>
+              <div className={`mt-3 rounded-2xl p-3 ${theme.darkMode ? "bg-rose-950/40" : "bg-rose-50"}`}>
+                <div className="text-[0.7rem] text-rose-600">공실 손실 추정 (공실 {simulationCost.vacancyUnits}곳 × 각 호실 월 임대료/관리비)</div>
+                <div className="mt-1 text-lg font-bold text-rose-700">{simulationCost.vacancyLoss.toLocaleString()}원</div>
+              </div>
+              <div className="mt-3 text-xs text-slate-500 leading-5">
+                <div>· 월 예상 운영비 = 월세/관리비 + 공과금 + 청소비 + 유지보수비 + 비품 감가/교체</div>
+                <div>· 공과금 = 현 거주자 {simulationCost.residents}명 × {simulationCost.constants.UTILITY_PER_RESIDENT.toLocaleString()}원</div>
+                <div>· 청소비 = 호실 {simulationCost.dormCount}곳 × {simulationCost.constants.CLEANING_PER_DORM.toLocaleString()}원 · 유지보수비 = 호실 × {simulationCost.constants.MAINTENANCE_PER_DORM.toLocaleString()}원 · 비품 = 호실 × {simulationCost.constants.INVENTORY_PER_DORM.toLocaleString()}원</div>
+                <div>· 공실 손실 = 공실 호실의 월 임대료/관리비 합계(거주자 0명 호실)</div>
+                <div>· 월세/관리비는 유효 계약(종료/해지 제외)의 월세·관리비, 없으면 계약금액÷12로 추정합니다.</div>
+              </div>
             </div>
 
             <div className="overflow-auto">
@@ -19478,9 +19636,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     options={["자동선택", "대기중", "거주중", "만료예정", "연장", "퇴실"]}
                   />
                   <div className="text-xs text-slate-500">자동선택 시 날짜 기준으로 자동 계산됩니다. 직접 선택하면 수동값이 우선 적용됩니다.</div>
-                  {newHireForm.residenceStatus === "자동선택" && (
-                    <div className="text-xs text-slate-500">자동계산: {calculateNewHireResidenceStatus(newHireForm)}</div>
-                  )}
+                  <div className="text-xs text-slate-500">자동계산: {calculateNewHireResidenceStatus(newHireForm)}{newHireForm.residenceStatus !== "자동선택" ? " (참고값 · 저장은 수동 선택값 우선)" : ""}</div>
                 </div>
                 <div className="space-y-1">
                   <SelectInput
@@ -19490,9 +19646,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     options={["자동선택", "대기자", "신규", "재입주", "연장"]}
                   />
                   <div className="text-xs text-slate-500">자동선택 시 날짜 기준으로 자동 계산됩니다. 직접 선택하면 수동값이 우선 적용됩니다.</div>
-                  {newHireForm.moveInType === "자동선택" && (
-                    <div className="text-xs text-slate-500">자동계산: {calculateMoveInType(newHireForm, newHires)}</div>
-                  )}
+                  <div className="text-xs text-slate-500">자동계산: {calculateMoveInType(newHireForm, newHires)}{newHireForm.moveInType !== "자동선택" ? " (참고값 · 저장은 수동 선택값 우선)" : ""}</div>
                 </div>
                 <Input label="연장사유" value={newHireForm.extensionReason} onChange={(v) => setNewHireForm((f) => ({ ...f, extensionReason: v }))} />
                 <Input label="특이사항 메모" value={newHireForm.notes} onChange={(v) => setNewHireForm((f) => ({ ...f, notes: v }))} />
@@ -19746,9 +19900,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input
                   label="기숙사 관리자명"
-                  value={defectForm.dormManagerName}
-                  onChange={(v) => setDefectForm((f) => ({ ...f, dormManagerName: v }))}
-                  readOnly={currentUser?.role === "maintenance_reporter" || isViewer}
+                  value={defectForm.dormId ? getDormManagerDisplayName(defectForm.dormId) : (defectForm.dormManagerName || "-")}
+                  onChange={() => {}}
+                  readOnly
                 />
                 {currentUser?.role !== "maintenance_reporter" ? (
                   <>
