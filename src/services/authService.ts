@@ -9,6 +9,7 @@ export interface Profile {
   id: string;
   email?: string;
   display_name?: string;
+  phone?: string | null;
   role?: UserRole;
   is_active?: boolean;
   dorm_id?: string | null;
@@ -307,6 +308,7 @@ export const updateProfileOnly = async (
     // undefined 필드는 보내지 않도록 정리(부분 업데이트). null 은 명시적 비움으로 전송.
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (profile.display_name !== undefined) patch.display_name = profile.display_name;
+    if (profile.phone !== undefined) patch.phone = profile.phone;
     if (profile.role !== undefined) patch.role = profile.role;
     if (profile.is_active !== undefined) patch.is_active = profile.is_active;
     if (profile.dorm_id !== undefined) patch.dorm_id = profile.dorm_id;

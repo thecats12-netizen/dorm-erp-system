@@ -8,6 +8,7 @@ export type LoginUser = {
   password: string;
   role: UserRole;
   displayName: string;
+  phone?: string;
   isActive: boolean;
   siteAccess: Site | "전체";
   genderAccess?: "남" | "여" | "전체";

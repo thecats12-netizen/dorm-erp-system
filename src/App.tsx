@@ -165,6 +165,7 @@ function mapProfileToLoginUser(profile: Profile, authUserEmail?: string): LoginU
     password: "",
     role: (profile.role || "viewer") as UserRole,
     displayName: profile.display_name || profile.email || "",
+    phone: profile.phone || "",
     isActive: profile.is_active ?? true,
     siteAccess: profile.site_access || "전체",
     genderAccess: profile.gender_access || "전체",
@@ -679,6 +680,7 @@ function userTemplate(): Omit<LoginUser, "id" | "createdAt"> {
     password: "",
     role: "viewer",
     displayName: "",
+    phone: "",
     isActive: true,
     siteAccess: "전체",
     genderAccess: "전체",
@@ -3677,6 +3679,13 @@ export default function App() {
     return manager ? manager.displayName || manager.username || "-" : "-";
   };
 
+  // 담당 관리자 연락처(profiles 기준). 없으면 "-". (조회전용 마스킹은 maskPhone 적용)
+  const getDormManagerPhone = (dormId?: string): string => {
+    const manager = getDormManagerUser(dormId);
+    const phone = (manager?.phone || "").trim();
+    return phone ? maskPhone(phone) : "-";
+  };
+
   // 입주자 계약만료일 단일 기준: 입주자가 배정된 기숙사의 "유효 계약 종료일".
   // 입주일+2년/예정퇴실일(개인 날짜)로 계산하지 않는다.
   const getDormEffectiveContractEnd = (dormId?: string): string => {
@@ -3706,6 +3715,27 @@ export default function App() {
     if (!end) return "-";
     const d = daysDiff(end);
     return d < 0 ? "만료" : String(d);
+  };
+
+  // 기숙사 유효 계약 시작일(계약일) — getDormEffectiveContractEnd 와 동일한 계약 선택 기준.
+  const getDormEffectiveContractStart = (dormId?: string): string => {
+    if (!dormId) return "";
+    const dorm = operationalDorms.find((d) => d.id === dormId) || dorms.find((d) => d.id === dormId);
+    if (!dorm) return "";
+    const key = makeDormMatchKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+    const validContract = dormContracts
+      .filter((c) => !c.isDeleted)
+      .filter((c) => c.contractStatus !== "종료" && c.contractStatus !== "해지")
+      .filter((c) => !!c.contractStart)
+      .filter((c) => makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === key)
+      .sort((a, b) => (Date.parse(b.updatedAt || "") || 0) - (Date.parse(a.updatedAt || "") || 0))[0];
+    if (validContract?.contractStart) return validContract.contractStart;
+    return dorm.contractStart || "";
+  };
+
+  const getDormContractStartLabel = (dormId?: string): string => {
+    const start = getDormEffectiveContractStart(dormId);
+    return start ? formatDateOnly(start) || "-" : "-";
   };
 
   // 입주자가 배정된 기숙사 조회(단일 기준). dormId 우선, 실패 시 연결 신입사원의 호실키로 재매칭.
@@ -6596,6 +6626,8 @@ export default function App() {
   const dormContractPg = usePagination(visibleDormContracts, { resetKey: `${dormContractSearch}|${dormContractSiteFilter}|${dormContractStatusFilter}|${dormContractExpiryMonthFilter}` });
   const newHirePg = usePagination(visibleNewHires, { resetKey: `${newHireSearch}|${newHireSiteFilter}|${newHireGenderFilter}|${newHireAssignmentFilter}` });
   const cleaningReportPg = usePagination(visibleCleaningReports, { resetKey: `${cleaningYear}|${cleaningMonth}|${cleaningDormSiteFilter}|${cleaningDormSearch}|${cleaningManagerFilter}|${cleaningStatusFilter}` });
+  // 청소관리 상단 기숙사 목록: 10개씩 페이지네이션(검색/필터 변경 시 1페이지로 초기화).
+  const cleaningDormPg = usePagination(visibleCleaningDormRows, { pageSize: 10, resetKey: `${cleaningDormSiteFilter}|${cleaningDormSearch}|${cleaningManagerFilter}|${cleaningStatusFilter}|${cleaningYear}|${cleaningMonth}` });
   const defectPg = usePagination(visibleDefects, { resetKey: `${defectSearch}|${defectStatusFilter}|${defectReceiptMonthFilter}` });
   const militaryTrainingPg = usePagination(filteredMilitaryTrainingRecords, { resetKey: `${militaryTrainingSearch}|${militaryTrainingStatusFilter}|${militaryTrainingYearFilter}|${militaryTrainingPersonFilter}|${militaryTrainingTypeFilter}|${militaryTrainingRoundFilter}|${militaryTrainingDepartmentFilter}` });
   const militaryNoticePg = usePagination(filteredMilitaryNotices, { resetKey: militaryNoticeSearch });
@@ -7702,25 +7734,82 @@ export default function App() {
     ...(report.afterPhotoDataUrls || []),
   ];
 
-  // 청소보고서 상세 PDF(브라우저 인쇄 → PDF 저장). 외부 라이브러리 없이 기존 인쇄 패턴 재사용.
-  const printCleaningReport = (report: CleaningReport) => {
-    const photos = getCleaningPhotos(report);
+  // 하자접수 사진(접수/완료) 공통 추출 — 청소관리 getCleaningPhotos 와 동일 패턴.
+  const getDefectRequestPhotos = (d: { requestPhotoDataUrls?: string[]; completionPhotoDataUrls?: string[] }): string[] => [
+    ...(d.requestPhotoDataUrls || []),
+    ...(d.completionPhotoDataUrls || []),
+  ];
+
+  // ===== 공통 사진 보고서 PDF helper (청소관리·하자접수 공용) =====
+  // 사진은 2열×3행(페이지당 6장) 기준, 6장 초과 시 자동으로 다음 페이지로 분리.
+  // 이미지는 object-fit:contain 으로 잘리지 않게 배치. 브라우저 인쇄 → PDF 저장 방식.
+  const printPhotoReport = (opts: {
+    title: string; // 문서 제목/머리글
+    fileBase: string; // 인쇄창 기본 파일명(확장자 제외)
+    infoRows: Array<{ label: string; value: string; full?: boolean }>; // 기본/위치/내용 정보
+    sections: Array<{ heading: string; urls: string[] }>; // 사진 섹션(접수/완료, 또는 사진)
+  }) => {
     const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
-    const imgs = photos.map((u) => `<img src="${u}" style="width:31%;margin:1%;border:1px solid #ccc;border-radius:4px"/>`).join("");
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>청소보고서</title>
-      <style>body{font-family:Arial,'Malgun Gothic',sans-serif;margin:32px;color:#0f172a}h1{font-size:18px}table{width:100%;border-collapse:collapse;margin-top:12px}td{padding:6px 8px;border:1px solid #ccc;font-size:13px}.label{background:#f1f5f9;width:130px;font-weight:600}.photos{margin-top:16px;display:flex;flex-wrap:wrap}</style>
+    const chunk = <T,>(arr: T[], n: number): T[][] => {
+      const out: T[][] = [];
+      for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+      return out;
+    };
+    // 정보 테이블: full 이 아닌 항목은 2개씩 한 줄(label/value × 2), full 은 한 줄 전체.
+    const infoHtml = (() => {
+      const rows: string[] = [];
+      let pair: typeof opts.infoRows = [];
+      const flushPair = () => {
+        if (pair.length === 0) return;
+        const cells = pair.map((r) => `<td class="label">${esc(r.label)}</td><td>${esc(r.value || "-")}</td>`).join("");
+        const pad = pair.length === 1 ? `<td class="label"></td><td></td>` : "";
+        rows.push(`<tr>${cells}${pad}</tr>`);
+        pair = [];
+      };
+      opts.infoRows.forEach((r) => {
+        if (r.full) {
+          flushPair();
+          rows.push(`<tr><td class="label">${esc(r.label)}</td><td colspan="3">${esc(r.value || "-")}</td></tr>`);
+        } else {
+          pair.push(r);
+          if (pair.length === 2) flushPair();
+        }
+      });
+      flushPair();
+      return `<table>${rows.join("")}</table>`;
+    })();
+    const sectionHtml = opts.sections
+      .map(({ heading, urls }) => {
+        if (!urls.length) return `<h3>${esc(heading)} (0장)</h3><div class="empty">사진 없음</div>`;
+        const pages = chunk(urls, 6)
+          .map((group, gi, all) => {
+            const cells = group.map((u) => `<div class="cell"><img src="${u}"/></div>`).join("");
+            const brk = gi < all.length - 1 ? "page-break-after:always;" : "";
+            return `<div class="photo-page" style="${brk}"><div class="grid">${cells}</div></div>`;
+          })
+          .join("");
+        return `<h3>${esc(heading)} (${urls.length}장)</h3>${pages}`;
+      })
+      .join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(opts.fileBase)}</title>
+      <style>
+        @page{size:A4 portrait;margin:15mm}
+        body{font-family:Arial,'Malgun Gothic',sans-serif;margin:0;color:#0f172a}
+        h1{font-size:18px;margin:0 0 12px}
+        h3{font-size:14px;margin:18px 0 8px;page-break-after:avoid}
+        table{width:100%;border-collapse:collapse}
+        td{padding:6px 8px;border:1px solid #ccc;font-size:13px;vertical-align:top}
+        .label{background:#f1f5f9;width:120px;font-weight:600}
+        .empty{font-size:13px;color:#64748b}
+        .grid{display:flex;flex-wrap:wrap}
+        .cell{width:48%;height:230px;margin:1%;border:1px solid #ccc;border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden;box-sizing:border-box;page-break-inside:avoid}
+        .cell img{max-width:100%;max-height:100%;object-fit:contain}
+      </style>
       </head><body>
-      <h1>청소보고서</h1>
-      <table>
-        <tr><td class="label">보고일</td><td>${esc(formatDateOnly(report.reportDate) || "-")}</td></tr>
-        <tr><td class="label">기숙사</td><td>${esc(`${report.buildingName} ${report.dong}-${report.roomHo}`)}</td></tr>
-        <tr><td class="label">상태</td><td>${esc(report.cleanStatus)}</td></tr>
-        <tr><td class="label">담당 관리자</td><td>${esc(getDormManagerDisplayName(report.dormId))}</td></tr>
-        <tr><td class="label">청소담당자</td><td>${esc(getUserDisplayName(report.cleanerName || ""))}</td></tr>
-        <tr><td class="label">메모</td><td>${esc(report.memo || "-")}</td></tr>
-      </table>
-      <div class="photos"><h3 style="width:100%;font-size:14px;margin:12px 0 4px">사진 (${photos.length}장)</h3>${imgs || "<div>사진 없음</div>"}</div>
-      <script>setTimeout(function(){window.print();},400);</script>
+      <h1>${esc(opts.title)}</h1>
+      ${infoHtml}
+      ${sectionHtml}
+      <script>document.title=${JSON.stringify(opts.fileBase)};setTimeout(function(){window.print();},400);</script>
       </body></html>`;
     const w = window.open("", "_blank");
     if (!w) { alert("팝업이 차단되었습니다. 브라우저 팝업을 허용해 주세요."); return; }
@@ -7728,53 +7817,48 @@ export default function App() {
     w.document.close();
   };
 
-  // 하자접수 사진(접수/완료) 공통 추출 — 청소관리 getCleaningPhotos 와 동일 패턴.
-  const getDefectRequestPhotos = (d: { requestPhotoDataUrls?: string[]; completionPhotoDataUrls?: string[] }): string[] => [
-    ...(d.requestPhotoDataUrls || []),
-    ...(d.completionPhotoDataUrls || []),
-  ];
+  const reportFileDate = (raw?: string): string =>
+    String(raw || "").replace(/\D/g, "").slice(0, 8) || new Date().toISOString().slice(0, 10).replace(/-/g, "");
 
-  // 하자접수 보고서 PDF(브라우저 인쇄 → PDF 저장). 청소보고서 printCleaningReport 와 동일 방식.
+  // 청소보고서 PDF — 공통 helper 사용.
+  const printCleaningReport = (report: CleaningReport) => {
+    printPhotoReport({
+      title: "청소보고서",
+      fileBase: `청소보고서_${report.buildingName || "기숙사"}_${reportFileDate(report.reportDate)}`,
+      infoRows: [
+        { label: "보고일", value: formatDateOnly(report.reportDate) || "-" },
+        { label: "기숙사", value: `${report.buildingName} ${report.dong}-${report.roomHo}` },
+        { label: "상태", value: report.cleanStatus },
+        { label: "담당 관리자", value: getDormManagerDisplayName(report.dormId) },
+        { label: "청소담당자", value: getUserDisplayName(report.cleanerName || "") },
+        { label: "메모", value: report.memo || "-", full: true },
+      ],
+      sections: [{ heading: "사진", urls: getCleaningPhotos(report) }],
+    });
+  };
+
+  // 하자접수 보고서 PDF — 공통 helper 사용.
   const printDefectReport = (d: DefectRequest) => {
-    const reqPhotos = d.requestPhotoDataUrls || [];
-    const donePhotos = d.completionPhotoDataUrls || [];
-    const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
-    // 사진은 실제 이미지로 배치, 페이지 넘침 시 자동 분할(page-break).
-    const imgBlock = (urls: string[]) =>
-      urls.length
-        ? urls.map((u) => `<img src="${u}" style="width:46%;margin:1.5%;border:1px solid #ccc;border-radius:4px;page-break-inside:avoid"/>`).join("")
-        : "<div>사진 없음</div>";
-    const dormDate = `${(d.buildingName || "기숙사")}_${String(d.receiptDate || "").replace(/\D/g, "") || new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>하자접수_${esc(dormDate)}</title>
-      <style>
-        @page{size:A4 portrait;margin:15mm}
-        body{font-family:Arial,'Malgun Gothic',sans-serif;margin:0;color:#0f172a}
-        h1{font-size:18px;margin:0 0 12px}
-        h3{font-size:14px;margin:18px 0 6px;page-break-after:avoid}
-        table{width:100%;border-collapse:collapse}
-        td{padding:6px 8px;border:1px solid #ccc;font-size:13px;vertical-align:top}
-        .label{background:#f1f5f9;width:120px;font-weight:600}
-        .photos{display:flex;flex-wrap:wrap;margin-top:4px}
-        .section{page-break-inside:avoid}
-      </style>
-      </head><body>
-      <h1>하자접수 보고서</h1>
-      <table>
-        <tr><td class="label">접수일</td><td>${esc(formatDateOnly(d.receiptDate) || "-")}</td><td class="label">기숙사명</td><td>${esc(d.buildingName || "-")}</td></tr>
-        <tr><td class="label">주소</td><td>${esc(d.roadAddress || "-")}${d.detailAddress ? " " + esc(d.detailAddress) : ""}</td><td class="label">동/호수</td><td>${esc(`${d.dong || "-"} / ${d.ho || "-"}`)}</td></tr>
-        <tr><td class="label">공동현관</td><td>${esc(d.공동현관 || "-")}</td><td class="label">세대현관</td><td>${esc(d.세대현관 || "-")}</td></tr>
-        <tr><td class="label">기숙사 관리자</td><td>${esc(getDormManagerDisplayName(d.dormId))}</td><td class="label">상황</td><td>${esc(d.defectStatus || "-")}</td></tr>
-        <tr><td class="label">하자신청내용</td><td colspan="3">${esc(d.requestText || "-")}</td></tr>
-        <tr><td class="label">완료내용</td><td colspan="3">${esc(d.completeText || "-")}</td></tr>
-      </table>
-      <div class="section"><h3>접수사진 (${reqPhotos.length}장)</h3><div class="photos">${imgBlock(reqPhotos)}</div></div>
-      <div class="section"><h3>완료사진 (${donePhotos.length}장)</h3><div class="photos">${imgBlock(donePhotos)}</div></div>
-      <script>document.title=${JSON.stringify(`하자접수_${dormDate}`)};setTimeout(function(){window.print();},400);</script>
-      </body></html>`;
-    const w = window.open("", "_blank");
-    if (!w) { alert("팝업이 차단되었습니다. 브라우저 팝업을 허용해 주세요."); return; }
-    w.document.write(html);
-    w.document.close();
+    printPhotoReport({
+      title: "하자접수 보고서",
+      fileBase: `하자접수_${d.buildingName || "기숙사"}_${reportFileDate(d.receiptDate)}`,
+      infoRows: [
+        { label: "접수일", value: formatDateOnly(d.receiptDate) || "-" },
+        { label: "기숙사명", value: d.buildingName || "-" },
+        { label: "주소", value: `${d.roadAddress || "-"}${d.detailAddress ? " " + d.detailAddress : ""}` },
+        { label: "동/호수", value: `${d.dong || "-"} / ${d.ho || "-"}` },
+        { label: "공동현관", value: d.공동현관 || "-" },
+        { label: "세대현관", value: d.세대현관 || "-" },
+        { label: "기숙사 관리자", value: getDormManagerDisplayName(d.dormId) },
+        { label: "상황", value: d.defectStatus || "-" },
+        { label: "하자신청내용", value: d.requestText || "-", full: true },
+        { label: "완료내용", value: d.completeText || "-", full: true },
+      ],
+      sections: [
+        { heading: "접수사진", urls: d.requestPhotoDataUrls || [] },
+        { heading: "완료사진", urls: d.completionPhotoDataUrls || [] },
+      ],
+    });
   };
 
   const saveCleaningReport = () => {
@@ -8150,11 +8234,18 @@ export default function App() {
 
           if (userId) {
             payload.id = userId;
+            // 연락처는 profiles 에 별도 저장(생성 직후 보강 업데이트). 실패해도 저장 흐름은 유지.
+            const phoneVal = (userForm.phone || "").trim();
+            if (phoneVal) {
+              const { error: phoneErr } = await updateProfileOnly(userId, { phone: phoneVal });
+              if (phoneErr) console.warn("[saveUser] 연락처 저장 실패(무시)", phoneErr);
+            }
           }
         } else {
           // 기존 사용자: profiles 테이블만 업데이트
           const { error: updateError } = await updateProfileOnly(editingUserId, {
             display_name: userForm.displayName.trim(),
+            phone: (userForm.phone || "").trim() || null,
             role: (userForm.role as any) || "viewer",
             is_active: userForm.isActive ?? true,
             dorm_id: normalizedDormId,
@@ -17064,11 +17155,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">호수</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">공동현관</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">세대현관</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">거주자</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">연락처</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">입실일</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">퇴실예정일</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자 이름</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자 연락처</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">기숙사 계약일</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">계약종료일</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">1주차</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">2주차</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">3주차</th>
@@ -17078,14 +17168,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleCleaningDormRows.map((dorm, idx) => {
-                    const occupant = occupants.find(
-                      (o) =>
-                        o.dormId === dorm.id && ["거주중", "만료예정"].includes(o.status)
-                    );
+                  {cleaningDormPg.pagedItems.map((dorm, idx) => {
+                    const rowNo = (cleaningDormPg.page - 1) * cleaningDormPg.pageSize + idx + 1;
                     return (
                       <tr key={`${dorm.id}-${idx}`} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                        <td className="px-3 py-3 whitespace-nowrap">{idx + 1}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{rowNo}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.site}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.gender}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{dorm.buildingName}</td>
@@ -17094,11 +17181,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.roomHo}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.공동현관 || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.세대현관 || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{occupant?.employeeName || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{maskPhone(occupant?.phone)}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(occupant?.moveInDate || "") || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(occupant?.expectedMoveOutDate || occupant?.moveOutDueDate || "") || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm.id)}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{getDormManagerPhone(dorm.id)}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{getDormContractStartLabel(dorm.id)}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(dorm.id)}</td>
                         {[1, 2, 3, 4, 5].map((weekNo) => (
                           <td key={weekNo} className="px-3 py-3 whitespace-nowrap">
                             {getCleaningWeeklyStatus(dorm, weekNo)}
@@ -17117,7 +17203,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   })}
                   {visibleCleaningDormRows.length === 0 && (
                     <tr>
-                      <td colSpan={20} className="px-3 py-6 text-center text-slate-500">
+                      <td colSpan={19} className="px-3 py-6 text-center text-slate-500">
                         검색 결과가 없습니다.
                       </td>
                     </tr>
@@ -17125,6 +17211,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </tbody>
               </table>
             </div>
+            <PaginationBar page={cleaningDormPg.page} totalPages={cleaningDormPg.totalPages} totalCount={cleaningDormPg.totalCount} onPrev={cleaningDormPg.goPrev} onNext={cleaningDormPg.goNext} onPage={cleaningDormPg.goPage} darkMode={theme.darkMode} />
 
             <div className={`${theme.darkMode ? "mt-8 rounded-3xl border border-slate-700 p-5" : "mt-8 rounded-3xl border border-slate-200 p-5"}`}>
               {currentUser?.role === "maintenance_reporter" && (
@@ -19722,28 +19809,42 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   if (merged.length === 0) {
                     return <div className={`rounded-2xl border border-dashed p-4 text-center text-sm ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-400"}`}>등록된 사진이 없습니다.</div>;
                   }
+                  const base = `청소사진_${cleaningReportForm.buildingName || "기숙사"}_${reportFileDate(cleaningReportForm.reportDate)}`;
                   return (
-                    <div className="flex flex-wrap gap-2">
-                      {merged.map((m, gi) => (
-                        <div key={`${m.field}-${m.idx}`} className="relative">
-                          <img
-                            src={m.url}
-                            alt={`사진-${gi + 1}`}
-                            onClick={() => setImageLightbox({ urls, index: gi, title: "청소 사진" })}
-                            className="h-20 w-20 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => removeCleaningReportPhoto(m.field, m.idx)}
-                            className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white hover:bg-rose-500"
-                            title="이 사진 삭제"
-                          >×</button>
-                        </div>
-                      ))}
-                    </div>
+                    <>
+                      <div className="flex flex-wrap gap-2">
+                        {merged.map((m, gi) => (
+                          <div key={`${m.field}-${m.idx}`} className="relative">
+                            <img
+                              src={m.url}
+                              alt={`사진-${gi + 1}`}
+                              onClick={() => setImageLightbox({ urls, index: gi, title: "청소 사진" })}
+                              className="h-20 w-20 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => downloadImage(m.url, `${base}_${gi + 1}.${dataUrlExt(m.url)}`)}
+                              className="absolute -left-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[11px] font-bold text-white hover:bg-blue-500"
+                              title="이 사진 다운로드"
+                            >↓</button>
+                            <button
+                              type="button"
+                              onClick={() => removeCleaningReportPhoto(m.field, m.idx)}
+                              className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white hover:bg-rose-500"
+                              title="이 사진 삭제"
+                            >×</button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">전체 다운로드</button>
+                        <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
+                        <button type="button" onClick={() => printCleaningReport(cleaningReportForm as CleaningReport)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF 저장</button>
+                        <span className="text-sm text-slate-500">총 {urls.length}장</span>
+                      </div>
+                    </>
                   );
                 })()}
-                <div className="text-sm text-slate-500">총 {cleaningReportForm.beforePhotoDataUrls.length + cleaningReportForm.afterPhotoDataUrls.length}장</div>
               </div>
             </div>
 
@@ -20406,10 +20507,19 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="flex flex-wrap gap-3">
                   {defectForm.requestPhotoDataUrls.map((src, idx) => (
                     <div key={idx} className="relative">
-                      <img src={src} alt={`request-${idx}`} className="h-24 w-24 rounded-xl object-cover ring-1 ring-slate-200" />
-                      <a href={src} download={`request-photo-${idx + 1}.png`} className="absolute bottom-1 left-1 rounded bg-black/70 px-2 py-1 text-[10px] text-white">
+                      <img
+                        src={src}
+                        alt={`request-${idx}`}
+                        onClick={() => setImageLightbox({ urls: defectForm.requestPhotoDataUrls, index: idx, title: `하자접수 · ${defectForm.buildingName || ""}` })}
+                        className="h-24 w-24 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => downloadImage(src, `접수사진_${defectForm.buildingName || "기숙사"}_${idx + 1}.${dataUrlExt(src)}`)}
+                        className="absolute bottom-1 left-1 rounded bg-black/70 px-2 py-1 text-[10px] text-white hover:bg-black/85"
+                      >
                         다운로드
-                      </a>
+                      </button>
                       {!isViewer && (
                         <button
                           type="button"
@@ -20431,6 +20541,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </button>
                   )}
                 </div>
+                {(defectForm.requestPhotoDataUrls.length > 0 || defectForm.completionPhotoDataUrls.length > 0) && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    {defectForm.requestPhotoDataUrls.length > 0 && (
+                      <>
+                        <button type="button" onClick={() => downloadAllImages(defectForm.requestPhotoDataUrls, `접수사진_${defectForm.buildingName || "기숙사"}_${reportFileDate(defectForm.receiptDate)}`)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">접수사진 전체 다운로드</button>
+                        <button type="button" onClick={() => void downloadImagesAsZip(defectForm.requestPhotoDataUrls, `접수사진_${defectForm.buildingName || "기숙사"}_${reportFileDate(defectForm.receiptDate)}`)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
+                      </>
+                    )}
+                    <button type="button" onClick={() => printDefectReport(defectForm as DefectRequest)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF 저장</button>
+                  </div>
+                )}
                 <input ref={defectRequestPhotoInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => handleDefectRequestPhotos(e.target.files)} />
               </div>
 
@@ -20442,10 +20563,19 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <div className="flex flex-wrap gap-3">
                     {defectForm.completionPhotoDataUrls.map((src, idx) => (
                       <div key={idx} className="relative">
-                        <img src={src} alt={`completion-${idx}`} className="h-24 w-24 rounded-xl object-cover ring-1 ring-slate-200" />
-                        <a href={src} download={`completion-photo-${idx + 1}.png`} className="absolute bottom-1 left-1 rounded bg-black/70 px-2 py-1 text-[10px] text-white">
+                        <img
+                          src={src}
+                          alt={`completion-${idx}`}
+                          onClick={() => setImageLightbox({ urls: defectForm.completionPhotoDataUrls, index: idx, title: `하자접수_완료 · ${defectForm.buildingName || ""}` })}
+                          className="h-24 w-24 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => downloadImage(src, `완료사진_${defectForm.buildingName || "기숙사"}_${idx + 1}.${dataUrlExt(src)}`)}
+                          className="absolute bottom-1 left-1 rounded bg-black/70 px-2 py-1 text-[10px] text-white hover:bg-black/85"
+                        >
                           다운로드
-                        </a>
+                        </button>
                         {!isViewer && (
                           <button
                             type="button"
@@ -20467,6 +20597,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       </button>
                     )}
                   </div>
+                  {defectForm.completionPhotoDataUrls.length > 0 && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <button type="button" onClick={() => downloadAllImages(defectForm.completionPhotoDataUrls, `완료사진_${defectForm.buildingName || "기숙사"}_${reportFileDate(defectForm.receiptDate)}`)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">완료사진 전체 다운로드</button>
+                      <button type="button" onClick={() => void downloadImagesAsZip(defectForm.completionPhotoDataUrls, `완료사진_${defectForm.buildingName || "기숙사"}_${reportFileDate(defectForm.receiptDate)}`)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
+                    </div>
+                  )}
                   <input ref={defectCompletionPhotoInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => handleDefectCompletionPhotos(e.target.files)} />
                 </div>
               )}
@@ -20661,6 +20797,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <Input label="로그인 아이디" value={userForm.username} onChange={(v) => setUserForm((f) => ({ ...f, username: v }))} />
                 <Input label="비밀번호" type="password" value={userForm.password} onChange={(v) => setUserForm((f) => ({ ...f, password: v }))} />
                 <Input label="표시이름" value={userForm.displayName} onChange={(v) => setUserForm((f) => ({ ...f, displayName: v }))} />
+                <Input label="연락처" value={userForm.phone || ""} onChange={(v) => setUserForm((f) => ({ ...f, phone: v }))} placeholder="010-0000-0000" />
               </div>
             </div>
 
