@@ -7728,6 +7728,55 @@ export default function App() {
     w.document.close();
   };
 
+  // 하자접수 사진(접수/완료) 공통 추출 — 청소관리 getCleaningPhotos 와 동일 패턴.
+  const getDefectRequestPhotos = (d: { requestPhotoDataUrls?: string[]; completionPhotoDataUrls?: string[] }): string[] => [
+    ...(d.requestPhotoDataUrls || []),
+    ...(d.completionPhotoDataUrls || []),
+  ];
+
+  // 하자접수 보고서 PDF(브라우저 인쇄 → PDF 저장). 청소보고서 printCleaningReport 와 동일 방식.
+  const printDefectReport = (d: DefectRequest) => {
+    const reqPhotos = d.requestPhotoDataUrls || [];
+    const donePhotos = d.completionPhotoDataUrls || [];
+    const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+    // 사진은 실제 이미지로 배치, 페이지 넘침 시 자동 분할(page-break).
+    const imgBlock = (urls: string[]) =>
+      urls.length
+        ? urls.map((u) => `<img src="${u}" style="width:46%;margin:1.5%;border:1px solid #ccc;border-radius:4px;page-break-inside:avoid"/>`).join("")
+        : "<div>사진 없음</div>";
+    const dormDate = `${(d.buildingName || "기숙사")}_${String(d.receiptDate || "").replace(/\D/g, "") || new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>하자접수_${esc(dormDate)}</title>
+      <style>
+        @page{size:A4 portrait;margin:15mm}
+        body{font-family:Arial,'Malgun Gothic',sans-serif;margin:0;color:#0f172a}
+        h1{font-size:18px;margin:0 0 12px}
+        h3{font-size:14px;margin:18px 0 6px;page-break-after:avoid}
+        table{width:100%;border-collapse:collapse}
+        td{padding:6px 8px;border:1px solid #ccc;font-size:13px;vertical-align:top}
+        .label{background:#f1f5f9;width:120px;font-weight:600}
+        .photos{display:flex;flex-wrap:wrap;margin-top:4px}
+        .section{page-break-inside:avoid}
+      </style>
+      </head><body>
+      <h1>하자접수 보고서</h1>
+      <table>
+        <tr><td class="label">접수일</td><td>${esc(formatDateOnly(d.receiptDate) || "-")}</td><td class="label">기숙사명</td><td>${esc(d.buildingName || "-")}</td></tr>
+        <tr><td class="label">주소</td><td>${esc(d.roadAddress || "-")}${d.detailAddress ? " " + esc(d.detailAddress) : ""}</td><td class="label">동/호수</td><td>${esc(`${d.dong || "-"} / ${d.ho || "-"}`)}</td></tr>
+        <tr><td class="label">공동현관</td><td>${esc(d.공동현관 || "-")}</td><td class="label">세대현관</td><td>${esc(d.세대현관 || "-")}</td></tr>
+        <tr><td class="label">기숙사 관리자</td><td>${esc(getDormManagerDisplayName(d.dormId))}</td><td class="label">상황</td><td>${esc(d.defectStatus || "-")}</td></tr>
+        <tr><td class="label">하자신청내용</td><td colspan="3">${esc(d.requestText || "-")}</td></tr>
+        <tr><td class="label">완료내용</td><td colspan="3">${esc(d.completeText || "-")}</td></tr>
+      </table>
+      <div class="section"><h3>접수사진 (${reqPhotos.length}장)</h3><div class="photos">${imgBlock(reqPhotos)}</div></div>
+      <div class="section"><h3>완료사진 (${donePhotos.length}장)</h3><div class="photos">${imgBlock(donePhotos)}</div></div>
+      <script>document.title=${JSON.stringify(`하자접수_${dormDate}`)};setTimeout(function(){window.print();},400);</script>
+      </body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) { alert("팝업이 차단되었습니다. 브라우저 팝업을 허용해 주세요."); return; }
+    w.document.write(html);
+    w.document.close();
+  };
+
   const saveCleaningReport = () => {
     if (!canCreateCleaningReport(currentUser)) return;
     if (!cleaningReportForm.buildingName.trim() || !cleaningReportForm.dong.trim() || !cleaningReportForm.roomHo.trim()) {
@@ -19338,44 +19387,49 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         </>
                       )}
 
-                      <td className="px-3 py-3">
-                        <div className="flex flex-wrap gap-2">
-                          {d.requestPhotoDataUrls.map((src, idx) => (
-                            <button
-                              key={idx}
-                              type="button"
-                              onClick={() => setImageLightbox({ urls: d.requestPhotoDataUrls, index: idx, title: `하자접수 · ${d.buildingName || ""}` })}
-                              className={`${theme.darkMode ? "rounded-lg border border-slate-600 px-2 py-1 text-xs hover:bg-slate-950" : "rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"}`}
-                              title="크게 보기"
-                            >
-                              접수{idx + 1}
-                            </button>
-                          ))}
-                          {d.requestPhotoDataUrls.length === 0 && "-"}
-                        </div>
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        {d.requestPhotoDataUrls.length === 0 ? (
+                          <span className="text-slate-400">-</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setImageLightbox({ urls: d.requestPhotoDataUrls, index: 0, title: `하자접수 · ${d.buildingName || ""}` }); }}
+                            className="inline-flex items-center gap-2"
+                            title="사진 크게 보기"
+                          >
+                            <img src={d.requestPhotoDataUrls[0]} alt="접수사진" className="h-9 w-9 rounded-md object-cover ring-1 ring-slate-300" />
+                            <span className="text-xs font-medium text-blue-600">접수 사진 {d.requestPhotoDataUrls.length}장</span>
+                          </button>
+                        )}
                       </td>
 
                       {currentUser.role !== "maintenance_reporter" && (
-                        <td className="px-3 py-3">
-                          <div className="flex flex-wrap gap-2">
-                            {d.completionPhotoDataUrls.map((src, idx) => (
-                              <button
-                                key={idx}
-                                type="button"
-                                onClick={() => setImageLightbox({ urls: d.completionPhotoDataUrls, index: idx, title: `하자접수_완료 · ${d.buildingName || ""}` })}
-                                className={`${theme.darkMode ? "rounded-lg border border-slate-600 px-2 py-1 text-xs hover:bg-slate-950" : "rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"}`}
-                                title="크게 보기"
-                              >
-                                완료{idx + 1}
-                              </button>
-                            ))}
-                            {d.completionPhotoDataUrls.length === 0 && "-"}
-                          </div>
+                        <td className="px-3 py-3 whitespace-nowrap">
+                          {d.completionPhotoDataUrls.length === 0 ? (
+                            <span className="text-slate-400">-</span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setImageLightbox({ urls: d.completionPhotoDataUrls, index: 0, title: `하자접수_완료 · ${d.buildingName || ""}` }); }}
+                              className="inline-flex items-center gap-2"
+                              title="사진 크게 보기"
+                            >
+                              <img src={d.completionPhotoDataUrls[0]} alt="완료사진" className="h-9 w-9 rounded-md object-cover ring-1 ring-slate-300" />
+                              <span className="text-xs font-medium text-blue-600">완료 사진 {d.completionPhotoDataUrls.length}장</span>
+                            </button>
+                          )}
                         </td>
                       )}
 
                       <td className="px-3 py-3">
                         <div className="flex gap-2">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); printDefectReport(d); }}
+                            className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}
+                            title="하자접수 보고서 PDF 저장"
+                          >
+                            PDF
+                          </button>
                           {canFileDefect(currentUser) && (
                             <button
                               onClick={(e) => {
