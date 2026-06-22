@@ -1453,7 +1453,7 @@ export default function App() {
     checkResult: row.check_result || "-",
     score: row.score ?? 0,
     memo: row.memo || "",
-    beforePhotoDataUrls: row.before_photo_data_urls || row.before_photos || row.images || row.photos || [],
+    beforePhotoDataUrls: row.before_photo_data_urls || row.before_photos || row.images || row.photos || row.imageUrls || row.attachments || [],
     afterPhotoDataUrls: row.after_photo_data_urls || row.after_photos || row.attachments || [],
     reporterUserId: row.reporter_user_id || "",
     reporterName: row.reporter_name || "",
@@ -1486,7 +1486,7 @@ export default function App() {
     completeText: row.complete_text || "",
     reporterUserId: row.reporter_user_id || "",
     reporterName: row.reporter_name || "",
-    requestPhotoDataUrls: row.request_photo_data_urls || row.request_photos || row.images || row.photos || [],
+    requestPhotoDataUrls: row.request_photo_data_urls || row.request_photos || row.images || row.photos || row.imageUrls || row.attachments || [],
     completionPhotoDataUrls: row.completion_photo_data_urls || row.completion_photos || row.attachments || [],
     createdAt: row.created_at || "",
     completedAt: row.completed_at || undefined,
@@ -5133,14 +5133,45 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operationalDorms, dorms, occupants, settlementSiteFilter, settlementGenderFilter, settlementSearch]);
 
-  const settlementResidentCount = useMemo(() => {
+  // 정산 거주자(중복 제거 + 제외 사유 진단). KPI·카드·상세·합계·Excel 공통 출처.
+  const settlementResidents = useMemo(() => {
     const y = Number(safeSettlementYear), m = Number(safeSettlementMonth);
     const start = new Date(y, m - 1, 1);
     const end = getMonthEnd(y, m);
     const scopedDormIds = new Set(settlementScopeDorms.map((d) => d.id));
-    return occupants.filter((o) => o.dormId && scopedDormIds.has(o.dormId) && isSettlementResident(o, start, end)).length;
+    const seen = new Set<string>();
+    const result: Occupant[] = [];
+    const excluded = { 삭제: 0, 미배정: 0, 기숙사매칭실패: 0, 기간불일치: 0, 중복제외: 0 };
+    occupants.forEach((o) => {
+      if (o.isDeleted) { excluded.삭제++; return; }
+      if (!o.dormId || !o.dormId.trim()) { excluded.미배정++; return; }
+      if (!scopedDormIds.has(o.dormId)) { excluded.기숙사매칭실패++; return; }
+      if (!isSettlementResident(o, start, end)) { excluded.기간불일치++; return; }
+      // 동일 인원(같은 기숙사) 중복 제거: 기숙사ID|이름|연락처
+      const key = `${o.dormId}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`;
+      if (seen.has(key)) { excluded.중복제외++; return; }
+      seen.add(key);
+      result.push(o);
+    });
+    if (import.meta.env.DEV) {
+      console.warn("[정산 거주인 집계]", { 포함: result.length, 제외사유: excluded });
+    }
+    return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settlementScopeDorms, occupants, safeSettlementYear, safeSettlementMonth]);
+
+  // 기숙사별 정산 거주자 묶음(상세/합계가 KPI와 동일하도록 동일 출처에서 그룹화).
+  const settlementResidentsByDorm = useMemo(() => {
+    const map = new Map<string, Occupant[]>();
+    settlementResidents.forEach((o) => {
+      const arr = map.get(o.dormId) || [];
+      arr.push(o);
+      map.set(o.dormId, arr);
+    });
+    return map;
+  }, [settlementResidents]);
+
+  const settlementResidentCount = settlementResidents.length;
 
   const reportPeriod = `${reportYear}-${reportMonth}`;
 
@@ -6929,6 +6960,68 @@ export default function App() {
     } catch (e) {
       console.warn("이미지 다운로드 실패:", e);
       window.open(url, "_blank");
+    }
+  };
+
+  // dataURL → 확장자 추론
+  const dataUrlExt = (url: string): string => {
+    const m = /^data:image\/(\w+)/.exec(url);
+    return m ? (m[1] === "jpeg" ? "jpg" : m[1]) : "png";
+  };
+
+  // 이미지 일괄: 개별 파일로 순차 다운로드
+  const downloadAllImages = (urls: string[], baseName: string) => {
+    urls.forEach((url, i) => downloadImage(url, `${baseName}_${i + 1}.${dataUrlExt(url)}`));
+  };
+
+  // 이미지 일괄: ZIP 다운로드
+  const downloadImagesAsZip = async (urls: string[], baseName: string) => {
+    try {
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      urls.forEach((url, i) => {
+        const comma = url.indexOf(",");
+        const b64 = comma >= 0 ? url.slice(comma + 1) : url;
+        zip.file(`${baseName}_${i + 1}.${dataUrlExt(url)}`, b64, { base64: true });
+      });
+      const blob = await zip.generateAsync({ type: "blob" });
+      const link = URL.createObjectURL(blob);
+      downloadImage(link, `${baseName}.zip`);
+      setTimeout(() => URL.revokeObjectURL(link), 2000);
+    } catch (e) {
+      console.error("ZIP 생성 실패:", e);
+      await appAlert("기숙사 ERP 알림", "ZIP 생성 중 오류가 발생했습니다.");
+    }
+  };
+
+  // 이미지 일괄: PDF(이미지 1장당 1페이지) 다운로드
+  const downloadImagesAsPdf = async (urls: string[], fileName: string) => {
+    try {
+      const { jsPDF } = await import("jspdf");
+      const loadSize = (url: string) => new Promise<{ w: number; h: number }>((resolve) => {
+        const im = new Image();
+        im.onload = () => resolve({ w: im.naturalWidth || 1, h: im.naturalHeight || 1 });
+        im.onerror = () => resolve({ w: 1, h: 1 });
+        im.src = url;
+      });
+      let doc: any = null;
+      for (let i = 0; i < urls.length; i++) {
+        const { w, h } = await loadSize(urls[i]);
+        const orientation = w >= h ? "landscape" : "portrait";
+        if (!doc) doc = new jsPDF({ orientation, unit: "pt", format: "a4" });
+        else doc.addPage("a4", orientation);
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const margin = 24;
+        const scale = Math.min((pw - margin * 2) / w, (ph - margin * 2) / h);
+        const dw = w * scale, dh = h * scale;
+        const fmt = dataUrlExt(urls[i]).toUpperCase() === "PNG" ? "PNG" : "JPEG";
+        doc.addImage(urls[i], fmt, (pw - dw) / 2, (ph - dh) / 2, dw, dh);
+      }
+      if (doc) doc.save(fileName);
+    } catch (e) {
+      console.error("PDF 생성 실패:", e);
+      await appAlert("기숙사 ERP 알림", "PDF 생성 중 오류가 발생했습니다.");
     }
   };
 
@@ -9382,10 +9475,8 @@ const exportExcel = () => {
 
     rows = settlementScopeDorms
       .map((dorm) => {
-        // 화면 정산과 동일 기준(공통 helper). 미배정 제외·기숙사 매칭 가능 입주자만.
-        const currentResidents = occupants.filter((o) =>
-          o.dormId === dorm.id && (periodStart && periodEnd ? isSettlementResident(o, periodStart, periodEnd) : !o.isDeleted)
-        ).length;
+        // 화면 정산 KPI/상세와 동일 출처(중복 제거 포함).
+        const currentResidents = (settlementResidentsByDorm.get(dorm.id) || []).length;
 
         const revenue = currentResidents * 2000000;
         const inventoryCost = inventory
@@ -15824,7 +15915,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
                 const filteredDorms = settlementScopeDorms
                   .map((dorm) => {
-                    const dormOccupants = occupants.filter((o) => o.dormId === dorm.id && isSettlementResident(o, periodStart, periodEnd));
+                    const dormOccupants = settlementResidentsByDorm.get(dorm.id) || []; // KPI와 동일 출처(중복 제거 포함)
 
                     const revenue = dormOccupants.length * 2000000;
                     const inventoryCost = inventory
@@ -17052,7 +17143,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             return (
                               <button
                                 type="button"
-                                onClick={() => setImageLightbox({ urls: photos, index: 0, title: `청소 사진 · ${report.buildingName || ""}` })}
+                                onClick={() => setImageLightbox({ urls: photos, index: 0, title: `청소보고서 · ${report.buildingName || ""}` })}
                                 className="inline-flex items-center gap-2"
                                 title="사진 크게 보기"
                               >
@@ -19251,7 +19342,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             <button
                               key={idx}
                               type="button"
-                              onClick={() => setImageLightbox({ urls: d.requestPhotoDataUrls, index: idx, title: `접수 사진 · ${d.buildingName || ""}` })}
+                              onClick={() => setImageLightbox({ urls: d.requestPhotoDataUrls, index: idx, title: `하자접수 · ${d.buildingName || ""}` })}
                               className={`${theme.darkMode ? "rounded-lg border border-slate-600 px-2 py-1 text-xs hover:bg-slate-950" : "rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"}`}
                               title="크게 보기"
                             >
@@ -19269,7 +19360,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               <button
                                 key={idx}
                                 type="button"
-                                onClick={() => setImageLightbox({ urls: d.completionPhotoDataUrls, index: idx, title: `완료 사진 · ${d.buildingName || ""}` })}
+                                onClick={() => setImageLightbox({ urls: d.completionPhotoDataUrls, index: idx, title: `하자접수_완료 · ${d.buildingName || ""}` })}
                                 className={`${theme.darkMode ? "rounded-lg border border-slate-600 px-2 py-1 text-xs hover:bg-slate-950" : "rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"}`}
                                 title="크게 보기"
                               >
@@ -20591,11 +20682,19 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="min-w-0 truncate text-sm font-medium">
                   {imageLightbox.title} <span className="text-white/60">({safeIndex + 1}/{urls.length})</span>
                 </div>
-                <div className="flex shrink-0 gap-2">
-                  <button type="button" onClick={() => window.open(current, "_blank")} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">새 창</button>
-                  <button type="button" onClick={() => downloadImage(current, `defect-image-${safeIndex + 1}.png`)} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold hover:bg-blue-500">다운로드</button>
-                  <button type="button" onClick={() => setImageLightbox(null)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">닫기</button>
-                </div>
+                {(() => {
+                  const base = `${imageLightbox.title.replace(/[^가-힣A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "이미지"}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+                  return (
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      <button type="button" onClick={() => window.open(current, "_blank")} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">새 창</button>
+                      <button type="button" onClick={() => downloadImage(current, `${base}_${safeIndex + 1}.${dataUrlExt(current)}`)} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold hover:bg-blue-500">이 이미지 저장</button>
+                      <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">전체 저장</button>
+                      <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">ZIP</button>
+                      <button type="button" onClick={() => void downloadImagesAsPdf(urls, `${base}.pdf`)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">PDF</button>
+                      <button type="button" onClick={() => setImageLightbox(null)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">닫기</button>
+                    </div>
+                  );
+                })()}
               </div>
               <div className="relative flex flex-1 items-center justify-center overflow-auto p-4" onClick={(e) => e.stopPropagation()}>
                 {urls.length > 1 && (
