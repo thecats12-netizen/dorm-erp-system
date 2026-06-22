@@ -290,6 +290,11 @@ function sanitizeExcelRow(row: Record<string, unknown>): Record<string, unknown>
 }
 
 // 공통 공실/사용률 계산(정원 기준). 활성 기숙사 목록(operationalDorms = 종료/해지/isDeleted 제외)과
+// 현 거주자 단일 기준(대시보드 v4 = 정산관리 공통): 삭제 아님 + 상태 거주중/만료예정.
+function isCurrentResidentStatus(o: { isDeleted?: boolean; status: string }): boolean {
+  return !o.isDeleted && (o.status === "거주중" || o.status === "만료예정");
+}
+
 // 현재 거주자(거주중/만료예정, 퇴실/과거/삭제 제외) 기준. 정원 0이면 0%(NaN 방지).
 // 공실 수 = 정원 - 현재거주자, 공실률 = 공실/정원*100, 사용률 = 거주자/정원*100.
 function computeVacancyStats(
@@ -5133,22 +5138,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operationalDorms, dorms, occupants, settlementSiteFilter, settlementGenderFilter, settlementSearch]);
 
-  // 정산 거주자(중복 제거 + 제외 사유 진단). KPI·카드·상세·합계·Excel 공통 출처.
+  // 정산 거주자 = 대시보드 현 거주자 동일 helper(isCurrentResidentStatus) + 미배정/매칭/중복 정리.
+  // KPI·카드·상세·합계·Excel 공통 출처. (선택월 거주기간은 별도 컬럼에서 getSettlementStayMonths 로 계산)
   const settlementResidents = useMemo(() => {
-    const y = Number(safeSettlementYear), m = Number(safeSettlementMonth);
-    const start = new Date(y, m - 1, 1);
-    const end = getMonthEnd(y, m);
     const scopedDormIds = new Set(settlementScopeDorms.map((d) => d.id));
     const seen = new Set<string>();
     const result: Occupant[] = [];
-    const excluded = { 삭제: 0, 미배정: 0, 기숙사매칭실패: 0, 기간불일치: 0, 중복제외: 0 };
+    const excluded = { 삭제: 0, 상태제외: 0, 미배정: 0, 기숙사매칭실패: 0, 중복제외: 0 };
     occupants.forEach((o) => {
       if (o.isDeleted) { excluded.삭제++; return; }
+      if (!isCurrentResidentStatus(o)) { excluded.상태제외++; return; } // 대시보드와 동일 기준
       if (!o.dormId || !o.dormId.trim()) { excluded.미배정++; return; }
-      if (!scopedDormIds.has(o.dormId)) { excluded.기숙사매칭실패++; return; }
-      if (!isSettlementResident(o, start, end)) { excluded.기간불일치++; return; }
-      // 동일 인원(같은 기숙사) 중복 제거: 기숙사ID|이름|연락처
-      const key = `${o.dormId}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`;
+      if (!scopedDormIds.has(o.dormId)) { excluded.기숙사매칭실패++; console.warn("[정산] 기숙사 매칭 실패", { id: o.id, name: o.employeeName, dormId: o.dormId }); return; }
+      const key = `${o.dormId}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`; // 동일 인원/기숙사 중복 1명
       if (seen.has(key)) { excluded.중복제외++; return; }
       seen.add(key);
       result.push(o);
@@ -5158,7 +5160,7 @@ export default function App() {
     }
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settlementScopeDorms, occupants, safeSettlementYear, safeSettlementMonth]);
+  }, [settlementScopeDorms, occupants]);
 
   // 기숙사별 정산 거주자 묶음(상세/합계가 KPI와 동일하도록 동일 출처에서 그룹화).
   const settlementResidentsByDorm = useMemo(() => {
@@ -11151,7 +11153,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const dashboardStat = {
     dormCount: uniqueActiveDormContracts.length,
-    currentResidents: occupants.filter((o) => !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length,
+    currentResidents: occupants.filter(isCurrentResidentStatus).length,
     totalVacancy: dormSummary.reduce((sum, item) => sum + item.vacancy, 0),
     openDefects: defects.filter((d) => !d.isDeleted && d.defectStatus !== "완료").length,
     inventoryCount: inventory.filter((i) => !i.isDeleted).length,
