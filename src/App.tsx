@@ -5113,22 +5113,34 @@ export default function App() {
   };
 
   // 정산 상단 KPI 현재 거주인 = 상세(필터된 기숙사) 합계와 동일 기준.
+  // 정산 필터(지역/성별/검색) 통과 여부
+  const settlementDormPassesFilter = (d: Dorm | OperationalDorm): boolean =>
+    (settlementSiteFilter === "전체" || d.site === settlementSiteFilter) &&
+    (settlementGenderFilter === "전체" || d.gender === settlementGenderFilter) &&
+    (!settlementSearch || `${d.buildingName} ${d.dong} ${d.roomHo}`.toLowerCase().includes(settlementSearch.toLowerCase()));
+
+  // 정산 대상 기숙사: operationalDorms ∪ "거주자가 있는 기숙사"(종료/해지 계약이라 운영목록에서 빠졌어도 포함).
+  // → 거주인 누락(예: 121 vs 123) 방지. 미배정(dormId 없음)은 제외, 기숙사 매칭 가능한 입주자만.
+  const settlementScopeDorms = useMemo(() => {
+    const byId = new Map<string, Dorm | OperationalDorm>();
+    operationalDorms.filter(settlementDormPassesFilter).forEach((d) => byId.set(d.id, d));
+    occupants.forEach((o) => {
+      if (!o.dormId || o.isDeleted || byId.has(o.dormId)) return;
+      const d = operationalDorms.find((x) => x.id === o.dormId) || dorms.find((x) => x.id === o.dormId);
+      if (d && !d.isDeleted && settlementDormPassesFilter(d) && !byId.has(d.id)) byId.set(d.id, d);
+    });
+    return Array.from(byId.values());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalDorms, dorms, occupants, settlementSiteFilter, settlementGenderFilter, settlementSearch]);
+
   const settlementResidentCount = useMemo(() => {
     const y = Number(safeSettlementYear), m = Number(safeSettlementMonth);
     const start = new Date(y, m - 1, 1);
     const end = getMonthEnd(y, m);
-    const scopedDormIds = new Set(
-      operationalDorms
-        .filter((d) =>
-          (settlementSiteFilter === "전체" || d.site === settlementSiteFilter) &&
-          (settlementGenderFilter === "전체" || d.gender === settlementGenderFilter) &&
-          (!settlementSearch || `${d.buildingName} ${d.dong} ${d.roomHo}`.toLowerCase().includes(settlementSearch.toLowerCase()))
-        )
-        .map((d) => d.id)
-    );
-    return occupants.filter((o) => scopedDormIds.has(o.dormId) && isSettlementResident(o, start, end)).length;
+    const scopedDormIds = new Set(settlementScopeDorms.map((d) => d.id));
+    return occupants.filter((o) => o.dormId && scopedDormIds.has(o.dormId) && isSettlementResident(o, start, end)).length;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operationalDorms, occupants, settlementSiteFilter, settlementGenderFilter, settlementSearch, safeSettlementYear, safeSettlementMonth]);
+  }, [settlementScopeDorms, occupants, safeSettlementYear, safeSettlementMonth]);
 
   const reportPeriod = `${reportYear}-${reportMonth}`;
 
@@ -7528,12 +7540,46 @@ export default function App() {
     setShowCleaningReportForm(true);
   };
 
-  const readFileDataUrl = (file: File): Promise<string> =>
+  const readFileRaw = (file: File): Promise<string> =>
     new Promise((resolve) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result as string);
       reader.readAsDataURL(file);
     });
+
+  // 이미지 첨부: 개수 제한 없음. 단 5MB 초과(또는 모든 이미지) 시 최대 1600px·JPEG 품질로 자동 압축해 저장 안정화.
+  const readFileDataUrl = async (file: File): Promise<string> => {
+    const raw = await readFileRaw(file);
+    if (!file.type.startsWith("image/")) return raw; // 이미지 아니면 원본
+    const needCompress = file.size > 5 * 1024 * 1024 || true; // 모든 이미지 압축(용량 절감)
+    if (!needCompress) return raw;
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = reject;
+        el.src = raw;
+      });
+      const MAX = 1600;
+      let { width, height } = img;
+      if (width > MAX || height > MAX) {
+        const scale = Math.min(MAX / width, MAX / height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return raw;
+      ctx.drawImage(img, 0, 0, width, height);
+      const compressed = canvas.toDataURL("image/jpeg", 0.7);
+      // 압축 결과가 원본보다 크면 원본 유지
+      return compressed.length < raw.length ? compressed : raw;
+    } catch {
+      return raw; // 압축 실패 시 원본
+    }
+  };
 
   const handleCleaningReportPhotos = async (
     files: FileList | null,
@@ -9334,21 +9380,12 @@ const exportExcel = () => {
     const periodStart = validSettlementYear && validSettlementMonth ? new Date(settlementYearNum, settlementMonthNum - 1, 1) : null;
     const periodEnd = validSettlementYear && validSettlementMonth ? getMonthEnd(settlementYearNum, settlementMonthNum) : null;
 
-    rows = operationalDorms
-      .filter((dorm) => settlementSiteFilter === "전체" || dorm.site === settlementSiteFilter)
-      .filter((dorm) => settlementGenderFilter === "전체" || dorm.gender === settlementGenderFilter)
+    rows = settlementScopeDorms
       .map((dorm) => {
-        const currentResidents = occupants.filter((o) => {
-          if (o.dormId !== dorm.id || o.isDeleted || o.status === "퇴실") return false;
-          if (!periodStart || !periodEnd) return true;
-          const moveInDate = parseSafeDate(o.moveInDate);
-          if (!moveInDate || moveInDate > periodEnd) return false;
-          const actualOutDate = parseSafeDate(o.actualMoveOutDate || "");
-          if (actualOutDate && actualOutDate < periodStart) return false;
-          const dueOutDate = parseSafeDate(o.moveOutDueDate);
-          if (dueOutDate && dueOutDate < periodStart) return false;
-          return true;
-        }).length;
+        // 화면 정산과 동일 기준(공통 helper). 미배정 제외·기숙사 매칭 가능 입주자만.
+        const currentResidents = occupants.filter((o) =>
+          o.dormId === dorm.id && (periodStart && periodEnd ? isSettlementResident(o, periodStart, periodEnd) : !o.isDeleted)
+        ).length;
 
         const revenue = currentResidents * 2000000;
         const inventoryCost = inventory
@@ -9383,11 +9420,11 @@ const exportExcel = () => {
           동: dorm.dong,
           호수: dorm.roomHo,
           입주인원: currentResidents,
-          수입: revenue,
-          비품비: inventoryCost,
-          하자비: defectCost,
-          기타비용: manualCost,
-          정산액: revenue - (inventoryCost + defectCost + manualCost),
+          수입: formatWon(revenue),
+          비품비: formatWon(inventoryCost),
+          하자비: formatWon(defectCost),
+          기타비용: formatWon(manualCost),
+          정산액: formatWon(revenue - (inventoryCost + defectCost + manualCost)),
         };
       });
     fileName = "정산관리.xlsx";
@@ -10173,41 +10210,20 @@ const openReportPdf = (type: PdfReportType, autoPrint: boolean) => {
 
 const handleDefectRequestPhotos = async (files: FileList | null) => {
     if (!files) return;
-
-    const convert = Array.from(files).map(
-      (file) =>
-        new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result || ""));
-          reader.readAsDataURL(file);
-        })
-    );
-
-    const results = await Promise.all(convert);
-
+    // 개수 제한 없음 + 자동 압축. 기존 이미지에 병합(덮어쓰기 방지).
+    const results = await Promise.all(Array.from(files).map((file) => readFileDataUrl(file)));
     setDefectForm((prev) => ({
       ...prev,
-      requestPhotoDataUrls: [...prev.requestPhotoDataUrls, ...results].slice(0, 10),
+      requestPhotoDataUrls: [...prev.requestPhotoDataUrls, ...results],
     }));
   };
 
   const handleDefectCompletionPhotos = async (files: FileList | null) => {
     if (!files) return;
-
-    const convert = Array.from(files).map(
-      (file) =>
-        new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result || ""));
-          reader.readAsDataURL(file);
-        })
-    );
-
-    const results = await Promise.all(convert);
-
+    const results = await Promise.all(Array.from(files).map((file) => readFileDataUrl(file)));
     setDefectForm((prev) => ({
       ...prev,
-      completionPhotoDataUrls: [...prev.completionPhotoDataUrls, ...results].slice(0, 10),
+      completionPhotoDataUrls: [...prev.completionPhotoDataUrls, ...results],
     }));
   };
 
@@ -15806,13 +15822,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 const periodStart = new Date(settlementYearNum, settlementMonthNum - 1, 1);
                 const periodEnd = getMonthEnd(settlementYearNum, settlementMonthNum);
 
-                const filteredDorms = operationalDorms
-                  .filter((dorm) => {
-                    const siteMatch = settlementSiteFilter === "전체" || dorm.site === settlementSiteFilter;
-                    const genderMatch = settlementGenderFilter === "전체" || dorm.gender === settlementGenderFilter;
-                    const searchMatch = !settlementSearch || `${dorm.buildingName} ${dorm.dong} ${dorm.roomHo}`.toLowerCase().includes(settlementSearch.toLowerCase());
-                    return siteMatch && genderMatch && searchMatch;
-                  })
+                const filteredDorms = settlementScopeDorms
                   .map((dorm) => {
                     const dormOccupants = occupants.filter((o) => o.dormId === dorm.id && isSettlementResident(o, periodStart, periodEnd));
 
