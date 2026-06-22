@@ -1678,6 +1678,7 @@ export default function App() {
   const [showDeletedUsers, setShowDeletedUsers] = useState(false); // 사용자관리: 삭제(숨김) 사용자 보기 토글(기본 OFF)
   const [_siteFilter, _setSiteFilter] = useState<Site | "전체">("전체");
   const [selectedDormId, setSelectedDormId] = useState<string>("");
+  const [selectedInventoryDormId, setSelectedInventoryDormId] = useState<string>(""); // 비품현황 기숙사 카드 선택
   const [selectedDormDetailId, setSelectedDormDetailId] = useState<string>("");
   const clickTimerRef = useRef<number | null>(null);
   const [selectedDormIds, setSelectedDormIds] = useState<string[]>([]);
@@ -3370,7 +3371,7 @@ export default function App() {
   };
 
   const getOpenDefectCount = (dormId: string): number =>
-    defects.filter((d) => d.dormId === dormId && d.defectStatus !== "완료").length;
+    defects.filter((d) => d.dormId === dormId && !d.isDeleted && d.defectStatus !== "완료").length;
 
   const isCleaningMissing = (dorm: OperationalDorm): boolean => {
     const currentMonth = new Date().toISOString().slice(0, 7);
@@ -3392,6 +3393,18 @@ export default function App() {
     }
     clickTimerRef.current = window.setTimeout(() => {
       setSelectedDormId((previous) => (previous === dormId ? "" : dormId));
+      clickTimerRef.current = null;
+    }, 200);
+  };
+
+  // 비품현황 기숙사 카드: 단일 클릭 → 해당 기숙사 필터(같은 카드 재클릭 → 해제), 더블클릭 → 상세 모달.
+  const handleInventoryCardClick = (dormId: string) => {
+    if (clickTimerRef.current) {
+      window.clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
+    clickTimerRef.current = window.setTimeout(() => {
+      setSelectedInventoryDormId((previous) => (previous === dormId ? "" : dormId));
       clickTimerRef.current = null;
     }, 200);
   };
@@ -5071,6 +5084,14 @@ export default function App() {
     return count <= 0 ? "공실" : count >= cap ? "만실" : "사용중";
   };
 
+  // 담당 기숙사 한글 표기(Excel/표시용): "천안 효성해링턴플레이스 104동-1201호". 없으면 "-".
+  const getDormLabel = (dormId?: string): string => {
+    if (!dormId) return "-";
+    const d = operationalDorms.find((x) => x.id === dormId) || dorms.find((x) => x.id === dormId);
+    if (!d) return "-";
+    return `${d.site} ${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`.replace(/\s+/g, " ").trim();
+  };
+
   const reportPeriod = `${reportYear}-${reportMonth}`;
 
   const reportFilteredOperationalDorms = useMemo(() => {
@@ -5196,6 +5217,7 @@ export default function App() {
     if (defectForm.dormId) {
       const selectedDorm = operationalDorms.find((d) => d.id === defectForm.dormId);
       if (selectedDorm) {
+        const mgr = getDormManagerDisplayName(defectForm.dormId); // displayName→username→email
         setDefectForm((prev) => ({
           ...prev,
           roadAddress: selectedDorm.address,
@@ -5204,6 +5226,8 @@ export default function App() {
           ho: selectedDorm.roomHo,
           공동현관: selectedDorm.공동현관 || "",
           세대현관: selectedDorm.세대현관 || "",
+          // 관리자명 기본값 자동 입력(미입력이거나 "-"일 때만 — 대리 접수 시 수동 수정 보존)
+          dormManagerName: !prev.dormManagerName || prev.dormManagerName === "-" ? (mgr === "-" ? "" : mgr) : prev.dormManagerName,
         }));
       }
     }
@@ -5616,10 +5640,13 @@ export default function App() {
         if (!isReplace) return false;
       }
 
+      // 기숙사 카드 선택 시 해당 기숙사 비품만
+      if (selectedInventoryDormId && i.dormId !== selectedInventoryDormId) return false;
+
       const text = `${i.site} ${i.dormAddress} ${i.buildingName} ${i.dong} ${i.roomHo} ${i.managerName} ${i.itemName} ${i.quantity} ${i.modelName} ${i.maker} ${i.status} ${i.installationLocation} ${i.purchaseDate} ${i.purchaseAmount} ${i.issuedDate} ${i.proofFile} ${i.soldDate} ${i.soldAmount} ${i.disposalDate} ${i.disposalReason} ${i.notes}`.toLowerCase();
       return !inventorySearch || text.includes(inventorySearch.toLowerCase());
     });
-  }, [inventory, inventorySearch, inventoryStatusFilter, inventoryYearFilter, inventoryMonthFilter, inventoryDayFilter, currentUser]);
+  }, [inventory, inventorySearch, inventoryStatusFilter, inventoryYearFilter, inventoryMonthFilter, inventoryDayFilter, currentUser, selectedInventoryDormId]);
 
   const visibleLeases = useMemo(() => {
     return leases.filter((lease) => {
@@ -5788,7 +5815,10 @@ export default function App() {
 
   const getStayMonths = (startDate: Date | null, endDate: Date | null) => {
     if (!startDate || !endDate || endDate < startDate) return 0;
-    return (endDate.getFullYear() - startDate.getFullYear()) * 12 + (endDate.getMonth() - startDate.getMonth()) + 1;
+    // 입실일~퇴실일 정확한 개월수: 완료 개월 + 종료일이 입실 기준일(일자) 이상이면 +1, 최소 1개월.
+    let months = (endDate.getFullYear() - startDate.getFullYear()) * 12 + (endDate.getMonth() - startDate.getMonth());
+    if (endDate.getDate() >= startDate.getDate()) months += 1;
+    return Math.max(months, 1);
   };
 
   const isWeekend = (value: string) => {
@@ -9116,7 +9146,7 @@ const exportExcel = () => {
 
   if (activeTab === "dorms") {
     rows = visibleDorms.map((d) => ({
-      담당기숙사ID: d.id,
+      담당기숙사명: getDormLabel(d.id),
       지역: d.site,
       성별: d.gender,
       건물명: d.buildingName,
@@ -9146,7 +9176,7 @@ const exportExcel = () => {
         // 기숙사 기준 단일 조회(dormId 우선, 실패 시 호실키 재매칭).
         const dorm = getOccupantDorm(o);
         return {
-          담당기숙사ID: dorm?.id || o.dormId || "",
+          담당기숙사명: getDormLabel(dorm?.id || o.dormId),
           지역: dorm?.site || "",
           기숙사: dorm?.buildingName || "",
           이름: o.employeeName,
@@ -9190,7 +9220,7 @@ const exportExcel = () => {
       .map((i) => {
         const dorm = operationalDorms.find((d) => d.id === i.dormId) || dorms.find((d) => d.id === i.dormId) || null;
         return {
-          담당기숙사ID: i.dormId || "",
+          담당기숙사명: getDormLabel(i.dormId),
           지역: dorm?.site || "",
           건물명: dorm?.buildingName || i.buildingName || "",
           기숙사주소: dorm?.address || i.dormAddress,
@@ -9329,7 +9359,7 @@ const exportExcel = () => {
         operationalDorms.find((d) => d.id === h.dormId) ||
         dorms.find((d) => d.id === h.dormId) || null;
       return {
-        담당기숙사ID: dorm?.id || h.dormId || "",
+        담당기숙사명: getDormLabel(dorm?.id || h.dormId),
         지역: dorm?.site || h.site,
         성별: h.gender,
         이름: h.name,
@@ -9471,7 +9501,7 @@ const exportExcel = () => {
         const common = dormCommonEntrance(dorm);
         const unit = dormUnitEntrance(dorm);
         return {
-          담당기숙사ID: r.dormId || "",
+          담당기숙사명: getDormLabel(r.dormId),
           보고일: formatDateOnly(r.reportDate || ""),
           지역: dorm?.site || r.site || "",
           건물명: dorm?.buildingName || r.buildingName || "",
@@ -10160,11 +10190,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const openDormContractEdit = (c: DormContract) => {
     const { id: _id, ...rest } = c;
-    setDormContractForm({
-      ...rest,
-      contractStatus: "자동선택",
-      contractType: "자동선택",
-    });
+    // 저장된 계약상태/유형을 그대로 로드(자동선택으로 강제 초기화하지 않음) → 폼 값이 테이블/Excel 표시값과 일치.
+    // 자동 재계산이 필요하면 사용자가 직접 "자동선택"으로 변경. 자동계산값은 안내문에 참고로 항상 표시.
+    setDormContractForm({ ...rest });
     setEditingDormContractId(c.id);
     setShowDormContractForm(true);
   };
@@ -10386,7 +10414,24 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     // 최신 users state 의 값을 우선 사용(저장 직후 갱신분 반영). 활성 여부는 is_active!==false 로 정규화.
     const latest = users.find((x) => x.id === u.id) || u;
     const { id: _id, createdAt: _c, password: _p, ...rest } = latest;
-    setUserForm({ ...rest, isActive: latest.isActive !== false, password: "" });
+    // 담당 기숙사(dorm_id)가 있으면 운영 기숙사에서 다시 찾아 주소/건물/동/호/현관을 form 에 자동 세팅.
+    // (profiles 에는 파생 필드가 저장되지 않아 재오픈 시 비어 보이던 문제 보정. dorm_id 는 미선택으로 초기화하지 않음.)
+    const linkedDorm = latest.dormId
+      ? operationalDorms.find((d) => d.id === latest.dormId) || dorms.find((d) => d.id === latest.dormId)
+      : undefined;
+    setUserForm({
+      ...rest,
+      isActive: latest.isActive !== false,
+      password: "",
+      dormId: latest.dormId || "",
+      siteAccess: linkedDorm ? linkedDorm.site : rest.siteAccess,
+      roadAddress: linkedDorm ? linkedDorm.address : rest.roadAddress,
+      buildingName: linkedDorm ? linkedDorm.buildingName : rest.buildingName,
+      dong: linkedDorm ? stripDongHoSuffix(linkedDorm.dong) : rest.dong,
+      roomHo: linkedDorm ? stripDongHoSuffix(linkedDorm.roomHo) : rest.roomHo,
+      공동현관: linkedDorm ? linkedDorm.공동현관 : rest.공동현관,
+      세대현관: linkedDorm ? linkedDorm.세대현관 : rest.세대현관,
+    });
     setEditingUserId(u.id);
     setShowUserForm(true);
   };
@@ -11639,7 +11684,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["담당기숙사ID", "지역", "성별", "이름", "연락처", "부서", "도로명주소", "건물명", "동", "호수", "공동현관", "세대현관", "담당관리자", "예상입실일", "입실일", "예상퇴실일", "퇴실예정일", "실제퇴실일", "천안이동일", "계약만료일", "남은일수", "거주상태", "입주유형", "연장사유", "특이사항 메모", "등록일", "수정일"],
+                      ["담당기숙사명", "지역", "성별", "이름", "연락처", "부서", "도로명주소", "건물명", "동", "호수", "공동현관", "세대현관", "담당관리자", "예상입실일", "입실일", "예상퇴실일", "퇴실예정일", "실제퇴실일", "천안이동일", "계약만료일", "남은일수", "거주상태", "입주유형", "연장사유", "특이사항 메모", "등록일", "수정일"],
                       [],
                     ]);
                     const wb = XLSX.utils.book_new();
@@ -11653,7 +11698,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["담당기숙사ID", "지역", "성별", "건물명", "주소", "동", "호수", "평수", "계약시작", "계약종료", "계약만료일", "남은일수", "계약금액", "상태", "공동현관", "세대현관", "담당관리자", "선납계약금", "부동산명", "잔금일", "비고"],
+                      ["담당기숙사명", "지역", "성별", "건물명", "주소", "동", "호수", "평수", "계약시작", "계약종료", "계약만료일", "남은일수", "계약금액", "상태", "공동현관", "세대현관", "담당관리자", "선납계약금", "부동산명", "잔금일", "비고"],
                       [],
                     ]);
                     const wb = XLSX.utils.book_new();
@@ -11667,7 +11712,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["담당기숙사ID", "지역", "기숙사", "이름", "성별", "부서", "연락처", "입실일", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "예상입실일", "퇴실예정일", "예상퇴실일", "실제퇴실일", "상태", "비고"],
+                      ["담당기숙사명", "지역", "기숙사", "이름", "성별", "부서", "연락처", "입실일", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "예상입실일", "퇴실예정일", "예상퇴실일", "실제퇴실일", "상태", "비고"],
                       [],
                     ]);
                     const wb = XLSX.utils.book_new();
@@ -11681,7 +11726,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["담당기숙사ID", "지역", "건물명", "기숙사주소", "동", "호수", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "비품명", "수량", "모델명", "메이커", "구매액", "구매일", "지급일", "매각일", "비고"],
+                      ["담당기숙사명", "지역", "건물명", "기숙사주소", "동", "호수", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "비품명", "수량", "모델명", "메이커", "구매액", "구매일", "지급일", "매각일", "비고"],
                       [],
                     ]);
                     const wb = XLSX.utils.book_new();
@@ -11709,7 +11754,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   onClick={() => {
                     const ws = XLSX.utils.aoa_to_sheet([
-                      ["담당기숙사ID", "보고일", "지역", "건물명", "동", "호수", "공동현관", "세대현관", "담당관리자", "청소담당자", "주차", "월", "청소상태", "확인결과", "점수", "메모"],
+                      ["담당기숙사명", "보고일", "지역", "건물명", "동", "호수", "공동현관", "세대현관", "담당관리자", "청소담당자", "주차", "월", "청소상태", "확인결과", "점수", "메모"],
                       [],
                     ]);
                     const wb = XLSX.utils.book_new();
@@ -14175,6 +14220,22 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         } as Occupant)).filter((o) => occupantMatchesMenuSearch(o))
                       : [])
                   ]
+                    .sort((a, b) => {
+                      // 상태 우선순위: 거주중 → 만료예정 → 배정대기/대기중 → 퇴실/과거거주
+                      const rank = (o: Occupant) => {
+                        const ds = occupantDisplayStatus(o);
+                        if (ds === "거주중") return 0;
+                        if (ds === "만료예정") return 1;
+                        if (ds === "배정대기") return 2;
+                        return 3; // 퇴실 / 과거거주
+                      };
+                      const ra = rank(a), rb = rank(b);
+                      if (ra !== rb) return ra - rb;
+                      // 같은 상태: 입실일 최신순, 없으면 이름순
+                      const da = a.moveInDate || "", db = b.moveInDate || "";
+                      if (da !== db) return db.localeCompare(da);
+                      return (a.employeeName || "").localeCompare(b.employeeName || "");
+                    })
                     .map((o) => {
                       // 기숙사 기준 단일 조회(dormId 우선, 실패 시 호실키 재매칭). 공동현관/세대현관 등 파생값에 사용.
                       const dorm = getOccupantDorm(o);
@@ -14205,7 +14266,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{formatRoomHo(dorm?.roomHo) || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dormCommonEntrance(dorm)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dormUnitEntrance(dorm)}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{dorm?.leaseStatus || "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{(() => {
+                          if (!dorm) return "-";
+                          const k = makeDormMatchKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+                          const c = dormContracts.find((x) => !x.isDeleted && x.contractStatus !== "종료" && x.contractStatus !== "해지" && makeDormMatchKey(x.site, x.buildingName, x.dong, x.roomHo) === k);
+                          return c ? getContractDisplayStatus(c) : getOccupancyStatus(dorm.id, dorm.capacity);
+                        })()}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(o.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractRemainLabel(o.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm?.id)}</td>
@@ -15290,15 +15356,31 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
             {inventorySubTab === "status" && (
               <div className={`${theme.darkMode ? "mb-4 rounded-3xl border border-slate-700 bg-slate-950 p-4" : "mb-4 rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
-                <div className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>기숙사별 비품 현황</div>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className={`${theme.darkMode ? "text-sm font-semibold text-slate-300" : "text-sm font-semibold text-slate-700"}`}>기숙사별 비품 현황 <span className="text-xs font-normal text-slate-400">(클릭: 해당 기숙사 필터 · 더블클릭: 상세보기)</span></div>
+                  {selectedInventoryDormId && (
+                    <button type="button" onClick={() => setSelectedInventoryDormId("")} className="rounded-2xl border border-slate-300 px-3 py-1 text-xs font-medium text-slate-600 hover:bg-white">
+                      전체 비품 보기
+                    </button>
+                  )}
+                </div>
                 <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-                  {Object.entries(inventoryByDorm).map(([dormId, data]) => (
-                    <div key={dormId} className={`rounded-2xl p-3 shadow-sm ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
-                      <div className={`font-medium text-sm ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{data.dormName}</div>
-                      <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>총 등록: {data.itemCount}개 · 현재 보유: {data.currentItems}개</div>
-                      <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>총 구매액: {formatNumber(data.totalAmount)}원</div>
-                    </div>
-                  ))}
+                  {Object.entries(inventoryByDorm).map(([dormId, data]) => {
+                    const isSelected = selectedInventoryDormId === dormId;
+                    return (
+                      <button
+                        key={dormId}
+                        type="button"
+                        onClick={() => handleInventoryCardClick(dormId)}
+                        onDoubleClick={() => openDormDetailModal(dormId)}
+                        className={`rounded-2xl p-3 text-left shadow-sm transition ${isSelected ? "ring-2 ring-blue-500 " : ""}${theme.darkMode ? "bg-slate-900 hover:bg-slate-800" : "bg-white hover:bg-slate-50"}`}
+                      >
+                        <div className={`font-medium text-sm ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{data.dormName}{isSelected && <span className="ml-1 rounded-full bg-blue-100 px-1.5 py-0.5 text-[0.6rem] font-semibold text-blue-700">선택됨</span>}</div>
+                        <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>총 등록: {data.itemCount}개 · 현재 보유: {data.currentItems}개</div>
+                        <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>총 구매액: {formatWon(data.totalAmount)}원</div>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -15976,15 +16058,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                       <td className="px-3 py-2">{o.employeeName}</td>
                                       <td className="px-3 py-2">{formatDateOnly(o.moveInDate || "") || "-"}</td>
                                       <td className="px-3 py-2">{formatDateOnly(o.actualMoveOutDate || o.moveOutDueDate || "") || "-"}</td>
-                                      <td className="px-3 py-2 text-right">{stayMonths}</td>
-                                      <td className="px-3 py-2 text-right">{monthlyRentOrMaintenance}</td>
-                                      <td className="px-3 py-2 text-right">{formatNumber(prepaymentDeposit)}원</td>
+                                      <td className="px-3 py-2 text-right">{stayMonths}개월</td>
+                                      <td className="px-3 py-2 text-right">{formatWon(monthlyRentOrMaintenance)}원</td>
+                                      <td className="px-3 py-2 text-right">{formatWon(prepaymentDeposit)}원</td>
                                       <td className="px-3 py-2 text-right">0원</td>
                                       <td className="px-3 py-2 text-right">0원</td>
-                                      <td className="px-3 py-2 text-right">{formatNumber(defectCost)}원</td>
-                                      <td className="px-3 py-2 text-right">{formatNumber(cleaningCost)}원</td>
-                                      <td className="px-3 py-2 text-right">구매:{formatNumber(inventoryPurchaseCost)} / 매각:{formatNumber(inventorySaleCost)} / 폐기:{formatNumber(inventoryDisposalCost)}</td>
-                                      <td className="px-3 py-2">{manualCost ? `기타 비용 ${formatNumber(manualCost)}원` : ""}</td>
+                                      <td className="px-3 py-2 text-right">{formatWon(defectCost)}원</td>
+                                      <td className="px-3 py-2 text-right">{formatWon(cleaningCost)}원</td>
+                                      <td className="px-3 py-2 text-right">구매:{formatWon(inventoryPurchaseCost)} / 매각:{formatWon(inventorySaleCost)} / 폐기:{formatWon(inventoryDisposalCost)}</td>
+                                      <td className="px-3 py-2">{manualCost ? `기타 비용 ${formatWon(manualCost)}원` : ""}</td>
                                     </tr>
                                   );
                                 });
@@ -20009,9 +20091,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input
                   label="기숙사 관리자명"
-                  value={defectForm.dormId ? getDormManagerDisplayName(defectForm.dormId) : (defectForm.dormManagerName || "-")}
-                  onChange={() => {}}
-                  readOnly
+                  value={defectForm.dormManagerName}
+                  onChange={(v) => setDefectForm((f) => ({ ...f, dormManagerName: v }))}
+                  placeholder="기본값: 담당 관리자(대리 접수 시 수정 가능)"
+                  readOnly={isViewer}
                 />
                 {currentUser?.role !== "maintenance_reporter" ? (
                   <>

@@ -4,6 +4,12 @@
    다크모드는 앱 루트에 inline color-scheme(dark)로만 적용된다. */
 :root { color-scheme: light; }
 
+/* 모바일/태블릿 가로 깨짐(오른쪽 검은 여백) 방지: 루트 가로 오버플로 차단. */
+html, body, #root { max-width: 100%; overflow-x: hidden; }
+
+/* 고정 min-width 테이블은 컨테이너 내부에서만 가로 스크롤되도록(뷰포트를 밀지 않게). */
+.erp-table-container, .overflow-auto, .overflow-x-auto { max-width: 100%; -webkit-overflow-scrolling: touch; }
+
 /* 상태 배지/칩: 배경이 항상 밝은 파스텔(colorMap)이므로 글씨는 항상 진한색으로 고정.
    다크모드의 text-slate 반전/밝은 글씨 상속으로 인한 "글씨 안 보임"을 무력화한다. */
 .status-badge { color: #0f172a !important; }
