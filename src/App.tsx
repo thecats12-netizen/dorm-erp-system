@@ -1453,8 +1453,8 @@ export default function App() {
     checkResult: row.check_result || "-",
     score: row.score ?? 0,
     memo: row.memo || "",
-    beforePhotoDataUrls: row.before_photo_data_urls || [],
-    afterPhotoDataUrls: row.after_photo_data_urls || [],
+    beforePhotoDataUrls: row.before_photo_data_urls || row.before_photos || row.images || row.photos || [],
+    afterPhotoDataUrls: row.after_photo_data_urls || row.after_photos || row.attachments || [],
     reporterUserId: row.reporter_user_id || "",
     reporterName: row.reporter_name || "",
     confirmedBy: row.confirmed_by || undefined,
@@ -1486,8 +1486,8 @@ export default function App() {
     completeText: row.complete_text || "",
     reporterUserId: row.reporter_user_id || "",
     reporterName: row.reporter_name || "",
-    requestPhotoDataUrls: row.request_photo_data_urls || [],
-    completionPhotoDataUrls: row.completion_photo_data_urls || [],
+    requestPhotoDataUrls: row.request_photo_data_urls || row.request_photos || row.images || row.photos || [],
+    completionPhotoDataUrls: row.completion_photo_data_urls || row.completion_photos || row.attachments || [],
     createdAt: row.created_at || "",
     completedAt: row.completed_at || undefined,
     updatedAt: row.updated_at || row.created_at || new Date().toISOString(),
@@ -5091,6 +5091,44 @@ export default function App() {
     if (!d) return "-";
     return `${d.site} ${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`.replace(/\s+/g, " ").trim();
   };
+
+  // 정산: 선택 연/월 기준 실제 거주자 판정(상단 KPI·카드·상세·Excel 공통).
+  // 입실일 <= 선택월말 && (퇴실일 없음 || 퇴실일 >= 선택월1일) && isDeleted 아님.
+  const isSettlementResident = (o: Occupant, periodStart: Date, periodEnd: Date): boolean => {
+    if (o.isDeleted) return false;
+    const moveIn = parseSafeDate(o.moveInDate);
+    if (!moveIn || moveIn > periodEnd) return false;
+    const out = parseSafeDate(o.actualMoveOutDate || o.moveOutDueDate || "");
+    if (out && out < periodStart) return false;
+    return true;
+  };
+
+  // 정산: 선택 연/월 거주기간(개월) — 시작=입실일, 종료=퇴실일(actual) 또는 선택월말(초과분 제외).
+  const getSettlementStayMonths = (o: Occupant, periodEnd: Date): number => {
+    const moveIn = parseSafeDate(o.moveInDate);
+    if (!moveIn) return 0;
+    const actualOut = parseSafeDate(o.actualMoveOutDate || "");
+    const end = actualOut && actualOut < periodEnd ? actualOut : periodEnd;
+    return getStayMonths(moveIn, end);
+  };
+
+  // 정산 상단 KPI 현재 거주인 = 상세(필터된 기숙사) 합계와 동일 기준.
+  const settlementResidentCount = useMemo(() => {
+    const y = Number(safeSettlementYear), m = Number(safeSettlementMonth);
+    const start = new Date(y, m - 1, 1);
+    const end = getMonthEnd(y, m);
+    const scopedDormIds = new Set(
+      operationalDorms
+        .filter((d) =>
+          (settlementSiteFilter === "전체" || d.site === settlementSiteFilter) &&
+          (settlementGenderFilter === "전체" || d.gender === settlementGenderFilter) &&
+          (!settlementSearch || `${d.buildingName} ${d.dong} ${d.roomHo}`.toLowerCase().includes(settlementSearch.toLowerCase()))
+        )
+        .map((d) => d.id)
+    );
+    return occupants.filter((o) => scopedDormIds.has(o.dormId) && isSettlementResident(o, start, end)).length;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalDorms, occupants, settlementSiteFilter, settlementGenderFilter, settlementSearch, safeSettlementYear, safeSettlementMonth]);
 
   const reportPeriod = `${reportYear}-${reportMonth}`;
 
@@ -9516,6 +9554,7 @@ const exportExcel = () => {
           청소상태: r.cleanStatus || "",
           확인결과: r.checkResult || "",
           점수: r.score ?? "",
+          사진수: getCleaningPhotos(r).length,
           메모: r.memo || "",
           등록일: formatDateOnly(r.createdAt),
           수정일: formatDateOnly(r.updatedAt),
@@ -9620,15 +9659,9 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
   const periodEnd = validSettlementYear && validSettlementMonth ? getMonthEnd(settlementYearNum, settlementMonthNum) : null;
 
   const dormOccupants = occupants.filter((o) => {
-    if (o.dormId !== dorm.id || o.isDeleted) return false;
-    if (!periodStart || !periodEnd) return true;
-    const moveInDate = parseSafeDate(o.moveInDate);
-    if (!moveInDate || moveInDate > periodEnd) return false;
-    const actualOutDate = parseSafeDate(o.actualMoveOutDate || "");
-    if (actualOutDate && actualOutDate < periodStart) return false;
-    const dueOutDate = parseSafeDate(o.moveOutDueDate);
-    if (dueOutDate && dueOutDate < periodStart) return false;
-    return true;
+    if (o.dormId !== dorm.id) return false;
+    if (!periodStart || !periodEnd) return !o.isDeleted;
+    return isSettlementResident(o, periodStart, periodEnd); // 화면 정산과 동일 기준
   });
 
   const dormKey = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
@@ -9686,9 +9719,7 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
     )?.miscCost || 0) + itemCost;
 
   const rows = dormOccupants.map((o) => {
-    const moveInDate = parseSafeDate(o.moveInDate);
-    const moveOutDate = parseSafeDate(o.actualMoveOutDate || o.moveOutDueDate || "");
-    const stayMonths = getStayMonths(moveInDate, moveOutDate || periodEnd);
+    const stayMonths = getSettlementStayMonths(o, periodEnd ?? getMonthEnd(settlementYearNum, settlementMonthNum));
 
     return {
       주소: dorm.address,
@@ -15744,7 +15775,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className="grid gap-3 md:grid-cols-4 mb-6">
               <MiniStat label="기숙사 수" value={`${operationalDorms.length}개`} />
-              <MiniStat label="현재 거주인" value={`${occupants.filter(o => !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length}명`} />
+              <MiniStat label="현재 거주인" value={`${settlementResidentCount}명`} />
               <MiniStat label="비품 총액" value={`${formatNumber(inventory.reduce((sum, i) => sum + (i.purchaseAmount || 0), 0))}원`} />
               <MiniStat label="미완료 하자" value={`${defects.filter(d => !d.isDeleted && d.defectStatus !== "완료").length}건`} />
             </div>
@@ -15783,17 +15814,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     return siteMatch && genderMatch && searchMatch;
                   })
                   .map((dorm) => {
-                    const dormOccupants = occupants.filter((o) => {
-                      if (o.dormId !== dorm.id || o.isDeleted) return false;
-                      if (!periodStart || !periodEnd) return true;
-                      const moveInDate = parseSafeDate(o.moveInDate);
-                      if (!moveInDate || moveInDate > periodEnd) return false;
-                      const actualOutDate = parseSafeDate(o.actualMoveOutDate || "");
-                      if (actualOutDate && actualOutDate < periodStart) return false;
-                      const dueOutDate = parseSafeDate(o.moveOutDueDate);
-                      if (dueOutDate && dueOutDate < periodStart) return false;
-                      return true;
-                    });
+                    const dormOccupants = occupants.filter((o) => o.dormId === dorm.id && isSettlementResident(o, periodStart, periodEnd));
 
                     const revenue = dormOccupants.length * 2000000;
                     const inventoryCost = inventory
@@ -16045,9 +16066,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 )?.miscCost || 0;
 
                                 return dormOccupants.map((o) => {
-                                  const moveInDate = parseSafeDate(o.moveInDate);
-                                  const moveOutDate = parseSafeDate(o.actualMoveOutDate || o.moveOutDueDate || "");
-                                  const stayMonths = getStayMonths(moveInDate, moveOutDate || periodEnd);
+                                  // 거주기간(개월): 입실일~퇴실일(actual) 또는 선택월말, 초과분 제외(공통 helper).
+                                  const stayMonths = getSettlementStayMonths(o, periodEnd);
 
                                   return (
                                     <tr key={`${dorm.id}-${o.id}`} className={o.id ? "" : ""}>
