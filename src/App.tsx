@@ -3914,10 +3914,11 @@ export default function App() {
   // 4. 감점 계산 함수 (계산형, DB 저장 안함)
   // X 1건당 -5점, 담당자 기준 자동 합산
   // ============================================
-  // 청소 감점/가점 계산(담당자 단위).
-  // - 담당자 시작일(계정 생성일 = 담당 지정 시작) 이후 기간만 계산 → 담당자 변경 시 새 담당자는
-  //   본인 시작일부터 새로 계산되고, 이전 담당자 이력은 넘어가지 않음(보고서 managerUserId 로 분리).
-  // - 미제출 주차: 기본 감점(missingReportPenalty, 기본 -5) 합산.
+  // 청소 감점/가점 계산(담당자 단위) — 주차 기준: 매주 일요일~토요일(월 경계 무관).
+  // - 제출 마감 = 해당 주차 토요일 23:59. 마감 지난 주차만 미제출 판정(이번 주/미래 주차 제외).
+  // - 담당자 시작일(계정 생성일=담당 지정일) 이전에 끝난 주차는 제외 → 담당자 변경 시 새 담당자는
+  //   변경일 이후 주차부터 새로 계산, 이전 담당자 이력 미승계(보고서 managerUserId 로 분리).
+  // - 미제출 확정 주차: 기본 감점(missingReportPenalty, 기본 -5).
   // - 관리자 확인(확인완료) 시 부여한 점수(report.score) 가점/감점 합산.
   const calculateCleaningScoreByManager = (managerUserId: string): number => {
     if (!managerUserId) return 0;
@@ -3935,27 +3936,31 @@ export default function App() {
       if (r.cleanStatus === "확인완료") score += r.score || 0;
     });
 
-    // 2) 담당 기숙사 주차별 미제출 감점 — 담당 시작일 이후 ~ 현재까지만
+    // 2) 담당 기숙사 주차별(일~토) 미제출 감점 — 담당 시작일 이후 ~ 마감 지난 주차만
     const dormId = manager?.dormId;
     if (dormId && startDate) {
       const now = new Date();
-      const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
-      while (cursor <= now) {
-        const y = cursor.getFullYear();
-        const m = cursor.getMonth() + 1;
-        const monthLabel = `${y}-${String(m).padStart(2, "0")}`;
-        for (let week = 1; week <= 5; week++) {
-          const range = getWeekRange(String(y), String(m), week);
-          // 해당 월에 실제 존재하는 주차만(다음 달로 넘어간 5주차 등 제외)
-          if (range.start.getMonth() !== m - 1) continue;
-          // 담당 시작 이전 또는 미래 주차 제외
-          if (range.end < startDate || range.start > now) continue;
-          const hasReport = managerReports.some(
-            (r) => r.dormId === dormId && getMonthLabel(r.reportDate) === monthLabel && getWeekOfMonth(r.reportDate) === week
-          );
+      // 담당 시작일이 속한 주의 일요일부터 시작
+      const cursor = new Date(startDate);
+      cursor.setHours(0, 0, 0, 0);
+      cursor.setDate(cursor.getDate() - cursor.getDay()); // 일요일로 정렬
+      let guard = 0;
+      while (cursor <= now && guard < 600) {
+        guard++;
+        const wkStart = new Date(cursor); // 일요일 00:00
+        const wkEnd = new Date(cursor);
+        wkEnd.setDate(wkEnd.getDate() + 6);
+        wkEnd.setHours(23, 59, 59, 999); // 토요일 23:59 (제출 마감)
+        // 마감이 지났고(미래/이번주 제외), 담당 시작 이전에 끝난 주가 아니어야 함
+        if (wkEnd < now && wkEnd >= startDate) {
+          const hasReport = managerReports.some((r) => {
+            if (r.dormId !== dormId) return false;
+            const d = parseSafeDate(r.reportDate);
+            return !!d && d >= wkStart && d <= wkEnd;
+          });
           if (!hasReport) score += cleaningSettings.missingReportPenalty;
         }
-        cursor.setMonth(cursor.getMonth() + 1);
+        cursor.setDate(cursor.getDate() + 7);
       }
     }
 
@@ -17287,21 +17292,24 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
             )}
 
+            {/* 하자접수 담당자: 통계/원본 리스트를 위로, 기숙사 데이터를 아래로 (order 로 순서 교체) */}
+            <div className="flex flex-col">
+            <div className={isMaintenanceReporter ? "order-2" : "order-1"}>
             <div className="mt-6 erp-table-container">
               <table className="erp-table min-w-[1300px] text-left">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">#</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">지역</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">성별</th>
+                    {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">#</th>}
+                    {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">지역</th>}
+                    {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">성별</th>}
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">기숙사명</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">도로명주소</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">동</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">호수</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">공동현관</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">세대현관</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자 이름</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자 연락처</th>
+                    {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">공동현관</th>}
+                    {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">세대현관</th>}
+                    {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자 이름</th>}
+                    {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자 연락처</th>}
                     {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">기숙사 계약일</th>}
                     {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">계약종료일</th>}
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">청소담당자</th>
@@ -17320,17 +17328,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     const rowNo = (cleaningDormPg.page - 1) * cleaningDormPg.pageSize + idx + 1;
                     return (
                       <tr key={`${dorm.id}-${idx}`} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                        <td className="px-3 py-3 whitespace-nowrap">{rowNo}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{dorm.site}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{dorm.gender}</td>
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{rowNo}</td>}
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{dorm.site}</td>}
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{dorm.gender}</td>}
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{dorm.buildingName}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{dorm.address}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.dong}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.roomHo}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{dorm.공동현관 || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{dorm.세대현관 || "-"}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm.id)}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{getDormManagerPhone(dorm.id)}</td>
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{dorm.공동현관 || "-"}</td>}
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{dorm.세대현관 || "-"}</td>}
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm.id)}</td>}
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{getDormManagerPhone(dorm.id)}</td>}
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{getDormContractStartLabel(dorm.id)}</td>}
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(dorm.id)}</td>}
                         {(() => {
@@ -17382,7 +17390,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </table>
             </div>
             <PaginationBar page={cleaningDormPg.page} totalPages={cleaningDormPg.totalPages} totalCount={cleaningDormPg.totalCount} onPrev={cleaningDormPg.goPrev} onNext={cleaningDormPg.goNext} onPage={cleaningDormPg.goPage} darkMode={theme.darkMode} />
+            </div>
 
+            <div className={isMaintenanceReporter ? "order-1" : "order-2"}>
             <div className={`${theme.darkMode ? "mt-8 rounded-3xl border border-slate-700 p-5" : "mt-8 rounded-3xl border border-slate-200 p-5"}`}>
               {currentUser?.role === "maintenance_reporter" && (
                 <div className={`${theme.darkMode ? "mb-4 p-4 bg-slate-950 rounded-2xl" : "mb-4 p-4 bg-slate-50 rounded-2xl"}`}>
@@ -17523,6 +17533,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </table>
               </div>
               <PaginationBar page={cleaningReportPg.page} totalPages={cleaningReportPg.totalPages} totalCount={cleaningReportPg.totalCount} onPrev={cleaningReportPg.goPrev} onNext={cleaningReportPg.goNext} onPage={cleaningReportPg.goPage} darkMode={theme.darkMode} />
+            </div>
+            </div>
             </div>
           </section>
         )}
