@@ -6959,11 +6959,13 @@ export default function App() {
       })
       .filter((x): x is NonNullable<typeof x> => !!x);
 
-    const within30 = enriched
-      .filter((x) => x.date >= today0 && x.date <= in30)
-      .sort((a, b) => a.date.getTime() - b.date.getTime());
     const thisMonth = enriched
       .filter((x) => x.date >= monthStart && x.date <= monthEnd)
+      .sort((a, b) => a.date.getTime() - b.date.getTime());
+    // 우선순위: 이번 달 퇴실 예정에 포함된 인원은 30일 이내 목록에서 중복 제외.
+    const thisMonthIds = new Set(thisMonth.map((x) => x.occupant.id));
+    const within30 = enriched
+      .filter((x) => x.date >= today0 && x.date <= in30 && !thisMonthIds.has(x.occupant.id))
       .sort((a, b) => a.date.getTime() - b.date.getTime());
 
     return { within30, thisMonth };
@@ -10702,6 +10704,30 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     setShowNewHireForm(true);
   };
 
+  // 대시보드 퇴실예정 클릭: 미배정(대기/미배정/배정대기)이면 신입사원 폼, 배정완료면 입주자 폼으로 이동.
+  // 대상은 이름/연락처/연결ID 기준으로 매칭해 등록·수정 모달을 바로 연다.
+  const openMoveOutTarget = (o: Occupant) => {
+    const unassigned = !o.dormId || o.status === "미배정" || o.status === "대기중";
+    if (unassigned) {
+      const norm = (s?: string) => (s || "").replace(/\D/g, "");
+      const hire = newHires.find(
+        (h) =>
+          !h.isDeleted &&
+          ((o.sourceNewHireId && h.id === o.sourceNewHireId) ||
+            (h.name === o.employeeName && (!o.phone || norm(h.phone) === norm(o.phone))))
+      );
+      if (hire) {
+        setActiveTab("newHires");
+        openNewHireEdit(hire);
+        return;
+      }
+    }
+    setActiveTab("occupants");
+    setOccupantForm(o);
+    setEditingOccupantId(o.id);
+    setShowOccupantForm(true);
+  };
+
   const buildNewHireFormFromOccupant = (occupant: Occupant): NewHireFormState => {
     const dorm = operationalDorms.find((d) => d.id === occupant.dormId) || dorms.find((d) => d.id === occupant.dormId);
     const occupancyStatus = ["거주중", "만료예정", "신규입주"].includes(occupant.status)
@@ -12508,12 +12534,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           <button
                             key={`${group.key}-${x.occupant.id}`}
                             type="button"
-                            onClick={() => {
-                              setActiveTab("occupants");
-                              setOccupantForm(x.occupant);
-                              setEditingOccupantId(x.occupant.id);
-                              setShowOccupantForm(true);
-                            }}
+                            onClick={() => openMoveOutTarget(x.occupant)}
                             className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-2.5 text-left transition ${theme.darkMode ? "border-slate-700 bg-slate-950 hover:bg-slate-800" : "border-slate-200 bg-slate-50 hover:bg-slate-100"}`}
                           >
                             <span className="min-w-0">
