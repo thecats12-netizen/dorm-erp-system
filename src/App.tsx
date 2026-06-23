@@ -17382,7 +17382,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           const cs = getDormCleaningSummary(dorm);
                           return (
                             <>
-                              <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[120px]">{cs.cleanerName}</td>
+                              <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[120px]">{getDormManagerDisplayName(dorm.id)}</td>
                               <td className="px-3 py-3 whitespace-nowrap">{cs.lastDate}</td>
                               <td className="px-3 py-3 whitespace-nowrap">
                                 <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${cs.needsInspection ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`} title={cs.reason}>
