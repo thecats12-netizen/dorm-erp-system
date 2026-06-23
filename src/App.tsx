@@ -3914,40 +3914,52 @@ export default function App() {
   // 4. 감점 계산 함수 (계산형, DB 저장 안함)
   // X 1건당 -5점, 담당자 기준 자동 합산
   // ============================================
+  // 청소 감점/가점 계산(담당자 단위).
+  // - 담당자 시작일(계정 생성일 = 담당 지정 시작) 이후 기간만 계산 → 담당자 변경 시 새 담당자는
+  //   본인 시작일부터 새로 계산되고, 이전 담당자 이력은 넘어가지 않음(보고서 managerUserId 로 분리).
+  // - 미제출 주차: 기본 감점(missingReportPenalty, 기본 -5) 합산.
+  // - 관리자 확인(확인완료) 시 부여한 점수(report.score) 가점/감점 합산.
   const calculateCleaningScoreByManager = (managerUserId: string): number => {
-    // 해당 담당자의 모든 청소보고를 찾기
-    const managerReports = cleaningReports.filter(r => r.managerUserId === managerUserId);
-    
-    // 월별로 그룹화
-    const monthReports = new Map<string, CleaningReport[]>();
-    managerReports.forEach(report => {
-      const month = getMonthLabel(report.reportDate);
-      if (!monthReports.has(month)) {
-        monthReports.set(month, []);
-      }
-      monthReports.get(month)!.push(report);
+    if (!managerUserId) return 0;
+    const manager = users.find((u) => u.id === managerUserId);
+    const startDate = (manager && parseSafeDate(manager.createdAt)) || null;
+    // 본인이 담당자로 지정된(=managerUserId) 보고서만, 삭제/영구삭제 제외
+    const managerReports = cleaningReports.filter(
+      (r) => r.managerUserId === managerUserId && !r.isDeleted && !r.isPermanentDeleted
+    );
+
+    let score = 0;
+
+    // 1) 관리자 확인(확인완료) 시 부여 점수 합산 (+가점/감점)
+    managerReports.forEach((r) => {
+      if (r.cleanStatus === "확인완료") score += r.score || 0;
     });
 
-    // 각 월별로 감점 계산
-    let totalPenalty = 0;
-    monthReports.forEach((reports, _month) => {
-      // 주차별 요약 (1~5주)
-      const weeks = new Map<number, { hasReport: boolean; status: "O" | "X" | "예정" }>();
-      
-      for (let week = 1; week <= 5; week++) {
-        const hasReport = reports.some(r => getWeekOfMonth(r.reportDate) === week);
-        weeks.set(week, {
-          hasReport,
-          status: hasReport ? "O" : "X",
-        });
+    // 2) 담당 기숙사 주차별 미제출 감점 — 담당 시작일 이후 ~ 현재까지만
+    const dormId = manager?.dormId;
+    if (dormId && startDate) {
+      const now = new Date();
+      const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+      while (cursor <= now) {
+        const y = cursor.getFullYear();
+        const m = cursor.getMonth() + 1;
+        const monthLabel = `${y}-${String(m).padStart(2, "0")}`;
+        for (let week = 1; week <= 5; week++) {
+          const range = getWeekRange(String(y), String(m), week);
+          // 해당 월에 실제 존재하는 주차만(다음 달로 넘어간 5주차 등 제외)
+          if (range.start.getMonth() !== m - 1) continue;
+          // 담당 시작 이전 또는 미래 주차 제외
+          if (range.end < startDate || range.start > now) continue;
+          const hasReport = managerReports.some(
+            (r) => r.dormId === dormId && getMonthLabel(r.reportDate) === monthLabel && getWeekOfMonth(r.reportDate) === week
+          );
+          if (!hasReport) score += cleaningSettings.missingReportPenalty;
+        }
+        cursor.setMonth(cursor.getMonth() + 1);
       }
+    }
 
-      // X 개수 * 감점
-      const xCount = Array.from(weeks.values()).filter(w => w.status === "X").length;
-      totalPenalty += xCount * cleaningSettings.missingReportPenalty;
-    });
-
-    return totalPenalty;
+    return score;
   };
 
   const calculateTotalScore = (managerUserId: string): number => {
@@ -5934,12 +5946,14 @@ export default function App() {
         report.reporterUserId === currentUser?.id ||
         report.managerUserId === currentUser?.id;
       const isReporter = currentUser?.role === "maintenance_reporter";
-      // 하자접수 담당자: 본인 담당 기숙사 + 본인(이름/등록자) 보고서만 조회.
+      // 하자접수 담당자 조회 범위:
+      //  - 본인이 직접 등록한 보고서(reporterUserId)
+      //  - 관리자가 대신 등록했어도 담당 기숙사가 본인 기숙사이고 담당 관리자명이 본인인 보고서
       const matchesOwnReporter =
-        report.dormId === currentUser?.dormId &&
-        (report.cleanerName === currentUser?.displayName ||
-          report.cleanerName === currentUser?.username ||
-          report.reporterUserId === currentUser?.id);
+        report.reporterUserId === currentUser?.id ||
+        (report.dormId === currentUser?.dormId &&
+          (report.managerName === currentUser?.displayName ||
+            report.managerUserId === currentUser?.id));
       return (
         Boolean(matchesYearMonth) &&
         matchesSite &&
@@ -7619,6 +7633,31 @@ export default function App() {
     setSaleForm(saleTemplate());
     setEditingSaleId(null);
     setShowSaleForm(false);
+  };
+
+  // 새 하자접수 등록 폼 열기(담당자는 본인 기숙사 자동 채움). 목록 상단/필터 영역 버튼 공통 사용.
+  const openNewDefectForm = () => {
+    if (!currentUser) return;
+    const currentDorm =
+      currentUser.role === "maintenance_reporter" && currentUser.dormId
+        ? operationalDorms.find((d) => d.id === currentUser.dormId)
+        : undefined;
+    setDefectForm({
+      ...defectTemplate(),
+      reporterUserId: currentUser.id,
+      reporterName: currentUser.displayName,
+      dormManagerName: currentUser.displayName,
+      site: currentDorm?.site || "평택",
+      dormId: currentDorm?.id || "",
+      buildingName: currentDorm?.buildingName || "",
+      dong: currentDorm?.dong || "",
+      ho: currentDorm?.roomHo || "",
+      공동현관: currentDorm?.공동현관 || "",
+      세대현관: currentDorm?.세대현관 || "",
+      roadAddress: currentDorm?.address || "",
+    });
+    setEditingDefectId(null);
+    setShowDefectForm(true);
   };
 
   const saveDefect = () => {
@@ -11740,22 +11779,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 >
                   <Menu className="h-5 w-5" />
                 </button>
-                <button
-                  type="button"
-                  title="알림 보기"
-                  onClick={() => setActiveTab("notificationManagement")}
-                  className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl ${theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
-                >
-                  <Bell className="h-5 w-5" />
-                </button>
-                <button
-                  type="button"
-                  title="문서/메시지 보기"
-                  onClick={() => setActiveTab("documentManagement")}
-                  className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl ${theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
-                >
-                  <MessageSquare className="h-5 w-5" />
-                </button>
+                {!isMaintenanceReporter && (
+                  <button
+                    type="button"
+                    title="알림 보기"
+                    onClick={() => setActiveTab("notificationManagement")}
+                    className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl ${theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                  >
+                    <Bell className="h-5 w-5" />
+                  </button>
+                )}
+                {!isMaintenanceReporter && (
+                  <button
+                    type="button"
+                    title="문서/메시지 보기"
+                    onClick={() => setActiveTab("documentManagement")}
+                    className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl ${theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                  >
+                    <MessageSquare className="h-5 w-5" />
+                  </button>
+                )}
                 {canManageUsers(currentUser) && (
                   <button
                     type="button"
@@ -17195,7 +17238,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="grid gap-4 lg:grid-cols-3">
               <Input label="연도" value={cleaningYear} onChange={(v) => setCleaningYear(v)} placeholder="YYYY" />
               <Input label="월" value={cleaningMonth} onChange={(v) => setCleaningMonth(v)} placeholder="MM" />
-              <SelectInput label="지역" value={cleaningDormSiteFilter} onChange={(v) => setCleaningDormSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
+              {!isMaintenanceReporter && (
+                <SelectInput label="지역" value={cleaningDormSiteFilter} onChange={(v) => setCleaningDormSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
+              )}
             </div>
             {!isMaintenanceReporter && (
             <div className="mt-4 grid gap-4 lg:grid-cols-3">
@@ -19447,7 +19492,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   접수일, 기숙사관리자명, 주소, 하자신청/완료 내용, 사진 첨부
                 </p>
               </div>
-
+              {/* 하자접수 담당자: + 하자접수 버튼을 카드 오른쪽 끝에 정렬 */}
+              {isMaintenanceReporter && canFileDefect(currentUser) && (
+                <button
+                  onClick={openNewDefectForm}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-white"
+                >
+                  <Plus className="h-4 w-4" /> 하자접수
+                </button>
+              )}
             </div>
 
             <div className="grid gap-4 mb-4 md:grid-cols-4">
@@ -19485,30 +19538,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
               )}
               <div className="flex items-end justify-end gap-2 md:col-span-1">
-                {canFileDefect(currentUser) && (
+                {!isMaintenanceReporter && canFileDefect(currentUser) && (
                   <button
-                    onClick={() => {
-                      const currentDorm =
-                        currentUser?.role === "maintenance_reporter" && currentUser.dormId
-                          ? operationalDorms.find((d) => d.id === currentUser.dormId)
-                          : undefined;
-                      setDefectForm({
-                        ...defectTemplate(),
-                        reporterUserId: currentUser.id,
-                        reporterName: currentUser.displayName,
-                        dormManagerName: currentUser.displayName,
-                        site: currentDorm?.site || "평택",
-                        dormId: currentDorm?.id || "",
-                        buildingName: currentDorm?.buildingName || "",
-                        dong: currentDorm?.dong || "",
-                        ho: currentDorm?.roomHo || "",
-                        공동현관: currentDorm?.공동현관 || "",
-                        세대현관: currentDorm?.세대현관 || "",
-                        roadAddress: currentDorm?.address || "",
-                      });
-                      setEditingDefectId(null);
-                      setShowDefectForm(true);
-                    }}
+                    onClick={openNewDefectForm}
                     className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-white"
                   >
                     <Plus className="h-4 w-4" /> 하자접수
