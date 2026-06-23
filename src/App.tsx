@@ -3682,6 +3682,23 @@ export default function App() {
     return matchedUser ? formatUserDisplay(matchedUser) : formatUserDisplay(normalized);
   };
 
+  // 현재(또는 특정) 로그인 사용자의 "표시이름" 해석 — email/id 가 아닌 displayName 우선.
+  // 1) user.displayName 이 이메일/아이디 형태가 아니면 사용
+  // 2) profiles(users)에서 id 또는 username(=로그인 아이디/이메일) 일치 사용자의 displayName
+  // 3) 그래도 없으면 마지막 fallback 으로 email/아이디
+  const resolveLoginDisplayName = (user: LoginUser | null): string => {
+    if (!user) return "-";
+    const uname = (user.username || "").trim();
+    const isEmailOrId = (s?: string) => {
+      const v = (s || "").trim();
+      return !v || v.includes("@") || v === uname || /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-/.test(v);
+    };
+    if (!isEmailOrId(user.displayName)) return (user.displayName || "").trim();
+    const profile = users.find((u) => u.id === user.id || (!!uname && u.username === uname));
+    if (profile && !isEmailOrId(profile.displayName)) return (profile.displayName || "").trim();
+    return (user.displayName || uname || "-").trim();
+  };
+
   // 기숙사 관리자 단일 기준(SoT): profiles.role === "dorm_manager" AND profiles.dorm_id === dorm.id (활성 사용자).
   // 기숙사/입주자/하자접수/계약/운영시뮬 등 모든 화면이 이 함수로 동일하게 관리자명을 자동 표시한다.
   const getDormManagerUser = (dormId?: string): LoginUser | null => {
@@ -7650,8 +7667,8 @@ export default function App() {
     setDefectForm({
       ...defectTemplate(),
       reporterUserId: currentUser.id,
-      reporterName: currentUser.displayName,
-      dormManagerName: currentUser.displayName,
+      reporterName: resolveLoginDisplayName(currentUser),
+      dormManagerName: resolveLoginDisplayName(currentUser),
       site: currentDorm?.site || "평택",
       dormId: currentDorm?.id || "",
       buildingName: currentDorm?.buildingName || "",
@@ -7686,9 +7703,10 @@ export default function App() {
       reporterUserId: existing?.reporterUserId || currentUser?.id || "",
       reporterName: existing?.reporterName || currentUser?.displayName || "",
       // 하자접수 담당자는 본인 표시이름으로 자동 입력(수정 불가). admin 등은 폼 입력값 사용.
+      // 저장값도 이메일/아이디가 아니라 표시이름으로 저장.
       dormManagerName: currentUser?.role === "maintenance_reporter"
-        ? (currentUser?.displayName || "")
-        : (defectForm.dormManagerName || existing?.dormManagerName || currentUser?.displayName || ""),
+        ? resolveLoginDisplayName(currentUser)
+        : (defectForm.dormManagerName || existing?.dormManagerName || resolveLoginDisplayName(currentUser)),
       createdAt: editingDefectId
         ? existing?.createdAt || new Date().toISOString()
         : new Date().toISOString(),
@@ -20578,7 +20596,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input
                   label="기숙사 관리자명"
-                  value={isMaintenanceReporter ? (currentUser?.displayName || "") : defectForm.dormManagerName}
+                  value={isMaintenanceReporter ? resolveLoginDisplayName(currentUser) : defectForm.dormManagerName}
                   onChange={(v) => setDefectForm((f) => ({ ...f, dormManagerName: v }))}
                   placeholder="기본값: 담당 관리자(대리 접수 시 수정 가능)"
                   readOnly={isViewer || !canEditDefectManagerName}
