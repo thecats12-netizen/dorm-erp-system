@@ -7633,7 +7633,10 @@ export default function App() {
       receiptDate: editingDefectId ? existing?.receiptDate || today : today,
       reporterUserId: existing?.reporterUserId || currentUser?.id || "",
       reporterName: existing?.reporterName || currentUser?.displayName || "",
-      dormManagerName: existing?.dormManagerName || currentUser?.username || "",
+      // 하자접수 담당자는 본인 표시이름으로 자동 입력(수정 불가). admin 등은 폼 입력값 사용.
+      dormManagerName: currentUser?.role === "maintenance_reporter"
+        ? (currentUser?.displayName || "")
+        : (defectForm.dormManagerName || existing?.dormManagerName || currentUser?.displayName || ""),
       createdAt: editingDefectId
         ? existing?.createdAt || new Date().toISOString()
         : new Date().toISOString(),
@@ -11149,6 +11152,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   const currentMenuGroup = menuGroupForTab[activeTab];
   const isViewer = currentUser?.role === "viewer";
   const isMaintenanceReporterWithDorm = currentUser?.role === "maintenance_reporter" && !!currentUser.dormId;
+  // 하자접수 담당자(maintenance_reporter) 전용 화면 제한 helper.
+  const isMaintenanceReporter = currentUser?.role === "maintenance_reporter";
+  const canDownloadFiles = !isMaintenanceReporter; // 이미지/PDF/엑셀/보고서 다운로드 가능 여부
+  const canViewOperationStats = !isMaintenanceReporter; // 대시보드 통계/지역별 통계 표시 여부
+  const canEditDefectManagerName = currentUser?.role === "admin"; // 하자접수 관리자명 수정 가능(admin만)
 
   useEffect(() => {
     if (isMaintenanceAccessUser && activeTab !== "cleaningReports" && activeTab !== "defects") {
@@ -11826,6 +11834,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
               </div>
             )}
+            {canViewOperationStats && (
             <div className="mt-6 grid gap-4 sm:grid-cols-2 md:landscape:grid-cols-4 xl:grid-cols-5">
               <button type="button" onClick={() => { setDormStatusFilter("사용중"); setDormSiteFilter("전체"); setDormGenderFilter("전체"); setDormSearch(""); setActiveTab("dorms"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">기숙사 수(현재 사용중인 기숙사 수)</div>
@@ -11848,8 +11857,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.inventoryCount}</div>
               </button>
             </div>
+            )}
           </header>
 
+          {canViewOperationStats && (
           <section className={`mb-6 rounded-3xl ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"} p-5 shadow-sm ring-1`}>
             <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
@@ -11918,6 +11929,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className={`rounded-3xl border p-4 text-sm ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-400" : "border-slate-200 bg-slate-50 text-slate-500"}`}>지역별 상세 통계가 접혀 있습니다. 펼치기 버튼을 클릭하면 전체 통계를 확인할 수 있습니다.</div>
             )}
           </section>
+          )}
 
           <section className={`mb-6 rounded-3xl p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
             <div className="mt-4 flex flex-wrap gap-2">
@@ -11973,13 +11985,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   유지보수 등록
                 </button>
               )}
-              <button
-                type="button"
-                onClick={exportExcel}
-                className={`inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold border ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-              >
-                <Download className="h-4 w-4" /> Excel 내보내기
-              </button>
+              {canDownloadFiles && (
+                <button
+                  type="button"
+                  onClick={exportExcel}
+                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold border ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
+                >
+                  <Download className="h-4 w-4" /> Excel 내보내기
+                </button>
+              )}
               {currentUser.role !== "maintenance_reporter" && canEditData(currentUser) && (
                 <button
                   type="button"
@@ -11989,13 +12003,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <Upload className="h-4 w-4" /> Excel 등록
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => window.print()}
-                className={`inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}
-              >
-                <FileSpreadsheet className="h-4 w-4" /> 보고서 생성
-              </button>
+              {canDownloadFiles && (
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}
+                >
+                  <FileSpreadsheet className="h-4 w-4" /> 보고서 생성
+                </button>
+              )}
             </div>
           </section>
 
@@ -19597,13 +19613,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
                       <td className="px-3 py-3">
                         <div className="flex gap-2">
-                          <button
-                            onClick={(e) => { e.stopPropagation(); printDefectReport(d); }}
-                            className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}
-                            title="하자접수 보고서 PDF 저장"
-                          >
-                            PDF
-                          </button>
+                          {canDownloadFiles && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); printDefectReport(d); }}
+                              className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}
+                              title="하자접수 보고서 PDF 저장"
+                            >
+                              PDF
+                            </button>
+                          )}
                           {canFileDefect(currentUser) && (
                             <button
                               onClick={(e) => {
@@ -20456,10 +20474,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input
                   label="기숙사 관리자명"
-                  value={defectForm.dormManagerName}
+                  value={isMaintenanceReporter ? (currentUser?.displayName || "") : defectForm.dormManagerName}
                   onChange={(v) => setDefectForm((f) => ({ ...f, dormManagerName: v }))}
                   placeholder="기본값: 담당 관리자(대리 접수 시 수정 가능)"
-                  readOnly={isViewer}
+                  readOnly={isViewer || !canEditDefectManagerName}
                 />
                 {currentUser?.role !== "maintenance_reporter" ? (
                   <>
@@ -20600,13 +20618,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         onClick={() => setImageLightbox({ urls: defectForm.requestPhotoDataUrls, index: idx, title: `하자접수 · ${defectForm.buildingName || ""}` })}
                         className="h-24 w-24 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200"
                       />
-                      <button
-                        type="button"
-                        onClick={() => downloadImage(src, `접수사진_${defectForm.buildingName || "기숙사"}_${idx + 1}.${dataUrlExt(src)}`)}
-                        className="absolute bottom-1 left-1 rounded bg-black/70 px-2 py-1 text-[10px] text-white hover:bg-black/85"
-                      >
-                        다운로드
-                      </button>
+                      {canDownloadFiles && (
+                        <button
+                          type="button"
+                          onClick={() => downloadImage(src, `접수사진_${defectForm.buildingName || "기숙사"}_${idx + 1}.${dataUrlExt(src)}`)}
+                          className="absolute bottom-1 left-1 rounded bg-black/70 px-2 py-1 text-[10px] text-white hover:bg-black/85"
+                        >
+                          다운로드
+                        </button>
+                      )}
                       {!isViewer && (
                         <button
                           type="button"
@@ -20628,7 +20648,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </button>
                   )}
                 </div>
-                {(defectForm.requestPhotoDataUrls.length > 0 || defectForm.completionPhotoDataUrls.length > 0) && (
+                {canDownloadFiles && (defectForm.requestPhotoDataUrls.length > 0 || defectForm.completionPhotoDataUrls.length > 0) && (
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     {defectForm.requestPhotoDataUrls.length > 0 && (
                       <>
