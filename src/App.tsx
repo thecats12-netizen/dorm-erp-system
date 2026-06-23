@@ -4156,6 +4156,8 @@ export default function App() {
       managerName: user.displayName || user.username, // 담당자명 자동
       reporterUserId: user.id,
       reporterName: user.displayName || user.username,
+      // 하자접수 담당자는 청소담당자 = 본인(자동, 수정불가)
+      cleanerName: user.role === "maintenance_reporter" ? (user.displayName || user.username) : baseForm.cleanerName,
       weekLabel: getWeekLabel(today),
       monthLabel: month,
     };
@@ -5931,14 +5933,20 @@ export default function App() {
         currentUser?.role === "admin" ||
         report.reporterUserId === currentUser?.id ||
         report.managerUserId === currentUser?.id;
-      const onlyOwnReports = currentUser?.role === "maintenance_reporter";
+      const isReporter = currentUser?.role === "maintenance_reporter";
+      // 하자접수 담당자: 본인 담당 기숙사 + 본인(이름/등록자) 보고서만 조회.
+      const matchesOwnReporter =
+        report.dormId === currentUser?.dormId &&
+        (report.cleanerName === currentUser?.displayName ||
+          report.cleanerName === currentUser?.username ||
+          report.reporterUserId === currentUser?.id);
       return (
         Boolean(matchesYearMonth) &&
         matchesSite &&
         matchesDormSearch &&
         matchesManager &&
         matchesStatus &&
-        (onlyOwnReports ? report.reporterUserId === currentUser?.id : matchesPermission)
+        (isReporter ? matchesOwnReporter : matchesPermission)
       );
     });
   }, [cleaningReports, cleaningYear, cleaningMonth, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, cleaningStatusFilter, users, currentUser]);
@@ -17249,8 +17257,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">세대현관</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자 이름</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자 연락처</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">기숙사 계약일</th>
-                    <th className="px-3 py-3 whitespace-nowrap leading-tight">계약종료일</th>
+                    {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">기숙사 계약일</th>}
+                    {!isMaintenanceReporter && <th className="px-3 py-3 whitespace-nowrap leading-tight">계약종료일</th>}
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">청소담당자</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">최근 청소일</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">점검필요</th>
@@ -17278,8 +17286,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.세대현관 || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm.id)}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{getDormManagerPhone(dorm.id)}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{getDormContractStartLabel(dorm.id)}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(dorm.id)}</td>
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{getDormContractStartLabel(dorm.id)}</td>}
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(dorm.id)}</td>}
                         {(() => {
                           const cs = getDormCleaningSummary(dorm);
                           return (
@@ -17440,9 +17448,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         </td>
                         <td className="px-3 py-3 whitespace-nowrap">
                           <div className="flex gap-2">
-                            <button onClick={() => printCleaningReport(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`} title="청소보고서 PDF 저장">
-                              PDF
-                            </button>
+                            {canDownloadFiles && (
+                              <button onClick={() => printCleaningReport(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`} title="청소보고서 PDF 저장">
+                                PDF
+                              </button>
+                            )}
                             {shouldShowMaintenanceControls(currentUser) && (
                               <button onClick={() => openCleaningReportEdit(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}>
                                 수정
@@ -19897,17 +19907,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           <div className="space-y-6">
             <div className={`rounded-2xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
               <h3 className="text-lg font-semibold mb-4">보고 기본정보</h3>
-              <FilteredDormSelector
-                value={cleaningReportForm.dormId}
-                onChange={(_dormId, dorm) => handleCleaningReportDormChange(dorm || null)}
-                currentUser={currentUser}
-                operationalDorms={operationalDorms}
-                defaultSite={cleaningReportForm.site}
-                label="기숙사"
-              />
+              {isMaintenanceReporter ? (
+                // 하자접수 담당자: 지역/성별/기숙사 수정 불가(본인 담당 기숙사 자동).
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  <Input label="지역" value={cleaningReportForm.site} readOnly />
+                  <Input label="성별" value={(currentUser?.genderAccess && currentUser.genderAccess !== "전체") ? currentUser.genderAccess : (operationalDorms.find((d) => d.id === cleaningReportForm.dormId)?.gender || "")} readOnly />
+                  <Input label="기숙사" value={cleaningReportForm.dormId ? `${cleaningReportForm.buildingName} ${formatDong(cleaningReportForm.dong)}-${formatRoomHo(cleaningReportForm.roomHo)}` : "미배정"} readOnly />
+                </div>
+              ) : (
+                <FilteredDormSelector
+                  value={cleaningReportForm.dormId}
+                  onChange={(_dormId, dorm) => handleCleaningReportDormChange(dorm || null)}
+                  currentUser={currentUser}
+                  operationalDorms={operationalDorms}
+                  defaultSite={cleaningReportForm.site}
+                  label="기숙사"
+                />
+              )}
               <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <Input label="보고일" type="date-text" value={cleaningReportForm.reportDate} onChange={(v) => setCleaningReportForm((f) => ({ ...f, reportDate: v }))} />
-                <Input label="청소 담당자" value={cleaningReportForm.cleanerName} onChange={(v) => setCleaningReportForm((f) => ({ ...f, cleanerName: v }))} />
+                <Input label="보고일" type="date-text" value={cleaningReportForm.reportDate} onChange={(v) => setCleaningReportForm((f) => ({ ...f, reportDate: v }))} readOnly={isMaintenanceReporter} />
+                <Input label="청소 담당자" value={isMaintenanceReporter ? (currentUser?.displayName || "") : cleaningReportForm.cleanerName} onChange={(v) => setCleaningReportForm((f) => ({ ...f, cleanerName: v }))} readOnly={isMaintenanceReporter} />
               </div>
             </div>
 
@@ -19960,12 +19979,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               onClick={() => setImageLightbox({ urls, index: gi, title: "청소 사진" })}
                               className="h-20 w-20 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200"
                             />
-                            <button
-                              type="button"
-                              onClick={() => downloadImage(m.url, `${base}_${gi + 1}.${dataUrlExt(m.url)}`)}
-                              className="absolute -left-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[11px] font-bold text-white hover:bg-blue-500"
-                              title="이 사진 다운로드"
-                            >↓</button>
+                            {canDownloadFiles && (
+                              <button
+                                type="button"
+                                onClick={() => downloadImage(m.url, `${base}_${gi + 1}.${dataUrlExt(m.url)}`)}
+                                className="absolute -left-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[11px] font-bold text-white hover:bg-blue-500"
+                                title="이 사진 다운로드"
+                              >↓</button>
+                            )}
                             <button
                               type="button"
                               onClick={() => removeCleaningReportPhoto(m.field, m.idx)}
@@ -19976,9 +19997,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         ))}
                       </div>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">전체 다운로드</button>
-                        <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
-                        <button type="button" onClick={() => printCleaningReport(cleaningReportForm as CleaningReport)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF 저장</button>
+                        {canDownloadFiles && (
+                          <>
+                            <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">전체 다운로드</button>
+                            <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
+                            <button type="button" onClick={() => printCleaningReport(cleaningReportForm as CleaningReport)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF 저장</button>
+                          </>
+                        )}
                         <span className="text-sm text-slate-500">총 {urls.length}장</span>
                       </div>
                     </>
@@ -21021,10 +21046,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   return (
                     <div className="flex shrink-0 flex-wrap gap-2">
                       <button type="button" onClick={() => window.open(current, "_blank")} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">새 창</button>
-                      <button type="button" onClick={() => downloadImage(current, `${base}_${safeIndex + 1}.${dataUrlExt(current)}`)} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold hover:bg-blue-500">이 이미지 저장</button>
-                      <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">전체 저장</button>
-                      <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">ZIP</button>
-                      <button type="button" onClick={() => void downloadImagesAsPdf(urls, `${base}.pdf`)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">PDF</button>
+                      {canDownloadFiles && (
+                        <>
+                          <button type="button" onClick={() => downloadImage(current, `${base}_${safeIndex + 1}.${dataUrlExt(current)}`)} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold hover:bg-blue-500">이 이미지 저장</button>
+                          <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">전체 저장</button>
+                          <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">ZIP</button>
+                          <button type="button" onClick={() => void downloadImagesAsPdf(urls, `${base}.pdf`)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">PDF</button>
+                        </>
+                      )}
                       <button type="button" onClick={() => setImageLightbox(null)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">닫기</button>
                     </div>
                   );
