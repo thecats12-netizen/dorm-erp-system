@@ -11937,6 +11937,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           </section>
           )}
 
+          {!isMaintenanceReporter && (
           <section className={`mb-6 rounded-3xl p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
             <div className="mt-4 flex flex-wrap gap-2">
               {canEditData(currentUser) && (
@@ -12020,6 +12021,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
             </div>
           </section>
+          )}
 
 
 
@@ -17333,13 +17335,33 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className={`${theme.darkMode ? "mb-4 p-4 bg-slate-950 rounded-2xl" : "mb-4 p-4 bg-slate-50 rounded-2xl"}`}>
                   <h3 className="text-lg font-semibold">내 청소보고 통계</h3>
                   {(() => {
-                    const stats = getManagerCleaningStats(currentUser.id);
+                    // 현재 로그인 사용자(본인) 청소보고만 집계 — 전체 통계가 아님.
+                    const uid = currentUser.id;
+                    const uname = currentUser.username;
+                    const dname = currentUser.displayName;
+                    const mine = cleaningReports.filter((r) =>
+                      !r.isDeleted && !r.isPermanentDeleted && (
+                        r.reporterUserId === uid ||
+                        r.managerUserId === uid ||
+                        r.cleanerName === uid ||
+                        (!!uname && r.cleanerName === uname) ||
+                        (!!dname && r.cleanerName === dname)
+                      )
+                    );
+                    const total = mine.length;
+                    const completed = mine.filter((r) => r.cleanStatus === "확인완료").length;
+                    const missing = mine.filter((r) => r.cleanStatus === "미제출").length;
+                    const bad = mine.filter((r) => r.cleanStatus === "불량").length;
+                    const photoMissing = mine.filter((r) => getCleaningPhotos(r).length === 0).length;
+                    const penalty = calculateCleaningScoreByManager(uid);
                     return (
-                      <div className="grid grid-cols-2 gap-4 mt-2">
-                        <div>총 보고: {stats.totalReports}</div>
-                        <div>완료 보고: {stats.completedReports}</div>
-                        <div>불량 보고: {stats.defectReports}</div>
-                        <div>점수: {stats.score}</div>
+                      <div className="grid grid-cols-2 gap-4 mt-2 md:grid-cols-3">
+                        <div>총 보고: {total}</div>
+                        <div>완료 보고: {completed}</div>
+                        <div>미제출: {missing}</div>
+                        <div>불량: {bad}</div>
+                        <div>사진누락: {photoMissing}</div>
+                        <div>총 감점: {penalty}</div>
                       </div>
                     );
                   })()}
@@ -19442,14 +19464,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   options={defectMonthOptions}
                 />
               </div>
-              <div className="md:col-span-1">
-                <Input
-                  label="검색"
-                  value={defectSearch}
-                  onChange={setDefectSearch}
-                  placeholder="관리자명, 주소, 내용 검색"
-                />
-              </div>
+              {!isMaintenanceReporter && (
+                <div className="md:col-span-1">
+                  <Input
+                    label="검색"
+                    value={defectSearch}
+                    onChange={setDefectSearch}
+                    placeholder="관리자명, 주소, 내용 검색"
+                  />
+                </div>
+              )}
               <div className="flex items-end justify-end gap-2 md:col-span-1">
                 {canFileDefect(currentUser) && (
                   <button
