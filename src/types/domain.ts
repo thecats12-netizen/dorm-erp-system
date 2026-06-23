@@ -22,6 +22,9 @@ export type LoginUser = {
   dormId?: string;
   isDeleted?: boolean;
   deletedAt?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
   createdAt: string;
 };
 
@@ -52,6 +55,9 @@ export type Dorm = {
   isDeleted?: boolean;
   deletedAt?: string;
   deletedBy?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
 };
 
 export type OperationalDorm = Dorm;
@@ -78,6 +84,9 @@ export type Occupant = {
   isDeleted?: boolean;
   deletedAt?: string;
   deletedBy?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
 };
 
 export type InventoryItem = {
@@ -109,6 +118,9 @@ export type InventoryItem = {
   isDeleted?: boolean;
   deletedAt?: string;
   deletedBy?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
 };
 
 export type LeaseContract = {
@@ -131,6 +143,9 @@ export type LeaseContract = {
   isDeleted?: boolean;
   deletedAt?: string;
   deletedBy?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
 };
 
 export type DormContractStatus = "진행중" | "종료" | "연장" | "해지" | "공실" | "만료예정";
@@ -173,6 +188,9 @@ export type DormContract = {
   isDeleted?: boolean;
   deletedAt?: string;
   deletedBy?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
 };
 
 export type NewHireResidenceStatus = "거주중" | "퇴실" | "연장" | "만료예정" | "대기중";
@@ -208,6 +226,9 @@ export type MilitaryPersonnel = {
   notes: string;
   isDeleted?: boolean;
   deletedAt?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -228,6 +249,9 @@ export type TrainingRecord = {
   notes: string;
   isDeleted?: boolean;
   deletedAt?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -320,6 +344,9 @@ export type NewHireEmployee = {
   isDeleted?: boolean;
   deletedAt?: string;
   deletedBy?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
 };
 
 export type SaleRecord = {
@@ -374,6 +401,9 @@ export type DefectRequest = {
   isDeleted?: boolean;
   deletedAt?: string;
   deletedBy?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
 };
 
 export type CleaningReport = {
@@ -407,6 +437,9 @@ export type CleaningReport = {
   isDeleted?: boolean;
   deletedAt?: string;
   deletedBy?: string;
+  isPermanentDeleted?: boolean;
+  permanentDeletedAt?: string;
+  permanentDeletedBy?: string;
 };
 
 export type ThemeSettings = {

@@ -35,6 +35,9 @@ const toDbDorm = (dorm: Dorm, tenantId: string, userId: string) => {
     is_deleted: dorm.isDeleted ?? false,
     deleted_at: safeDateOrNull(dorm.deletedAt),
     deleted_by: safeUuidOrNull(dorm.deletedBy),
+    is_permanent_deleted: dorm.isPermanentDeleted ?? false,
+    permanent_deleted_at: safeDateOrNull(dorm.permanentDeletedAt),
+    permanent_deleted_by: dorm.permanentDeletedBy || null,
     created_by: userId,
     updated_by: userId,
     created_at: dorm.createdAt || new Date().toISOString(),
@@ -69,6 +72,9 @@ const toDomainDorm = (row: any): Dorm => ({
   isDeleted: row.is_deleted ?? false,
   deletedAt: row.deleted_at || undefined,
   deletedBy: row.deleted_by || undefined,
+  isPermanentDeleted: row.is_permanent_deleted ?? false,
+  permanentDeletedAt: row.permanent_deleted_at || undefined,
+  permanentDeletedBy: row.permanent_deleted_by || undefined,
 });
 
 const toDbOccupant = (occupant: Occupant, tenantId: string, userId: string) => ({
@@ -92,6 +98,9 @@ const toDbOccupant = (occupant: Occupant, tenantId: string, userId: string) => (
   is_deleted: occupant.isDeleted ?? false,
   deleted_at: safeDateOrNull(occupant.deletedAt),
   deleted_by: safeUuidOrNull(occupant.deletedBy),
+  is_permanent_deleted: occupant.isPermanentDeleted ?? false,
+  permanent_deleted_at: safeDateOrNull(occupant.permanentDeletedAt),
+  permanent_deleted_by: occupant.permanentDeletedBy || null,
   created_by: userId,
   updated_by: userId,
   created_at: occupant.createdAt || new Date().toISOString(),
@@ -120,6 +129,9 @@ const toDomainOccupant = (row: any): Occupant => ({
   isDeleted: row.is_deleted ?? false,
   deletedAt: row.deleted_at || undefined,
   deletedBy: row.deleted_by || undefined,
+  isPermanentDeleted: row.is_permanent_deleted ?? false,
+  permanentDeletedAt: row.permanent_deleted_at || undefined,
+  permanentDeletedBy: row.permanent_deleted_by || undefined,
 });
 
 const toDbDormContract = (contract: DormContract, tenantId: string, userId: string) => ({
@@ -153,6 +165,9 @@ const toDbDormContract = (contract: DormContract, tenantId: string, userId: stri
   is_deleted: contract.isDeleted ?? false,
   deleted_at: safeDateOrNull(contract.deletedAt),
   deleted_by: safeUuidOrNull(contract.deletedBy),
+  is_permanent_deleted: contract.isPermanentDeleted ?? false,
+  permanent_deleted_at: safeDateOrNull(contract.permanentDeletedAt),
+  permanent_deleted_by: contract.permanentDeletedBy || null,
   created_by: userId,
   updated_by: userId,
   created_at: contract.createdAt || new Date().toISOString(),
@@ -191,6 +206,9 @@ const toDomainDormContract = (row: any): DormContract => ({
   isDeleted: row.is_deleted ?? false,
   deletedAt: row.deleted_at || undefined,
   deletedBy: row.deleted_by || undefined,
+  isPermanentDeleted: row.is_permanent_deleted ?? false,
+  permanentDeletedAt: row.permanent_deleted_at || undefined,
+  permanentDeletedBy: row.permanent_deleted_by || undefined,
 });
 
 const safeNumberOrNull = (value: string | number | null | undefined): number | null => {
@@ -254,6 +272,9 @@ const toDbNewHire = (hire: NewHireEmployee, tenantId: string, userId: string) =>
   is_deleted: hire.isDeleted ?? false,
   deleted_at: safeDateOrNull(hire.deletedAt),
   deleted_by: safeUuidOrNull(hire.deletedBy),
+  is_permanent_deleted: hire.isPermanentDeleted ?? false,
+  permanent_deleted_at: safeDateOrNull(hire.permanentDeletedAt),
+  permanent_deleted_by: hire.permanentDeletedBy || null,
   created_by: userId,
   updated_by: userId,
   created_at: hire.createdAt || new Date().toISOString(),
@@ -290,6 +311,9 @@ const toDomainNewHire = (row: any): NewHireEmployee => ({
   isDeleted: row.is_deleted ?? false,
   deletedAt: row.deleted_at || undefined,
   deletedBy: row.deleted_by || undefined,
+  isPermanentDeleted: row.is_permanent_deleted ?? false,
+  permanentDeletedAt: row.permanent_deleted_at || undefined,
+  permanentDeletedBy: row.permanent_deleted_by || undefined,
 });
 
 export const loadDormModule = async (tenantId: string): Promise<DormModuleState | null> => {

@@ -68,6 +68,9 @@ const toDbCleaningReport = (report: CleaningReport, tenantId: string, userId: st
   is_deleted: report.isDeleted ?? false,
   deleted_at: report.deletedAt,
   deleted_by: report.deletedBy,
+  is_permanent_deleted: report.isPermanentDeleted ?? false,
+  permanent_deleted_at: report.permanentDeletedAt,
+  permanent_deleted_by: report.permanentDeletedBy,
 });
 
 const toDomainCleaningReport = (row: any): CleaningReport => ({
@@ -101,6 +104,9 @@ const toDomainCleaningReport = (row: any): CleaningReport => ({
   isDeleted: row.is_deleted ?? false,
   deletedAt: row.deleted_at || undefined,
   deletedBy: row.deleted_by || undefined,
+  isPermanentDeleted: row.is_permanent_deleted ?? false,
+  permanentDeletedAt: row.permanent_deleted_at || undefined,
+  permanentDeletedBy: row.permanent_deleted_by || undefined,
 });
 
 const toDbDefectRequest = (defect: DefectRequest, tenantId: string, userId: string) => ({
@@ -134,6 +140,9 @@ const toDbDefectRequest = (defect: DefectRequest, tenantId: string, userId: stri
   is_deleted: defect.isDeleted ?? false,
   deleted_at: defect.deletedAt,
   deleted_by: defect.deletedBy,
+  is_permanent_deleted: defect.isPermanentDeleted ?? false,
+  permanent_deleted_at: defect.permanentDeletedAt,
+  permanent_deleted_by: defect.permanentDeletedBy,
 });
 
 const toDomainDefectRequest = (row: any): DefectRequest => ({
@@ -164,6 +173,9 @@ const toDomainDefectRequest = (row: any): DefectRequest => ({
   isDeleted: row.is_deleted ?? false,
   deletedAt: row.deleted_at || undefined,
   deletedBy: row.deleted_by || undefined,
+  isPermanentDeleted: row.is_permanent_deleted ?? false,
+  permanentDeletedAt: row.permanent_deleted_at || undefined,
+  permanentDeletedBy: row.permanent_deleted_by || undefined,
 });
 
 const toDbInventoryItem = (item: InventoryItem, tenantId: string, userId: string) => ({
@@ -198,6 +210,9 @@ const toDbInventoryItem = (item: InventoryItem, tenantId: string, userId: string
   is_deleted: item.isDeleted ?? false,
   deleted_at: item.deletedAt,
   deleted_by: item.deletedBy,
+  is_permanent_deleted: item.isPermanentDeleted ?? false,
+  permanent_deleted_at: item.permanentDeletedAt,
+  permanent_deleted_by: item.permanentDeletedBy,
 });
 
 const toDomainInventoryItem = (row: any): InventoryItem => ({
@@ -229,6 +244,9 @@ const toDomainInventoryItem = (row: any): InventoryItem => ({
   isDeleted: row.is_deleted ?? false,
   deletedAt: row.deleted_at || undefined,
   deletedBy: row.deleted_by || undefined,
+  isPermanentDeleted: row.is_permanent_deleted ?? false,
+  permanentDeletedAt: row.permanent_deleted_at || undefined,
+  permanentDeletedBy: row.permanent_deleted_by || undefined,
 });
 
 const toDbSettlementRecord = (record: SettlementRecord, tenantId: string, userId: string) => ({

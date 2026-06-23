@@ -296,6 +296,13 @@ function isCurrentResidentStatus(o: { isDeleted?: boolean; status: string }): bo
   return !o.isDeleted && (o.status === "거주중" || o.status === "만료예정");
 }
 
+// 휴지통/완전삭제 관리 표시 단일 기준: 삭제됨(isDeleted) 이면서 영구삭제(isPermanentDeleted)가 아닌 항목만.
+// 영구삭제(isPermanentDeleted=true) 항목은 일반 목록/휴지통/복구 목록 모두에서 숨김.
+// Supabase load·realtime·localStorage fallback 모두 이 기준을 공유.
+function isInTrash(x: { isDeleted?: boolean; isPermanentDeleted?: boolean }): boolean {
+  return x.isDeleted === true && x.isPermanentDeleted !== true;
+}
+
 // 현재 거주자(거주중/만료예정, 퇴실/과거/삭제 제외) 기준. 정원 0이면 0%(NaN 방지).
 // 공실 수 = 정원 - 현재거주자, 공실률 = 공실/정원*100, 사용률 = 거주자/정원*100.
 function computeVacancyStats(
@@ -1348,6 +1355,9 @@ export default function App() {
     isDeleted: row.is_deleted ?? false,
     deletedAt: row.deleted_at || undefined,
     deletedBy: row.deleted_by || undefined,
+    isPermanentDeleted: row.is_permanent_deleted ?? false,
+    permanentDeletedAt: row.permanent_deleted_at || undefined,
+    permanentDeletedBy: row.permanent_deleted_by || undefined,
   });
 
   const toDomainRealtimeOccupant = (row: any): Occupant => ({
@@ -1372,6 +1382,9 @@ export default function App() {
     isDeleted: row.is_deleted ?? false,
     deletedAt: row.deleted_at || undefined,
     deletedBy: row.deleted_by || undefined,
+    isPermanentDeleted: row.is_permanent_deleted ?? false,
+    permanentDeletedAt: row.permanent_deleted_at || undefined,
+    permanentDeletedBy: row.permanent_deleted_by || undefined,
   });
 
   const toDomainRealtimeDormContract = (row: any): DormContract => ({
@@ -1406,6 +1419,9 @@ export default function App() {
     isDeleted: row.is_deleted ?? false,
     deletedAt: row.deleted_at || undefined,
     deletedBy: row.deleted_by || undefined,
+    isPermanentDeleted: row.is_permanent_deleted ?? false,
+    permanentDeletedAt: row.permanent_deleted_at || undefined,
+    permanentDeletedBy: row.permanent_deleted_by || undefined,
   });
 
   const toDomainRealtimeNewHire = (row: any): NewHireEmployee => ({
@@ -1438,6 +1454,9 @@ export default function App() {
     isDeleted: row.is_deleted ?? false,
     deletedAt: row.deleted_at || undefined,
     deletedBy: row.deleted_by || undefined,
+    isPermanentDeleted: row.is_permanent_deleted ?? false,
+    permanentDeletedAt: row.permanent_deleted_at || undefined,
+    permanentDeletedBy: row.permanent_deleted_by || undefined,
   });
 
   const toDomainRealtimeCleaningReport = (row: any): CleaningReport => ({
@@ -1471,6 +1490,9 @@ export default function App() {
     isDeleted: row.is_deleted ?? false,
     deletedAt: row.deleted_at || undefined,
     deletedBy: row.deleted_by || undefined,
+    isPermanentDeleted: row.is_permanent_deleted ?? false,
+    permanentDeletedAt: row.permanent_deleted_at || undefined,
+    permanentDeletedBy: row.permanent_deleted_by || undefined,
   });
 
   const toDomainRealtimeDefectRequest = (row: any): DefectRequest => ({
@@ -1501,6 +1523,9 @@ export default function App() {
     isDeleted: row.is_deleted ?? false,
     deletedAt: row.deleted_at || undefined,
     deletedBy: row.deleted_by || undefined,
+    isPermanentDeleted: row.is_permanent_deleted ?? false,
+    permanentDeletedAt: row.permanent_deleted_at || undefined,
+    permanentDeletedBy: row.permanent_deleted_by || undefined,
   });
 
   const toDomainRealtimeInventoryItem = (row: any): InventoryItem => ({
@@ -1532,6 +1557,9 @@ export default function App() {
     isDeleted: row.is_deleted ?? false,
     deletedAt: row.deleted_at || undefined,
     deletedBy: row.deleted_by || undefined,
+    isPermanentDeleted: row.is_permanent_deleted ?? false,
+    permanentDeletedAt: row.permanent_deleted_at || undefined,
+    permanentDeletedBy: row.permanent_deleted_by || undefined,
   });
 
   const handleRealtimeTableRow = (table: string, payload: any) => {
@@ -3075,16 +3103,16 @@ export default function App() {
         version: BACKUP_VERSION,
         exportedAt: new Date().toISOString(),
         data: {
-          users: users.filter((u) => u.isDeleted).map((u) => ({ ...u, password: "" })),
-          dorms: dorms.filter((d) => d.isDeleted),
-          occupants: occupants.filter((o) => o.isDeleted),
-          dormContracts: dormContracts.filter((c) => c.isDeleted),
-          newHires: newHires.filter((h) => h.isDeleted),
-          inventory: inventory.filter((i) => i.isDeleted),
-          cleaningReports: cleaningReports.filter((r) => r.isDeleted),
-          defects: defects.filter((d) => d.isDeleted),
-          militaryPersonnel: militaryPersonnel.filter((p) => p.isDeleted),
-          militaryTrainingRecords: militaryTrainingRecords.filter((r) => r.isDeleted),
+          users: users.filter(isInTrash).map((u) => ({ ...u, password: "" })),
+          dorms: dorms.filter(isInTrash),
+          occupants: occupants.filter(isInTrash),
+          dormContracts: dormContracts.filter(isInTrash),
+          newHires: newHires.filter(isInTrash),
+          inventory: inventory.filter(isInTrash),
+          cleaningReports: cleaningReports.filter(isInTrash),
+          defects: defects.filter(isInTrash),
+          militaryPersonnel: militaryPersonnel.filter(isInTrash),
+          militaryTrainingRecords: militaryTrainingRecords.filter(isInTrash),
         },
       },
       `dorm-erp-trash-backup-${backupTimestamp()}.json`
@@ -5915,14 +5943,14 @@ export default function App() {
     });
   }, [cleaningReports, cleaningYear, cleaningMonth, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, cleaningStatusFilter, users, currentUser]);
 
-  const deletedDorms = useMemo(() => dorms.filter((d) => d.isDeleted), [dorms]);
-  const deletedDormContracts = useMemo(() => dormContracts.filter((c) => c.isDeleted), [dormContracts]);
-  const deletedNewHires = useMemo(() => newHires.filter((h) => h.isDeleted), [newHires]);
-  const deletedOccupants = useMemo(() => occupants.filter((o) => o.isDeleted), [occupants]);
-  const deletedInventory = useMemo(() => inventory.filter((i) => i.isDeleted), [inventory]);
-  const deletedLeases = useMemo(() => leases.filter((l) => l.isDeleted), [leases]);
-  const deletedDefects = useMemo(() => defects.filter((d) => d.isDeleted), [defects]);
-  const deletedCleaningReports = useMemo(() => cleaningReports.filter((report) => report.isDeleted), [cleaningReports]);
+  const deletedDorms = useMemo(() => dorms.filter(isInTrash), [dorms]);
+  const deletedDormContracts = useMemo(() => dormContracts.filter(isInTrash), [dormContracts]);
+  const deletedNewHires = useMemo(() => newHires.filter(isInTrash), [newHires]);
+  const deletedOccupants = useMemo(() => occupants.filter(isInTrash), [occupants]);
+  const deletedInventory = useMemo(() => inventory.filter(isInTrash), [inventory]);
+  const deletedLeases = useMemo(() => leases.filter(isInTrash), [leases]);
+  const deletedDefects = useMemo(() => defects.filter(isInTrash), [defects]);
+  const deletedCleaningReports = useMemo(() => cleaningReports.filter(isInTrash), [cleaningReports]);
 
   
 
@@ -6018,6 +6046,29 @@ export default function App() {
   const getManagerCleaningPenalty = (managerUserId: string) => {
     if (!managerUserId) return 0;
     return calculateCleaningScoreByManager(managerUserId);
+  };
+
+  // 청소 대상 기숙사 실무 요약: 청소담당자/최근 청소일/사진 수 + 다음 점검 필요 여부.
+  const getDormCleaningSummary = (dorm: Dorm) => {
+    const dormKey = matchDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+    const reports = cleaningReports
+      .filter((r) => !r.isDeleted && !r.isPermanentDeleted)
+      .filter((r) => r.dormId === dorm.id || matchDormKey(r.site, r.buildingName, r.dong, r.roomHo) === dormKey)
+      .sort((a, b) => (parseSafeDate(b.reportDate)?.getTime() || 0) - (parseSafeDate(a.reportDate)?.getTime() || 0));
+    const latest = reports[0] || null;
+    const cleanerName = latest ? getUserDisplayName(latest.cleanerName || "") || "-" : "-";
+    const lastDate = latest ? formatDateOnly(latest.reportDate) || "-" : "-";
+    const photoCount = latest ? getCleaningPhotos(latest).length : 0;
+    let needsInspection = false;
+    let reason = "양호";
+    if (!latest) { needsInspection = true; reason = "보고서 없음"; }
+    else if (["미제출", "불량", "재청소요청"].includes(latest.cleanStatus)) { needsInspection = true; reason = latest.cleanStatus; }
+    else if (photoCount === 0) { needsInspection = true; reason = "사진 누락"; }
+    else {
+      const d = parseSafeDate(latest.reportDate);
+      if (d && Date.now() - d.getTime() > 30 * 24 * 3600 * 1000) { needsInspection = true; reason = "30일 경과"; }
+    }
+    return { latest, cleanerName, lastDate, photoCount, needsInspection, reason, latestStatus: latest?.cleanStatus || "미제출" };
   };
 
   useEffect(() => {
@@ -10963,25 +11014,38 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     });
   };
 
-  const permanentlyDeleteItem = <T extends { id: string }>(
+  // 영구삭제: 실제 행을 삭제하지 않고 isPermanentDeleted=true 로 숨김 처리(soft).
+  // → Supabase/localStorage 에 플래그가 저장되어 새로고침 후에도 다시 보이지 않음.
+  //   isInTrash 기준으로 휴지통/복구 목록·일반 목록 모두에서 제외됨.
+  const permanentlyDeleteItem = <T extends { id: string; isDeleted?: boolean; deletedAt?: string; isPermanentDeleted?: boolean; permanentDeletedAt?: string; permanentDeletedBy?: string; updatedAt?: string }>(
     items: T[],
     setter: React.Dispatch<React.SetStateAction<T[]>>,
     id: string,
-    targetType: AuditLog["targetType"]
-  ) => {
+    targetType: AuditLog["targetType"],
+    options?: { skipConfirm?: boolean }
+  ): boolean => {
     const existing = items.find((entry) => entry.id === id);
-    if (!existing) return;
-    if (!confirm("영구 삭제할까요?")) return;
-    setter((prev) => prev.filter((entry) => entry.id !== id));
+    if (!existing) return false;
+    if (!options?.skipConfirm && !confirm("영구 삭제할까요?\n\n영구삭제 항목은 휴지통/복구 목록에서 사라집니다. (데이터는 삭제되지 않고 숨김 처리됩니다)")) return false;
+    const now = new Date().toISOString();
+    const by = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
+    setter((prev) =>
+      prev.map((entry) =>
+        entry.id === id
+          ? { ...entry, isDeleted: true, deletedAt: entry.deletedAt || now, isPermanentDeleted: true, permanentDeletedAt: now, permanentDeletedBy: by, updatedAt: now }
+          : entry
+      )
+    );
     createAuditLog({
       targetType,
       targetId: id,
       actionType: "delete",
-      changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+      changedBy: by,
       beforeValue: JSON.stringify(existing),
-      afterValue: "",
-      memo: "permanently deleted",
+      afterValue: "영구삭제(숨김)",
+      memo: "permanently deleted (soft hidden)",
     });
+    return true;
   };
 
   const selectDormForContext = (dormId: string) => {
@@ -17159,6 +17223,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">담당 관리자 연락처</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">기숙사 계약일</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">계약종료일</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">청소담당자</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">최근 청소일</th>
+                    <th className="px-3 py-3 whitespace-nowrap leading-tight">점검필요</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">1주차</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">2주차</th>
                     <th className="px-3 py-3 whitespace-nowrap leading-tight">3주차</th>
@@ -17185,9 +17252,31 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{getDormManagerPhone(dorm.id)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractStartLabel(dorm.id)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(dorm.id)}</td>
+                        {(() => {
+                          const cs = getDormCleaningSummary(dorm);
+                          return (
+                            <>
+                              <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[120px]">{cs.cleanerName}</td>
+                              <td className="px-3 py-3 whitespace-nowrap">{cs.lastDate}</td>
+                              <td className="px-3 py-3 whitespace-nowrap">
+                                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${cs.needsInspection ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`} title={cs.reason}>
+                                  {cs.needsInspection ? `필요 · ${cs.reason}` : "양호"}
+                                </span>
+                              </td>
+                            </>
+                          );
+                        })()}
                         {[1, 2, 3, 4, 5].map((weekNo) => (
                           <td key={weekNo} className="px-3 py-3 whitespace-nowrap">
-                            {getCleaningWeeklyStatus(dorm, weekNo)}
+                            {(() => {
+                              const st = getCleaningWeeklyStatus(dorm, weekNo);
+                              const cls =
+                                st === "O" ? "bg-emerald-100 text-emerald-700" :
+                                st === "불량" || st === "X" ? "bg-rose-100 text-rose-700" :
+                                st === "사진누락" ? "bg-amber-100 text-amber-700" :
+                                "bg-slate-100 text-slate-600";
+                              return <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${cls}`}>{st}</span>;
+                            })()}
                           </td>
                         ))}
                         <td className="px-3 py-3 whitespace-nowrap">
@@ -17203,7 +17292,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   })}
                   {visibleCleaningDormRows.length === 0 && (
                     <tr>
-                      <td colSpan={19} className="px-3 py-6 text-center text-slate-500">
+                      <td colSpan={22} className="px-3 py-6 text-center text-slate-500">
                         검색 결과가 없습니다.
                       </td>
                     </tr>
@@ -17271,7 +17360,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <tr key={report.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(report.reportDate) || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{`${report.buildingName} ${report.dong}-${report.roomHo}`}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{report.cleanStatus}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">
+                          {(() => {
+                            const st = report.cleanStatus;
+                            const cls =
+                              st === "확인완료" ? "bg-emerald-100 text-emerald-700" :
+                              st === "제출완료" ? "bg-blue-100 text-blue-700" :
+                              st === "불량" || st === "재청소요청" ? "bg-rose-100 text-rose-700" :
+                              "bg-slate-100 text-slate-600";
+                            return <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${cls}`}>{st}</span>;
+                          })()}
+                        </td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(report.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(report.cleanerName || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
@@ -18573,22 +18672,22 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-6">
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">계약</div>
-                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{dormContracts.filter(c => c.isDeleted).length}</div>
+                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{dormContracts.filter(isInTrash).length}</div>
                 <div className="mt-2 text-sm text-slate-500">삭제됨</div>
               </div>
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">신입사원</div>
-                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{newHires.filter(h => h.isDeleted).length}</div>
+                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{newHires.filter(isInTrash).length}</div>
                 <div className="mt-2 text-sm text-slate-500">삭제됨</div>
               </div>
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">입주자</div>
-                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{occupants.filter(o => o.isDeleted).length}</div>
+                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{occupants.filter(isInTrash).length}</div>
                 <div className="mt-2 text-sm text-slate-500">삭제됨</div>
               </div>
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">비품</div>
-                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{inventory.filter(i => i.isDeleted).length}</div>
+                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{inventory.filter(isInTrash).length}</div>
                 <div className="mt-2 text-sm text-slate-500">삭제됨</div>
               </div>
             </div>
@@ -18703,7 +18802,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
               <div className="grid gap-6 lg:grid-cols-2">
               {/* 신규계약 휴지통 */}
-              {dormContracts.filter(c => c.isDeleted).length > 0 && (
+              {dormContracts.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -18712,7 +18811,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {dormContracts.filter(c => c.isDeleted).map((contract) => (
+                    {dormContracts.filter(isInTrash).map((contract) => (
                       <div key={contract.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
                           {contract.buildingName} {contract.dong}-{contract.roomHo} ({contract.contractStatus})
@@ -18738,11 +18837,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             복원
                           </button>
                           <button
-                            onClick={() => {
-                              if (window.confirm("정말로 영구 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")) {
-                                setDormContracts(prev => prev.filter(c => c.id !== contract.id));
-                              }
-                            }}
+                            onClick={() => permanentlyDeleteItem(dormContracts, setDormContracts, contract.id, "dormContract")}
                             className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
                           >
                             영구삭제
@@ -18755,7 +18850,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
 
               {/* 신입사원 휴지통 */}
-              {newHires.filter(h => h.isDeleted).length > 0 && (
+              {newHires.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -18764,7 +18859,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {newHires.filter(h => h.isDeleted).map((hire) => (
+                    {newHires.filter(isInTrash).map((hire) => (
                       <div key={hire.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
                           {hire.name} ({hire.residenceStatus})
@@ -18787,13 +18882,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               });
                               // 연동 입주자 자동복구 (sourceNewHireId 관계 유지, 중복 생성 없음)
                               const linkedOccupants = occupants.filter(
-                                (o) => o.isDeleted && o.sourceNewHireId === hire.id
+                                (o) => isInTrash(o) && o.sourceNewHireId === hire.id
                               );
                               if (linkedOccupants.length > 0) {
                                 const restoredStatus = mapNewHireStatusToOccupantStatus(hire.residenceStatus);
                                 setOccupants((prev) =>
                                   prev.map((o) =>
-                                    o.isDeleted && o.sourceNewHireId === hire.id
+                                    isInTrash(o) && o.sourceNewHireId === hire.id
                                       ? {
                                           ...o,
                                           isDeleted: false,
@@ -18825,11 +18920,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           </button>
                           <button
                             onClick={() => {
-                              if (window.confirm("정말로 영구 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")) {
-                                setNewHires(prev => prev.filter(h => h.id !== hire.id));
-                                // 관련 입주자도 영구 삭제
-                                setOccupants(prev => prev.filter(o => o.sourceNewHireId !== hire.id));
-                              }
+                              if (!permanentlyDeleteItem(newHires, setNewHires, hire.id, "newHire")) return;
+                              // 연동 입주자도 영구삭제(숨김) 처리 — sourceNewHireId 로 매칭, 휴지통 대상만.
+                              occupants
+                                .filter((o) => o.sourceNewHireId === hire.id && o.isDeleted && !o.isPermanentDeleted)
+                                .forEach((o) => permanentlyDeleteItem(occupants, setOccupants, o.id, "occupant", { skipConfirm: true }));
                             }}
                             className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
                           >
@@ -18843,7 +18938,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
 
               {/* 입주자 휴지통 */}
-              {occupants.filter(o => o.isDeleted).length > 0 && (
+              {occupants.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -18852,7 +18947,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {occupants.filter(o => o.isDeleted).map((occupant) => (
+                    {occupants.filter(isInTrash).map((occupant) => (
                       <div key={occupant.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
                           {occupant.employeeName} ({occupant.status})
@@ -18878,11 +18973,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             복원
                           </button>
                           <button
-                            onClick={() => {
-                              if (window.confirm("정말로 영구 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")) {
-                                setOccupants(prev => prev.filter(o => o.id !== occupant.id));
-                              }
-                            }}
+                            onClick={() => permanentlyDeleteItem(occupants, setOccupants, occupant.id, "occupant")}
                             className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
                           >
                             영구삭제
@@ -18895,7 +18986,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
 
               {/* 비품 휴지통 */}
-              {inventory.filter(i => i.isDeleted).length > 0 && (
+              {inventory.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -18904,7 +18995,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {inventory.filter(i => i.isDeleted).map((item) => (
+                    {inventory.filter(isInTrash).map((item) => (
                       <div key={item.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
                           {item.itemName} ({item.status})
@@ -18930,11 +19021,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             복원
                           </button>
                           <button
-                            onClick={() => {
-                              if (window.confirm("정말로 영구 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")) {
-                                setInventory(prev => prev.filter(i => i.id !== item.id));
-                              }
-                            }}
+                            onClick={() => permanentlyDeleteItem(inventory, setInventory, item.id, "inventory")}
                             className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
                           >
                             영구삭제
@@ -18947,7 +19034,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
 
               {/* 기숙사 휴지통 */}
-              {dorms.filter(d => d.isDeleted).length > 0 && (
+              {dorms.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -18956,7 +19043,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {dorms.filter(d => d.isDeleted).map((d) => (
+                    {dorms.filter(isInTrash).map((d) => (
                       <div key={d.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
                           {d.buildingName} {formatDong(d.dong)}-{formatRoomHo(d.roomHo)} ({d.leaseStatus})
@@ -18967,7 +19054,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               restoreItem(dorms, setDorms, d.id, "dorm");
                               const key = getDormKey(d.site, d.buildingName, d.dong, d.roomHo);
                               dormContracts
-                                .filter((c) => c.isDeleted && getDormKey(c.site, c.buildingName, c.dong, c.roomHo) === key)
+                                .filter((c) => isInTrash(c) && getDormKey(c.site, c.buildingName, c.dong, c.roomHo) === key)
                                 .forEach((c) => restoreItem(dormContracts, setDormContracts, c.id, "dormContract"));
                             }}
                             className="rounded-2xl bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-200"
@@ -18988,7 +19075,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
 
               {/* 청소보고서 휴지통 */}
-              {cleaningReports.filter(r => r.isDeleted).length > 0 && (
+              {cleaningReports.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -18997,7 +19084,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {cleaningReports.filter(r => r.isDeleted).map((r) => (
+                    {cleaningReports.filter(isInTrash).map((r) => (
                       <div key={r.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
                           {r.buildingName} {formatDong(r.dong)}-{formatRoomHo(r.roomHo)} · {formatDateOnly(r.reportDate) || "-"} ({r.cleanStatus})
@@ -19023,7 +19110,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
 
               {/* 하자접수 휴지통 */}
-              {defects.filter(d => d.isDeleted).length > 0 && (
+              {defects.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -19032,7 +19119,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {defects.filter(d => d.isDeleted).map((d) => (
+                    {defects.filter(isInTrash).map((d) => (
                       <div key={d.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
                           {d.buildingName} {formatDong(d.dong)}-{formatRoomHo(d.ho)} ({d.defectStatus})
@@ -19058,7 +19145,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
 
               {/* 사용자 휴지통 (Auth/profiles 실제 삭제 없음 — is_deleted 숨김 복구/유지) */}
-              {users.filter((u) => u.isDeleted).length > 0 && (
+              {users.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -19067,7 +19154,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {users.filter((u) => u.isDeleted).map((u) => (
+                    {users.filter(isInTrash).map((u) => (
                       <div key={u.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
                           {u.displayName || u.username} <span className="text-xs text-slate-400">({getRoleLabel(u.role)})</span>
@@ -19100,7 +19187,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
 
               {/* 군대 인원 휴지통 */}
-              {militaryPersonnel.filter((p) => p.isDeleted).length > 0 && (
+              {militaryPersonnel.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -19109,7 +19196,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {militaryPersonnel.filter((p) => p.isDeleted).map((p) => (
+                    {militaryPersonnel.filter(isInTrash).map((p) => (
                       <div key={p.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{p.name} <span className="text-xs text-slate-400">({p.unit || "-"})</span></div>
                         <div className="flex flex-wrap gap-2">
@@ -19133,7 +19220,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
 
               {/* 군대 훈련기록 휴지통 */}
-              {militaryTrainingRecords.filter((r) => r.isDeleted).length > 0 && (
+              {militaryTrainingRecords.filter(isInTrash).length > 0 && (
                 <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
@@ -19142,7 +19229,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </div>
                   </div>
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {militaryTrainingRecords.filter((r) => r.isDeleted).map((r) => (
+                    {militaryTrainingRecords.filter(isInTrash).map((r) => (
                       <div key={r.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>{militaryPersonnel.find((p) => p.id === r.personnelId)?.name || "-"} · {r.subject || r.trainingType || "훈련"}</div>
                         <div className="flex flex-wrap gap-2">
