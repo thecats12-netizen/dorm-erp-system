@@ -4700,6 +4700,8 @@ export default function App() {
       });
       // Do not run Supabase save during initial loading or when the change originated from realtime.
       if (isLoading) return;
+      // 하자접수 담당자(maintenance_reporter)는 기숙사/계약/신입사원/입주자 관리자 데이터를 저장하지 않음(401 방지).
+      if (currentUser?.role === "maintenance_reporter") return;
       // 저장 대상 payload 스냅샷(동일 데이터면 저장 생략)
       const snapshot = dormModuleSnapshot({ dorms, occupants, dormContracts, newHires });
       if (realtimeUpdateSourceRef.current.has("dorm_module")) {
@@ -4744,19 +4746,13 @@ export default function App() {
           payloadSizes: { dorms: dorms.length, occupants: occupants.length, dormContracts: dormContracts.length, newHires: newHires.length },
           raw: error,
         });
-        const message = translateSupabaseError((err && err.message) || String(error));
-        if (lastDormAlertRef.current !== message) {
-          lastDormAlertRef.current = message;
-          try {
-            // eslint-disable-next-line no-alert
-            alert(`Supabase 기숙사 모듈 동기화에 실패했습니다. ${message}`);
-          } catch { /* alert 미지원 환경 무시 */ }
-        }
+        // 화면에는 Supabase 원문 alert 대신 한글 안내만 표시(팝업 없음).
+        setOperationalSyncError("저장 권한이 없거나 연결이 불안정합니다. 잠시 후 다시 시도해주세요.");
       }
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [dorms, occupants, dormContracts, newHires, tenantId]);
+  }, [dorms, occupants, dormContracts, newHires, tenantId, currentUser?.role]);
 
   useEffect(() => {
     if (!isSupabaseAvailable()) return;
@@ -4770,11 +4766,16 @@ export default function App() {
       // - viewer 등 그 외: 운영 모듈 저장 자체를 하지 않음
       const role = currentUser?.role;
       const isAdmin = role === "admin";
+      // 담당자(maintenance_reporter/dorm_manager)는 "본인 담당 기숙사"의 청소/하자만 저장(권한 외 데이터 전송 금지 → 401/403 방지).
+      const ownDormId = currentUser?.dormId || "";
+      const scopeOwn = role === "maintenance_reporter" || role === "dorm_manager";
+      const scopedCleaningReports = scopeOwn ? cleaningReports.filter((r) => r.dormId === ownDormId) : cleaningReports;
+      const scopedDefects = scopeOwn ? defects.filter((d) => d.dormId === ownDormId) : defects;
       // 실제 저장 payload (비admin 은 권한 없는 테이블을 빈 배열로 전달 → upsert no-op, 403 방지)
       const operationalPayload = {
         tenantId,
-        cleaningReports,
-        defects,
+        cleaningReports: scopedCleaningReports,
+        defects: scopedDefects,
         inventory: isAdmin ? inventory : [],
         settlementRecords: isAdmin ? settlementRecords : [],
         settlementItems: isAdmin ? settlementItems : [],
@@ -4839,16 +4840,8 @@ export default function App() {
           },
           raw: error,
         });
-        const msg = translateSupabaseError((err && err.message) || String(error));
-        setOperationalSyncError(msg);
-        // 동일 오류 메시지는 1회만 alert (반복 저장 실패 시 알림 폭주 방지)
-        if (lastOperationalAlertRef.current !== msg) {
-          lastOperationalAlertRef.current = msg;
-          try {
-            // eslint-disable-next-line no-alert
-            alert(`Supabase 운영 모듈 동기화에 실패했습니다. ${msg}`);
-          } catch { /* alert 미지원 환경 무시 */ }
-        }
+        // 화면에는 Supabase 원문 alert 대신 한글 안내만 표시(팝업 없음).
+        setOperationalSyncError("저장 권한이 없거나 연결이 불안정합니다. 잠시 후 다시 시도해주세요.");
       }
     }, 500);
 
@@ -4875,17 +4868,16 @@ export default function App() {
       channel = null;
     };
 
-    // CHANNEL_ERROR / socket closed / TIMED_OUT 시 지수 백오프(2s→4s→8s→16s→최대 30s)로 자동 재연결.
+    // CHANNEL_ERROR / socket closed / TIMED_OUT 시 3초 후 자동 재연결(빨간 에러 대신 경고 로그).
     const scheduleReconnect = () => {
       if (cancelled || retryTimer) return;
       attempts += 1;
-      const delay = Math.min(30000, 2000 * 2 ** Math.min(attempts, 4));
       retryTimer = setTimeout(() => {
         retryTimer = null;
         if (cancelled) return;
         cleanupChannel();
         void subscribeRealtime();
-      }, delay);
+      }, 3000);
     };
 
     const subscribeRealtime = async () => {
@@ -4894,8 +4886,8 @@ export default function App() {
       try {
         session = await getCurrentSession();
       } catch (e) {
-        // 세션 조회 실패 시에도 앱은 계속 동작 — 콘솔만 남기고 재연결 예약.
-        console.error("[Realtime] 세션 조회 실패 — 자동 재연결 예약:", e);
+        // 세션 조회 실패 시에도 앱은 계속 동작 — 경고 로그만 남기고 재연결 예약.
+        console.warn("[Realtime] 재연결 대기 (세션 조회 실패)", e);
         scheduleReconnect();
         return;
       }
@@ -4961,14 +4953,14 @@ export default function App() {
             attempts = 0; // 정상 연결 시 백오프 초기화
             console.log("[Realtime] 구독 완료:", `realtime-${tenantId}`);
           } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-            // 사용자 화면에는 오류 팝업/상태를 띄우지 않고(콘솔만), 자동 재연결을 예약한다.
-            console.error("[Realtime] 구독 상태 이상 — 자동 재연결 예약:", { status, error: err?.message });
+            // 빨간 에러 대신 경고 로그만 남기고(사용자 팝업 없음) 3초 후 재구독.
+            console.warn("[Realtime] 재연결 대기", status, err?.message || "");
             scheduleReconnect();
           }
         });
       } catch (e) {
-        // 채널 생성/구독 중 예외가 나도 앱이 멈추지 않게 — 콘솔만 남기고 재연결 예약.
-        console.error("[Realtime] 채널 구독 실패 — 자동 재연결 예약:", e);
+        // 채널 생성/구독 중 예외가 나도 앱이 멈추지 않게 — 경고 로그만 남기고 재연결 예약.
+        console.warn("[Realtime] 재연결 대기 (채널 구독 실패)", e);
         scheduleReconnect();
       }
     };
@@ -11709,7 +11701,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       <div className={`min-h-screen notranslate ${theme.darkMode ? "dark-mode bg-slate-950 text-slate-100" : "bg-slate-50 text-slate-900"}`} translate="no">
         {operationalSyncError && (
           <div className={`fixed inset-x-0 top-0 z-50 border-b px-4 py-3 text-sm font-medium ${theme.darkMode ? "border-rose-700 bg-rose-900 text-rose-100" : "border-rose-200 bg-rose-50 text-rose-900"}`}>
-            Supabase operational sync failed: {operationalSyncError}
+            {operationalSyncError}
           </div>
         )}
         {militaryDirty && ["militaryDashboard", "personnelManagement", "trainingRecords", "militaryNotices", "militaryReports", "militarySettings"].includes(activeTab) && (
