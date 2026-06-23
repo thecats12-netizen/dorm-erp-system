@@ -4858,13 +4858,52 @@ export default function App() {
   useEffect(() => {
     if (!isSupabaseAvailable() || isLoading) return;
 
-    let realtimeSubscription: any = null;
-    const subscribeRealtime = async () => {
-      if (!supabase) return;
-      const session = await getCurrentSession();
-      if (!session?.user?.id) return;
+    let channel: any = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+    let attempts = 0;
 
-      realtimeSubscription = supabase
+    // 같은 채널 중복 구독 방지: 기존 채널 제거 후 재구독.
+    const cleanupChannel = () => {
+      if (channel && supabase) {
+        try {
+          supabase.removeChannel(channel);
+        } catch {
+          /* 이미 제거된 경우 무시 */
+        }
+      }
+      channel = null;
+    };
+
+    // CHANNEL_ERROR / socket closed / TIMED_OUT 시 지수 백오프(2s→4s→8s→16s→최대 30s)로 자동 재연결.
+    const scheduleReconnect = () => {
+      if (cancelled || retryTimer) return;
+      attempts += 1;
+      const delay = Math.min(30000, 2000 * 2 ** Math.min(attempts, 4));
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        if (cancelled) return;
+        cleanupChannel();
+        void subscribeRealtime();
+      }, delay);
+    };
+
+    const subscribeRealtime = async () => {
+      if (cancelled || !supabase) return;
+      let session;
+      try {
+        session = await getCurrentSession();
+      } catch (e) {
+        // 세션 조회 실패 시에도 앱은 계속 동작 — 콘솔만 남기고 재연결 예약.
+        console.error("[Realtime] 세션 조회 실패 — 자동 재연결 예약:", e);
+        scheduleReconnect();
+        return;
+      }
+      if (cancelled || !session?.user?.id) return;
+      cleanupChannel(); // 재구독 전 기존 채널 정리(중복 구독 방지)
+
+      try {
+      channel = supabase
         .channel(`realtime-${tenantId}`)
         .on(
           "postgres_changes",
@@ -4919,20 +4958,27 @@ export default function App() {
         )
         .subscribe((status: string, err?: Error) => {
           if (status === "SUBSCRIBED") {
+            attempts = 0; // 정상 연결 시 백오프 초기화
             console.log("[Realtime] 구독 완료:", `realtime-${tenantId}`);
           } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-            console.error("[Realtime] 구독 상태 이상:", { status, error: err?.message });
-            setSupabaseSyncStatus("실시간 동기화 연결이 불안정합니다. 네트워크를 확인하거나 새로고침해주세요.");
+            // 사용자 화면에는 오류 팝업/상태를 띄우지 않고(콘솔만), 자동 재연결을 예약한다.
+            console.error("[Realtime] 구독 상태 이상 — 자동 재연결 예약:", { status, error: err?.message });
+            scheduleReconnect();
           }
         });
+      } catch (e) {
+        // 채널 생성/구독 중 예외가 나도 앱이 멈추지 않게 — 콘솔만 남기고 재연결 예약.
+        console.error("[Realtime] 채널 구독 실패 — 자동 재연결 예약:", e);
+        scheduleReconnect();
+      }
     };
 
-    subscribeRealtime();
+    void subscribeRealtime();
 
     return () => {
-      if (realtimeSubscription?.unsubscribe) {
-        realtimeSubscription.unsubscribe().catch(() => {});
-      }
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      cleanupChannel();
     };
     // currentUser?.id 기준으로만 재구독 (객체 재참조로 인한 과도한 재구독 방지)
   }, [tenantId, currentUser?.id, isLoading]);
@@ -6879,6 +6925,50 @@ export default function App() {
 
     return { moveInTodayCount, moveOutTodayCount, unassignedNewHires, newHireAssignments };
   }, [occupants, newHires]);
+
+  // 대시보드 퇴실 예정: 30일 이내 + 이번 달(1일~말일). 퇴실/삭제 제외, 담당자는 본인 기숙사만.
+  const moveOutSchedules = useMemo(() => {
+    const now = new Date();
+    const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const in30 = new Date(today0);
+    in30.setDate(in30.getDate() + 30);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const role = currentUser?.role;
+    const ownDormId = currentUser?.dormId || "";
+    const restrictOwn = role === "maintenance_reporter" || role === "dorm_manager";
+
+    const enriched = occupants
+      .filter((o) => !o.isDeleted && !o.isPermanentDeleted)
+      .filter((o) => o.status !== "퇴실" && !o.actualMoveOutDate) // 이미 퇴실 처리된 인원 제외
+      .filter((o) => !restrictOwn || o.dormId === ownDormId)
+      .map((o) => {
+        const raw = o.expectedMoveOutDate || o.moveOutDueDate || "";
+        const d = parseSafeDate(raw);
+        if (!d) return null;
+        const dorm = getOccupantDorm(o);
+        return {
+          occupant: o,
+          date: d,
+          dateStr: raw,
+          buildingName: dorm?.buildingName || o.site || "",
+          dong: dorm?.dong || "",
+          roomHo: dorm?.roomHo || "",
+          remainDays: Math.ceil((d.getTime() - today0.getTime()) / 86400000),
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => !!x);
+
+    const within30 = enriched
+      .filter((x) => x.date >= today0 && x.date <= in30)
+      .sort((a, b) => a.date.getTime() - b.date.getTime());
+    const thisMonth = enriched
+      .filter((x) => x.date >= monthStart && x.date <= monthEnd)
+      .sort((a, b) => a.date.getTime() - b.date.getTime());
+
+    return { within30, thisMonth };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [occupants, operationalDorms, dorms, currentUser?.role, currentUser?.dormId]);
 
   // ============================================
   // 통합검색 (전 모듈 대상)
@@ -12399,6 +12489,49 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </button>
                   ))}
                 </div>
+
+                {/* 퇴실 예정(30일 이내) / 이번 달 퇴실 예정 — 클릭 시 입주자 수정 화면으로 이동 */}
+                {([
+                  { key: "within30", title: "퇴실 예정 (30일 이내)", rows: moveOutSchedules.within30, color: "text-amber-600" },
+                  { key: "thisMonth", title: "이번 달 퇴실 예정", rows: moveOutSchedules.thisMonth, color: "text-rose-600" },
+                ] as const).map((group) => (
+                  <div key={group.key} className="mt-5">
+                    <div className="mb-2 flex items-center justify-between">
+                      <h3 className="text-sm font-semibold">{group.title}</h3>
+                      <span className={`text-xs font-bold ${group.rows.length > 0 ? group.color : "text-slate-400"}`}>{group.rows.length}명</span>
+                    </div>
+                    {group.rows.length === 0 ? (
+                      <div className={`rounded-2xl border px-4 py-3 text-xs ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-400" : "border-slate-200 bg-slate-50 text-slate-400"}`}>퇴실 예정자가 없습니다.</div>
+                    ) : (
+                      <div className="space-y-2 max-h-60 overflow-y-auto">
+                        {group.rows.map((x) => (
+                          <button
+                            key={`${group.key}-${x.occupant.id}`}
+                            type="button"
+                            onClick={() => {
+                              setActiveTab("occupants");
+                              setOccupantForm(x.occupant);
+                              setEditingOccupantId(x.occupant.id);
+                              setShowOccupantForm(true);
+                            }}
+                            className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-2.5 text-left transition ${theme.darkMode ? "border-slate-700 bg-slate-950 hover:bg-slate-800" : "border-slate-200 bg-slate-50 hover:bg-slate-100"}`}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm font-medium">{x.occupant.employeeName || "-"}</span>
+                              <span className="block truncate text-xs text-slate-500">{`${x.buildingName} ${formatDong(x.dong)}-${formatRoomHo(x.roomHo)}`}</span>
+                            </span>
+                            <span className="shrink-0 text-right">
+                              <span className="block text-xs text-slate-500">{formatDateOnly(x.dateStr) || "-"}</span>
+                              <span className={`block text-xs font-bold ${x.remainDays < 0 ? "text-rose-600" : x.remainDays <= 7 ? "text-amber-600" : group.color}`}>
+                                {x.remainDays < 0 ? `${Math.abs(x.remainDays)}일 경과` : `D-${x.remainDays}`}
+                              </span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
               </section>
             </div>
 
