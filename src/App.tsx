@@ -17292,8 +17292,45 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
             )}
 
-            {/* 하자접수 담당자: 통계/원본 리스트를 위로, 기숙사 데이터를 아래로 (order 로 순서 교체) */}
+            {/* 하자접수 담당자: 내 청소보고 통계 → 기숙사 데이터 → 청소보고서 원본 리스트 순서 (order) */}
             <div className="flex flex-col">
+            {isMaintenanceReporter && (
+              <div className="order-1">
+                <div className={`${theme.darkMode ? "mt-8 p-4 bg-slate-950 rounded-2xl border border-slate-700" : "mt-8 p-4 bg-slate-50 rounded-2xl border border-slate-200"}`}>
+                  <h3 className="text-lg font-semibold">내 청소보고 통계</h3>
+                  {(() => {
+                    const uid = currentUser!.id;
+                    const uname = currentUser!.username;
+                    const dname = currentUser!.displayName;
+                    const mine = cleaningReports.filter((r) =>
+                      !r.isDeleted && !r.isPermanentDeleted && (
+                        r.reporterUserId === uid ||
+                        r.managerUserId === uid ||
+                        r.cleanerName === uid ||
+                        (!!uname && r.cleanerName === uname) ||
+                        (!!dname && r.cleanerName === dname)
+                      )
+                    );
+                    const total = mine.length;
+                    const completed = mine.filter((r) => r.cleanStatus === "확인완료").length;
+                    const missing = mine.filter((r) => r.cleanStatus === "미제출").length;
+                    const bad = mine.filter((r) => r.cleanStatus === "불량").length;
+                    const photoMissing = mine.filter((r) => getCleaningPhotos(r).length === 0).length;
+                    const penalty = calculateCleaningScoreByManager(uid);
+                    return (
+                      <div className="grid grid-cols-2 gap-4 mt-2 md:grid-cols-3">
+                        <div>총 보고: {total}</div>
+                        <div>완료 보고: {completed}</div>
+                        <div>미제출: {missing}</div>
+                        <div>불량: {bad}</div>
+                        <div>사진누락: {photoMissing}</div>
+                        <div>총 감점: {penalty}</div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            )}
             <div className={isMaintenanceReporter ? "order-2" : "order-1"}>
             <div className="mt-6 erp-table-container">
               <table className="erp-table min-w-[1300px] text-left">
@@ -17392,44 +17429,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <PaginationBar page={cleaningDormPg.page} totalPages={cleaningDormPg.totalPages} totalCount={cleaningDormPg.totalCount} onPrev={cleaningDormPg.goPrev} onNext={cleaningDormPg.goNext} onPage={cleaningDormPg.goPage} darkMode={theme.darkMode} />
             </div>
 
-            <div className={isMaintenanceReporter ? "order-1" : "order-2"}>
+            <div className={isMaintenanceReporter ? "order-3" : "order-2"}>
             <div className={`${theme.darkMode ? "mt-8 rounded-3xl border border-slate-700 p-5" : "mt-8 rounded-3xl border border-slate-200 p-5"}`}>
-              {currentUser?.role === "maintenance_reporter" && (
-                <div className={`${theme.darkMode ? "mb-4 p-4 bg-slate-950 rounded-2xl" : "mb-4 p-4 bg-slate-50 rounded-2xl"}`}>
-                  <h3 className="text-lg font-semibold">내 청소보고 통계</h3>
-                  {(() => {
-                    // 현재 로그인 사용자(본인) 청소보고만 집계 — 전체 통계가 아님.
-                    const uid = currentUser.id;
-                    const uname = currentUser.username;
-                    const dname = currentUser.displayName;
-                    const mine = cleaningReports.filter((r) =>
-                      !r.isDeleted && !r.isPermanentDeleted && (
-                        r.reporterUserId === uid ||
-                        r.managerUserId === uid ||
-                        r.cleanerName === uid ||
-                        (!!uname && r.cleanerName === uname) ||
-                        (!!dname && r.cleanerName === dname)
-                      )
-                    );
-                    const total = mine.length;
-                    const completed = mine.filter((r) => r.cleanStatus === "확인완료").length;
-                    const missing = mine.filter((r) => r.cleanStatus === "미제출").length;
-                    const bad = mine.filter((r) => r.cleanStatus === "불량").length;
-                    const photoMissing = mine.filter((r) => getCleaningPhotos(r).length === 0).length;
-                    const penalty = calculateCleaningScoreByManager(uid);
-                    return (
-                      <div className="grid grid-cols-2 gap-4 mt-2 md:grid-cols-3">
-                        <div>총 보고: {total}</div>
-                        <div>완료 보고: {completed}</div>
-                        <div>미제출: {missing}</div>
-                        <div>불량: {bad}</div>
-                        <div>사진누락: {photoMissing}</div>
-                        <div>총 감점: {penalty}</div>
-                      </div>
-                    );
-                  })()}
-                </div>
-              )}
               <div className="mb-4 flex items-center justify-between">
                 <div>
                   <h3 className="text-lg font-semibold">청소보고서 원본 리스트</h3>
