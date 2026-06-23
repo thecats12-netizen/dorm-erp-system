@@ -11542,16 +11542,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <h2 className={`mt-3 text-xl font-bold ${theme.darkMode ? "text-slate-100" : "text-slate-900"}`}>운영관리 대시보드</h2>
           </div>
           <div className="space-y-3">
-            <div>
-              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">메뉴 검색</div>
-              <input
-                type="text"
-                value={menuSearchKeyword}
-                onChange={(e) => setMenuSearchKeyword(e.target.value)}
-                placeholder="검색..."
-                className={`w-full rounded-2xl border px-3 py-2 text-sm outline-none focus:border-slate-400 ${theme.darkMode ? "border-slate-600 bg-slate-900 text-slate-100" : "border-slate-300 bg-white text-slate-900"}`}
-              />
-            </div>
+            {!isMaintenanceReporter && (
+              <div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">메뉴 검색</div>
+                <input
+                  type="text"
+                  value={menuSearchKeyword}
+                  onChange={(e) => setMenuSearchKeyword(e.target.value)}
+                  placeholder="검색..."
+                  className={`w-full rounded-2xl border px-3 py-2 text-sm outline-none focus:border-slate-400 ${theme.darkMode ? "border-slate-600 bg-slate-900 text-slate-100" : "border-slate-300 bg-white text-slate-900"}`}
+                />
+              </div>
+            )}
             <div className="max-h-[70vh] overflow-y-auto pr-1">
               {filteredMenuGroups.length === 0 ? (
                 <div className={`rounded-2xl border p-4 text-sm ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-400" : "border-slate-200 bg-slate-50 text-slate-500"}`}>검색 결과가 없습니다.</div>
@@ -11626,16 +11628,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </button>
               </div>
               <div className="p-5">
-                <div className="mb-4">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">메뉴 검색</div>
-                  <input
-                    type="text"
-                    value={menuSearchKeyword}
-                    onChange={(e) => setMenuSearchKeyword(e.target.value)}
-                    placeholder="검색..."
-                    className={`w-full rounded-2xl border px-3 py-2 text-sm outline-none focus:border-slate-400 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-300 bg-white text-slate-900"}`}
-                  />
-                </div>
+                {!isMaintenanceReporter && (
+                  <div className="mb-4">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">메뉴 검색</div>
+                    <input
+                      type="text"
+                      value={menuSearchKeyword}
+                      onChange={(e) => setMenuSearchKeyword(e.target.value)}
+                      placeholder="검색..."
+                      className={`w-full rounded-2xl border px-3 py-2 text-sm outline-none focus:border-slate-400 ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-300 bg-white text-slate-900"}`}
+                    />
+                  </div>
+                )}
                 {filteredMenuGroups.length === 0 ? (
                   <div className={`rounded-2xl border p-4 text-sm ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-400" : "border-slate-200 bg-slate-50 text-slate-500"}`}>검색 결과가 없습니다.</div>
                 ) : (
@@ -11675,7 +11679,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <p className="mt-1 text-sm text-slate-500">기숙사, 입주배정, 비품, 계약, 매각, 하자접수, 운영시뮬레이션까지 한 번에</p>
               </div>
 
-              {/* 통합검색 */}
+              {/* 통합검색 (하자접수 담당자 숨김) */}
+              {!isMaintenanceReporter && (
               <div className="relative w-full lg:max-w-md lg:flex-1 lg:px-4">
                 <input
                   type="text"
@@ -11717,6 +11722,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </div>
                 )}
               </div>
+              )}
 
               <div className="flex flex-wrap items-center justify-end gap-3">
                 <button
@@ -17181,11 +17187,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <Input label="월" value={cleaningMonth} onChange={(v) => setCleaningMonth(v)} placeholder="MM" />
               <SelectInput label="지역" value={cleaningDormSiteFilter} onChange={(v) => setCleaningDormSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
             </div>
+            {!isMaintenanceReporter && (
             <div className="mt-4 grid gap-4 lg:grid-cols-3">
               <Input label="기숙사 검색" value={cleaningDormSearch} onChange={(v) => setCleaningDormSearch(v)} />
               <SelectInput label="담당자" value={cleaningManagerFilter} onChange={(v) => setCleaningManagerFilter(v)} options={["전체", ...managerFilterOptions]} />
               <SelectInput label="청소 상태" value={cleaningStatusFilter} onChange={(v) => setCleaningStatusFilter(v)} options={["전체", "미제출", "제출완료", "확인완료", "불량", "재청소요청"]} />
             </div>
+            )}
+            {!isMaintenanceReporter && (
             <div className="mt-4 grid gap-4 lg:grid-cols-3">
               <Input
                 label="미보고 감점"
@@ -17221,6 +17230,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
               </div>
             </div>
+            )}
 
             <div className="mt-6 erp-table-container">
               <table className="erp-table min-w-[1300px] text-left">
