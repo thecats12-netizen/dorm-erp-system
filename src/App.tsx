@@ -10704,23 +10704,24 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     setShowNewHireForm(true);
   };
 
-  // 대시보드 퇴실예정 클릭: 미배정(대기/미배정/배정대기)이면 신입사원 폼, 배정완료면 입주자 폼으로 이동.
-  // 대상은 이름/연락처/연결ID 기준으로 매칭해 등록·수정 모달을 바로 연다.
+  // 대시보드 퇴실예정 클릭: 신입사원 데이터가 있으면 무조건 신입사원 등록/수정으로 연다.
+  // 매칭 우선순위 — ① 연결 id(sourceNewHireId), ② 전화번호, ③ 이름.
+  // 신입사원에 없을 때만 입주자 등록/수정으로 폴백한다.
   const openMoveOutTarget = (o: Occupant) => {
-    const unassigned = !o.dormId || o.status === "미배정" || o.status === "대기중";
-    if (unassigned) {
-      const norm = (s?: string) => (s || "").replace(/\D/g, "");
-      const hire = newHires.find(
-        (h) =>
-          !h.isDeleted &&
-          ((o.sourceNewHireId && h.id === o.sourceNewHireId) ||
-            (h.name === o.employeeName && (!o.phone || norm(h.phone) === norm(o.phone))))
-      );
-      if (hire) {
-        setActiveTab("newHires");
-        openNewHireEdit(hire);
-        return;
-      }
+    const norm = (s?: string) => (s || "").replace(/\D/g, "");
+    const activeHires = newHires.filter((h) => !h.isDeleted && !h.isPermanentDeleted);
+    const hire =
+      // ① id 우선
+      (o.sourceNewHireId && activeHires.find((h) => h.id === o.sourceNewHireId)) ||
+      // ② 전화번호 보조
+      (o.phone && activeHires.find((h) => norm(h.phone) && norm(h.phone) === norm(o.phone))) ||
+      // ③ 이름 마지막 기준
+      activeHires.find((h) => h.name && h.name === o.employeeName) ||
+      null;
+    if (hire) {
+      setActiveTab("newHires");
+      openNewHireEdit(hire);
+      return;
     }
     setActiveTab("occupants");
     setOccupantForm(o);
