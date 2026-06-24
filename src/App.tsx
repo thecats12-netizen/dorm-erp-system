@@ -60,6 +60,8 @@ import {
   isSupabaseAvailable,
   loadMilitaryModule,
   saveMilitaryModule,
+  loadAppSettings,
+  saveAppSettings,
   translateSupabaseError,
   type MilitaryModuleState,
 } from "./services/supabaseService";
@@ -75,6 +77,7 @@ import {
 import {
   signInWithEmail,
   signOut as supabaseSignOut,
+  onAuthStateChange,
   getCurrentSession,
   getCurrentAuthUser,
   getProfile,
@@ -1311,6 +1314,9 @@ export default function App() {
   const lastDormSnapshotRef = useRef<string>("");
   const lastOperationalSnapshotRef = useRef<string>("");
   const lastMilitarySnapshotRef = useRef<string>("");
+  const lastAppSettingsSnapshotRef = useRef<string>("");
+  // 군대 모듈: 로드/Realtime 로 적용된 변경(사용자 수정 아님)을 dirty 에서 제외하기 위한 플래그.
+  const militarySyncSnapshotRef = useRef<boolean>(false);
   // 동기화 실패 alert 중복 방지(동일 오류 메시지는 1회만 표시)
   const lastDormAlertRef = useRef<string>("");
   const lastOperationalAlertRef = useRef<string>("");
@@ -1653,6 +1659,7 @@ export default function App() {
     if (!data || typeof data !== "object") return;
     // 자기 기기 저장분의 재저장/깜빡임 방지(저장 effect 가 이 플래그를 보고 재저장 생략)
     realtimeUpdateSourceRef.current.add("military_module");
+    militarySyncSnapshotRef.current = true; // Realtime 반영분은 dirty 로 잡지 않음
     if (Array.isArray(data.militaryPersonnel)) setMilitaryPersonnel(data.militaryPersonnel);
     if (Array.isArray(data.militaryTrainingRecords)) setMilitaryTrainingRecords(data.militaryTrainingRecords);
     if (Array.isArray(data.militaryNotices)) setMilitaryNotices(data.militaryNotices);
@@ -1661,6 +1668,20 @@ export default function App() {
     if (Array.isArray(data.militaryTrainingRules)) setMilitaryTrainingRules(data.militaryTrainingRules);
     if (data.militaryCodeValues && typeof data.militaryCodeValues === "object") setMilitaryCodeValues(data.militaryCodeValues);
     if (data.militaryTrainingAutoConfig && typeof data.militaryTrainingAutoConfig === "object") setMilitaryTrainingAutoConfig(data.militaryTrainingAutoConfig);
+  };
+
+  // 운영 설정 Realtime: 관리자가 운영시뮬레이션 설정을 바꾸면 모든 기기에서 즉시 반영.
+  const handleAppSettingsRealtime = (payload: any) => {
+    const newRow = payload.new ?? payload.record;
+    if (!newRow || newRow.tenant_id !== tenantId) return;
+    const data = newRow.data;
+    if (!data || typeof data !== "object") return;
+    if (data.simCostSettings && typeof data.simCostSettings === "object") {
+      const merged = { ...DEFAULT_SIM_COST_SETTINGS, ...data.simCostSettings };
+      realtimeUpdateSourceRef.current.add("app_settings"); // 자기 저장분 재저장 루프 방지
+      lastAppSettingsSnapshotRef.current = JSON.stringify(merged);
+      setSimCostSettings(merged);
+    }
   };
 
   const militaryReferenceYear = Number(militarySettings["기준연도"]);
@@ -2437,6 +2458,16 @@ export default function App() {
               useSupabase = false;
             }
 
+            // 운영 설정(운영시뮬레이션: 월 예상 운영비/공실 손실) — 모든 기기 공유. 실패 시 로컬 설정 유지.
+            if (useSupabase) {
+              const appSettings = await loadAppSettings(tenantId);
+              if (appSettings?.simCostSettings) {
+                const merged = { ...DEFAULT_SIM_COST_SETTINGS, ...appSettings.simCostSettings };
+                setSimCostSettings(merged);
+                lastAppSettingsSnapshotRef.current = JSON.stringify(merged);
+              }
+            }
+
             // User profile (세션이 유효하면 dorm/op 로드 실패와 무관하게 로그인 상태를 갱신)
             if (hasValidSession && profileRes.status === "fulfilled" && profileRes.value) {
               const profile = profileRes.value;
@@ -2599,10 +2630,22 @@ export default function App() {
   // (인사/훈련/통보/보고/설정 변경, 자동생성 등 모든 변경을 한 곳에서 포착)
   useEffect(() => {
     if (isLoading) return;
+    // 권한 없는 계정(군대 데이터 편집 불가)은 저장 필요 표시를 하지 않음.
+    if (!canEditData(currentUser)) {
+      if (militaryDirty) setMilitaryDirty(false);
+      return;
+    }
     const snap = JSON.stringify(getMilitaryModuleState());
+    // 로드/Realtime 로 반영된 변경은 사용자 수정이 아니므로 깨끗한 상태로 스냅샷만 동기화.
+    if (militarySyncSnapshotRef.current) {
+      militarySyncSnapshotRef.current = false;
+      lastMilitarySnapshotRef.current = snap;
+      if (militaryDirty) setMilitaryDirty(false);
+      return;
+    }
     setMilitaryDirty(snap !== lastMilitarySnapshotRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [militaryPersonnel, militaryTrainingRecords, militaryNotices, militaryReports, militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig, militaryLastSavedAt, isLoading]);
+  }, [militaryPersonnel, militaryTrainingRecords, militaryNotices, militaryReports, militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig, militaryLastSavedAt, isLoading, currentUser?.role]);
 
   // 저장 필요 상태에서 새로고침/창닫기 경고 (앱 내부 탭 이동은 막지 않음)
   useEffect(() => {
@@ -2626,6 +2669,7 @@ export default function App() {
     try {
       const remote = await loadMilitaryModule(tenantId);
       if (remote) {
+        militarySyncSnapshotRef.current = true; // 로드 반영분은 dirty 로 잡지 않음
         setMilitaryPersonnel(remote.militaryPersonnel || []);
         setMilitaryTrainingRecords(remote.militaryTrainingRecords || []);
         setMilitaryNotices(remote.militaryNotices || []);
@@ -4647,7 +4691,23 @@ export default function App() {
   useEffect(() => {
     if (isLoading) return;
     saveJson(SIM_COST_SETTINGS_KEY, simCostSettings, tenantId);
-  }, [simCostSettings, tenantId, isLoading]);
+    // 운영시뮬레이션 설정은 관리자만 Supabase 에 저장(모든 기기 공유). Realtime 수신분은 재저장 생략(루프 방지).
+    if (!isSupabaseAvailable() || currentUser?.role !== "admin") return;
+    if (realtimeUpdateSourceRef.current.has("app_settings")) {
+      realtimeUpdateSourceRef.current.delete("app_settings");
+      return;
+    }
+    const snap = JSON.stringify(simCostSettings);
+    if (snap === lastAppSettingsSnapshotRef.current) return;
+    const timer = setTimeout(() => {
+      lastAppSettingsSnapshotRef.current = snap;
+      void saveAppSettings(tenantId, { simCostSettings }).catch((e) => {
+        console.warn("[app_settings] 저장 실패(로컬 유지):", (e as { message?: string })?.message || e);
+      });
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simCostSettings, tenantId, isLoading, currentUser?.role]);
   useEffect(() => {
     if (isLoading) return;
     // Supabase 모드에서는 profiles 가 단일 출처. localStorage 로 users 를 다시 저장하면
@@ -4936,6 +4996,11 @@ export default function App() {
           "postgres_changes",
           { event: "*", schema: "public", table: "military_module_data", filter: `tenant_id=eq.${tenantId}` },
           (payload) => handleMilitaryRealtimeRow(payload)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "app_settings", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleAppSettingsRealtime(payload)
         )
         .on(
           "postgres_changes",
@@ -6243,12 +6308,13 @@ export default function App() {
     return dorm ? getOccupancyStatus(dorm.id, dorm.capacity) : "공실";
   };
 
-  const expiringDormsTop10 = useMemo(() => {
+  // 현재 사용중(operationalDorms = 종료/해지/isDeleted 제외) 기숙사 중 계약 만료 예정 전체 목록(가까운 순).
+  const expiringDormsAll = useMemo(() => {
     return [...operationalDorms]
       .filter((d) => d.contractEnd && daysDiff(d.contractEnd) >= 0)
-      .sort((a, b) => daysDiff(a.contractEnd) - daysDiff(b.contractEnd))
-      .slice(0, 10);
+      .sort((a, b) => daysDiff(a.contractEnd) - daysDiff(b.contractEnd));
   }, [operationalDorms]);
+  const expiringDormsTop10 = useMemo(() => expiringDormsAll.slice(0, 10), [expiringDormsAll]);
 
   const parseDateValue = (value: any) => {
     if (value === undefined || value === null || value === "") return null;
@@ -6761,6 +6827,8 @@ export default function App() {
   const cleaningReportPg = usePagination(visibleCleaningReports, { resetKey: `${cleaningYear}|${cleaningMonth}|${cleaningDormSiteFilter}|${cleaningDormSearch}|${cleaningManagerFilter}|${cleaningStatusFilter}` });
   // 청소관리 상단 기숙사 목록: 10개씩 페이지네이션(검색/필터 변경 시 1페이지로 초기화).
   const cleaningDormPg = usePagination(visibleCleaningDormRows, { pageSize: 10, resetKey: `${cleaningDormSiteFilter}|${cleaningDormSearch}|${cleaningManagerFilter}|${cleaningStatusFilter}|${cleaningYear}|${cleaningMonth}` });
+  // 대시보드 "계약 만료 예정" 더보기 모달: 10개씩 페이지네이션.
+  const expiringDormPg = usePagination(expiringDormsAll, { pageSize: 10, resetKey: showExpiringDormsModal ? "open" : "closed" });
   const defectPg = usePagination(visibleDefects, { resetKey: `${defectSearch}|${defectStatusFilter}|${defectReceiptMonthFilter}` });
   const militaryTrainingPg = usePagination(filteredMilitaryTrainingRecords, { resetKey: `${militaryTrainingSearch}|${militaryTrainingStatusFilter}|${militaryTrainingYearFilter}|${militaryTrainingPersonFilter}|${militaryTrainingTypeFilter}|${militaryTrainingRoundFilter}|${militaryTrainingDepartmentFilter}` });
   const militaryNoticePg = usePagination(filteredMilitaryNotices, { resetKey: militaryNoticeSearch });
@@ -7239,16 +7307,37 @@ export default function App() {
   };
 
 
+  const manualSignOutRef = useRef(false);
   const logout = async () => {
     // 군대 모듈 저장 필요 상태면 로그아웃 전 경고(앱 내부 동작이라 beforeunload 미발생)
     if (militaryDirty && !window.confirm("군대관리에 저장되지 않은 변경사항이 있습니다.\n저장하지 않고 로그아웃하시겠습니까?")) {
       return;
     }
+    manualSignOutRef.current = true; // 수동 로그아웃은 세션 만료 안내에서 제외
     if (isSupabaseAvailable()) {
       await supabaseSignOut();
     }
     setCurrentUser(null);
   };
+
+  // 세션 만료(refresh token 오류 등)로 SIGNED_OUT 이 발생하면 한글 안내 후 로그인 화면으로.
+  useEffect(() => {
+    if (!isSupabaseAvailable()) return;
+    const unsub = onAuthStateChange((_user, session, event) => {
+      if (event === "SIGNED_OUT" && !session) {
+        if (manualSignOutRef.current) {
+          manualSignOutRef.current = false; // 사용자가 직접 로그아웃 → 안내 생략
+          return;
+        }
+        // 자동 로그아웃(세션 만료/refresh 실패) → 안내 + 로그인 화면 이동
+        console.warn("[Auth] 세션 만료 감지 — 재로그인 필요");
+        setCurrentUser(null);
+        setLoginError("로그인 세션이 만료되었습니다. 다시 로그인해주세요.");
+      }
+    });
+    return () => { unsub?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── 보안: 비활성 자동 로그아웃(30분 무활동) + 절대 세션 만료(8시간) ──
   // 기존 logout()을 재사용. 웹/모바일/PWA 동일 적용(window 이벤트 기반).
@@ -12882,7 +12971,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <section key={sec.title} className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
                   <h3 className="mb-3 text-base font-semibold">{sec.title}</h3>
                   <div className="erp-table-container max-h-72 overflow-y-auto">
-                    <table className="erp-table text-left">
+                    <table className="erp-table erp-table--compact w-full text-left">
                       <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                         <tr><th className="px-3 py-2">구분</th><th className="px-3 py-2">인원</th></tr>
                       </thead>
@@ -13855,7 +13944,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       >추가</button>
                     </div>
                     <div className="overflow-x-auto">
-                      <table className="erp-table text-left">
+                      <table className="erp-table erp-table--compact w-full text-left">
                         <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                           <tr>
                             <th className="px-3 py-2 erp-col-name">카테고리</th>
@@ -15316,36 +15405,42 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         )}
 
         {showExpiringDormsModal && modalWrap(
-          "계약 만료 예정 목록",
-          <div className="overflow-auto">
-            <table className="w-full text-sm text-left">
-              <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
-                <tr>
-                  <th className="px-3 py-2">#</th>
-                  <th className="px-3 py-2">지역</th>
-                  <th className="px-3 py-2">기숙사</th>
-                  <th className="px-3 py-2">주소</th>
-                  <th className="px-3 py-2">만료일</th>
-                  <th className="px-3 py-2">D-Day</th>
-                  <th className="px-3 py-2">작업</th>
-                </tr>
-              </thead>
-              <tbody>
-                {expiringDormsTop10.map((d, idx) => (
-                  <tr key={d.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                    <td className="px-3 py-3">{idx + 1}</td>
-                    <td className="px-3 py-3">{d.site}</td>
-                    <td className="px-3 py-3">{d.buildingName}</td>
-                    <td className="px-3 py-3">{`${d.address} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`}</td>
-                    <td className="px-3 py-3">{formatDateOnly(d.contractEnd || "") || "-"}</td>
-                    <td className="px-3 py-3">{daysDiff(d.contractEnd)}</td>
-                    <td className="px-3 py-3">
-                      <button className="text-blue-600 text-sm" onClick={() => { const contract = dormContracts.find(c => matchDormKey(c.site, c.buildingName, c.dong, c.roomHo) === matchDormKey(d.site, d.buildingName, d.dong, d.roomHo)); if (contract) openDormContractEdit(contract); }}>수정</button>
-                    </td>
+          `계약 만료 예정 목록 (전체 ${expiringDormsAll.length}곳)`,
+          <div>
+            <div className="overflow-auto">
+              <table className="w-full text-sm text-left">
+                <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                  <tr>
+                    <th className="px-3 py-2">#</th>
+                    <th className="px-3 py-2">지역</th>
+                    <th className="px-3 py-2">기숙사</th>
+                    <th className="px-3 py-2">주소</th>
+                    <th className="px-3 py-2">만료일</th>
+                    <th className="px-3 py-2">D-Day</th>
+                    <th className="px-3 py-2">작업</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {expiringDormPg.pagedItems.map((d, idx) => (
+                    <tr key={d.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
+                      <td className="px-3 py-3">{(expiringDormPg.page - 1) * expiringDormPg.pageSize + idx + 1}</td>
+                      <td className="px-3 py-3">{d.site}</td>
+                      <td className="px-3 py-3">{d.buildingName}</td>
+                      <td className="px-3 py-3">{`${d.address} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`}</td>
+                      <td className="px-3 py-3">{formatDateOnly(d.contractEnd || "") || "-"}</td>
+                      <td className="px-3 py-3">{daysDiff(d.contractEnd)}</td>
+                      <td className="px-3 py-3">
+                        <button className="text-blue-600 text-sm" onClick={() => { const contract = dormContracts.find(c => matchDormKey(c.site, c.buildingName, c.dong, c.roomHo) === matchDormKey(d.site, d.buildingName, d.dong, d.roomHo)); if (contract) openDormContractEdit(contract); }}>수정</button>
+                      </td>
+                    </tr>
+                  ))}
+                  {expiringDormsAll.length === 0 && (
+                    <tr><td colSpan={7} className="px-3 py-6 text-center text-slate-500">계약 만료 예정 기숙사가 없습니다.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <PaginationBar page={expiringDormPg.page} totalPages={expiringDormPg.totalPages} totalCount={expiringDormPg.totalCount} onPrev={expiringDormPg.goPrev} onNext={expiringDormPg.goNext} onPage={expiringDormPg.goPage} darkMode={theme.darkMode} />
           </div>,
           () => setShowExpiringDormsModal(false),
           () => {},
@@ -17455,6 +17550,50 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
               </div>
             </div>
+            )}
+
+            {/* 관리자 전용: 담당자별 청소 현황(실시간) — 청소보고 등록/수정/상태변경 시 즉시 반영 */}
+            {!isMaintenanceReporter && managerFilterOptions.length > 0 && (
+              <div className="mt-4 erp-table-container">
+                <div className="mb-2 text-sm font-semibold">담당자별 청소 현황 (실시간)</div>
+                <table className="erp-table min-w-[640px] w-full text-left">
+                  <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                    <tr>
+                      <th className="px-3 py-2 whitespace-nowrap">담당자</th>
+                      <th className="px-3 py-2 whitespace-nowrap">총 보고</th>
+                      <th className="px-3 py-2 whitespace-nowrap">완료보고</th>
+                      <th className="px-3 py-2 whitespace-nowrap">미제출</th>
+                      <th className="px-3 py-2 whitespace-nowrap">사진누락</th>
+                      <th className="px-3 py-2 whitespace-nowrap">감점</th>
+                      <th className="px-3 py-2 whitespace-nowrap">점수</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {managerFilterOptions.map((managerName) => {
+                      const manager = users.find((u) => u.displayName === managerName);
+                      const uid = manager?.id || "";
+                      const reps = cleaningReports.filter((r) => r.managerUserId === uid && !r.isDeleted && !r.isPermanentDeleted);
+                      const total = reps.length;
+                      const completed = reps.filter((r) => r.cleanStatus === "확인완료").length;
+                      const missing = reps.filter((r) => r.cleanStatus === "미제출").length;
+                      const photoMissing = reps.filter((r) => getCleaningPhotos(r).length === 0).length;
+                      const penalty = uid ? calculateCleaningScoreByManager(uid) : 0;
+                      const score = 100 + penalty;
+                      return (
+                        <tr key={managerName} className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}`}>
+                          <td className="px-3 py-2 whitespace-nowrap font-medium">{managerName}</td>
+                          <td className="px-3 py-2 whitespace-nowrap">{total}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-emerald-600">{completed}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-500">{missing}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-amber-600">{photoMissing}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-rose-600">{penalty}</td>
+                          <td className="px-3 py-2 whitespace-nowrap font-bold">{score}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             )}
 
             {/* 하자접수 담당자: 내 청소보고 통계 → 기숙사 데이터 → 청소보고서 원본 리스트 순서 (order) */}

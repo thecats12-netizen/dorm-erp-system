@@ -97,7 +97,8 @@ export const getCurrentSession = async (): Promise<Session | null> => {
     const { data } = await supabase!.auth.getSession();
     return data.session;
   } catch (err) {
-    console.error("[AuthService] Get session error:", err);
+    // 세션 만료/refresh 실패는 빨간 오류 대신 경고로(반복 출력 완화).
+    console.warn("[AuthService] 세션 조회 경고:", (err as { message?: string })?.message || err);
     return null;
   }
 };
@@ -126,7 +127,7 @@ export const getCurrentAuthUser = async (): Promise<User | null> => {
  * @returns 리스너 제거 함수 또는 null
  */
 export const onAuthStateChange = (
-  callback: (user: User | null, session: Session | null) => void
+  callback: (user: User | null, session: Session | null, event?: string) => void
 ): (() => void) | null => {
   if (!isSupabaseAvailable()) {
     console.warn("[AuthService] Supabase is not configured. Auth state listener not available.");
@@ -134,8 +135,8 @@ export const onAuthStateChange = (
   }
 
   try {
-    const { data } = supabase!.auth.onAuthStateChange((_event, session) => {
-      callback(session?.user ?? null, session);
+    const { data } = supabase!.auth.onAuthStateChange((event, session) => {
+      callback(session?.user ?? null, session, event);
     });
 
     // 리스너 제거 함수 반환

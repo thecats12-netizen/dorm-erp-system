@@ -21,7 +21,8 @@ declare
     'settlement_items',
     'profiles',
     'audit_logs',
-    'military_module_data'
+    'military_module_data',
+    'app_settings'
   ];
 begin
   foreach t in array tables loop

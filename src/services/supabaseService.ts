@@ -133,3 +133,42 @@ export const saveMilitaryModule = async (payload: MilitaryModuleState): Promise<
     if (error) { logErr("insert", error); throw error; }
   }
 };
+
+// ============================================================================
+// 운영 설정(operational/app settings) — 테넌트당 1행 JSON 블롭.
+// 운영시뮬레이션(월 예상 운영비/공실 손실) 등 관리자 설정을 모든 기기에서 즉시 공유.
+// ============================================================================
+export const APP_SETTINGS_TABLE = "app_settings";
+
+export const loadAppSettings = async (tenantId: string): Promise<Record<string, any> | null> => {
+  if (!isSupabaseAvailable()) return null;
+  const { data, error } = await supabase!
+    .from(APP_SETTINGS_TABLE)
+    .select("data")
+    .eq("tenant_id", tenantId)
+    .limit(1);
+  if (error) {
+    // 테이블 미생성(42P01) 등은 조용히 null 반환(로컬 폴백) — 콘솔 경고만.
+    console.warn("[loadAppSettings] 로드 실패(로컬 설정 사용):", error.message);
+    return null;
+  }
+  return (Array.isArray(data) && data[0]?.data) || null;
+};
+
+export const saveAppSettings = async (tenantId: string, data: Record<string, any>): Promise<void> => {
+  if (!isSupabaseAvailable()) return;
+  const row = { tenant_id: tenantId, data, updated_at: new Date().toISOString() };
+  const { data: existing, error: selErr } = await supabase!
+    .from(APP_SETTINGS_TABLE)
+    .select("tenant_id")
+    .eq("tenant_id", tenantId)
+    .limit(1);
+  if (selErr) throw selErr;
+  if (existing && existing.length > 0) {
+    const { error } = await supabase!.from(APP_SETTINGS_TABLE).update(row).eq("tenant_id", tenantId);
+    if (error) throw error;
+  } else {
+    const { error } = await supabase!.from(APP_SETTINGS_TABLE).insert({ ...row, created_at: new Date().toISOString() });
+    if (error) throw error;
+  }
+};

@@ -108,6 +108,15 @@
   .erp-table {
     min-width: 720px;
   }
+  /* 소형(2~3컬럼) 요약 표는 720px 강제에서 제외 → 카드 안에서 깨지지 않고 가득 차게 */
+  .erp-table.erp-table--compact {
+    min-width: 0;
+  }
+}
+/* 소형 요약 표는 항상 컨테이너 폭에 맞춤 */
+.erp-table--compact {
+  min-width: 0;
+  width: 100%;
 }
 
 .counter {
