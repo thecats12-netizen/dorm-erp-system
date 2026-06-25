@@ -1950,6 +1950,7 @@ export default function App() {
   const [selectedNewHiresForAssignment, setSelectedNewHiresForAssignment] = useState<string[]>([]);
   const [assignmentSiteFilter, setAssignmentSiteFilter] = useState<Site | "전체">("전체");
   const [assignmentGenderFilter, setAssignmentGenderFilter] = useState<"남" | "여" | "전체">("전체");
+  const [assignmentStatusFilter, setAssignmentStatusFilter] = useState<string>("전체"); // 일괄 배정 기숙사 상태 필터
   const [assignmentNewHireSearch, setAssignmentNewHireSearch] = useState("");
 
   // 공통 알림/확인 모달(브라우저 기본 팝업 대체 — 한글 실무 문구, 개발자 용어 노출 방지)
@@ -6296,6 +6297,94 @@ export default function App() {
     return "사용중";
   };
 
+  // 신입사원 기숙사 배정용: 활성 기숙사의 실제 표시 상태(공실/사용중/만실/만료예정) 맵.
+  const dormAssignStatusById = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const map: Record<string, string> = {};
+    operationalDorms.forEach((d) => {
+      // 계약 만료 예정(만료일 임박/경과 또는 leaseStatus=만료예정) 우선, 그 외 인원 기준.
+      const end = d.contractEnd || "";
+      if (d.leaseStatus === "만료예정" || (end && end < today)) {
+        map[d.id] = "만료예정";
+      } else {
+        map[d.id] = getOccupancyStatus(d.id, d.capacity);
+      }
+    });
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalDorms, occupancyCountByDorm]);
+
+  // 종료/해지된(과거) 기숙사 목록 + 상태 라벨 — 배정 셀렉터에서 "종료/해지 포함" 선택 시에만 노출.
+  const pastDormsForAssign = useMemo(() => {
+    const activeKeys = new Set(operationalDorms.map((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo)));
+    const latestTerminated = new Map<string, DormContract>();
+    dormContracts
+      .filter((c) => !c.isDeleted && (c.contractStatus === "종료" || c.contractStatus === "해지"))
+      .forEach((c) => {
+        const key = makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo);
+        if (activeKeys.has(key)) return; // 활성 계약이 있으면 과거 아님
+        const ex = latestTerminated.get(key);
+        const cu = c.updatedAt ? Date.parse(c.updatedAt) : 0;
+        const eu = ex?.updatedAt ? Date.parse(ex.updatedAt) : 0;
+        if (!ex || cu >= eu) latestTerminated.set(key, c);
+      });
+    const statusById: Record<string, string> = {};
+    const list = Array.from(latestTerminated.values()).map((c) => {
+      const key = makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo);
+      const md = dorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key && !d.isDeleted);
+      const ng = normGender(c.gender);
+      const id = md?.id || c.id;
+      statusById[id] = c.contractStatus; // "종료" | "해지" 실제 라벨
+      return {
+        id,
+        site: c.site,
+        gender: (ng === "여" ? "여" : "남") as "남" | "여",
+        buildingName: c.buildingName,
+        address: md?.address || c.address || "",
+        dong: c.dong,
+        roomHo: c.roomHo,
+        pyeong: c.pyeong || "",
+        capacity: md?.capacity ?? 6,
+        managerUserId: md?.managerUserId || "",
+        contractStart: c.contractStart || "",
+        contractEnd: c.contractEnd || "",
+        contractAmount: c.contractAmount || "",
+        leaseStatus: "해지", // OperationalDorm 유니온 호환(표시 라벨은 statusById 사용)
+        공동현관: c.공동현관 || "",
+        세대현관: c.세대현관 || "",
+        prepaymentDeposit: 0,
+        realEstateName: c.realEstateName || "",
+        balanceDate: "",
+        notes: c.notes || "",
+        createdAt: c.createdAt || "",
+        updatedAt: c.updatedAt || "",
+      } as OperationalDorm;
+    });
+    return { list, statusById };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dormContracts, operationalDorms, dorms]);
+
+  // 종료/해지 과거 기숙사의 상태 라벨도 포함한 전체 상태 맵(배정 셀렉터 전달용).
+  const dormAssignStatusAll = useMemo(
+    () => ({ ...dormAssignStatusById, ...pastDormsForAssign.statusById }),
+    [dormAssignStatusById, pastDormsForAssign]
+  );
+
+  // 일괄 배정 모달용 기숙사 목록: 지역/성별 + 상태 필터(공실/사용중/만실/만료예정/종료해지 포함).
+  // 기본("전체")은 활성만(종료/해지 숨김), "종료/해지 포함" 선택 시 과거 기숙사도 표시.
+  const assignmentDormRows = useMemo(() => {
+    const includePast = assignmentStatusFilter === "종료/해지 포함";
+    const pool = [...operationalDorms, ...(includePast ? pastDormsForAssign.list : [])];
+    return pool.filter((d) => {
+      if (assignmentSiteFilter !== "전체" && d.site !== assignmentSiteFilter) return false;
+      if (assignmentGenderFilter !== "전체" && d.gender !== assignmentGenderFilter) return false;
+      const s = dormAssignStatusAll[d.id] || d.leaseStatus;
+      if (assignmentStatusFilter === "전체") return s !== "종료" && s !== "해지";
+      if (assignmentStatusFilter === "종료/해지 포함") return true;
+      return s === assignmentStatusFilter;
+    });
+  }, [operationalDorms, pastDormsForAssign, dormAssignStatusAll, assignmentSiteFilter, assignmentGenderFilter, assignmentStatusFilter]);
+
   // 계약 등록/수정 폼의 자동계산 상태(안내문용): 종료/해지(수동) → 그대로, 만료일 경과 → 만료, 그 외 → 실제 인원 기준(공실/사용중/만실).
   const computeFormContractStatus = (f: DormContractFormState): "공실" | "사용중" | "만실" | "만료" | "종료" | "해지" => {
     if (f.contractStatus === "종료") return "종료";
@@ -6986,26 +7075,28 @@ export default function App() {
     return { moveInTodayCount, moveOutTodayCount, unassignedNewHires, newHireAssignments };
   }, [occupants, newHires]);
 
-  // 대시보드 퇴실 예정: 30일 이내 + 이번 달(1일~말일). 퇴실/삭제 제외, 담당자는 본인 기숙사만.
+  // 대시보드 퇴실 예정: 오늘 / 30일 이내 / 이번 달(1~말일).
+  // 우선순위(중복 방지): 오늘 퇴실 > 30일 이내 > 이번 달. 퇴실예정일은 실제퇴실/예상퇴실/퇴실예정 중 유효값.
   const moveOutSchedules = useMemo(() => {
     const now = new Date();
     const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const in30 = new Date(today0);
     in30.setDate(in30.getDate() + 30);
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
     const role = currentUser?.role;
     const ownDormId = currentUser?.dormId || "";
     const restrictOwn = role === "maintenance_reporter" || role === "dorm_manager";
 
     const enriched = occupants
       .filter((o) => !o.isDeleted && !o.isPermanentDeleted)
-      .filter((o) => o.status !== "퇴실" && !o.actualMoveOutDate) // 이미 퇴실 처리된 인원 제외
       .filter((o) => !restrictOwn || o.dormId === ownDormId)
       .map((o) => {
-        const raw = o.expectedMoveOutDate || o.moveOutDueDate || "";
-        const d = parseSafeDate(raw);
-        if (!d) return null;
+        // 실제퇴실일 우선, 없으면 예상퇴실일/퇴실예정일 — 날짜 정규화(시각 제거)해 오늘과 비교.
+        const raw = o.actualMoveOutDate || o.expectedMoveOutDate || o.moveOutDueDate || "";
+        const parsed = parseSafeDate(raw);
+        if (!parsed) return null;
+        const d = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+        if (d < today0) return null; // 이미 지난(퇴실 완료) 인원 제외 — 오늘은 포함
         const dorm = getOccupantDorm(o);
         return {
           occupant: o,
@@ -7014,21 +7105,24 @@ export default function App() {
           buildingName: dorm?.buildingName || o.site || "",
           dong: dorm?.dong || "",
           roomHo: dorm?.roomHo || "",
-          remainDays: Math.ceil((d.getTime() - today0.getTime()) / 86400000),
+          remainDays: Math.round((d.getTime() - today0.getTime()) / 86400000),
         };
       })
       .filter((x): x is NonNullable<typeof x> => !!x);
 
-    const thisMonth = enriched
-      .filter((x) => x.date >= monthStart && x.date <= monthEnd)
-      .sort((a, b) => a.date.getTime() - b.date.getTime());
-    // 우선순위: 이번 달 퇴실 예정에 포함된 인원은 30일 이내 목록에서 중복 제외.
-    const thisMonthIds = new Set(thisMonth.map((x) => x.occupant.id));
-    const within30 = enriched
-      .filter((x) => x.date >= today0 && x.date <= in30 && !thisMonthIds.has(x.occupant.id))
-      .sort((a, b) => a.date.getTime() - b.date.getTime());
+    const sortByDate = <T extends { date: Date }>(arr: T[]) => arr.sort((a, b) => a.date.getTime() - b.date.getTime());
+    // ① 오늘 퇴실 예정
+    const today = sortByDate(enriched.filter((x) => x.date.getTime() === today0.getTime()));
+    const todayIds = new Set(today.map((x) => x.occupant.id));
+    // ② 30일 이내(오늘 제외)
+    const within30 = sortByDate(enriched.filter((x) => !todayIds.has(x.occupant.id) && x.date > today0 && x.date <= in30));
+    const within30Ids = new Set(within30.map((x) => x.occupant.id));
+    // ③ 이번 달(오늘·30일 이내 제외)
+    const thisMonth = sortByDate(
+      enriched.filter((x) => !todayIds.has(x.occupant.id) && !within30Ids.has(x.occupant.id) && x.date >= today0 && x.date <= monthEnd)
+    );
 
-    return { within30, thisMonth };
+    return { today, within30, thisMonth };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [occupants, operationalDorms, dorms, currentUser?.role, currentUser?.dormId]);
 
@@ -8177,6 +8271,10 @@ export default function App() {
       const payload: CleaningReport = {
         id: existing.id,
         ...cleaningReportForm,
+        // 상태/점수 등만 바꿔도 기존 이미지가 초기화되지 않도록 방어:
+        // 폼 배열이 누락(undefined)되면 기존 보고서의 사진을 유지. (사용자가 직접 삭제한 빈 배열 []은 그대로 존중)
+        beforePhotoDataUrls: cleaningReportForm.beforePhotoDataUrls ?? existing.beforePhotoDataUrls ?? [],
+        afterPhotoDataUrls: cleaningReportForm.afterPhotoDataUrls ?? existing.afterPhotoDataUrls ?? [],
         createdAt: existing.createdAt,
         updatedAt: new Date().toISOString(),
       };
@@ -8412,7 +8510,7 @@ export default function App() {
           // 계정 생성 화면으로 이동 + 신입사원 정보 프리필(담당 기숙사/지역/성별 포함)
           // 계정 저장 시 이 신입사원에 담당자 계정 id 를 연결하기 위해 pending 연결 정보 보관.
           setPendingManagerLink({ newHireId: hire.id, dormId });
-          setUserForm({ ...userTemplate(), displayName: name, role: "maintenance_reporter", dormId, siteAccess: hire.site, genderAccess });
+          setUserForm({ ...userTemplate(), displayName: name, phone: hire.phone || "", role: "maintenance_reporter", dormId, siteAccess: hire.site, genderAccess, isActive: true });
           setEditingUserId(null);
           setShowUserForm(true);
           setActiveTab("users");
@@ -12579,7 +12677,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="space-y-2">
                   {([
                     { label: "오늘 입주 예정", count: dashboardOpsData.moveInTodayCount, tab: "occupants", color: "text-blue-600" },
-                    { label: "오늘 퇴실 예정", count: dashboardOpsData.moveOutTodayCount, tab: "occupants", color: "text-indigo-600" },
+                    { label: "오늘 퇴실 예정", count: moveOutSchedules.today.length, tab: "occupants", color: "text-indigo-600" },
                     { label: "계약 만료 예정 (30일)", count: dashboardSummaryStats.expiringCount, tab: "dormContracts", color: "text-amber-600" },
                     { label: "청소 미제출", count: dashboardSummaryStats.unreportedCleaning, tab: "cleaningReports", color: "text-green-600" },
                     { label: "하자 미처리", count: dashboardSummaryStats.unprocessedDefects, tab: "defects", color: "text-red-600" },
@@ -12598,8 +12696,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   ))}
                 </div>
 
-                {/* 퇴실 예정(30일 이내) / 이번 달 퇴실 예정 — 클릭 시 입주자 수정 화면으로 이동 */}
+                {/* 오늘 퇴실 / 30일 이내 / 이번 달 — 우선순위로 중복 없이 표시. 클릭 시 원본(신입사원/입주자) 화면 이동 */}
                 {([
+                  { key: "today", title: "오늘 퇴실 예정", rows: moveOutSchedules.today, color: "text-indigo-600" },
                   { key: "within30", title: "퇴실 예정 (30일 이내)", rows: moveOutSchedules.within30, color: "text-amber-600" },
                   { key: "thisMonth", title: "이번 달 퇴실 예정", rows: moveOutSchedules.thisMonth, color: "text-rose-600" },
                 ] as const).map((group) => (
@@ -13568,7 +13667,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <h2 className="text-lg font-semibold">환경설정</h2>
               <p className="text-sm text-slate-500">예비군/민방위 기준표와 코드값, 자동생성 설정을 관리합니다.</p>
             </div>
-            <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+            <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr_0.8fr]">
               <div className="space-y-6">
                 <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-5" : "rounded-2xl border border-slate-200 bg-slate-50 p-5"}`}>
                   <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -15135,6 +15234,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     setSelectedNewHiresForAssignment([]);
                     setAssignmentSiteFilter("전체");
                     setAssignmentGenderFilter("전체");
+                    setAssignmentStatusFilter("전체");
                     setAssignmentNewHireSearch("");
                   }}
                   className={`${theme.darkMode ? "rounded-2xl border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-950" : "rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"}`}
@@ -15165,6 +15265,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   }}
                   options={["전체", "남", "여"]}
                 />
+                <FilterSelect
+                  label="기숙사 상태"
+                  value={assignmentStatusFilter}
+                  onChange={(v) => {
+                    setAssignmentStatusFilter(v);
+                    setSelectedDormForAssignment("");
+                  }}
+                  options={["전체", "공실", "사용중", "만실", "만료예정", "종료/해지 포함"]}
+                />
                 <div className="flex-1 min-w-64">
                   <input
                     type="text"
@@ -15175,7 +15284,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   />
                 </div>
                 <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-600"}`}>
-                  표시 기숙사: {filteredDormsForAssignment.length}개 / 미배정 신입사원: {filteredUnassignedNewHires.length}명
+                  표시 기숙사: {assignmentDormRows.length}개 / 미배정 신입사원: {filteredUnassignedNewHires.length}명
                 </div>
               </div>
 
@@ -15185,7 +15294,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <h4 className="mb-3 text-base font-semibold">1. 기숙사 선택</h4>
                   <div className="space-y-3">
                     <div className="max-h-64 overflow-y-auto">
-                      {filteredDormsForAssignment.map((dorm) => (
+                      {assignmentDormRows.map((dorm) => {
+                          const st = dormAssignStatusAll[dorm.id] || dorm.leaseStatus;
+                          return (
                           <button
                             key={dorm.id}
                             type="button"
@@ -15196,10 +15307,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 : "border-slate-200 hover:bg-slate-50"
                             }`}
                           >
-                            <div className="font-medium">{dorm.buildingName} {formatDong(dorm.dong)} {formatRoomHo(dorm.roomHo)}</div>
+                            <div className="font-medium">{dorm.buildingName} {formatDong(dorm.dong)} {formatRoomHo(dorm.roomHo)} <span className="text-xs font-semibold text-slate-500">[{st}]</span></div>
                             <div className="text-sm text-slate-500">{dorm.site} · {dorm.gender} · 정원 {dorm.capacity}명</div>
                           </button>
-                        ))}
+                          );
+                        })}
+                      {assignmentDormRows.length === 0 && (
+                        <div className="text-center text-slate-400 py-4">해당 필터에 맞는 기숙사가 없습니다.</div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -15210,7 +15325,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   {selectedDormForAssignment ? (
                     <div className="space-y-3">
                       <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-600"}`}>
-                        선택된 기숙사: {operationalDorms.find(d => d.id === selectedDormForAssignment)?.buildingName}
+                        선택된 기숙사: {assignmentDormRows.find(d => d.id === selectedDormForAssignment)?.buildingName}
                       </div>
                       <div className="max-h-64 overflow-y-auto space-y-2">
                         {filteredUnassignedNewHires.map((hire) => (
@@ -17759,16 +17874,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
               </div>
               <div className="erp-table-container">
-                <table className="erp-table w-full">
+                <table className="erp-table min-w-[900px] w-full text-left">
                   <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                     <tr>
-                      <th className="px-3 py-3">보고일</th>
-                      <th className="px-3 py-3">기숙사</th>
-                      <th className="px-3 py-3">상태</th>
-                      <th className="px-3 py-3">담당 관리자</th>
-                      <th className="px-3 py-3">청소담당자</th>
-                      <th className="px-3 py-3">사진</th>
-                      <th className="px-3 py-3">작업</th>
+                      <th className="px-3 py-3 whitespace-nowrap">보고일</th>
+                      <th className="px-3 py-3 whitespace-nowrap">기숙사</th>
+                      <th className="px-3 py-3 whitespace-nowrap">상태</th>
+                      <th className="px-3 py-3 whitespace-nowrap">담당 관리자</th>
+                      <th className="px-3 py-3 whitespace-nowrap">청소담당자</th>
+                      <th className="px-3 py-3 whitespace-nowrap">사진</th>
+                      <th className="px-3 py-3 whitespace-nowrap">작업</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -17807,7 +17922,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           })()}
                         </td>
                         <td className="px-3 py-3 whitespace-nowrap">
-                          <div className="flex gap-2">
+                          <div className="flex flex-nowrap gap-2">
                             {canDownloadFiles && (
                               <button onClick={() => printCleaningReport(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`} title="청소보고서 PDF 저장">
                                 PDF
@@ -20554,6 +20669,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 defaultSite={newHireForm.site}
                 defaultGender={newHireForm.gender}
                 label="기숙사"
+                assignMode
+                statusByDormId={dormAssignStatusAll}
+                pastDorms={pastDormsForAssign.list}
               />
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 mt-4">
                 <Input label="주소" value={newHireForm.address} onChange={(v) => setNewHireForm((f) => ({ ...f, address: v }))} readOnly />
@@ -20678,6 +20796,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               defaultSite={newHires.find(h => h.id === assigningNewHireId)?.site}
               defaultGender={newHires.find(h => h.id === assigningNewHireId)?.gender}
               label="기숙사 선택"
+              assignMode
+              statusByDormId={dormAssignStatusAll}
+              pastDorms={pastDormsForAssign.list}
             />
           </div>,
           () => {
@@ -20715,6 +20836,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 operationalDorms={operationalDorms}
                 defaultSite={occupantForm.site}
                 label="기숙사"
+                assignMode
+                statusByDormId={dormAssignStatusAll}
+                pastDorms={pastDormsForAssign.list}
               />
               <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input label="입실일" type="date-text" value={occupantForm.moveInDate} onChange={(v) => setOccupantForm((f) => ({ ...f, moveInDate: v }))} />
