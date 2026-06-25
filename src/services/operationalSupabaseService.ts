@@ -308,7 +308,8 @@ const toDomainSettlementItem = (row: any): SettlementItem => ({
 });
 
 const toDbAuditLog = (log: AuditLog, tenantId: string, userId: string) => ({
-  id: log.id,
+  // id 없으면 생성(테이블에 PK/unique 없거나 누락 시에도 insert 가능하도록).
+  id: log.id || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`),
   tenant_id: tenantId,
   target_type: log.targetType,
   target_id: log.targetId,
@@ -391,7 +392,8 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
       settlementItems: payload.settlementItems?.length || 0,
       auditLogs: payload.auditLogs?.length || 0,
     });
-    const [cleaningResult, defectsResult, inventoryResult, settlementRecordsResult, settlementItemsResult, auditLogsResult] =
+    // 실제 데이터(부가기능 audit_logs 제외)만 critical 저장 — 이 중 하나라도 실패하면 throw.
+    const [cleaningResult, defectsResult, inventoryResult, settlementRecordsResult, settlementItemsResult] =
       await Promise.all([
         supabase!
           .from("cleaning_reports")
@@ -408,19 +410,20 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
         supabase!
           .from("settlement_items")
           .upsert(payload.settlementItems.map((item) => toDbSettlementItem(item, payload.tenantId, userId)), { onConflict: "id" }),
-        supabase!
-          .from("audit_logs")
-          .upsert(payload.auditLogs.map((log) => toDbAuditLog(log, payload.tenantId, userId)), { onConflict: "id" }),
       ]);
 
-    if (cleaningResult.error || defectsResult.error || inventoryResult.error || settlementRecordsResult.error || settlementItemsResult.error || auditLogsResult.error) {
-      const err = cleaningResult.error || defectsResult.error || inventoryResult.error || settlementRecordsResult.error || settlementItemsResult.error || auditLogsResult.error;
+    if (cleaningResult.error || defectsResult.error || inventoryResult.error || settlementRecordsResult.error || settlementItemsResult.error) {
+      const err = cleaningResult.error || defectsResult.error || inventoryResult.error || settlementRecordsResult.error || settlementItemsResult.error;
       // provide more helpful logging if RLS/permission issue
       if (err && /permission|row level security|RLS/i.test(JSON.stringify(err))) {
         console.error("Supabase permission/RLS error detected:", err);
       }
       throw new Error(translateSupabaseError((err as any)?.message || String(err)));
     }
+
+    // 부가기능: 변경이력(audit_logs)은 실패해도 전체 저장을 실패로 처리하지 않음(경고만).
+    // upsert(on_conflict=id) 대신 plain insert 사용 — id unique/PK 미설정 환경의 500 회피.
+    await insertAuditLogsScoped(payload.auditLogs, payload.tenantId, userId);
   } catch (error) {
     console.error("Supabase operational module save error:", error);
     throw new Error(translateSupabaseError((error as any)?.message || String(error)));
@@ -432,6 +435,8 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
  * - upsert + ignoreDuplicates:true → 신규 행만 INSERT, 기존 행은 DO NOTHING (UPDATE 미발생)
  * - audit_logs 의 INSERT 전용 RLS 정책과 호환 (UPDATE 정책 없어도 403 없음)
  */
+// 변경이력(audit_logs) 저장 — 부가기능. 실패해도 throw 하지 않고 console.warn 만 남긴다.
+// upsert(on_conflict=id) 대신 plain insert 사용 → id unique/PK 미설정 환경의 500/400 회피.
 export const insertAuditLogsScoped = async (
   auditLogs: AuditLog[],
   tenantId: string,
@@ -439,14 +444,15 @@ export const insertAuditLogsScoped = async (
 ): Promise<void> => {
   if (!isSupabaseAvailable()) return;
   if (!auditLogs || auditLogs.length === 0) return;
-  const { error } = await supabase!
-    .from("audit_logs")
-    .upsert(
-      auditLogs.map((log) => toDbAuditLog(log, tenantId, userId)),
-      { onConflict: "id", ignoreDuplicates: true }
-    );
-  if (error) {
-    const message = error instanceof Error ? error.message : String((error as { message?: string })?.message ?? error);
-    throw new Error(translateSupabaseError(message));
+  try {
+    const { error } = await supabase!
+      .from("audit_logs")
+      .insert(auditLogs.map((log) => toDbAuditLog(log, tenantId, userId)));
+    if (error) {
+      // 감사로그 저장 실패는 실제 데이터 저장과 무관 → 경고만(앱 동작/저장 성공에는 영향 없음).
+      console.warn("[audit_logs] 변경이력 저장 실패(무시):", (error as { message?: string })?.message || error);
+    }
+  } catch (e) {
+    console.warn("[audit_logs] 변경이력 저장 예외(무시):", (e as { message?: string })?.message || e);
   }
 };
