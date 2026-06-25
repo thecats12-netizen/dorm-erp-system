@@ -1793,6 +1793,8 @@ export default function App() {
   const [cleaningDormSearch, setCleaningDormSearch] = useState("");
   const [cleaningManagerFilter, setCleaningManagerFilter] = useState<string>("전체");
   const [cleaningStatusFilter, setCleaningStatusFilter] = useState<string>("전체");
+  // 청소관리: 기숙사 데이터 행/카드 클릭 시 선택된 기숙사 id (""=전체). 요약/담당자감점/원본리스트 모두 이 기준으로 필터.
+  const [selectedCleaningDormId, setSelectedCleaningDormId] = useState<string>("");
   const [cleaningSettings, setCleaningSettings] = useState<CleaningSettings>({
     missingReportPenalty: -5,
     includeWeekendReports: false,
@@ -2167,6 +2169,19 @@ export default function App() {
   // 하자 이미지 라이트박스(저장 없이 즉시 미리보기)
   const [imageLightbox, setImageLightbox] = useState<{ urls: string[]; index: number; title: string } | null>(null);
   const [lightboxZoomed, setLightboxZoomed] = useState(false);
+  const lightboxTouchStartXRef = useRef<number | null>(null);
+
+  // 이미지 미리보기: 방향키 이동 / ESC 닫기 (데스크탑 키보드 편의).
+  useEffect(() => {
+    if (!imageLightbox || imageLightbox.urls.length === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { setImageLightbox(null); }
+      else if (e.key === "ArrowLeft") { setLightboxZoomed(false); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index - 1 + lb.urls.length) % lb.urls.length } : lb)); }
+      else if (e.key === "ArrowRight") { setLightboxZoomed(false); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + 1) % lb.urls.length } : lb)); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [imageLightbox]);
   const [operationalSyncError, setOperationalSyncError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -6083,16 +6098,20 @@ export default function App() {
         (report.dormId === currentUser?.dormId &&
           (report.managerName === currentUser?.displayName ||
             report.managerUserId === currentUser?.id));
+      // 기숙사 데이터에서 특정 기숙사를 클릭 선택한 경우 해당 기숙사 보고서만.
+      const matchesSelectedDorm =
+        !selectedCleaningDormId || report.dormId === selectedCleaningDormId || reportDorm?.id === selectedCleaningDormId;
       return (
         Boolean(matchesYearMonth) &&
         matchesSite &&
         matchesDormSearch &&
         matchesManager &&
         matchesStatus &&
+        matchesSelectedDorm &&
         (isReporter ? matchesOwnReporter : matchesPermission)
       );
     });
-  }, [cleaningReports, cleaningYear, cleaningMonth, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, cleaningStatusFilter, users, currentUser]);
+  }, [cleaningReports, cleaningYear, cleaningMonth, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, cleaningStatusFilter, selectedCleaningDormId, users, currentUser]);
 
   const deletedDorms = useMemo(() => dorms.filter(isInTrash), [dorms]);
   const deletedDormContracts = useMemo(() => dormContracts.filter(isInTrash), [dormContracts]);
@@ -6276,6 +6295,13 @@ export default function App() {
     });
   }, [operationalDorms, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, users, currentUser]);
 
+  // 선택한 기숙사가 현재 필터 범위에서 사라지면 선택 해제(잘못된 빈 요약 방지).
+  useEffect(() => {
+    if (selectedCleaningDormId && !visibleCleaningDormRows.some((d) => d.id === selectedCleaningDormId)) {
+      setSelectedCleaningDormId("");
+    }
+  }, [visibleCleaningDormRows, selectedCleaningDormId]);
+
   const managerFilterOptions = useMemo(() => {
     const names = new Set<string>();
     operationalDorms.forEach((dorm) => {
@@ -6287,16 +6313,33 @@ export default function App() {
     return Array.from(names).sort();
   }, [operationalDorms, users]);
 
+  // 선택된 기숙사가 있으면 그 기숙사만, 없으면 전체(visible) — 요약/담당자감점/현황 공통 범위.
+  const cleaningScopeDormRows = useMemo(() => {
+    if (selectedCleaningDormId) return visibleCleaningDormRows.filter((d) => d.id === selectedCleaningDormId);
+    return visibleCleaningDormRows;
+  }, [visibleCleaningDormRows, selectedCleaningDormId]);
+
+  // 범위 내 담당자 이름 목록(담당자별 감점/현황 카드용). 선택 시 해당 기숙사 담당자만.
+  const cleaningScopeManagerNames = useMemo(() => {
+    const names = new Set<string>();
+    cleaningScopeDormRows.forEach((dorm) => {
+      const mgr = getDormManagerUser(dorm.id);
+      if (mgr) names.add(mgr.displayName || mgr.username);
+    });
+    return Array.from(names).sort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cleaningScopeDormRows, users]);
+
   const cleaningOverview = useMemo(() => {
     const summary = {
-      totalDorms: visibleCleaningDormRows.length,
+      totalDorms: cleaningScopeDormRows.length,
       submitted: 0,
       missing: 0,
       bad: 0,
       photoMissing: 0,
       penaltyTotal: 0,
     };
-    visibleCleaningDormRows.forEach((dorm) => {
+    cleaningScopeDormRows.forEach((dorm) => {
       for (let weekNo = 1; weekNo <= 5; weekNo += 1) {
         const status = getCleaningWeeklyStatus(dorm, weekNo);
         if (status === "O") summary.submitted += 1;
@@ -6304,10 +6347,10 @@ export default function App() {
         if (status === "불량") summary.bad += 1;
         if (status === "사진누락") summary.photoMissing += 1;
       }
-      summary.penaltyTotal += getManagerCleaningPenalty(dorm.managerUserId || "");
+      summary.penaltyTotal += getManagerCleaningPenalty(getDormManagerUser(dorm.id)?.id || dorm.managerUserId || "");
     });
     return summary;
-  }, [visibleCleaningDormRows, cleaningSettings, getCleaningWeeklyStatus, getManagerCleaningPenalty]);
+  }, [cleaningScopeDormRows, cleaningSettings, getCleaningWeeklyStatus, getManagerCleaningPenalty]);
 
   const occupancyCountByDorm = useMemo(() => {
     const map = new Map<string, number>();
@@ -7119,22 +7162,17 @@ export default function App() {
     const ownDormId = currentUser?.dormId || "";
     const restrictOwn = role === "maintenance_reporter" || role === "dorm_manager";
 
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const enriched = occupants
       .filter((o) => !o.isDeleted && !o.isPermanentDeleted)
       .filter((o) => !restrictOwn || o.dormId === ownDormId)
-      // 이미 퇴실 완료(실제퇴실일 과거 또는 상태 퇴실) 인원은 제외.
-      .filter((o) => {
-        const actual = parseSafeDate(o.actualMoveOutDate || "");
-        if (actual && new Date(actual.getFullYear(), actual.getMonth(), actual.getDate()) < today0) return false;
-        return true;
-      })
       .map((o) => {
-        // 기준일: 예상퇴실일이 있으면 예상퇴실일, 없으면 퇴실일(거주기한). 날짜 정규화 후 오늘과 비교.
-        const raw = o.expectedMoveOutDate || o.moveOutDueDate || "";
+        // 기준일: 예상퇴실일이 있으면 예상퇴실일 우선, 없으면 퇴실일(거주기한/실제퇴실일).
+        // (예상퇴실일이 미래면 실제퇴실일이 과거여도 예상퇴실일 기준으로 판단 — 요청 예시 반영)
+        const raw = o.expectedMoveOutDate || o.moveOutDueDate || o.actualMoveOutDate || "";
         const parsed = parseSafeDate(raw);
         if (!parsed) return null;
         const d = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
-        if (d < today0) return null; // 기준일이 지난 인원 제외 — 오늘은 포함
         const dorm = getOccupantDorm(o);
         return {
           occupant: o,
@@ -7149,20 +7187,97 @@ export default function App() {
       .filter((x): x is NonNullable<typeof x> => !!x);
 
     const sortByDate = <T extends { date: Date }>(arr: T[]) => arr.sort((a, b) => a.date.getTime() - b.date.getTime());
-    // ① 오늘 퇴실 예정
+    // ① 오늘 퇴실 예정: 기준일 == 오늘 (최우선)
     const today = sortByDate(enriched.filter((x) => x.date.getTime() === today0.getTime()));
     const todayIds = new Set(today.map((x) => x.occupant.id));
-    // ② 30일 이내(오늘 제외)
-    const within30 = sortByDate(enriched.filter((x) => !todayIds.has(x.occupant.id) && x.date > today0 && x.date <= in30));
-    const within30Ids = new Set(within30.map((x) => x.occupant.id));
-    // ③ 이번 달(오늘·30일 이내 제외)
-    const thisMonth = sortByDate(
-      enriched.filter((x) => !todayIds.has(x.occupant.id) && !within30Ids.has(x.occupant.id) && x.date >= today0 && x.date <= monthEnd)
+    // ② 이번 달 퇴실 예정: 기준일이 이번 달(1일~말일)에 포함 (오늘 제외)
+    //    예) 예상퇴실일이 이번 달이면 30일 이내와 겹쳐도 "이번 달"에 표시(요청 예시 반영).
+    const thisMonth = sortByDate(enriched.filter((x) => !todayIds.has(x.occupant.id) && x.date >= monthStart && x.date <= monthEnd));
+    const thisMonthIds = new Set(thisMonth.map((x) => x.occupant.id));
+    // ③ 30일 이내: 오늘 이후 ~ +30일 (오늘·이번 달 제외 → 다음 달로 넘어가는 30일 이내 인원)
+    const within30 = sortByDate(
+      enriched.filter((x) => !todayIds.has(x.occupant.id) && !thisMonthIds.has(x.occupant.id) && x.date > today0 && x.date <= in30)
     );
 
     return { today, within30, thisMonth };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [occupants, operationalDorms, dorms, currentUser?.role, currentUser?.dormId]);
+
+  // ============================================
+  // 오버레이(모달/미리보기/메뉴) 닫기 우선순위 + 키보드 단축키 + 모바일 뒤로가기
+  // ============================================
+  // 현재 열려 있는 최상위 오버레이를 닫는다(우선순위: 미리보기 > 폼/모달 > 모바일 메뉴). 닫았으면 true.
+  const closeTopOverlay = (): boolean => {
+    if (imageLightbox) { setImageLightbox(null); return true; }
+    if (excelPreview) { setExcelPreview(null); return true; }
+    if (showDefectForm) { setShowDefectForm(false); return true; }
+    if (showCleaningReportForm) { setShowCleaningReportForm(false); return true; }
+    if (showNewHireForm) { setShowNewHireForm(false); return true; }
+    if (showOccupantForm) { setShowOccupantForm(false); return true; }
+    if (showDormForm) { setShowDormForm(false); return true; }
+    if (showDormContractForm) { setShowDormContractForm(false); return true; }
+    if (showInventoryForm) { setShowInventoryForm(false); return true; }
+    if (showLeaseForm) { setShowLeaseForm(false); return true; }
+    if (showSaleForm) { setShowSaleForm(false); return true; }
+    if (showUserForm) { setShowUserForm(false); return true; }
+    if (showMilitaryPersonnelForm) { setShowMilitaryPersonnelForm(false); return true; }
+    if (showMilitaryTrainingForm) { setShowMilitaryTrainingForm(false); return true; }
+    if (showMilitaryNoticeForm) { setShowMilitaryNoticeForm(false); return true; }
+    if (showMilitaryReportForm) { setShowMilitaryReportForm(false); return true; }
+    if (showAssignDormForNewHire) { setShowAssignDormForNewHire(false); return true; }
+    if (showNewHireAssignmentModal) { setShowNewHireAssignmentModal(false); return true; }
+    if (showExpiringDormsModal) { setShowExpiringDormsModal(false); return true; }
+    if (showUnassignedNewHiresModal) { setShowUnassignedNewHiresModal(false); return true; }
+    if (showAuditLogModal) { setShowAuditLogModal(false); return true; }
+    if (mobileMenuOpen) { setMobileMenuOpen(false); return true; }
+    return false;
+  };
+  const hasOpenOverlay = !!(
+    imageLightbox || excelPreview || showDefectForm || showCleaningReportForm || showNewHireForm ||
+    showOccupantForm || showDormForm || showDormContractForm || showInventoryForm || showLeaseForm ||
+    showSaleForm || showUserForm || showMilitaryPersonnelForm || showMilitaryTrainingForm ||
+    showMilitaryNoticeForm || showMilitaryReportForm || showAssignDormForNewHire ||
+    showNewHireAssignmentModal || showExpiringDormsModal || showUnassignedNewHiresModal ||
+    showAuditLogModal || mobileMenuOpen
+  );
+  // 최신 closeTopOverlay 를 ref 로 보관(이벤트 리스너에서 항상 최신 상태 사용).
+  const closeTopOverlayRef = useRef(closeTopOverlay);
+  closeTopOverlayRef.current = closeTopOverlay;
+
+  // 모바일/태블릿 뒤로가기: 오버레이가 열려 있으면 종료 대신 최상위 오버레이만 닫기.
+  useEffect(() => {
+    if (!hasOpenOverlay) return;
+    window.history.pushState({ appOverlay: Date.now() }, "");
+    const onPop = () => { closeTopOverlayRef.current(); };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [hasOpenOverlay]);
+
+  // 데스크탑 키보드 단축키: Esc 닫기 / Ctrl(⌘)+S 저장 / Ctrl(⌘)+F·"/" 검색 포커스.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing = !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (e.key === "Escape") {
+        if (closeTopOverlayRef.current()) e.preventDefault();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+        const btn = document.querySelector<HTMLButtonElement>("[data-modal-save]:not([disabled])");
+        if (btn) { e.preventDefault(); btn.click(); }
+        return;
+      }
+      if (((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) || (e.key === "/" && !typing)) {
+        const el =
+          document.querySelector<HTMLInputElement>('[data-search-input]') ||
+          document.querySelector<HTMLInputElement>('input[placeholder*="검색"]');
+        if (el) { e.preventDefault(); el.focus(); el.select?.(); }
+        return;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // ============================================
   // 통합검색 (전 모듈 대상)
@@ -10970,10 +11085,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       openNewHireEdit(hire);
       return;
     }
-    setActiveTab("occupants");
-    setOccupantForm(o);
-    setEditingOccupantId(o.id);
-    setShowOccupantForm(true);
+    // 매칭되는 신입사원 레코드가 없어도 항상 신입사원 등록/수정 화면으로 연다(입주자 정보로 프리필).
+    setActiveTab("newHires");
+    setNewHireForm(buildNewHireFormFromOccupant(o));
+    setEditingNewHireId(null);
+    setShowNewHireForm(true);
   };
 
   const buildNewHireFormFromOccupant = (occupant: Occupant): NewHireFormState => {
@@ -17727,10 +17843,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
               <div className={`${theme.darkMode ? "space-y-2 rounded-2xl border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300" : "space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">담당자별 감점</div>
-                {managerFilterOptions.length === 0 ? (
+                {cleaningScopeManagerNames.length === 0 ? (
                   <div className="text-slate-500">담당자 정보 없음</div>
                 ) : (
-                  managerFilterOptions.slice(0, 5).map((managerName) => {
+                  cleaningScopeManagerNames.slice(0, 10).map((managerName) => {
                     const manager = users.find((u) => u.displayName === managerName);
                     const penalty = manager ? getManagerCleaningPenalty(manager.id) : 0;
                     return (
@@ -17746,7 +17862,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             )}
 
             {/* 관리자 전용: 담당자별 청소 현황(실시간) — 청소보고 등록/수정/상태변경 시 즉시 반영 */}
-            {!isMaintenanceReporter && managerFilterOptions.length > 0 && (
+            {!isMaintenanceReporter && cleaningScopeManagerNames.length > 0 && (
               <div className="mt-4 erp-table-container">
                 <div className="mb-2 text-sm font-semibold">담당자별 청소 현황 (실시간)</div>
                 <table className="erp-table min-w-[640px] w-full text-left">
@@ -17762,7 +17878,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </tr>
                   </thead>
                   <tbody>
-                    {managerFilterOptions.map((managerName) => {
+                    {cleaningScopeManagerNames.map((managerName) => {
                       const manager = users.find((u) => u.displayName === managerName);
                       const uid = manager?.id || "";
                       const reps = cleaningReports.filter((r) => r.managerUserId === uid && !r.isDeleted && !r.isPermanentDeleted);
@@ -17829,6 +17945,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             )}
             <div className={isMaintenanceReporter ? "order-2" : "order-1"}>
+            {selectedCleaningDormId && (() => {
+              const sel = visibleCleaningDormRows.find((d) => d.id === selectedCleaningDormId);
+              return (
+                <div className={`mt-6 flex flex-wrap items-center justify-between gap-2 rounded-2xl border px-4 py-2 text-sm ${theme.darkMode ? "border-blue-700 bg-blue-950/40 text-blue-100" : "border-blue-300 bg-blue-50 text-blue-800"}`}>
+                  <span>선택 기숙사: <strong>{sel ? `${sel.buildingName} ${formatDong(sel.dong)}-${formatRoomHo(sel.roomHo)}` : "-"}</strong></span>
+                  <button type="button" onClick={() => setSelectedCleaningDormId("")} className="rounded-lg border border-blue-400 px-2.5 py-1 text-xs font-semibold hover:bg-blue-100">전체 보기</button>
+                </div>
+              );
+            })()}
             <div className="mt-6 erp-table-container">
               <table className="erp-table min-w-[1300px] text-left">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
@@ -17860,8 +17985,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <tbody>
                   {cleaningDormPg.pagedItems.map((dorm, idx) => {
                     const rowNo = (cleaningDormPg.page - 1) * cleaningDormPg.pageSize + idx + 1;
+                    const isSelectedDorm = selectedCleaningDormId === dorm.id;
                     return (
-                      <tr key={`${dorm.id}-${idx}`} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
+                      <tr
+                        key={`${dorm.id}-${idx}`}
+                        onClick={() => setSelectedCleaningDormId((prev) => (prev === dorm.id ? "" : dorm.id))}
+                        title={isSelectedDorm ? "다시 클릭하면 전체 보기" : "클릭하면 이 기숙사만 보기"}
+                        className={`cursor-pointer ${isSelectedDorm ? (theme.darkMode ? "bg-blue-950/40 ring-1 ring-blue-500" : "bg-blue-50 ring-1 ring-blue-300") : ""} ${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}
+                      >
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{rowNo}</td>}
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{dorm.site}</td>}
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{dorm.gender}</td>}
@@ -17904,7 +18035,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         ))}
                         <td className="px-3 py-3 whitespace-nowrap">
                           <button
-                            onClick={() => openCleaningReportForm(undefined, dorm)}
+                            onClick={(e) => { e.stopPropagation(); openCleaningReportForm(undefined, dorm); }}
                             className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-2xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}
                           >
                             보고서 등록
@@ -21603,7 +21734,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   );
                 })()}
               </div>
-              <div className="relative flex flex-1 items-center justify-center overflow-auto p-4" onClick={(e) => e.stopPropagation()}>
+              <div
+                className="relative flex flex-1 items-center justify-center overflow-auto p-4"
+                onClick={(e) => e.stopPropagation()}
+                onTouchStart={(e) => { lightboxTouchStartXRef.current = e.touches[0]?.clientX ?? null; }}
+                onTouchEnd={(e) => {
+                  const startX = lightboxTouchStartXRef.current;
+                  lightboxTouchStartXRef.current = null;
+                  if (startX == null || urls.length <= 1) return;
+                  const dx = (e.changedTouches[0]?.clientX ?? startX) - startX;
+                  if (Math.abs(dx) > 40) go(dx < 0 ? 1 : -1); // 왼쪽 스와이프 → 다음, 오른쪽 → 이전
+                }}
+              >
                 {urls.length > 1 && (
                   <button type="button" onClick={() => go(-1)} className="absolute left-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/15 px-3 py-2 text-xl text-white hover:bg-white/30">‹</button>
                 )}
@@ -21617,7 +21759,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <button type="button" onClick={() => go(1)} className="absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/15 px-3 py-2 text-xl text-white hover:bg-white/30">›</button>
                 )}
               </div>
-              <div className="pb-3 text-center text-xs text-white/50">이미지를 클릭하면 확대/축소됩니다 · 바깥을 누르면 닫힙니다</div>
+              <div className="pb-3 text-center text-xs text-white/50">클릭=확대/축소 · ←/→ 또는 스와이프=이동 · ESC/바깥=닫기</div>
             </div>
           );
         })()}
@@ -21646,7 +21788,7 @@ function modalWrap(title: string, body: React.ReactNode, onClose: () => void, on
       <div className="max-h-[92vh] w-full max-w-6xl overflow-auto rounded-3xl bg-white p-5 shadow-2xl">
         <div className="mb-5 flex items-center justify-between"><div><h3 className="text-xl font-semibold">{title}</h3></div><button onClick={onClose} className="rounded-xl border border-slate-300 p-2 hover:bg-slate-50"><ChevronRight className="h-5 w-5 rotate-45" /></button></div>
         {body}
-        <div className="mt-6 flex justify-end gap-2"><button onClick={onClose} className="rounded-2xl border border-slate-300 px-4 py-2 hover:bg-slate-50">취소</button><button onClick={onSave} disabled={saveDisabled} className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-white ${saveDisabled ? "opacity-50 cursor-not-allowed" : ""}`} style={{ backgroundColor: accentColor }}><Save className="h-4 w-4" /> 저장</button></div>
+        <div className="mt-6 flex justify-end gap-2"><button onClick={onClose} className="rounded-2xl border border-slate-300 px-4 py-2 hover:bg-slate-50">취소</button><button data-modal-save onClick={onSave} disabled={saveDisabled} className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-white ${saveDisabled ? "opacity-50 cursor-not-allowed" : ""}`} style={{ backgroundColor: accentColor }}><Save className="h-4 w-4" /> 저장</button></div>
       </div>
     </div>
   );
