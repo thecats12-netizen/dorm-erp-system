@@ -62,6 +62,7 @@ import {
   saveMilitaryModule,
   loadAppSettings,
   saveAppSettings,
+  deleteRowsByIds,
   translateSupabaseError,
   type MilitaryModuleState,
 } from "./services/supabaseService";
@@ -92,7 +93,7 @@ import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
 import FilteredDormSelector from "./components/FilteredDormSelector";
 import { usePagination, PaginationBar } from "./components/Pagination";
-import { Input, SelectInput, SearchableSelect, FilterSelect, MiniStat, CompactField } from "./components/FormControls";
+import { Input, NumberInput, SelectInput, SearchableSelect, FilterSelect, MiniStat, CompactField } from "./components/FormControls";
 import { themeDefault } from "./constants/defaultData";
 import {
   getDefaultSystemSettings,
@@ -177,6 +178,8 @@ function mapProfileToLoginUser(profile: Profile, authUserEmail?: string): LoginU
     // 숨김(삭제) 판정: is_deleted 우선, 없으면 deleted_at 존재 여부로 판단
     isDeleted: profile.is_deleted === true || !!profile.deleted_at,
     deletedAt: profile.deleted_at || undefined,
+    // 영구삭제(휴지통에서도 제외): profiles.is_permanent_deleted
+    isPermanentDeleted: profile.is_permanent_deleted === true,
   } as LoginUser;
 }
 
@@ -7119,13 +7122,19 @@ export default function App() {
     const enriched = occupants
       .filter((o) => !o.isDeleted && !o.isPermanentDeleted)
       .filter((o) => !restrictOwn || o.dormId === ownDormId)
+      // 이미 퇴실 완료(실제퇴실일 과거 또는 상태 퇴실) 인원은 제외.
+      .filter((o) => {
+        const actual = parseSafeDate(o.actualMoveOutDate || "");
+        if (actual && new Date(actual.getFullYear(), actual.getMonth(), actual.getDate()) < today0) return false;
+        return true;
+      })
       .map((o) => {
-        // 실제퇴실일 우선, 없으면 예상퇴실일/퇴실예정일 — 날짜 정규화(시각 제거)해 오늘과 비교.
-        const raw = o.actualMoveOutDate || o.expectedMoveOutDate || o.moveOutDueDate || "";
+        // 기준일: 예상퇴실일이 있으면 예상퇴실일, 없으면 퇴실일(거주기한). 날짜 정규화 후 오늘과 비교.
+        const raw = o.expectedMoveOutDate || o.moveOutDueDate || "";
         const parsed = parseSafeDate(raw);
         if (!parsed) return null;
         const d = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
-        if (d < today0) return null; // 이미 지난(퇴실 완료) 인원 제외 — 오늘은 포함
+        if (d < today0) return null; // 기준일이 지난 인원 제외 — 오늘은 포함
         const dorm = getOccupantDorm(o);
         return {
           occupant: o,
@@ -8450,6 +8459,36 @@ export default function App() {
       return;
     }
     await appAlert("사용자 관리", "사용자가 정상적으로 복구되었습니다.");
+  };
+
+  // 사용자 영구삭제: Auth 계정은 보안상 유지하되 profiles 를 is_permanent_deleted=true 로 표시 →
+  // 휴지통 포함 모든 목록에서 제외(isInTrash/일반 목록 모두 숨김). 새로고침 후에도 유지.
+  const permanentlyDeleteUser = async (userId: string) => {
+    if (!canManageUsers(currentUser)) return;
+    if (!userId) return;
+    if (userId === currentUser?.id) {
+      await appAlert("사용자 관리", "본인 계정은 영구삭제할 수 없습니다.");
+      return;
+    }
+    const ok = await appConfirm(
+      "사용자 관리",
+      "이 계정을 영구삭제하시겠습니까?\n\n휴지통을 포함한 모든 목록에서 제외됩니다. (Auth 계정은 보안상 삭제하지 않고 숨김 처리됩니다)",
+      { confirmText: "영구삭제", tone: "danger" }
+    );
+    if (!ok) return;
+    const now = new Date().toISOString();
+    // 로컬 즉시 반영(영구삭제 = isInTrash 제외)
+    setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, isActive: false, isDeleted: true, deletedAt: u.deletedAt || now, isPermanentDeleted: true } : u)));
+    if (isSupabaseAvailable()) {
+      // is_permanent_deleted 컬럼이 없으면 is_deleted/deleted_at 만이라도 유지(단계적 폴백).
+      let res = await updateProfileOnly(userId, { is_active: false, is_deleted: true, deleted_at: now, is_permanent_deleted: true });
+      if (res.error && isMissingColumnError(res.error)) {
+        res = await updateProfileOnly(userId, { is_active: false, is_deleted: true, deleted_at: now });
+      }
+      if (res.error) console.warn("[permanentlyDeleteUser] profiles 업데이트 경고:", (res.error as { message?: string })?.message || res.error);
+    }
+    setSelectedUserIds((prev) => prev.filter((id) => id !== userId));
+    await appAlert("사용자 관리", "영구삭제 처리되었습니다.");
   };
 
   // 신입사원 "기숙사 담당자로 지정" → profiles.dorm_id 단일 기준으로 담당자 지정.
@@ -11412,10 +11451,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     });
   };
 
-  // 영구삭제: 실제 행을 삭제하지 않고 isPermanentDeleted=true 로 숨김 처리(soft).
-  // → Supabase/localStorage 에 플래그가 저장되어 새로고침 후에도 다시 보이지 않음.
-  //   isInTrash 기준으로 휴지통/복구 목록·일반 목록 모두에서 제외됨.
-  const permanentlyDeleteItem = <T extends { id: string; isDeleted?: boolean; deletedAt?: string; isPermanentDeleted?: boolean; permanentDeletedAt?: string; permanentDeletedBy?: string; updatedAt?: string }>(
+  // targetType → Supabase 테이블 매핑(영구삭제 시 hard delete 대상). 군대 모듈은 JSON 블롭이라 행 삭제 없음.
+  const HARD_DELETE_TABLE_BY_TARGET: Partial<Record<AuditLog["targetType"], string>> = {
+    dorm: "dorms",
+    dormContract: "dorm_contracts",
+    newHire: "new_hires",
+    occupant: "occupants",
+    inventory: "inventory_items",
+    defect: "defect_requests",
+    cleaningReport: "cleaning_reports",
+    lease: "leases",
+  };
+
+  // 영구삭제: 로컬 state 에서 제거 + Supabase 행 hard delete → 새로고침/realtime/load 로 복원되지 않음.
+  // (localStorage 는 state 기반 자동저장이라 다음 저장 시 제거 반영. 군대 모듈은 state 제거 후 블롭 재저장으로 반영.)
+  const permanentlyDeleteItem = <T extends { id: string }>(
     items: T[],
     setter: React.Dispatch<React.SetStateAction<T[]>>,
     id: string,
@@ -11424,24 +11474,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   ): boolean => {
     const existing = items.find((entry) => entry.id === id);
     if (!existing) return false;
-    if (!options?.skipConfirm && !confirm("영구 삭제할까요?\n\n영구삭제 항목은 휴지통/복구 목록에서 사라집니다. (데이터는 삭제되지 않고 숨김 처리됩니다)")) return false;
-    const now = new Date().toISOString();
+    if (!options?.skipConfirm && !confirm("영구 삭제할까요?\n\n이 작업은 되돌릴 수 없으며, 데이터가 완전히 삭제됩니다.")) return false;
     const by = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
-    setter((prev) =>
-      prev.map((entry) =>
-        entry.id === id
-          ? { ...entry, isDeleted: true, deletedAt: entry.deletedAt || now, isPermanentDeleted: true, permanentDeletedAt: now, permanentDeletedBy: by, updatedAt: now }
-          : entry
-      )
-    );
+    // 1) 로컬 state 에서 완전 제거 (화면/목록 즉시 반영 + 자동저장 재upsert 방지)
+    setter((prev) => prev.filter((entry) => entry.id !== id));
+    // 2) Supabase 행 hard delete (있을 때만) — 새로고침/realtime 복원 차단
+    const table = HARD_DELETE_TABLE_BY_TARGET[targetType];
+    if (table) void deleteRowsByIds(table, [id]);
     createAuditLog({
       targetType,
       targetId: id,
       actionType: "delete",
       changedBy: by,
       beforeValue: JSON.stringify(existing),
-      afterValue: "영구삭제(숨김)",
-      memo: "permanently deleted (soft hidden)",
+      afterValue: "",
+      memo: "permanently deleted (hard)",
     });
     return true;
   };
@@ -17661,10 +17708,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             )}
             {!isMaintenanceReporter && (
             <div className="mt-4 grid gap-4 lg:grid-cols-3">
-              <Input
-                label="미보고 감점"
-                value={String(cleaningSettings.missingReportPenalty)}
-                onChange={(v) => setCleaningSettings((prev) => ({ ...prev, missingReportPenalty: Number(v) || 0 }))}
+              <NumberInput
+                label="미보고 감점 (예: -5, 주차별 누적)"
+                value={cleaningSettings.missingReportPenalty}
+                onChange={(n) => setCleaningSettings((prev) => ({ ...prev, missingReportPenalty: n }))}
+                placeholder="예: -5"
               />
               <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">요약</div>
@@ -19732,17 +19780,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             복구
                           </button>
                           <button
-                            onClick={async () => {
-                              const ok = await appConfirm(
-                                "휴지통 관리",
-                                "선택한 항목을 삭제 상태로 유지합니다.\n\n삭제된 항목은 일반 목록에 표시되지 않으며, 휴지통에서만 관리할 수 있습니다.",
-                                { confirmText: "유지" }
-                              );
-                              if (ok) await appAlert("휴지통 관리", "삭제 상태로 유지됩니다. 필요 시 휴지통에서 복구할 수 있습니다.");
-                            }}
+                            onClick={() => void permanentlyDeleteUser(u.id)}
                             className="rounded-2xl bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-200"
                           >
-                            삭제 상태 유지
+                            영구삭제
                           </button>
                         </div>
                       </div>
@@ -20527,11 +20568,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     onChange={(v) => setCleaningReportForm((f) => ({ ...f, checkResult: v as CleaningReport["checkResult"] }))}
                     options={["O", "X", "-"]}
                   />
-                  <Input
-                    label="점수"
-                    type="number"
-                    value={String(cleaningReportForm.score)}
-                    onChange={(v) => setCleaningReportForm((f) => ({ ...f, score: Number(v) || 0 }))}
+                  <NumberInput
+                    label="점수 (벌점 -10, -5 등 음수 가능)"
+                    value={cleaningReportForm.score}
+                    onChange={(n) => setCleaningReportForm((f) => ({ ...f, score: n }))}
+                    placeholder="예: -5"
                   />
                   <Input label="확인자" value={cleaningReportForm.confirmedBy || ""} readOnly />
                   <Input label="확인일" value={cleaningReportForm.confirmedAt || ""} readOnly />

@@ -24,7 +24,12 @@ begin
   end loop;
 end $$;
 
+-- 사용자(profiles) 영구삭제 표시 컬럼 — 휴지통 포함 모든 목록에서 제외 기준.
+alter table public.profiles add column if not exists is_permanent_deleted boolean default false;
+
 -- 군대관리 인원/훈련기록은 military_module_data(jsonb 스냅샷)에 저장되므로 컬럼 추가 불필요.
+-- 참고: 청소보고서/하자접수 등 행 기반 데이터의 "영구삭제"는 앱에서 hard delete(행 삭제)도 함께 수행하므로
+--       위 is_permanent_deleted 컬럼이 없어도 재출현하지 않습니다(컬럼은 호환/이력용).
 
 -- 확인:
 -- select table_name, column_name from information_schema.columns

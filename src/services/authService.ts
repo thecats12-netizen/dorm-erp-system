@@ -17,6 +17,7 @@ export interface Profile {
   gender_access?: "남" | "여" | "전체";
   is_deleted?: boolean | null;
   deleted_at?: string | null;
+  is_permanent_deleted?: boolean | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -317,6 +318,7 @@ export const updateProfileOnly = async (
     if (profile.gender_access !== undefined) patch.gender_access = profile.gender_access;
     if (profile.is_deleted !== undefined) patch.is_deleted = profile.is_deleted;
     if (profile.deleted_at !== undefined) patch.deleted_at = profile.deleted_at;
+    if (profile.is_permanent_deleted !== undefined) patch.is_permanent_deleted = profile.is_permanent_deleted;
 
     const { data, error } = await supabase!
       .from("profiles")

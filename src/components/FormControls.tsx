@@ -1,5 +1,58 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { ChevronRight } from "lucide-react";
+
+// 숫자 입력(음수 허용) — 자체 draft 문자열을 유지해 "-" 만 입력한 중간 상태도 보존.
+// 모델에는 number 를 emit(빈 값/"-" 는 0). allowNegative=false 면 음수 차단.
+export function NumberInput({
+  label,
+  value,
+  onChange,
+  readOnly = false,
+  allowNegative = true,
+  placeholder,
+}: {
+  label: string;
+  value: number;
+  onChange: (n: number) => void;
+  readOnly?: boolean;
+  allowNegative?: boolean;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState<string>(value == null ? "" : String(value));
+  const lastEmitted = useRef<number>(value);
+  // 외부 값이 사용자 입력 외의 이유로 바뀌면(폼 리셋/로드) draft 동기화.
+  useEffect(() => {
+    if (value !== lastEmitted.current) {
+      setDraft(value == null ? "" : String(value));
+      lastEmitted.current = value;
+    }
+  }, [value]);
+  const handle = (raw: string) => {
+    let cleaned = allowNegative ? raw.replace(/[^0-9-]/g, "") : raw.replace(/[^0-9]/g, "");
+    // '-' 는 맨 앞 1개만 허용
+    if (allowNegative) cleaned = cleaned.replace(/(?!^)-/g, "");
+    setDraft(cleaned);
+    const n = cleaned === "" || cleaned === "-" ? 0 : Number(cleaned);
+    if (!Number.isNaN(n)) {
+      lastEmitted.current = n;
+      onChange(n);
+    }
+  };
+  return (
+    <div>
+      <label className="mb-2 block text-sm font-medium text-slate-700">{label}</label>
+      <input
+        type="text"
+        inputMode={allowNegative ? "text" : "numeric"}
+        value={draft}
+        onChange={(e) => handle(e.target.value)}
+        readOnly={readOnly}
+        placeholder={placeholder}
+        className={`w-full rounded-2xl border border-slate-300 px-3 py-3 outline-none ${readOnly ? "bg-slate-50" : "focus:border-slate-400"}`}
+      />
+    </div>
+  );
+}
 
 // App.tsx 에서 분리한 공용 프레젠테이션 컴포넌트 (순수 — props 기반).
 // FilteredDormSelector 등 다른 컴포넌트와 공유하기 위해 모듈 레벨로 이동.

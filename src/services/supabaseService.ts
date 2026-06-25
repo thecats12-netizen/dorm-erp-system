@@ -138,6 +138,17 @@ export const saveMilitaryModule = async (payload: MilitaryModuleState): Promise<
 // 운영 설정(operational/app settings) — 테넌트당 1행 JSON 블롭.
 // 운영시뮬레이션(월 예상 운영비/공실 손실) 등 관리자 설정을 모든 기기에서 즉시 공유.
 // ============================================================================
+// 지정 테이블에서 id 목록을 영구(hard) 삭제. 실패해도 throw 하지 않고 경고만(부가 동작).
+export const deleteRowsByIds = async (table: string, ids: string[]): Promise<void> => {
+  if (!isSupabaseAvailable() || !ids || ids.length === 0) return;
+  try {
+    const { error } = await supabase!.from(table).delete().in("id", ids);
+    if (error) console.warn(`[deleteRowsByIds] ${table} 영구삭제 실패(무시):`, (error as { message?: string })?.message || error);
+  } catch (e) {
+    console.warn(`[deleteRowsByIds] ${table} 영구삭제 예외(무시):`, (e as { message?: string })?.message || e);
+  }
+};
+
 export const APP_SETTINGS_TABLE = "app_settings";
 
 export const loadAppSettings = async (tenantId: string): Promise<Record<string, any> | null> => {
