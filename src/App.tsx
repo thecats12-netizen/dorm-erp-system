@@ -6196,6 +6196,35 @@ export default function App() {
     return calculateCleaningScoreByManager(managerUserId);
   };
 
+  // [성능] 담당자별 실시간 청소 점수(100점 - 감점 + 가점) 맵 — 청소보고 변경 시에만 재계산.
+  // 목록 렌더링마다 전체 재계산하지 않도록 useMemo 로 1회 산정 후 행에서 조회만 한다.
+  const managerCleaningScoreById = useMemo(() => {
+    const map: Record<string, number> = {};
+    users.forEach((u) => {
+      if (u.role === "dorm_manager" || u.role === "maintenance_reporter") {
+        map[u.id] = 100 + calculateCleaningScoreByManager(u.id);
+      }
+    });
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [users, cleaningReports, cleaningSettings]);
+
+  // 기숙사의 담당자 실시간 점수(없으면 null). 표/카드/상세에서 공통 사용.
+  const getDormManagerScore = (dormId?: string): number | null => {
+    const mgr = getDormManagerUser(dormId);
+    if (!mgr) return null;
+    return managerCleaningScoreById[mgr.id] ?? (100 + calculateCleaningScoreByManager(mgr.id));
+  };
+
+  // 담당자명 + 실시간 점수 라벨. mode "slash": "윤태희 / 85점", "paren": "윤태희 (85점)". 점수 없으면 이름만.
+  const getDormManagerNameWithScore = (dormId?: string, mode: "slash" | "paren" = "slash"): string => {
+    const name = getDormManagerDisplayName(dormId);
+    if (name === "-") return name;
+    const score = getDormManagerScore(dormId);
+    if (score == null) return name;
+    return mode === "paren" ? `${name} (${score}점)` : `${name} / ${score}점`;
+  };
+
   // 청소 대상 기숙사 실무 요약: 청소담당자/최근 청소일/사진 수 + 다음 점검 필요 여부.
   const getDormCleaningSummary = (dorm: Dorm) => {
     const dormKey = matchDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
@@ -14779,7 +14808,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         labelClassName="text-[0.64rem]"
                         valueClassName="text-[0.68rem]"
                       />
-                      <CompactField label="관리자" value={getDormManagerDisplayName(d.id)} />
+                      <CompactField label="관리자" value={getDormManagerNameWithScore(d.id, "paren")} />
                       <CompactField label="현재 인원" value={`${residentCount}/6`} />
                       <CompactField label="부동산명" value={d.realEstateName || "-"} />
                     </div>
@@ -14883,6 +14912,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       })()}
                     </div>
                     <div className="mb-2 text-[0.7rem] text-slate-500">{dorm.site} / {dorm.gender} · {formatDong(dorm.dong)} {formatRoomHo(dorm.roomHo)}</div>
+                    <div className="mb-2 truncate text-[0.7rem] text-slate-500">담당자 {getDormManagerNameWithScore(dorm.id, "paren")}</div>
                     <div className="flex flex-wrap gap-1">
                       <span className={`${theme.darkMode ? "inline-flex items-center gap-0.5 rounded bg-slate-900 px-1.5 py-0.5 text-[0.65rem] font-medium" : "inline-flex items-center gap-0.5 rounded bg-slate-100 px-1.5 py-0.5 text-[0.65rem] font-medium"}`}>👥 {currentCount}/{dorm.capacity}</span>
                       <span className={`${theme.darkMode ? "inline-flex items-center gap-0.5 rounded bg-slate-900 px-1.5 py-0.5 text-[0.65rem] font-medium" : "inline-flex items-center gap-0.5 rounded bg-slate-100 px-1.5 py-0.5 text-[0.65rem] font-medium"}`}>{isCleaningMissing(dorm) ? "🔴 미보" : "✓ 정상"}</span>
@@ -15146,7 +15176,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <div className={`rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                       <h4 className="mb-3 text-base font-semibold">운영정보</h4>
                       <dl className={`${theme.darkMode ? "grid gap-2 text-sm text-slate-300 sm:grid-cols-2" : "grid gap-2 text-sm text-slate-700 sm:grid-cols-2"}`}>
-                        <div><dt className="font-medium">담당 관리자</dt><dd>{getDormManagerDisplayName(selectedDetailDorm.id)}</dd></div>
+                        <div><dt className="font-medium">담당 관리자</dt><dd>{getDormManagerNameWithScore(selectedDetailDorm.id, "paren")}</dd></div>
                         <div><dt className="font-medium">현재인원</dt><dd>{occupancyCountByDorm.get(selectedDetailDorm.id) || 0} / {selectedDetailDorm.capacity}</dd></div>
                         <div><dt className="font-medium">공실수</dt><dd>{Math.max(selectedDetailDorm.capacity - (occupancyCountByDorm.get(selectedDetailDorm.id) || 0), 0)}</dd></div>
                         <div><dt className="font-medium">청소상태</dt><dd>{isCleaningMissing(selectedDetailDorm) ? "미보고" : "정상"}</dd></div>
@@ -17793,7 +17823,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{dorm.roomHo}</td>
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{dorm.공동현관 || "-"}</td>}
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{dorm.세대현관 || "-"}</td>}
-                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm.id)}</td>}
+                        {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[170px]">{getDormManagerNameWithScore(dorm.id)}</td>}
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[130px]">{getDormManagerPhone(dorm.id)}</td>}
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{getDormContractStartLabel(dorm.id)}</td>}
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(dorm.id)}</td>}
@@ -17945,7 +17975,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     {visibleCleaningReports.length === 0 && (
                       <tr>
                         <td colSpan={7} className="px-3 py-6 text-center text-slate-500">
-                          등록된 청소보고서가 없습니다.
+                          {isLoading ? "청소보고서를 불러오는 중입니다…" : "등록된 청소보고서가 없습니다."}
                         </td>
                       </tr>
                     )}
