@@ -66,6 +66,8 @@ html, body, #root { max-width: 100%; overflow-x: hidden; }
 /* Print optimized styles for reports */
 @media print {
   @page { size: A4 portrait; margin: 15mm; }
+  /* 컬러 출력 유지(배지/상태색/이미지 색상이 흑백으로 빠지지 않게) */
+  *, html, body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
   body { background: #fff !important; color: #000 !important; }
   .no-print, header, nav, aside, .sidebar, .topbar, .footer, button, input, select, textarea { display: none !important; }
   .rounded-3xl, .rounded-2xl, .shadow-sm { box-shadow: none !important; border-radius: 4px !important; }

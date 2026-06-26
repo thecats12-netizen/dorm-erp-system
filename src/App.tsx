@@ -4755,7 +4755,8 @@ export default function App() {
   }, [dormContracts, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    if (!isSupabaseAvailable()) saveJson(CLEANING_REPORTS_KEY, cleaningReports, tenantId);
+    // localStorage 에는 base64 이미지를 저장하지 않음(용량 초과 방지). 이미지는 Supabase 가 단일 출처.
+    if (!isSupabaseAvailable()) saveJson(CLEANING_REPORTS_KEY, cleaningReports.map((r) => ({ ...r, beforePhotoDataUrls: [], afterPhotoDataUrls: [] })), tenantId);
   }, [cleaningReports, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
@@ -5037,8 +5038,8 @@ export default function App() {
             attempts = 0; // 정상 연결 시 백오프 초기화
             console.log("[Realtime] 구독 완료:", `realtime-${tenantId}`);
           } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-            // 빨간 에러 대신 경고 로그만 남기고(사용자 팝업 없음) 3초 후 재구독.
-            console.warn("[Realtime] 재연결 대기", status, err?.message || "");
+            // 빨간 에러 대신 경고 로그만(동일 로그 반복 제한: 연결 실패 streak 첫 1회만 출력) 3초 후 재구독.
+            if (attempts === 0) console.warn("[Realtime] 재연결 대기", status, err?.message || "");
             scheduleReconnect();
           }
         });
@@ -5084,7 +5085,8 @@ export default function App() {
   }, [sales, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    if (!isSupabaseAvailable()) saveJson(DEFECTS_KEY, defects, tenantId);
+    // localStorage 에는 base64 이미지를 저장하지 않음(용량 초과 방지). 이미지는 Supabase 가 단일 출처.
+    if (!isSupabaseAvailable()) saveJson(DEFECTS_KEY, defects.map((d) => ({ ...d, requestPhotoDataUrls: [], completionPhotoDataUrls: [] })), tenantId);
   }, [defects, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
@@ -5533,13 +5535,15 @@ export default function App() {
   }, [defectForm.dormId, operationalDorms]);
 
   // ============================================
-  // 동기화 4: 퇴실 → 청소관리 (자동 생성)
-  // 동기화 5: 퇴실 → 하자점검 (자동 생성)
+  // [자동 생성 비활성화] 퇴실 시 청소보고서/하자접수 자동 생성 중단.
+  // 요청 [5][6]: 사용자가 직접 등록한 데이터만 저장. 미보고/점검 대상은 화면에서 계산 표시(저장 안 함).
   // ============================================
   useEffect(() => {
+    return; // 자동 생성 비활성화 (아래 로직은 보존하되 실행하지 않음)
+    // eslint-disable-next-line no-unreachable
     const today = new Date().toISOString().slice(0, 10);
     const sevenDaysAgo = new Date(new Date().setDate(new Date().getDate() - 7)).toISOString().slice(0, 10);
-    
+
     const recentlyExitedOccupants = occupants.filter(
       o => o.status === "퇴실" && o.actualMoveOutDate && 
            o.actualMoveOutDate >= sevenDaysAgo && 
@@ -8338,6 +8342,9 @@ export default function App() {
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(opts.fileBase)}</title>
       <style>
         @page{size:A4 portrait;margin:15mm}
+        /* PDF/인쇄 시에도 배경/색상이 그대로 출력되도록(컬러 출력) */
+        *{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important;}
+        html,body{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important;}
         body{font-family:Arial,'Malgun Gothic',sans-serif;margin:0;color:#0f172a}
         h1{font-size:18px;margin:0 0 12px}
         h3{font-size:14px;margin:18px 0 8px;page-break-after:avoid}

@@ -72,18 +72,22 @@ export const loadMilitaryModule = async (tenantId: string): Promise<MilitaryModu
     console.warn("Supabase environment variables are not configured. Falling back to local storage.");
     return null;
   }
+  // .single() 은 0행/다중행에서 406(PGRST116)을 던진다. tenant 당 0~N행일 수 있으므로
+  // limit(1) + maybeSingle 로 안전 조회(406 방지). 최신 행 우선.
   const { data, error } = await supabase!
     .from(MILITARY_MODULE_TABLE)
     .select("data")
     .eq("tenant_id", tenantId)
-    .single();
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   if (error) {
-    if (error.message?.includes("No rows")) return null;
-    console.error("Supabase load error:", error);
-    throw error;
+    if (error.code === "PGRST116" || /no rows|multiple/i.test(error.message || "")) return null;
+    console.warn("[loadMilitaryModule] 로드 경고(로컬 폴백):", error.message);
+    return null;
   }
-  return data?.data ?? null;
+  return (data as { data?: MilitaryModuleState } | null)?.data ?? null;
 };
 
 export const saveMilitaryModule = async (payload: MilitaryModuleState): Promise<void> => {
