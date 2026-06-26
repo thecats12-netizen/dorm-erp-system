@@ -1795,6 +1795,8 @@ export default function App() {
   const [cleaningStatusFilter, setCleaningStatusFilter] = useState<string>("전체");
   // 청소관리: 기숙사 데이터 행/카드 클릭 시 선택된 기숙사 id (""=전체). 요약/담당자감점/원본리스트 모두 이 기준으로 필터.
   const [selectedCleaningDormId, setSelectedCleaningDormId] = useState<string>("");
+  // 청소관리 소메뉴: "status"(청소 현황) | "manager"(담당자별 청소 현황 - 실시간). 관리자 전용.
+  const [cleaningView, setCleaningView] = useState<"status" | "manager">("status");
   const [cleaningSettings, setCleaningSettings] = useState<CleaningSettings>({
     missingReportPenalty: -5,
     includeWeekendReports: false,
@@ -3994,11 +3996,11 @@ export default function App() {
   // 4. 감점 계산 함수 (계산형, DB 저장 안함)
   // X 1건당 -5점, 담당자 기준 자동 합산
   // ============================================
-  // 청소 감점/가점 계산(담당자 단위) — 주차 기준: 매주 일요일~토요일(월 경계 무관).
-  // - 제출 마감 = 해당 주차 토요일 23:59. 마감 지난 주차만 미제출 판정(이번 주/미래 주차 제외).
+  // 청소 감점/가점 계산(담당자 단위) — 주차 기준: 매주 월요일~일요일(월 경계 무관, 주차 컬럼과 동일).
+  // - 제출 마감 = 해당 주차 일요일 23:59. 마감 지난 주차만 미제출 판정(이번 주/미래 주차 제외).
   // - 담당자 시작일(계정 생성일=담당 지정일) 이전에 끝난 주차는 제외 → 담당자 변경 시 새 담당자는
   //   변경일 이후 주차부터 새로 계산, 이전 담당자 이력 미승계(보고서 managerUserId 로 분리).
-  // - 미제출 확정 주차: 기본 감점(missingReportPenalty, 기본 -5).
+  // - 미제출 확정 주차: 기본 감점(missingReportPenalty, 기본 -5). 보고서 있으면(승인 전 포함) 제외.
   // - 관리자 확인(확인완료) 시 부여한 점수(report.score) 가점/감점 합산.
   const calculateCleaningScoreByManager = (managerUserId: string): number => {
     if (!managerUserId) return 0;
@@ -4016,21 +4018,21 @@ export default function App() {
       if (r.cleanStatus === "확인완료") score += r.score || 0;
     });
 
-    // 2) 담당 기숙사 주차별(일~토) 미제출 감점 — 담당 시작일 이후 ~ 마감 지난 주차만
+    // 2) 담당 기숙사 주차별(월~일) 미제출 감점 — 담당 시작일 이후 ~ 마감 지난 주차만
     const dormId = manager?.dormId;
     if (dormId && startDate) {
       const now = new Date();
-      // 담당 시작일이 속한 주의 일요일부터 시작
+      // 담당 시작일이 속한 주의 월요일부터 시작
       const cursor = new Date(startDate);
       cursor.setHours(0, 0, 0, 0);
-      cursor.setDate(cursor.getDate() - cursor.getDay()); // 일요일로 정렬
+      cursor.setDate(cursor.getDate() - ((cursor.getDay() + 6) % 7)); // 월요일로 정렬
       let guard = 0;
       while (cursor <= now && guard < 600) {
         guard++;
-        const wkStart = new Date(cursor); // 일요일 00:00
+        const wkStart = new Date(cursor); // 월요일 00:00
         const wkEnd = new Date(cursor);
         wkEnd.setDate(wkEnd.getDate() + 6);
-        wkEnd.setHours(23, 59, 59, 999); // 토요일 23:59 (제출 마감)
+        wkEnd.setHours(23, 59, 59, 999); // 일요일 23:59 (제출 마감)
         // 마감이 지났고(미래/이번주 제외), 담당 시작 이전에 끝난 주가 아니어야 함
         if (wkEnd < now && wkEnd >= startDate) {
           const hasReport = managerReports.some((r) => {
@@ -6143,14 +6145,17 @@ export default function App() {
     return day === 0 || day === 6;
   };
 
+  // 주차 = 매월 월요일 시작, 월요일~일요일(7일). 1주차는 그 달 1일이 속한 월~일 주.
   const getWeekRange = (year: string, month: string, weekNo: number) => {
     const monthIndex = Number(month) - 1;
     const first = new Date(Number(year), monthIndex, 1);
-    const offset = (first.getDay() + 6) % 7;
+    const offset = (first.getDay() + 6) % 7; // 1일이 속한 주의 월요일까지의 보정
     const startDay = 1 + (weekNo - 1) * 7 - offset;
-    const start = new Date(Number(year), monthIndex, Math.max(1, startDay));
+    const start = new Date(Number(year), monthIndex, startDay);
+    start.setHours(0, 0, 0, 0);
     const end = new Date(start);
-    end.setDate(start.getDate() + 4);
+    end.setDate(start.getDate() + 6); // 월~일 7일
+    end.setHours(23, 59, 59, 999);
     return { start, end };
   };
 
@@ -6198,10 +6203,11 @@ export default function App() {
     const range = getWeekRange(cleaningYear, cleaningMonth, weekNo);
     const dormKey = matchDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
     const reports = cleaningReports.filter((report) => {
+      if (report.isDeleted || report.isPermanentDeleted) return false;
       const reportDate = parseSafeDate(report.reportDate);
       if (!reportDate) return false;
       if (reportDate < range.start || reportDate > range.end) return false;
-      if (!cleaningSettings.includeWeekendReports && isWeekend(report.reportDate)) return false;
+      // 월~일 사이 보고서가 있으면(주말 포함, 승인 전이라도) 보고로 인정 → 미보고/벌점 제외.
       const reportKey = matchDormKey(report.site, report.buildingName, report.dong, report.roomHo);
       return report.dormId === dorm.id || reportKey === dormKey;
     });
@@ -7097,11 +7103,27 @@ export default function App() {
       !d.isDeleted && (d.defectStatus === "접수" || d.defectStatus === "진행중")
     ).length;
 
-    // 5. 청소 미보고 수
-    const unreportedCleaning = occupants.filter(o =>
-      !o.isDeleted && o.status === "퇴실" && o.actualMoveOutDate &&
-      !cleaningReports.find(r => r.dormId === o.dormId && r.reportDate >= (o.actualMoveOutDate || ""))
-    ).length;
+    // 5. 청소 미보고 수: 현재 사용중인 기숙사(operationalDorms, 약 25개) 중
+    //    "현재 주차(월~일)"에 청소보고서가 등록되지 않은 기숙사 수. (승인 전이라도 보고서 있으면 제외)
+    const nowD = new Date();
+    const wkStart = new Date(nowD.getFullYear(), nowD.getMonth(), nowD.getDate());
+    wkStart.setDate(wkStart.getDate() - ((wkStart.getDay() + 6) % 7)); // 이번 주 월요일 00:00
+    wkStart.setHours(0, 0, 0, 0);
+    const wkEnd = new Date(wkStart);
+    wkEnd.setDate(wkStart.getDate() + 6);
+    wkEnd.setHours(23, 59, 59, 999); // 이번 주 일요일 23:59
+    const activeReports = cleaningReports.filter((r) => !r.isDeleted && !r.isPermanentDeleted);
+    const dormKeyOf = (s: string, b: string, dg: string, h: string) =>
+      `${(s || "").trim().toLowerCase()}|${(b || "").trim().toLowerCase()}|${stripDongHoSuffix(dg).toLowerCase()}|${stripDongHoSuffix(h).toLowerCase()}`;
+    const unreportedCleaning = operationalDorms.filter((dorm) => {
+      const key = dormKeyOf(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+      const reported = activeReports.some((r) => {
+        const d = parseSafeDate(r.reportDate);
+        if (!d || d < wkStart || d > wkEnd) return false;
+        return r.dormId === dorm.id || dormKeyOf(r.site, r.buildingName, r.dong, r.roomHo) === key;
+      });
+      return !reported;
+    }).length;
 
     // 6. 비품 노후/부족 수
     const outdatedInventory = inventory.filter(i =>
@@ -7116,7 +7138,7 @@ export default function App() {
       unreportedCleaning,
       outdatedInventory,
     };
-  }, [newHires, dormContracts, dorms, occupants, defects, cleaningReports, inventory]);
+  }, [newHires, dormContracts, dorms, occupants, defects, cleaningReports, inventory, operationalDorms]);
 
   // 대시보드: 오늘의 일정(입주/퇴실) + 미배정 신입사원 목록
   const dashboardOpsData = useMemo(() => {
@@ -17815,6 +17837,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
             </div>
 
+            {/* 청소관리 소메뉴: 청소 현황 / 담당자별 청소 현황(실시간) — 관리자 전용 분리 */}
+            {!isMaintenanceReporter && (
+              <div className="mb-4 inline-flex rounded-2xl border border-slate-200 bg-slate-50 p-1 text-sm dark:border-slate-700 dark:bg-slate-950">
+                <button type="button" onClick={() => setCleaningView("status")} className={`rounded-xl px-4 py-1.5 font-semibold ${cleaningView === "status" ? "bg-slate-900 text-white" : "text-slate-600 hover:text-slate-900"}`}>청소 현황</button>
+                <button type="button" onClick={() => setCleaningView("manager")} className={`rounded-xl px-4 py-1.5 font-semibold ${cleaningView === "manager" ? "bg-slate-900 text-white" : "text-slate-600 hover:text-slate-900"}`}>담당자별 청소 현황</button>
+              </div>
+            )}
+
             <div className="grid gap-4 lg:grid-cols-3">
               <Input label="연도" value={cleaningYear} onChange={(v) => setCleaningYear(v)} placeholder="YYYY" />
               <Input label="월" value={cleaningMonth} onChange={(v) => setCleaningMonth(v)} placeholder="MM" />
@@ -17822,14 +17852,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <SelectInput label="지역" value={cleaningDormSiteFilter} onChange={(v) => setCleaningDormSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
               )}
             </div>
-            {!isMaintenanceReporter && (
+            {!isMaintenanceReporter && cleaningView === "status" && (
             <div className="mt-4 grid gap-4 lg:grid-cols-3">
               <Input label="기숙사 검색" value={cleaningDormSearch} onChange={(v) => setCleaningDormSearch(v)} />
               <SelectInput label="담당자" value={cleaningManagerFilter} onChange={(v) => setCleaningManagerFilter(v)} options={["전체", ...managerFilterOptions]} />
               <SelectInput label="청소 상태" value={cleaningStatusFilter} onChange={(v) => setCleaningStatusFilter(v)} options={["전체", "미제출", "제출완료", "확인완료", "불량", "재청소요청"]} />
             </div>
             )}
-            {!isMaintenanceReporter && (
+            {!isMaintenanceReporter && cleaningView === "status" && (
             <div className="mt-4 grid gap-4 lg:grid-cols-3">
               <NumberInput
                 label="미보고 감점 (예: -5, 주차별 누적)"
@@ -17868,8 +17898,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
             )}
 
-            {/* 관리자 전용: 담당자별 청소 현황(실시간) — 청소보고 등록/수정/상태변경 시 즉시 반영 */}
-            {!isMaintenanceReporter && cleaningScopeManagerNames.length > 0 && (
+            {/* 관리자 전용 소메뉴: 담당자별 청소 현황(실시간) — 청소보고 등록/수정/상태변경 시 즉시 반영 */}
+            {!isMaintenanceReporter && cleaningView === "manager" && cleaningScopeManagerNames.length > 0 && (
               <div className="mt-4 erp-table-container">
                 <div className="mb-2 text-sm font-semibold">담당자별 청소 현황 (실시간)</div>
                 <table className="erp-table min-w-[640px] w-full text-left">
@@ -17912,7 +17942,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             )}
 
-            {/* 하자접수 담당자: 내 청소보고 통계 → 기숙사 데이터 → 청소보고서 원본 리스트 순서 (order) */}
+            {/* 청소 현황 소메뉴(기본): 내 청소보고 통계/기숙사 데이터/청소보고서 원본 리스트. 담당자별 현황은 별도 소메뉴. */}
+            {cleaningView === "status" && (
             <div className="flex flex-col">
             {isMaintenanceReporter && (
               <div className="order-1">
@@ -18172,6 +18203,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
             </div>
             </div>
+            )}
           </section>
         )}
 
