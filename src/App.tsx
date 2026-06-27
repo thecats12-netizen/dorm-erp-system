@@ -2007,8 +2007,12 @@ export default function App() {
     }
   }, [activeTab]);
 
-  // 자동 계약상태 변경 (30일 전 자동 만료예정)
+  // [자동 변경 비활성화] 계약상태를 자동으로 "만료예정"으로 덮어쓰지 않는다(요청2/5).
+  //   만료예정 등은 저장값(자동선택)일 때 표시 단계(getContractDisplayStatus)에서만 계산하고,
+  //   수동 선택값은 그대로 유지한다. (아래 로직은 보존하되 실행하지 않음)
   useEffect(() => {
+    return; // 자동 계약상태 변경 차단
+    // eslint-disable-next-line no-unreachable
     if (dormContracts.length === 0) return;
     const today = new Date().toISOString().slice(0, 10);
     let hasChanges = false;
@@ -3181,6 +3185,77 @@ export default function App() {
   };
 
   // 휴지통 백업(JSON) 다운로드 — 삭제(숨김) 항목만
+  // [요청6] 자동생성 의심 데이터 정리(관리자 전용, 임시). 의심 데이터만 휴지통으로 soft-delete(복구 가능).
+  //   판정: 자동 마커("[자동]"/"퇴실자:"), 주요 필드/접수일 공백, 등록자 공백, 동일 기숙사·동·호 중복.
+  //   정상(사용자/Excel/기존 Supabase) 데이터는 보존. 삭제 전 확인창 표시.
+  const cleanupSuspectedAutoData = async () => {
+    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    const blank = (s?: string | null) => !s || !String(s).trim();
+    const dormHoKey = (site?: string, b?: string, dg?: string, h?: string) =>
+      `${(site || "").trim()}|${(b || "").trim()}|${stripDongHoSuffix(dg || "")}|${stripDongHoSuffix(h || "")}`;
+
+    // 하자접수 의심: 자동 마커 / 접수일 공백 / (점검자·접수자·신청내용 모두 공백)
+    const suspectDefects = defects.filter(
+      (d) => !d.isDeleted && (
+        (d.requestText || "").includes("[자동]") ||
+        blank(d.receiptDate) ||
+        (blank(d.inspectorName) && blank(d.reporterName) && blank(d.requestText))
+      )
+    );
+    // 청소보고 의심: 자동 마커("[자동]" 또는 "퇴실자:")
+    const suspectCleaning = cleaningReports.filter(
+      (r) => !r.isDeleted && ((r.memo || "").includes("[자동]") || (r.memo || "").trim().startsWith("퇴실자:"))
+    );
+    // 신입사원 의심: 이름 공백(핵심 식별값 없음)
+    const suspectNewHires = newHires.filter((h) => !h.isDeleted && blank(h.name));
+    // 신규계약 의심: 건물명·주소 모두 공백(핵심 식별값 없음)
+    const suspectContracts = dormContracts.filter((c) => !c.isDeleted && blank(c.buildingName) && blank(c.address));
+
+    // 동일 기숙사·동·호 중복 하자접수: 같은 키가 2건 이상이고, 등록자/신청내용이 공백인 추가본만 의심
+    const defectKeyCount = new Map<string, number>();
+    defects.filter((d) => !d.isDeleted).forEach((d) => {
+      const k = dormHoKey(d.site, d.buildingName, d.dong, d.ho);
+      defectKeyCount.set(k, (defectKeyCount.get(k) || 0) + 1);
+    });
+    const dupDefects = defects.filter(
+      (d) => !d.isDeleted && (defectKeyCount.get(dormHoKey(d.site, d.buildingName, d.dong, d.ho)) || 0) > 1 &&
+        blank(d.reporterName) && blank(d.requestText)
+    );
+
+    const defectIds = new Set([...suspectDefects, ...dupDefects].map((d) => d.id));
+    const cleaningIds = new Set(suspectCleaning.map((r) => r.id));
+    const newHireIds = new Set(suspectNewHires.map((h) => h.id));
+    const contractIds = new Set(suspectContracts.map((c) => c.id));
+    const total = defectIds.size + cleaningIds.size + newHireIds.size + contractIds.size;
+
+    if (total === 0) {
+      await appAlert("자동생성 의심 데이터 정리", "의심 데이터가 없습니다. (모두 정상)");
+      return;
+    }
+    const ok = await appConfirm(
+      "자동생성 의심 데이터 정리",
+      `자동생성 의심 데이터를 휴지통으로 이동할까요?\n\n` +
+        `· 하자접수 ${defectIds.size}건\n· 청소보고 ${cleaningIds.size}건\n· 신입사원 ${newHireIds.size}건\n· 신규계약 ${contractIds.size}건\n\n` +
+        `정상 데이터는 영향받지 않으며, 휴지통에서 복구할 수 있습니다.`,
+      { confirmText: "휴지통으로 이동", tone: "danger" }
+    );
+    if (!ok) return;
+    const now = new Date().toISOString();
+    const by = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
+    const mark = <T extends { id: string; isDeleted?: boolean; deletedAt?: string; deletedBy?: string; updatedAt?: string }>(arr: T[], ids: Set<string>): T[] =>
+      arr.map((x) => (ids.has(x.id) ? { ...x, isDeleted: true, deletedAt: now, deletedBy: by, updatedAt: now } : x));
+    if (defectIds.size) setDefects((prev) => mark(prev, defectIds));
+    if (cleaningIds.size) setCleaningReports((prev) => mark(prev, cleaningIds));
+    if (newHireIds.size) setNewHires((prev) => mark(prev, newHireIds));
+    if (contractIds.size) setDormContracts((prev) => mark(prev, contractIds));
+    // 상태 변경 → 자동저장 effect 가 Supabase/localStorage 반영. 감사로그 기록.
+    [...defectIds].forEach((id) => createAuditLog({ targetType: "defect", targetId: id, actionType: "delete", changedBy: by, beforeValue: "", afterValue: "자동생성 의심 정리(휴지통)", memo: "cleanupSuspectedAutoData" }));
+    [...contractIds].forEach((id) => createAuditLog({ targetType: "dormContract", targetId: id, actionType: "delete", changedBy: by, beforeValue: "", afterValue: "자동생성 의심 정리(휴지통)", memo: "cleanupSuspectedAutoData" }));
+    [...newHireIds].forEach((id) => createAuditLog({ targetType: "newHire", targetId: id, actionType: "delete", changedBy: by, beforeValue: "", afterValue: "자동생성 의심 정리(휴지통)", memo: "cleanupSuspectedAutoData" }));
+    [...cleaningIds].forEach((id) => createAuditLog({ targetType: "cleaningReport", targetId: id, actionType: "delete", changedBy: by, beforeValue: "", afterValue: "자동생성 의심 정리(휴지통)", memo: "cleanupSuspectedAutoData" }));
+    await appAlert("자동생성 의심 데이터 정리", `${total}건을 휴지통으로 이동했습니다. 휴지통에서 확인·복구할 수 있습니다.`);
+  };
+
   const downloadTrashBackup = () => {
     if (!canManageUsers(currentUser)) { void appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
     downloadJsonFile(
@@ -7834,44 +7909,10 @@ export default function App() {
         }
       }
       
-      // 2-3. 청소 요청 자동 생성
+      // 2-3. [자동 생성 차단] 퇴실 시 청소보고서 자동 생성 중단(요청: 자동생성 제거).
+      //      청소보고서는 사용자가 직접 등록한 건만 저장/표시한다.
       if (dormId) {
-        const dorm = dorms.find((d) => d.id === dormId);
-        if (dorm) {
-          const today = new Date().toISOString().slice(0, 10);
-          const cleaningReport: CleaningReport = {
-            id: `cleaning-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            reportDate: today,
-            site: dorm.site,
-            dormId: dormId,
-            buildingName: dorm.buildingName,
-            address: dorm.address,
-            dong: dorm.dong,
-            roomHo: dorm.roomHo,
-            공동현관: dorm.공동현관 || "",
-            세대현관: dorm.세대현관 || "",
-            managerUserId: dorm.managerUserId || "",
-            managerName: dorm.managerUserId 
-              ? users.find((u) => u.id === dorm.managerUserId)?.displayName || ""
-              : "",
-            cleanerName: "",
-            weekLabel: `${Math.ceil(new Date().getDate() / 7)}주차`,
-            monthLabel: `${new Date().getMonth() + 1}월`,
-            cleanStatus: "미제출",
-            checkResult: "-",
-            score: 0,
-            beforePhotoDataUrls: [],
-            afterPhotoDataUrls: [],
-            memo: `퇴실자: ${payload.employeeName}`,
-            reporterUserId: currentUser?.id || "",
-            reporterName: currentUser?.displayName || currentUser?.username || "",
-            confirmedBy: "",
-            confirmedAt: "",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          };
-          setCleaningReports((prev) => [cleaningReport, ...prev]);
-        }
+        console.warn("[BLOCKED AUTO CREATE]", "occupant-exit→cleaningReport");
       }
     }
     
@@ -19592,6 +19633,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   >
                     휴지통 백업 복원
                   </button>
+                  {canManageUsers(currentUser) && (
+                    <button
+                      type="button"
+                      onClick={() => void cleanupSuspectedAutoData()}
+                      className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100"
+                      title="자동생성 의심 데이터(자동 마커/공백/중복)를 휴지통으로 이동(복구 가능)"
+                    >
+                      자동생성 의심 데이터 정리
+                    </button>
+                  )}
                   <input
                     ref={trashBackupInputRef}
                     type="file"
