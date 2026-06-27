@@ -1327,12 +1327,33 @@ export default function App() {
   const [militaryDirty, setMilitaryDirty] = useState(false);
   const [militaryLastSavedAt, setMilitaryLastSavedAt] = useState<string | null>(null);
 
-  const applyRealtimeUpdate = <T extends { id: string }>(prev: T[], row: any, toDomain: (row: any) => T): T[] => {
+  // preservePhotoKeys: 들어온 realtime row 의 해당 이미지 필드가 비어 있고(빈 배열) 기존 state 에는
+  // 사진이 있으면 기존 사진을 유지한다. (DB 사진 컬럼 미적용/누락 시 echo 가 사진을 지우는 문제 방지)
+  const applyRealtimeUpdate = <T extends { id: string }>(
+    prev: T[],
+    row: any,
+    toDomain: (row: any) => T,
+    preservePhotoKeys?: string[]
+  ): T[] => {
     if (!row?.id) return prev;
     if (row.is_deleted) {
       return prev.filter((item) => item.id !== row.id);
     }
-    const nextItem = toDomain(row);
+    let nextItem = toDomain(row);
+    if (preservePhotoKeys && preservePhotoKeys.length > 0) {
+      const existing = prev.find((item) => item.id === row.id) as Record<string, any> | undefined;
+      if (existing) {
+        const merged = { ...(nextItem as Record<string, any>) };
+        for (const k of preservePhotoKeys) {
+          const incoming = merged[k];
+          const before = existing[k];
+          if ((!Array.isArray(incoming) || incoming.length === 0) && Array.isArray(before) && before.length > 0) {
+            merged[k] = before; // 기존 사진 보존
+          }
+        }
+        nextItem = merged as T;
+      }
+    }
     return prev.some((item) => item.id === row.id)
       ? prev.map((item) => (item.id === row.id ? nextItem : item))
       : [...prev, nextItem];
@@ -1619,10 +1640,10 @@ export default function App() {
         setDormContracts((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeDormContract));
         break;
       case "cleaning_reports":
-        setCleaningReports((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeCleaningReport));
+        setCleaningReports((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeCleaningReport, ["beforePhotoDataUrls", "afterPhotoDataUrls"]));
         break;
       case "defect_requests":
-        setDefects((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeDefectRequest));
+        setDefects((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeDefectRequest, ["requestPhotoDataUrls", "completionPhotoDataUrls"]));
         break;
       case "inventory_items":
         setInventory((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeInventoryItem));
@@ -5298,15 +5319,23 @@ export default function App() {
   // 그 외(공실/진행중 등 활성)는 실제 입주자 수 기준(0=공실, 정원미만=사용중, 정원이상=만실).
   // operationalDorms 직후에 정의해 visibleDormContracts 등에서 안전하게 사용(자체 입주자 카운트).
   const getContractDisplayStatus = (c: DormContract): string => {
-    if (c.contractStatus === "종료" || c.contractStatus === "해지" || c.contractStatus === "만료예정" || c.contractStatus === "연장") {
-      return c.contractStatus;
-    }
+    const stored = c.contractStatus as string;
+    // [요청2] 수동 선택값(자동선택/빈값 제외)은 그대로 우선 표시(공실/진행중/만료예정/연장/종료/해지 등).
+    if (stored && stored !== "자동선택") return stored;
+    // 자동선택(또는 빈값) → 현재 점유 인원 기준 자동 계산(0=공실, 정원미만=사용중, 정원이상=만실).
     const key = makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo);
     const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
     if (!dorm) return "공실";
     const count = occupants.filter((o) => !o.isDeleted && o.dormId === dorm.id && ["거주중", "만료예정"].includes(o.status)).length;
     const cap = dorm.capacity && dorm.capacity > 0 ? dorm.capacity : 6;
     return count <= 0 ? "공실" : count >= cap ? "만실" : "사용중";
+  };
+
+  // [요청2] 계약유형 표시: 수동 선택값 우선, "자동선택"이면 신규/재계약 등을 계산해 표시만(저장값은 자동선택 유지).
+  const getContractTypeDisplay = (c: DormContract): string => {
+    const stored = c.contractType as string;
+    if (stored && stored !== "자동선택") return stored;
+    return calculateDormContractType(c as unknown as Parameters<typeof calculateDormContractType>[0], dormContracts, c.id || null);
   };
 
   // 담당 기숙사 한글 표기(Excel/표시용): "천안 효성해링턴플레이스 104동-1201호". 없으면 "-".
@@ -7871,20 +7900,13 @@ export default function App() {
       ? dormContracts.find((c) => c.id === editingDormContractId)
       : null;
 
-    const actualStatus =
-      dormContractForm.contractStatus === "자동선택"
-        ? calculateDormContractStatus(dormContractForm, dorms, occupants)
-        : dormContractForm.contractStatus;
-    const actualType =
-      dormContractForm.contractType === "자동선택"
-        ? calculateDormContractType(dormContractForm, dormContracts, editingDormContractId)
-        : dormContractForm.contractType;
-
+    // [요청2] DB 저장값을 계산값으로 덮어쓰지 않는다 — 폼 값(기본 "자동선택" 또는 수동값)을 그대로 저장.
+    //   자동선택이면 표시(getContractDisplayStatus/getContractTypeDisplay)에서만 계산하고, 수동 선택 시 그 값이 우선.
     const finalPayload: DormContract = {
       id: editingDormContractId || crypto.randomUUID(),
       ...dormContractForm,
-      contractStatus: actualStatus,
-      contractType: actualType,
+      contractStatus: dormContractForm.contractStatus as DormContractStatus,
+      contractType: dormContractForm.contractType as ContractType,
       registeredBy: dormContractForm.registeredBy || currentUser?.displayName || "",
       modifiedBy: currentUser?.displayName || dormContractForm.modifiedBy || "",
       createdAt:
@@ -10206,7 +10228,7 @@ const exportExcel = () => {
       선납금: formatWon(c.prepaymentDeposit),
       보증금: formatWon(c.deposit),
       "월세/관리비": formatWon(c.monthlyRentOrMaintenance),
-      계약유형: c.contractType,
+      계약유형: getContractTypeDisplay(c),
       성별: c.gender,
       비고: c.notes,
       등록일: formatDateOnly(c.createdAt),
@@ -14556,7 +14578,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatWon(c.prepaymentDeposit)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatWon(c.deposit)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatWon(c.monthlyRentOrMaintenance)}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{c.contractType}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{getContractTypeDisplay(c)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs erp-col-memo" title={c.notes}>{c.notes}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.createdAt)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(c.updatedAt)}</td>
@@ -21823,11 +21845,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
 function modalWrap(title: string, body: React.ReactNode, onClose: () => void, onSave: () => void, accentColor: string, saveDisabled = false) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-sm">
-      <div className="max-h-[92vh] w-full max-w-6xl overflow-auto rounded-3xl bg-white p-5 shadow-2xl">
-        <div className="mb-5 flex items-center justify-between"><div><h3 className="text-xl font-semibold">{title}</h3></div><button onClick={onClose} className="rounded-xl border border-slate-300 p-2 hover:bg-slate-50"><ChevronRight className="h-5 w-5 rotate-45" /></button></div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-2 sm:p-4 backdrop-blur-sm">
+      <div className="max-h-[94vh] w-full max-w-6xl overflow-auto rounded-3xl bg-white p-4 sm:p-5 shadow-2xl">
+        <div className="mb-5 flex items-center justify-between"><div><h3 className="text-lg sm:text-xl font-semibold">{title}</h3></div><button onClick={onClose} className="rounded-xl border border-slate-300 p-2 hover:bg-slate-50"><ChevronRight className="h-5 w-5 rotate-45" /></button></div>
         {body}
-        <div className="mt-6 flex justify-end gap-2"><button onClick={onClose} className="rounded-2xl border border-slate-300 px-4 py-2 hover:bg-slate-50">취소</button><button data-modal-save onClick={onSave} disabled={saveDisabled} className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-white ${saveDisabled ? "opacity-50 cursor-not-allowed" : ""}`} style={{ backgroundColor: accentColor }}><Save className="h-4 w-4" /> 저장</button></div>
+        {/* 모바일에서도 저장/취소가 항상 보이도록 하단 고정(스크롤해도 잘리지 않음) */}
+        <div className="sticky bottom-0 -mx-4 sm:-mx-5 mt-6 flex flex-wrap justify-end gap-2 border-t border-slate-100 bg-white px-4 sm:px-5 pt-3"><button onClick={onClose} className="rounded-2xl border border-slate-300 px-4 py-2 hover:bg-slate-50">취소</button><button data-modal-save onClick={onSave} disabled={saveDisabled} className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-white ${saveDisabled ? "opacity-50 cursor-not-allowed" : ""}`} style={{ backgroundColor: accentColor }}><Save className="h-4 w-4" /> 저장</button></div>
       </div>
     </div>
   );
