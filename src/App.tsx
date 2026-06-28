@@ -1433,6 +1433,11 @@ export default function App() {
   const isInitialLoadCompleteRef = useRef<boolean>(false);
   const lastDormSnapshotRef = useRef<string>("");
   const lastOperationalSnapshotRef = useRef<string>("");
+  // 저장 중복 호출 방지(in-flight 가드) + 동일 데이터 연속 실패 시 무한 재시도 방지(최대 2회).
+  const dormSavingRef = useRef<boolean>(false);
+  const operationalSavingRef = useRef<boolean>(false);
+  const dormFailRef = useRef<{ snap: string; count: number }>({ snap: "", count: 0 });
+  const operationalFailRef = useRef<{ snap: string; count: number }>({ snap: "", count: 0 });
   const lastMilitarySnapshotRef = useRef<string>("");
   const lastAppSettingsSnapshotRef = useRef<string>("");
   // 군대 모듈: 로드/Realtime 로 적용된 변경(사용자 수정 아님)을 dirty 에서 제외하기 위한 플래그.
@@ -2335,6 +2340,15 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [imageLightbox]);
   const [operationalSyncError, setOperationalSyncError] = useState<string | null>(null);
+  // 저장 상태 표시(토스트): idle | saving | saved | error
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const saveStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 저장 성공/실패 후 일정 시간 뒤 토스트 자동 숨김(저장 완료/실패만 잠깐 노출).
+  const flashSaveStatus = (status: "saved" | "error") => {
+    setSaveStatus(status);
+    if (saveStatusTimerRef.current) clearTimeout(saveStatusTimerRef.current);
+    saveStatusTimerRef.current = setTimeout(() => setSaveStatus("idle"), status === "saved" ? 1500 : 4000);
+  };
 
   useEffect(() => {
     if (operationalSyncError) {
@@ -5023,17 +5037,23 @@ export default function App() {
       if (currentUser?.role === "maintenance_reporter") return;
       // 저장 대상 payload 스냅샷(동일 데이터면 저장 생략)
       const snapshot = dormModuleSnapshot({ dorms, occupants, dormContracts, newHires });
+      // Realtime 에코 처리: 에코로 트리거됐고 직전 저장과 데이터가 동일하면 저장 생략.
+      // (단, 에코 후 실제로 새 편집이 있었다면 snapshot 이 달라지므로 저장을 계속 진행 → "여러 번 저장해야 반영" 방지)
       if (realtimeUpdateSourceRef.current.has("dorm_module")) {
         realtimeUpdateSourceRef.current.delete("dorm_module");
-        // Realtime 수신분은 이미 서버 반영 상태 → 스냅샷만 갱신해 저장 루프 방지
-        lastDormSnapshotRef.current = snapshot;
-        return;
+        if (snapshot === lastDormSnapshotRef.current) return;
       }
       // 직전 저장과 동일한 데이터면 Supabase 저장 생략
       if (snapshot === lastDormSnapshotRef.current) return;
+      // 동일 데이터 2회 연속 실패 → 무한 재시도 방지(다음 편집 시 자동 재시도)
+      if (dormFailRef.current.snap === snapshot && dormFailRef.current.count >= 2) return;
+      // 저장 중이면 중복 저장 요청 차단(in-flight 가드)
+      if (dormSavingRef.current) return;
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
 
+      dormSavingRef.current = true;
+      setSaveStatus("saving");
       try {
         console.debug("[SAVE] Saving dorm module to Supabase", {
           dorms: dorms.length,
@@ -5052,7 +5072,10 @@ export default function App() {
           session.user.id
         );
         lastDormSnapshotRef.current = snapshot;
+        dormFailRef.current = { snap: "", count: 0 }; // 성공 → 실패 카운트 초기화
         lastDormAlertRef.current = ""; // 성공 시 알림 dedup 초기화
+        setOperationalSyncError(null);
+        flashSaveStatus("saved");
         console.log("[SAVE] contracts saved:", dormContracts.length);
         console.log("[SAVE] newHires saved:", newHires.length);
       } catch (error) {
@@ -5065,8 +5088,15 @@ export default function App() {
           payloadSizes: { dorms: dorms.length, occupants: occupants.length, dormContracts: dormContracts.length, newHires: newHires.length },
           raw: error,
         });
+        // 동일 스냅샷 실패 횟수 누적(최대 2회까지만 재시도)
+        dormFailRef.current = dormFailRef.current.snap === snapshot
+          ? { snap: snapshot, count: dormFailRef.current.count + 1 }
+          : { snap: snapshot, count: 1 };
         // 화면에는 Supabase 원문 alert 대신 한글 안내만 표시(팝업 없음).
         setOperationalSyncError("저장 권한이 없거나 연결이 불안정합니다. 잠시 후 다시 시도해주세요.");
+        flashSaveStatus("error");
+      } finally {
+        dormSavingRef.current = false;
       }
     }, 500);
 
@@ -5106,20 +5136,26 @@ export default function App() {
         isAdmin
       );
 
+      // Realtime 에코 처리: 에코로 트리거됐고 직전 저장과 데이터가 동일하면 저장 생략.
+      // (에코 후 새 편집이 있었다면 snapshot 이 달라져 저장을 계속 진행 → "여러 번 저장해야 반영" 방지)
       if (realtimeUpdateSourceRef.current.has("operational_module")) {
         realtimeUpdateSourceRef.current.delete("operational_module");
-        // Realtime 수신분은 이미 서버 반영 상태 → 스냅샷만 갱신해 저장 루프 방지
-        lastOperationalSnapshotRef.current = snapshot;
-        return;
+        if (snapshot === lastOperationalSnapshotRef.current) return;
       }
       if (role !== "admin" && role !== "dorm_manager" && role !== "maintenance_reporter") {
         return;
       }
       // 직전 저장과 동일한 데이터면 Supabase 저장 생략
       if (snapshot === lastOperationalSnapshotRef.current) return;
+      // 동일 데이터 2회 연속 실패 → 무한 재시도 방지(다음 편집 시 자동 재시도)
+      if (operationalFailRef.current.snap === snapshot && operationalFailRef.current.count >= 2) return;
+      // 저장 중이면 중복 저장 요청 차단(in-flight 가드)
+      if (operationalSavingRef.current) return;
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
 
+      operationalSavingRef.current = true;
+      setSaveStatus("saving");
       try {
         console.debug("Operational sync: saving", {
           role,
@@ -5132,14 +5168,16 @@ export default function App() {
         });
         setOperationalSyncError(null);
         await saveOperationalModule(operationalPayload, session.user.id);
-        // 비admin 작업 감사로그는 INSERT 전용 정책으로 신규 행만 별도 저장 (기존 행 UPDATE 없음 → 403 없음)
+        // 비admin 작업 감사로그는 신규 행만 별도 저장(upsert ignoreDuplicates → 409/500 없음, 실패해도 warn 만)
         if (!isAdmin) {
           await insertAuditLogsScoped(auditLogs, tenantId, session.user.id);
         }
         lastOperationalSnapshotRef.current = snapshot;
+        operationalFailRef.current = { snap: "", count: 0 }; // 성공 → 실패 카운트 초기화
         // clear any previous error on success
         setOperationalSyncError(null);
         lastOperationalAlertRef.current = ""; // 성공 시 알림 dedup 초기화
+        flashSaveStatus("saved");
       } catch (error) {
         const err = error as { status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown };
         // 어떤 테이블/정책에서 실패했는지 추적할 수 있도록 상세 로그 출력
@@ -5159,8 +5197,15 @@ export default function App() {
           },
           raw: error,
         });
+        // 동일 스냅샷 실패 횟수 누적(최대 2회까지만 재시도)
+        operationalFailRef.current = operationalFailRef.current.snap === snapshot
+          ? { snap: snapshot, count: operationalFailRef.current.count + 1 }
+          : { snap: snapshot, count: 1 };
         // 화면에는 Supabase 원문 alert 대신 한글 안내만 표시(팝업 없음).
         setOperationalSyncError("저장 권한이 없거나 연결이 불안정합니다. 잠시 후 다시 시도해주세요.");
+        flashSaveStatus("error");
+      } finally {
+        operationalSavingRef.current = false;
       }
     }, 500);
 
@@ -12339,6 +12384,22 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         {operationalSyncError && (
           <div className={`fixed inset-x-0 top-0 z-50 border-b px-4 py-3 text-sm font-medium ${theme.darkMode ? "border-rose-700 bg-rose-900 text-rose-100" : "border-rose-200 bg-rose-50 text-rose-900"}`}>
             {operationalSyncError}
+          </div>
+        )}
+        {/* 저장 상태 토스트(저장 중 / 저장 완료 / 저장 실패) — 우측 하단 */}
+        {saveStatus !== "idle" && (
+          <div
+            className={`fixed bottom-4 right-4 z-[60] rounded-2xl px-4 py-2 text-sm font-semibold shadow-lg ${
+              saveStatus === "saving"
+                ? "bg-slate-800 text-white"
+                : saveStatus === "saved"
+                ? "bg-emerald-600 text-white"
+                : "bg-rose-600 text-white"
+            }`}
+          >
+            {saveStatus === "saving" && "저장 중…"}
+            {saveStatus === "saved" && "저장 완료"}
+            {saveStatus === "error" && "저장 실패 · 잠시 후 다시 시도해주세요."}
           </div>
         )}
         {militaryDirty && ["militaryDashboard", "personnelManagement", "trainingRecords", "militaryNotices", "militaryReports", "militarySettings"].includes(activeTab) && (

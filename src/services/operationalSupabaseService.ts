@@ -438,7 +438,9 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
  * - audit_logs 의 INSERT 전용 RLS 정책과 호환 (UPDATE 정책 없어도 403 없음)
  */
 // 변경이력(audit_logs) 저장 — 부가기능. 실패해도 throw 하지 않고 console.warn 만 남긴다.
-// upsert(on_conflict=id) 대신 plain insert 사용 → id unique/PK 미설정 환경의 500/400 회피.
+// upsert(on_conflict=id, ignoreDuplicates) 사용 → 이미 저장된 id 를 다시 보내도
+// "INSERT ... ON CONFLICT DO NOTHING" 으로 처리되어 409 duplicate key / 500 오류가 발생하지 않는다.
+// (기존: plain insert 로 누적 감사로그 전체를 매 저장마다 재전송 → 409/500 콘솔 스팸의 원인)
 export const insertAuditLogsScoped = async (
   auditLogs: AuditLog[],
   tenantId: string,
@@ -449,7 +451,7 @@ export const insertAuditLogsScoped = async (
   try {
     const { error } = await supabase!
       .from("audit_logs")
-      .insert(auditLogs.map((log) => toDbAuditLog(log, tenantId, userId)));
+      .upsert(auditLogs.map((log) => toDbAuditLog(log, tenantId, userId)), { onConflict: "id", ignoreDuplicates: true });
     if (error) {
       // 감사로그 저장 실패는 실제 데이터 저장과 무관 → 경고만(앱 동작/저장 성공에는 영향 없음).
       console.warn("[audit_logs] 변경이력 저장 실패(무시):", (error as { message?: string })?.message || error);
