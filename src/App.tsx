@@ -1461,6 +1461,12 @@ export default function App() {
   const operationalSavingRef = useRef<boolean>(false);
   const dormFailRef = useRef<{ snap: string; count: number }>({ snap: "", count: 0 });
   const operationalFailRef = useRef<{ snap: string; count: number }>({ snap: "", count: 0 });
+  // 사용자 액션 카운터: 등록/수정/삭제/복구/영구삭제/배정/일괄배정/상태변경/엑셀업로드 등 "사용자 변경"에서만 증가한다.
+  // fetch/Realtime/파생(occupant 동기화) state 변경은 이 값을 올리지 않으므로, 자동 저장 useEffect 는
+  // 이 카운터가 직전 저장 이후 증가했을 때만 실제 저장을 실행한다 → 에코/파생 churn 으로 인한 무한 저장 차단.
+  const userMutationTickRef = useRef<number>(0);
+  const lastSavedDormTickRef = useRef<number>(0);
+  const lastSavedOpTickRef = useRef<number>(0);
   const lastMilitarySnapshotRef = useRef<string>("");
   const lastAppSettingsSnapshotRef = useRef<string>("");
   // 군대 모듈: 로드/Realtime 로 적용된 변경(사용자 수정 아님)을 dirty 에서 제외하기 위한 플래그.
@@ -5060,8 +5066,15 @@ export default function App() {
       if (isLoading || !isInitialLoadCompleteRef.current) return; // 최초 로딩 완료 전 저장 차단(중복 방지)
       // 하자접수 담당자(maintenance_reporter)는 기숙사/계약/신입사원/입주자 관리자 데이터를 저장하지 않음(401 방지).
       if (currentUser?.role === "maintenance_reporter") return;
+      // 사용자 액션 기반 저장: 직전 저장 이후 사용자 변경(등록/수정/삭제/배정/엑셀 등)이 없으면 저장하지 않는다.
+      // → fetch/Realtime/파생(occupant 동기화) state 변경은 카운터를 올리지 않으므로 여기서 즉시 종료
+      //   (로그/토스트/Supabase 요청 없음 → 무한 저장 루프 차단).
+      const tick = userMutationTickRef.current;
+      if (tick === lastSavedDormTickRef.current) return;
       // 저장 대상 payload 스냅샷(동일 데이터면 저장 생략)
       const snapshot = dormModuleSnapshot({ dorms, occupants, dormContracts, newHires });
+      // 사용자 액션은 있었으나 실제 내용이 직전 저장과 동일하면 저장 생략(틱만 동기화).
+      if (snapshot === lastDormSnapshotRef.current) { lastSavedDormTickRef.current = tick; return; }
       // Realtime 에코 처리: 에코로 트리거됐고 직전 저장과 데이터가 동일하면 저장 생략.
       // (단, 에코 후 실제로 새 편집이 있었다면 snapshot 이 달라지므로 저장을 계속 진행 → "여러 번 저장해야 반영" 방지)
       if (realtimeUpdateSourceRef.current.has("dorm_module")) {
@@ -5097,6 +5110,7 @@ export default function App() {
           session.user.id
         );
         lastDormSnapshotRef.current = snapshot;
+        lastSavedDormTickRef.current = tick; // 이 저장으로 반영된 사용자 액션 시점 기록
         dormFailRef.current = { snap: "", count: 0 }; // 성공 → 실패 카운트 초기화
         lastDormAlertRef.current = ""; // 성공 시 알림 dedup 초기화
         setOperationalSyncError(null);
@@ -5133,6 +5147,9 @@ export default function App() {
 
     const timer = setTimeout(async () => {
       if (isLoading || !isInitialLoadCompleteRef.current) return; // 최초 로딩 완료 전 저장 차단(중복 방지)
+      // 사용자 액션 기반 저장: 직전 저장 이후 사용자 변경이 없으면 저장하지 않음(에코/파생/fetch churn 무시).
+      const tick = userMutationTickRef.current;
+      if (tick === lastSavedOpTickRef.current) return;
 
       // 권한 기반 저장 범위 제한 (RLS 403 회피, RLS 완화 없음)
       // - admin: 전체 저장
@@ -5170,8 +5187,8 @@ export default function App() {
       if (role !== "admin" && role !== "dorm_manager" && role !== "maintenance_reporter") {
         return;
       }
-      // 직전 저장과 동일한 데이터면 Supabase 저장 생략
-      if (snapshot === lastOperationalSnapshotRef.current) return;
+      // 직전 저장과 동일한 데이터면 Supabase 저장 생략(틱만 동기화)
+      if (snapshot === lastOperationalSnapshotRef.current) { lastSavedOpTickRef.current = tick; return; }
       // 동일 데이터 2회 연속 실패 → 무한 재시도 방지(다음 편집 시 자동 재시도)
       if (operationalFailRef.current.snap === snapshot && operationalFailRef.current.count >= 2) return;
       // 저장 중이면 중복 저장 요청 차단(in-flight 가드)
@@ -5198,6 +5215,7 @@ export default function App() {
           await insertAuditLogsScoped(auditLogs, tenantId, session.user.id);
         }
         lastOperationalSnapshotRef.current = snapshot;
+        lastSavedOpTickRef.current = tick; // 이 저장으로 반영된 사용자 액션 시점 기록
         operationalFailRef.current = { snap: "", count: 0 }; // 성공 → 실패 카운트 초기화
         // clear any previous error on success
         setOperationalSyncError(null);
@@ -10278,6 +10296,8 @@ export default function App() {
 
   const uploadExcel = async (file: File) => {
     if (!canEditData(currentUser)) return;
+    // 엑셀 업로드는 사용자 액션 → 저장 트리거 카운터 증가(자동 저장 useEffect 가 저장하도록).
+    userMutationTickRef.current += 1;
     if (activeTab === "dormContracts") {
       await uploadDormContractsExcel(file);
       return;
@@ -11655,6 +11675,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   };
 
   const createAuditLog = (params: Omit<AuditLog, "id" | "changedAt">) => {
+    // 감사로그는 모든 사용자 데이터 변경(등록/수정/삭제/복구/영구삭제/배정/상태변경)에서 호출되므로,
+    // 여기서 사용자 액션 카운터를 올려 자동 저장 useEffect 가 "사용자 변경"만 저장하도록 한다.
+    userMutationTickRef.current += 1;
     const entry = createAuditLogEntry(params);
     setAuditLogs((prev) => [entry, ...prev].slice(0, MAX_AUDIT_LOGS));
   };
@@ -15966,6 +15989,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         const assignedHires = updatedNewHires.filter(h => selectedNewHiresForAssignment.includes(h.id));
                         const nextOccupants = assignedHires.reduce((acc, hire) => upsertOccupantFromNewHire(hire, acc), occupants);
 
+                        // 사용자 액션(일괄 배정) → 저장 트리거 카운터 증가
+                        userMutationTickRef.current += 1;
                         // 상태 업데이트 (새로고침 없이 신입사원/입주자/기숙사 현재인원/대시보드/시뮬레이션 즉시 반영)
                         setNewHires(updatedNewHires);
                         setOccupants(nextOccupants);
@@ -21303,6 +21328,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 });
                 const nextNewHires = newHires.map(h => h.id === assigningNewHireId ? updatedNewHire : h);
                 const nextOccupants = upsertOccupantFromNewHire(updatedNewHire, occupants);
+                // 사용자 액션(기숙사 배정) → 저장 트리거 카운터 증가
+                userMutationTickRef.current += 1;
                 setNewHires(nextNewHires);
                 setOccupants(nextOccupants);
                 if (!isSupabaseAvailable()) {
