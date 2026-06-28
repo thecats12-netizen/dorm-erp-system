@@ -4421,6 +4421,18 @@ export default function App() {
     return [occupantPayload, ...currentOccupants];
   };
 
+  // 배정/일괄배정/기숙사 변경/배정 해제 등 신입사원 dorm 변경 시,
+  // 신입사원 등록/수정 저장(saveNewHire)과 동일한 자동계산을 적용한다.
+  // 거주상태(residenceStatus)·입주유형(moveInType)을 즉시 재계산하여 배정 직후 바로 반영되게 한다.
+  // (입실일/퇴실일/계약상태/만료여부/현재거주·사용중 여부 등은 dormId + 이 값들을 기준으로
+  //  목록·대시보드·시뮬레이션에서 파생 계산되므로, 이 두 값이 갱신되면 모든 통계가 함께 갱신된다.)
+  const recalcNewHireDerived = (hire: NewHireEmployee): NewHireEmployee => ({
+    ...hire,
+    residenceStatus: calculateNewHireResidenceStatus(hire),
+    moveInType: calculateMoveInType(hire, newHires),
+    updatedAt: new Date().toISOString().slice(0, 10),
+  });
+
   // ============================================
   // 6. 계정 비활성화 로직
   // 계약상태 = 종료/해지 또는 담당자 변경 시
@@ -15845,97 +15857,32 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             }
                           }
 
-                        // 신입사원 배정 처리
+                        // 신입사원 배정 처리 — 등록/수정 저장과 동일한 자동계산(거주상태·입주유형) 적용
                         const updatedNewHires = newHires.map(h => {
                           if (selectedNewHiresForAssignment.includes(h.id)) {
-                            return {
+                            return recalcNewHireDerived({
                               ...h,
                               dormId: selectedDorm.id,
                               site: selectedDorm.site,
+                              gender: selectedDorm.gender || h.gender,
                               address: selectedDorm.address,
                               buildingName: selectedDorm.buildingName,
-                              dong: selectedDorm.dong,
-                              roomHo: selectedDorm.roomHo,
+                              dong: stripDongHoSuffix(selectedDorm.dong),
+                              roomHo: stripDongHoSuffix(selectedDorm.roomHo),
                               공동현관: selectedDorm.공동현관,
                               세대현관: selectedDorm.세대현관,
-                              residenceStatus: (h.moveInDate ? "거주중" : "대기중") as NewHireResidenceStatus,
-                              moveInType: "신규" as MoveInType,
-                              updatedAt: new Date().toISOString(),
-                            };
+                            });
                           }
                           return h;
                         });
 
-                        // occupants에 추가/업데이트
-                        const newOccupants = selectedNewHiresForAssignment
-                          .map(hireId => {
-                            const hire = updatedNewHires.find(h => h.id === hireId);
-                            if (!hire) return null;
+                        // 입주자 동기화 — 등록/수정 저장과 동일하게 upsertOccupantFromNewHire 사용(중복 방지/상태 매핑 일치)
+                        const assignedHires = updatedNewHires.filter(h => selectedNewHiresForAssignment.includes(h.id));
+                        const nextOccupants = assignedHires.reduce((acc, hire) => upsertOccupantFromNewHire(hire, acc), occupants);
 
-                            // 이미 존재하는 occupant 확인
-                            const existingOccupant = occupants.find(o => o.sourceNewHireId === hire.id);
-                            if (existingOccupant) {
-                              // 업데이트
-                              return {
-                                ...existingOccupant,
-                                dormId: selectedDorm.id,
-                                site: selectedDorm.site,
-                                employeeName: hire.name,
-                                gender: hire.gender,
-                                department: hire.department,
-                                phone: hire.phone,
-                                moveInDate: hire.moveInDate,
-                                moveOutDueDate: hire.moveOutDate,
-                                status: hire.residenceStatus as Occupant["status"],
-                                address: selectedDorm.address,
-                                buildingName: selectedDorm.buildingName,
-                                dong: selectedDorm.dong,
-                                roomHo: selectedDorm.roomHo,
-                                공동현관: selectedDorm.공동현관,
-                                세대현관: selectedDorm.세대현관,
-                                updatedAt: new Date().toISOString(),
-                              };
-                            } else {
-                              // 새로 생성
-                              return {
-                                id: `occupant-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-                                dormId: selectedDorm.id,
-                                site: selectedDorm.site,
-                                employeeName: hire.name,
-                                gender: hire.gender,
-                                department: hire.department,
-                                phone: hire.phone,
-                                moveInDate: hire.moveInDate,
-                                moveOutDueDate: hire.moveOutDate,
-                                status: hire.residenceStatus as Occupant["status"],
-                                isNewHireAssignment: true,
-                                notes: "",
-                                address: selectedDorm.address,
-                                buildingName: selectedDorm.buildingName,
-                                dong: selectedDorm.dong,
-                                roomHo: selectedDorm.roomHo,
-                                공동현관: selectedDorm.공동현관,
-                                세대현관: selectedDorm.세대현관,
-                                sourceNewHireId: hire.id,
-                                createdAt: new Date().toISOString(),
-                                updatedAt: new Date().toISOString(),
-                              } as Occupant;
-                            }
-                          })
-                          .filter(Boolean) as Occupant[];
-
-                        // 상태 업데이트 (새로고침 없이 신입사원/입주자/대시보드 즉시 반영)
+                        // 상태 업데이트 (새로고침 없이 신입사원/입주자/기숙사 현재인원/대시보드/시뮬레이션 즉시 반영)
                         setNewHires(updatedNewHires);
-                        setOccupants(prev => {
-                          // 기존 occupant 업데이트
-                          const updated = prev.map(o => {
-                            const newOccupant = newOccupants.find(no => no.sourceNewHireId === o.sourceNewHireId);
-                            return newOccupant || o;
-                          });
-                          // 새 occupant 추가
-                          const toAdd = newOccupants.filter(no => !updated.find(o => o.sourceNewHireId === no.sourceNewHireId));
-                          return [...updated, ...toAdd];
-                        });
+                        setOccupants(nextOccupants);
 
                         // 모달 닫기
                         setShowNewHireAssignmentModal(false);
@@ -15945,17 +15892,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         // 로컬스토리지 저장 (Supabase가 사용 중이면 쓰지 않음 — Supabase 는 자동 저장 effect + realtime 으로 반영)
                         if (!isSupabaseAvailable()) {
                           saveJson(NEW_HIRES_KEY, updatedNewHires, tenantId);
-                          saveJson(
-                            OCCUPANTS_KEY,
-                            [
-                              ...occupants.map((o) => {
-                                const newOccupant = newOccupants.find((no) => no.sourceNewHireId === o.sourceNewHireId);
-                                return newOccupant || o;
-                              }),
-                              ...newOccupants.filter((no) => !occupants.find((o) => o.sourceNewHireId === no.sourceNewHireId)),
-                            ],
-                            tenantId
-                          );
+                          saveJson(OCCUPANTS_KEY, nextOccupants, tenantId);
                         }
                         } catch (e) {
                           console.error("[신입사원 일괄배정] 처리 실패:", e);
@@ -21265,7 +21202,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 }
                 const newHire = newHires.find(h => h.id === assigningNewHireId);
                 if (!newHire) return;
-                const updatedNewHire = {
+                // 등록/수정 저장과 동일한 자동계산(거주상태·입주유형) 적용 후 입주자 동기화.
+                const updatedNewHire = recalcNewHireDerived({
                   ...newHire,
                   dormId,
                   site: dorm.site,
@@ -21276,10 +21214,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   roomHo: stripDongHoSuffix(dorm.roomHo),
                   공동현관: dorm.공동현관,
                   세대현관: dorm.세대현관,
-                  updatedAt: new Date().toISOString(),
-                };
-                setNewHires(prev => prev.map(h => h.id === assigningNewHireId ? updatedNewHire : h));
-                setOccupants(prev => upsertOccupantFromNewHire(updatedNewHire, prev));
+                });
+                const nextNewHires = newHires.map(h => h.id === assigningNewHireId ? updatedNewHire : h);
+                const nextOccupants = upsertOccupantFromNewHire(updatedNewHire, occupants);
+                setNewHires(nextNewHires);
+                setOccupants(nextOccupants);
+                if (!isSupabaseAvailable()) {
+                  saveJson(NEW_HIRES_KEY, nextNewHires, tenantId);
+                  saveJson(OCCUPANTS_KEY, nextOccupants, tenantId);
+                }
                 setShowAssignDormForNewHire(false);
                 setAssigningNewHireId(null);
               }}
