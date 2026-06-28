@@ -692,6 +692,7 @@ function inventoryTemplate(): Omit<InventoryItem, "id" | "createdAt"> {
     dong: "",
     roomHo: "",
     managerName: "",
+    managerPhone: "",
     itemName: "",
     quantity: 1,
     modelName: "",
@@ -1683,6 +1684,7 @@ export default function App() {
     dong: row.dong || "",
     roomHo: row.room_ho || "",
     managerName: row.manager_name || "",
+    managerPhone: row.manager_phone || "",
     itemName: row.item_name || "",
     quantity: row.quantity ?? 0,
     modelName: row.model_name || "",
@@ -2623,7 +2625,24 @@ export default function App() {
               const dCleaning = dedupeRecords(remoteOperationalModule?.cleaningReports || [], "cleaningReports", (r) => `${recordDormKey(r as any)}|${r.reportDate || ""}`);
               const dDefects = dedupeRecords(remoteOperationalModule?.defects || [], "defects", (d) => `${(d.site || "")}|${(d.buildingName || "")}|${(d.dong || "")}|${(d.ho || "")}|${d.receiptDate || ""}|${(d.requestText || "").slice(0, 20)}`);
               const dInv = dedupeRecords(remoteOperationalModule?.inventory || [], "inventory", (i) => `${recordDormKey(i as any)}|${(i.itemName || "").trim()}|${(i.modelName || "").trim()}`);
-              setCleaningReports(dCleaning);
+              // 사진 보존 병합: 로드 결과의 사진이 비어 있는데 메모리(이전 상태)에 사진이 있으면 그 값을 유지(빈값 덮어쓰기 방지).
+              setCleaningReports((prevReports) => {
+                const prevById = new Map(prevReports.map((r) => [r.id, r]));
+                return dCleaning.map((r) => {
+                  const prev = prevById.get(r.id);
+                  const before = (Array.isArray(r.beforePhotoDataUrls) && r.beforePhotoDataUrls.length > 0)
+                    ? r.beforePhotoDataUrls
+                    : (prev?.beforePhotoDataUrls?.length ? prev.beforePhotoDataUrls : (r.beforePhotoDataUrls || []));
+                  const after = (Array.isArray(r.afterPhotoDataUrls) && r.afterPhotoDataUrls.length > 0)
+                    ? r.afterPhotoDataUrls
+                    : (prev?.afterPhotoDataUrls?.length ? prev.afterPhotoDataUrls : (r.afterPhotoDataUrls || []));
+                  const next = { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
+                  // 디버깅: 사진 개수로 어느 단계에서 사라지는지 추적(base64 원문은 콘솔 과부하 방지를 위해 개수만 출력)
+                  console.log("[PHOTO LOAD]", next.id, { before: before.length, after: after.length });
+                  if (before.length === 0 && after.length === 0) console.warn("[PHOTO MISSING]", next.id);
+                  return next;
+                });
+              });
               setDefects(dDefects);
               setInventory(dInv);
               setSettlementRecords(remoteOperationalModule?.settlementRecords || []);
@@ -3954,6 +3973,40 @@ export default function App() {
     return phone ? maskPhone(phone) : "-";
   };
 
+  // 도로명주소 표시 정규화: 값이 UUID/코드 형식이면 실제 주소가 아니므로 ID로 간주.
+  // (실제 도로명주소는 한글/공백을 포함 → 한글·공백이 전혀 없고 식별자성 문자열이면 코드로 판단)
+  const looksLikeIdCode = (s: string): boolean => {
+    const t = (s || "").trim();
+    if (!t) return false;
+    if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(t)) return true; // UUID
+    if (!/[가-힣]/.test(t) && !/\s/.test(t) && /^[A-Za-z0-9_-]{12,}$/.test(t)) return true; // 코드성 식별자
+    return false;
+  };
+  // 기숙사(dorm) / 계약(contract) ID 로 실제 도로명주소 조회. 없으면 "".
+  const findAddressById = (id?: string): string => {
+    const key = (id || "").trim();
+    if (!key) return "";
+    return (
+      operationalDorms.find((d) => d.id === key)?.address ||
+      dorms.find((d) => d.id === key)?.address ||
+      dormContracts.find((c) => c.id === key)?.address ||
+      ""
+    );
+  };
+  // 신입사원/입주자 등 목록·폼·Excel 공통 도로명주소 표시.
+  // 우선순위: dormId 로 실제 주소 → address(실주소) → address 가 코드면 ID 변환 → "-".
+  const resolveDisplayAddress = (address?: string, dormId?: string): string => {
+    const byDorm = findAddressById(dormId);
+    if (byDorm) return byDorm;
+    const addr = (address || "").trim();
+    if (addr && !looksLikeIdCode(addr)) return addr;
+    if (addr && looksLikeIdCode(addr)) {
+      const resolved = findAddressById(addr);
+      if (resolved) return resolved;
+    }
+    return "-";
+  };
+
   // 입주자 계약만료일 단일 기준: 입주자가 배정된 기숙사의 "유효 계약 종료일".
   // 입주일+2년/예정퇴실일(개인 날짜)로 계산하지 않는다.
   const getDormEffectiveContractEnd = (dormId?: string): string => {
@@ -4845,6 +4898,7 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     };
     
+    console.log("[PHOTO SAVE]", autoFilledForm.id, { before: autoFilledForm.beforePhotoDataUrls?.length || 0, after: autoFilledForm.afterPhotoDataUrls?.length || 0 });
     setCleaningReports((prev) => [autoFilledForm, ...prev]);
     createAuditLog({
       targetType: "cleaningReport",
@@ -4921,8 +4975,15 @@ export default function App() {
   }, [dormContracts, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
-    // localStorage 에는 base64 이미지를 저장하지 않음(용량 초과 방지). 이미지는 Supabase 가 단일 출처.
-    if (!isSupabaseAvailable()) saveJson(CLEANING_REPORTS_KEY, cleaningReports.map((r) => ({ ...r, beforePhotoDataUrls: [], afterPhotoDataUrls: [] })), tenantId);
+    // localStorage 에도 사진(data URL)을 포함해 저장 → 오프라인/새로고침/종료 후에도 사진 유지.
+    // 용량 초과로 실패(saveJson=false)하면, 최소한 보고서 본문은 남도록 사진 제외 후 재저장(사진은 Supabase 가 유지).
+    if (!isSupabaseAvailable()) {
+      const okFull = saveJson(CLEANING_REPORTS_KEY, cleaningReports, tenantId);
+      if (!okFull) {
+        console.warn("[PHOTO SAVE] localStorage 용량 초과 — 사진 제외하고 본문만 저장(사진은 Supabase 동기화 필요)");
+        saveJson(CLEANING_REPORTS_KEY, cleaningReports.map((r) => ({ ...r, beforePhotoDataUrls: [], afterPhotoDataUrls: [] })), tenantId);
+      }
+    }
   }, [cleaningReports, tenantId, isLoading]);
   useEffect(() => {
     if (isLoading) return;
@@ -8592,6 +8653,7 @@ export default function App() {
         updatedAt: new Date().toISOString(),
       };
 
+      console.log("[PHOTO SAVE]", payload.id, { before: payload.beforePhotoDataUrls?.length || 0, after: payload.afterPhotoDataUrls?.length || 0 });
       setCleaningReports((prev) => prev.map((report) => (report.id === existing.id ? payload : report)));
 
       const actionType = existing.cleanStatus !== payload.cleanStatus ? "statusChange" : "update";
@@ -10281,7 +10343,8 @@ const exportExcel = () => {
           호수: dorm?.roomHo || "",
           공동현관: dormCommonEntrance(dorm),
           세대현관: dormUnitEntrance(dorm),
-          담당관리자: getDormManagerDisplayName(i.dormId),
+          담당관리자: i.managerName || getDormManagerDisplayName(i.dormId),
+          담당자연락처: i.managerPhone || getDormManagerPhone(i.dormId),
           계약만료일: getDormContractEndLabel(i.dormId),
           남은일수: getDormContractRemainLabel(i.dormId),
           비품명: i.itemName,
@@ -10407,7 +10470,7 @@ const exportExcel = () => {
         이름: h.name,
         연락처: h.phone,
         부서: h.department,
-        도로명주소: dorm?.address || "",
+        도로명주소: (() => { const a = resolveDisplayAddress(h.address, h.dormId); return a === "-" ? "" : a; })(),
         건물명: dorm?.buildingName || h.buildingName,
         동: dorm?.dong || h.dong,
         호수: dorm?.roomHo || h.roomHo,
@@ -11430,9 +11493,29 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const openInventoryEdit = (i: InventoryItem) => {
     const { id: _id, createdAt: _c, ...rest } = i;
-    setInventoryForm(rest);
+    setInventoryForm({ ...rest, managerPhone: rest.managerPhone || "" });
     setEditingInventoryId(i.id);
     setShowInventoryForm(true);
+  };
+
+  // 신규 비품 등록 시: 선택된(클릭한) 기숙사가 있으면 그 기숙사 + 담당자/연락처를 자동 채운 폼을 생성.
+  const buildInventoryFormForDorm = (dormId: string) => {
+    const base = inventoryTemplate();
+    if (!dormId) return base;
+    const dorm = operationalDorms.find((d) => d.id === dormId) || dorms.find((d) => d.id === dormId) || null;
+    if (!dorm) return base;
+    const manager = getDormManagerUser(dormId);
+    return {
+      ...base,
+      dormId,
+      site: dorm.site || base.site,
+      dormAddress: dorm.address || "",
+      buildingName: dorm.buildingName || "",
+      dong: stripDongHoSuffix(dorm.dong),
+      roomHo: stripDongHoSuffix(dorm.roomHo),
+      managerName: manager?.displayName || manager?.username || "",
+      managerPhone: manager?.phone || "",
+    };
   };
 
   const openLeaseEdit = (l: LeaseContract) => {
@@ -12695,7 +12778,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <button
                   type="button"
                   onClick={() => {
-                    setInventoryForm(inventoryTemplate());
+                    setInventoryForm(buildInventoryFormForDorm(selectedInventoryDormId));
                     setEditingInventoryId(null);
                     setShowInventoryForm(true);
                   }}
@@ -14939,7 +15022,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.name} {(!h.dormId || !h.buildingName || !h.address) && <span className="ml-1 rounded-full bg-orange-100 px-1 py-0.5 text-xs font-semibold text-orange-700">미배정</span>}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{maskPhone(h.phone)}</td>
                       <td translate="no" className="px-2 py-3 whitespace-nowrap text-xs notranslate">{h.department}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{operationalDorms.find((d) => d.id === h.dormId)?.address || dorms.find((d) => d.id === h.dormId)?.address || h.dormId}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{resolveDisplayAddress(h.address, h.dormId)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.buildingName}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.dong}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.roomHo}</td>
@@ -15712,37 +15795,55 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
               </div>
 
-              {/* 배정 버튼 */}
-              {selectedDormForAssignment && selectedNewHiresForAssignment.length > 0 && (
+              {/* 배정 버튼 (항상 표시 + 비활성 사유 안내) */}
+              {(() => {
+                // 선택 기숙사는 "실제 표시된 목록(assignmentDormRows)" 기준으로 조회 →
+                // 종료/해지 포함 등 operationalDorms 에 없는 기숙사를 골라도 배정이 동작하도록 한다.
+                const selectedDorm =
+                  assignmentDormRows.find((d) => d.id === selectedDormForAssignment) ||
+                  operationalDorms.find((d) => d.id === selectedDormForAssignment) ||
+                  dorms.find((d) => d.id === selectedDormForAssignment) ||
+                  null;
+                const count = selectedNewHiresForAssignment.length;
+                const capacity = selectedDorm?.capacity || 6;
+                const currentOccupants = selectedDorm
+                  ? occupants.filter((o) => o.dormId === selectedDorm.id && !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length
+                  : 0;
+                const remaining = Math.max(capacity - currentOccupants, 0);
+                const totalAfter = currentOccupants + count;
+                const overCapacity = !!selectedDorm && totalAfter > capacity;
+                // 버튼 활성: 기숙사 선택 + 1명 이상. 정원 초과는 confirm 으로 강제 배정 허용(버튼은 활성 유지).
+                const canAssign = !!selectedDorm && count > 0;
+                // 비활성/주의 사유(한글)
+                let reason = "";
+                if (!selectedDorm) reason = "기숙사를 선택해주세요.";
+                else if (count === 0) reason = "배정할 인원을 선택해주세요.";
+                else if (overCapacity) reason = `선택 인원이 잔여 TO보다 많습니다. (잔여 ${remaining}명 / 선택 ${count}명) — 배정 시 정원 초과 확인이 필요합니다.`;
+
+                return (
                 <div className={`${theme.darkMode ? "mt-6 rounded-3xl border border-slate-700 p-4" : "mt-6 rounded-3xl border border-slate-200 p-4"}`}>
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
                     <div>
-                      <div className="font-medium">선택 인원: {selectedNewHiresForAssignment.length}명</div>
+                      <div className="font-medium">선택 인원: {count}명</div>
                       <div className="text-sm text-slate-500">
-                        {(() => {
-                          const selectedDorm = operationalDorms.find(d => d.id === selectedDormForAssignment);
-                          const currentOccupants = occupants.filter(o => o.dormId === selectedDormForAssignment && !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length;
-                          const totalAfter = currentOccupants + selectedNewHiresForAssignment.length;
-                          const capacity = selectedDorm?.capacity || 6;
-                          return `현재 ${currentOccupants}명 거주 중 / 정원 ${capacity}명 → 배정 후 ${totalAfter}명`;
-                        })()}
+                        {selectedDorm
+                          ? `현재 ${currentOccupants}명 거주 중 / 정원 ${capacity}명 → 배정 후 ${totalAfter}명 (잔여 TO ${remaining}명)`
+                          : "기숙사를 선택하면 정원 정보가 표시됩니다."}
                       </div>
                     </div>
                     <button
                       type="button"
+                      disabled={!canAssign}
                       onClick={async () => {
-                        const selectedDorm = operationalDorms.find(d => d.id === selectedDormForAssignment);
-                        if (!selectedDorm) return;
+                        try {
+                          if (!selectedDorm) { alert("기숙사를 선택해주세요."); return; }
+                          if (count === 0) { alert("배정할 인원을 선택해주세요."); return; }
 
-                        const currentOccupants = occupants.filter(o => o.dormId === selectedDorm.id && !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length;
-                        const capacity = selectedDorm.capacity || 6;
-                        const totalAfter = currentOccupants + selectedNewHiresForAssignment.length;
-
-                        if (totalAfter > capacity) {
-                          if (!confirm(`현재 ${currentOccupants}명 거주 중 / 정원 ${capacity}명입니다. ${selectedNewHiresForAssignment.length}명을 배정하면 정원을 초과합니다. 그래도 배정하시겠습니까?`)) {
-                            return;
+                          if (totalAfter > capacity) {
+                            if (!confirm(`현재 ${currentOccupants}명 거주 중 / 정원 ${capacity}명입니다. ${count}명을 배정하면 정원을 초과합니다. 그래도 배정하시겠습니까?`)) {
+                              return;
+                            }
                           }
-                        }
 
                         // 신입사원 배정 처리
                         const updatedNewHires = newHires.map(h => {
@@ -15823,7 +15924,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           })
                           .filter(Boolean) as Occupant[];
 
-                        // 상태 업데이트
+                        // 상태 업데이트 (새로고침 없이 신입사원/입주자/대시보드 즉시 반영)
                         setNewHires(updatedNewHires);
                         setOccupants(prev => {
                           // 기존 occupant 업데이트
@@ -15841,7 +15942,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         setSelectedDormForAssignment("");
                         setSelectedNewHiresForAssignment([]);
 
-                        // 로컬스토리지 저장 (Supabase가 사용 중이면 쓰지 않음)
+                        // 로컬스토리지 저장 (Supabase가 사용 중이면 쓰지 않음 — Supabase 는 자동 저장 effect + realtime 으로 반영)
                         if (!isSupabaseAvailable()) {
                           saveJson(NEW_HIRES_KEY, updatedNewHires, tenantId);
                           saveJson(
@@ -15856,14 +15957,20 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             tenantId
                           );
                         }
+                        } catch (e) {
+                          console.error("[신입사원 일괄배정] 처리 실패:", e);
+                          alert("배정 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+                        }
                       }}
-                      className="rounded-2xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white hover:bg-blue-500"
+                      className={`rounded-2xl px-6 py-3 text-sm font-semibold text-white ${canAssign ? "bg-blue-600 hover:bg-blue-500" : "cursor-not-allowed bg-slate-300"}`}
                     >
                       선택 인원 배정
                     </button>
                   </div>
+                  {reason && <div className="mt-2 text-sm font-medium text-rose-600">{reason}</div>}
                 </div>
-              )}
+                );
+              })()}
             </div>
           </div>
         )}
@@ -16492,7 +16599,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               {canEditData(currentUser) && (
                 <button
                   onClick={() => {
-                    setInventoryForm(inventoryTemplate());
+                    setInventoryForm(buildInventoryFormForDorm(selectedInventoryDormId));
                     setEditingInventoryId(null);
                     setShowInventoryForm(true);
                   }}
@@ -21059,7 +21166,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 pastDorms={pastDormsForAssign.list}
               />
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 mt-4">
-                <Input label="주소" value={newHireForm.address} onChange={(v) => setNewHireForm((f) => ({ ...f, address: v }))} readOnly />
+                <Input label="주소" value={(() => { const a = resolveDisplayAddress(newHireForm.address, newHireForm.dormId); return a === "-" ? "" : a; })()} onChange={(v) => setNewHireForm((f) => ({ ...f, address: v }))} readOnly />
                 <Input label="건물명" value={newHireForm.buildingName} onChange={(v) => setNewHireForm((f) => ({ ...f, buildingName: v }))} readOnly />
                 <Input label="동" value={formatDong(newHireForm.dong)} onChange={(v) => setNewHireForm((f) => ({ ...f, dong: v }))} readOnly />
                 <Input label="호수" value={formatRoomHo(newHireForm.roomHo)} onChange={(v) => setNewHireForm((f) => ({ ...f, roomHo: v }))} readOnly />
@@ -21276,6 +21383,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <FilteredDormSelector
                 value={inventoryForm.dormId}
                 onChange={(dormId, dorm) => {
+                  // 기숙사 변경 시 담당자/담당자 연락처를 해당 기숙사 담당 관리자 기준으로 즉시 자동 변경.
+                  const manager = getDormManagerUser(dormId);
                   setInventoryForm((f) => ({
                     ...f,
                     dormId,
@@ -21284,7 +21393,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     buildingName: dorm?.buildingName || f.buildingName,
                     dong: dorm ? stripDongHoSuffix(dorm.dong) : f.dong,
                     roomHo: dorm ? stripDongHoSuffix(dorm.roomHo) : f.roomHo,
-                    managerName: dorm?.managerUserId ? (users.find((u) => u.id === dorm.managerUserId)?.displayName || f.managerName) : f.managerName,
+                    managerName: manager?.displayName || manager?.username || "",
+                    managerPhone: manager?.phone || "",
                   }));
                 }}
                 currentUser={currentUser}
@@ -21298,7 +21408,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <Input label="건물명" value={inventoryForm.buildingName} onChange={(v) => setInventoryForm((f) => ({ ...f, buildingName: v }))} readOnly />
                 <Input label="동" value={formatDong(inventoryForm.dong)} onChange={(v) => setInventoryForm((f) => ({ ...f, dong: stripDongHoSuffix(v) }))} readOnly />
                 <Input label="호수" value={formatRoomHo(inventoryForm.roomHo)} onChange={(v) => setInventoryForm((f) => ({ ...f, roomHo: stripDongHoSuffix(v) }))} readOnly />
-                <Input label="담당자" value={inventoryForm.managerName} onChange={(v) => setInventoryForm((f) => ({ ...f, managerName: v }))} readOnly />
+                <Input label="담당자" value={inventoryForm.managerName} onChange={(v) => setInventoryForm((f) => ({ ...f, managerName: v }))} />
+                <Input label="담당자 연락처" value={inventoryForm.managerPhone} onChange={(v) => setInventoryForm((f) => ({ ...f, managerPhone: v }))} />
               </div>
             </div>
 

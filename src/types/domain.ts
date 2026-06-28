@@ -98,6 +98,7 @@ export type InventoryItem = {
   dong: string;
   roomHo: string;
   managerName: string;
+  managerPhone: string;
   itemName: string;
   quantity: number;
   modelName: string;
