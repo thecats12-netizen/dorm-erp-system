@@ -1951,6 +1951,13 @@ export default function App() {
     calculationMode: "auto",
     manualCategory: "",
     manualYear: "",
+    serviceNumber: "",
+    emergencyContact: "",
+    emergencyRelation: "",
+    workPhone: "",
+    email: "",
+    bankName: "",
+    accountNumber: "",
     status: "",
     notes: "",
     createdAt: "",
@@ -8948,7 +8955,17 @@ export default function App() {
   };
 
   const openMilitaryPersonnelEdit = (person: MilitaryPersonnel) => {
-    setMilitaryPersonnelForm(person);
+    // 기존 데이터에 신규 필드가 없으면 빈 문자열로 보정(입력/저장 오류 방지).
+    setMilitaryPersonnelForm({
+      ...person,
+      serviceNumber: person.serviceNumber ?? "",
+      emergencyContact: person.emergencyContact ?? "",
+      emergencyRelation: person.emergencyRelation ?? "",
+      workPhone: person.workPhone ?? "",
+      email: person.email ?? "",
+      bankName: person.bankName ?? "",
+      accountNumber: person.accountNumber ?? "",
+    });
     setEditingMilitaryPersonnelId(person.id);
     setShowMilitaryPersonnelForm(true);
   };
@@ -9016,34 +9033,6 @@ export default function App() {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-  };
-
-  // 연차 계산 검증용 샘플 데이터 생성(기존 데이터 삭제 없이 추가, 이름 앞 [샘플] 표시)
-  const generateMilitarySampleData = () => {
-    if (!canEditData(currentUser)) return;
-    if (!window.confirm("연차 계산 검증용 샘플 8건을 추가합니다. (기존 데이터는 삭제되지 않습니다)")) return;
-    const baseYear = effectiveMilitaryReferenceYear || new Date().getFullYear();
-    const now = new Date().toISOString();
-    const mk = (over: Partial<MilitaryPersonnel>): MilitaryPersonnel => ({
-      id: crypto.randomUUID(), name: "", rank: "", serviceBranch: "", unit: "검증샘플", phone: "",
-      birthDate: "", enlistmentDate: "", dischargeDate: "", calculationMode: "auto",
-      manualCategory: "", manualYear: "", mobilization: false, status: "재직", notes: "연차 계산 검증용 샘플",
-      createdAt: now, updatedAt: now, ...over,
-    });
-    const samples: MilitaryPersonnel[] = [
-      // 전역일 기준 (생년월일은 36~40세 밖으로 두어 예비군/대상아님이 명확하도록)
-      mk({ name: "[샘플]예비군1년차_최근전역", birthDate: `${baseYear - 30}-01-01`, dischargeDate: `${baseYear}-03-01` }),
-      mk({ name: "[샘플]예비군3년차", birthDate: `${baseYear - 31}-01-01`, dischargeDate: `${baseYear - 2}-03-01` }),
-      mk({ name: "[샘플]예비군5년차", birthDate: `${baseYear - 32}-01-01`, dischargeDate: `${baseYear - 4}-03-01` }),
-      mk({ name: "[샘플]예비군7년차", birthDate: `${baseYear - 33}-01-01`, dischargeDate: `${baseYear - 6}-03-01` }),
-      mk({ name: "[샘플]예비군종료_9년차", birthDate: `${baseYear - 30}-01-01`, dischargeDate: `${baseYear - 8}-03-01` }),
-      // 생년월일 기준 (전역일 없음 → 연령으로 민방위 판정)
-      mk({ name: "[샘플]민방위1년차", birthDate: `${baseYear - 36}-01-01` }),
-      mk({ name: "[샘플]민방위3년차", birthDate: `${baseYear - 38}-01-01` }),
-      mk({ name: "[샘플]민방위종료", birthDate: `${baseYear - 41}-01-01` }),
-    ];
-    setMilitaryPersonnel((prev) => [...samples, ...prev]);
-    alert("검증용 군대 샘플 8건을 추가했습니다. (이름 앞 [샘플] 표시 — 확인 후 삭제 가능)");
   };
 
   const saveMilitaryPersonnel = () => {
@@ -9205,6 +9194,13 @@ export default function App() {
       manualCategory: "",
       manualYear: "",
       mobilization: false,
+      serviceNumber: "",
+      emergencyContact: "",
+      emergencyRelation: "",
+      workPhone: "",
+      email: "",
+      bankName: "",
+      accountNumber: "",
       status: "",
       notes: "",
       createdAt: "",
@@ -9868,6 +9864,13 @@ export default function App() {
       serviceBranch: String(r["군별"] || r["serviceBranch"] || ""),
       unit: String(r["부대"] || r["unit"] || ""),
       phone: String(r["연락처"] || r["phone"] || ""),
+      serviceNumber: String(r["군번"] || r["serviceNumber"] || ""),
+      emergencyContact: String(r["비상연락망"] || r["emergencyContact"] || ""),
+      emergencyRelation: String(r["비상연락망(관계)"] || r["비상연락망관계"] || r["emergencyRelation"] || ""),
+      workPhone: String(r["직장번호"] || r["workPhone"] || ""),
+      email: String(r["E-mail"] || r["Email"] || r["이메일"] || r["email"] || ""),
+      bankName: String(r["은행명"] || r["bankName"] || ""),
+      accountNumber: String(r["계좌번호"] || r["accountNumber"] || ""),
       birthDate: parseExcelDate(r["생년월일"] || r["birthDate"] || ""),
       enlistmentDate: parseExcelDate(r["입대일"] || r["enlistmentDate"] || ""),
       dischargeDate: parseExcelDate(r["전역일"] || r["dischargeDate"] || ""),
@@ -10344,6 +10347,13 @@ const exportExcel = () => {
       군별: p.serviceBranch,
       부대: p.unit,
       연락처: p.phone,
+      군번: p.serviceNumber || "",
+      비상연락망: p.emergencyContact || "",
+      "비상연락망(관계)": p.emergencyRelation || "",
+      직장번호: p.workPhone || "",
+      "E-mail": p.email || "",
+      은행명: p.bankName || "",
+      계좌번호: p.accountNumber || "",
       생년월일: p.birthDate,
       전역일: p.dischargeDate,
       계산모드: p.calculationMode || "auto",
@@ -13361,7 +13371,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     setMilitaryPersonnelForm({
                       id: "", name: "", rank: "", serviceBranch: "", unit: "", phone: "",
                       birthDate: "", enlistmentDate: "", dischargeDate: "", calculationMode: "auto",
-                      manualCategory: "", manualYear: "", mobilization: false, status: "", notes: "",
+                      manualCategory: "", manualYear: "", mobilization: false,
+                      serviceNumber: "", emergencyContact: "", emergencyRelation: "", workPhone: "",
+                      email: "", bankName: "", accountNumber: "",
+                      status: "", notes: "",
                       createdAt: "", updatedAt: "",
                     });
                     setEditingMilitaryPersonnelId(null);
@@ -13370,16 +13383,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500"
                 >
                   <Plus className="h-4 w-4" /> 인원 등록
-                </button>
-              )}
-              {canEditData(currentUser) && (
-                <button
-                  type="button"
-                  onClick={generateMilitarySampleData}
-                  title="연차 계산 검증용 샘플 8건 추가"
-                  className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-2 text-sm font-semibold ${theme.darkMode ? "border-slate-600 text-slate-300 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-100"}`}
-                >
-                  검증 샘플 생성
                 </button>
               )}
             </div>
@@ -13565,37 +13568,37 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <option value="관리제외">관리제외</option>
                 </select>
                 {canEditData(currentUser) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMilitaryTrainingForm({
-                        id: "",
-                        personnelId: "",
-                        subject: "",
-                        trainingDate: "",
-                        location: "",
-                        attendees: 0,
-                        status: "",
-                        notes: "",
-                        createdAt: "",
-                        updatedAt: "",
-                      });
-                      setEditingMilitaryTrainingId(null);
-                      setShowMilitaryTrainingForm(true);
-                    }}
-                    className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
-                  >
-                    훈련 등록
-                  </button>
-                )}
-                {canEditData(currentUser) && (
-                  <button
-                    type="button"
-                    onClick={() => generateAllMilitaryTrainingRecords()}
-                    className="rounded-2xl border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
-                  >
-                    현재 인원 기준 훈련기록 자동생성
-                  </button>
+                  <div className="ml-auto flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMilitaryTrainingForm({
+                          id: "",
+                          personnelId: "",
+                          subject: "",
+                          trainingDate: "",
+                          location: "",
+                          attendees: 0,
+                          status: "",
+                          notes: "",
+                          createdAt: "",
+                          updatedAt: "",
+                        });
+                        setEditingMilitaryTrainingId(null);
+                        setShowMilitaryTrainingForm(true);
+                      }}
+                      className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                    >
+                      훈련 등록
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => generateAllMilitaryTrainingRecords()}
+                      className="rounded-2xl border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
+                    >
+                      현재 인원 기준 훈련기록 자동생성
+                    </button>
+                  </div>
                 )}
               </div>
               <p className="mt-2 text-xs text-slate-400">
@@ -21607,6 +21610,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
               <div className="mt-1 text-xs text-slate-400">예비군 1~4년차만 적용 (5년차 이상은 기본/작계, 동원여부 무관)</div>
             </div>
+            <Input label="군번" value={militaryPersonnelForm.serviceNumber || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, serviceNumber: v }))} />
+            <Input label="비상연락망" value={militaryPersonnelForm.emergencyContact || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, emergencyContact: v }))} />
+            <Input label="비상연락망(관계)" value={militaryPersonnelForm.emergencyRelation || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, emergencyRelation: v }))} />
+            <Input label="직장번호" value={militaryPersonnelForm.workPhone || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, workPhone: v }))} />
+            <Input label="E-mail" value={militaryPersonnelForm.email || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, email: v }))} />
+            <Input label="은행명" value={militaryPersonnelForm.bankName || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, bankName: v }))} />
+            <Input label="계좌번호" value={militaryPersonnelForm.accountNumber || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, accountNumber: v }))} />
             <Input label="비고" value={militaryPersonnelForm.notes} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, notes: v }))} />
           </div>,
           () => setShowMilitaryPersonnelForm(false),

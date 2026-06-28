@@ -222,6 +222,13 @@ export type MilitaryPersonnel = {
   manualYear?: string;
   manualBaseYear?: string; // 수동 자동증가 기준연도(이 해의 manualYear 연차에서 기준연도마다 +1)
   mobilization?: boolean;
+  serviceNumber?: string; // 군번
+  emergencyContact?: string; // 비상연락망
+  emergencyRelation?: string; // 비상연락망(관계)
+  workPhone?: string; // 직장번호
+  email?: string; // E-mail
+  bankName?: string; // 은행명
+  accountNumber?: string; // 계좌번호
   status: string;
   notes: string;
   isDeleted?: boolean;
