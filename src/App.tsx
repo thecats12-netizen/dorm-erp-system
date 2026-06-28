@@ -21639,93 +21639,148 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         )}
         {showMilitaryPersonnelForm && modalWrap(
           "군인 인원 등록/수정",
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <Input label="이름" value={militaryPersonnelForm.name} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, name: v }))} />
-            <Input label="직급" value={militaryPersonnelForm.rank} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, rank: v }))} />
-            <div>
-              <SearchableSelect
-                label="부서(검색 또는 선택)"
-                value={militaryPersonnelForm.unit || ""}
-                onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, unit: v }))}
-                options={militaryCodeValues.departments || []}
-                displayOptions={militaryCodeValues.departments || []}
-              />
-              <Input label="부서 직접입력 (선택)" value={militaryPersonnelForm.unit} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, unit: v }))} />
+          <div className="space-y-6">
+            {/* ① 기본정보 */}
+            <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
+              <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>기본정보</h4>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <Input label="이름" value={militaryPersonnelForm.name} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, name: v }))} />
+                <Input label="군번" value={militaryPersonnelForm.serviceNumber || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, serviceNumber: v }))} />
+                <Input label="생년월일" type="date-text" value={militaryPersonnelForm.birthDate} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, birthDate: v }))} />
+                <Input label="연락처" value={militaryPersonnelForm.phone} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, phone: v }))} />
+                <Input label="E-mail" value={militaryPersonnelForm.email || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, email: v }))} />
+                <Input label="직장번호" value={militaryPersonnelForm.workPhone || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, workPhone: v }))} />
+              </div>
             </div>
-            <Input label="연락처" value={militaryPersonnelForm.phone} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, phone: v }))} />
-            <Input label="생년월일" type="date-text" value={militaryPersonnelForm.birthDate} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, birthDate: v }))} />
-            <Input label="전역일" type="date-text" value={militaryPersonnelForm.dischargeDate} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, dischargeDate: v }))} />
-            <div>
-              <label className="mb-2 block text-sm font-medium text-slate-700">계산 모드</label>
-              <select
-                value={militaryPersonnelForm.calculationMode || "auto"}
-                onChange={(e) => setMilitaryPersonnelForm((f) => ({ ...f, calculationMode: e.target.value as "auto" | "manual" | "manualAuto" }))}
-                className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400"
-              >
-                <option value="auto">자동계산 (전역일 기준)</option>
-                <option value="manualAuto">수동관리 (자동증가)</option>
-                <option value="manual">수동관리 (고정)</option>
-              </select>
-            </div>
-            {(militaryPersonnelForm.calculationMode === "manual" || militaryPersonnelForm.calculationMode === "manualAuto") && (
-              <>
+
+            {/* ② 회사정보 */}
+            <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
+              <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>회사정보</h4>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
                 <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">현재구분(최초)</label>
+                  <SearchableSelect
+                    label="부서(검색 또는 선택)"
+                    value={militaryPersonnelForm.unit || ""}
+                    onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, unit: v }))}
+                    options={militaryCodeValues.departments || []}
+                    displayOptions={militaryCodeValues.departments || []}
+                  />
+                  <Input label="부서 직접입력 (선택)" value={militaryPersonnelForm.unit} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, unit: v }))} />
+                </div>
+                <Input label="직급" value={militaryPersonnelForm.rank} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, rank: v }))} />
+                <SelectInput label="재직상태" value={militaryPersonnelForm.status || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, status: v }))} options={militaryCodeValues.employmentStatus || [""]} />
+                <Input label="전역일" type="date-text" value={militaryPersonnelForm.dischargeDate} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, dischargeDate: v }))} />
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">계산 모드</label>
                   <select
-                    value={militaryPersonnelForm.manualCategory || ""}
-                    onChange={(e) => setMilitaryPersonnelForm((f) => ({ ...f, manualCategory: e.target.value as "예비군" | "민방위" | "대상아님" | "" }))}
+                    value={militaryPersonnelForm.calculationMode || "auto"}
+                    onChange={(e) => setMilitaryPersonnelForm((f) => ({ ...f, calculationMode: e.target.value as "auto" | "manual" | "manualAuto" }))}
                     className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400"
                   >
-                    <option value="">선택하세요</option>
-                    <option value="예비군">예비군</option>
-                    <option value="민방위">민방위</option>
-                    <option value="대상아님">대상아님</option>
+                    <option value="auto">자동계산 (전역일 기준)</option>
+                    <option value="manualAuto">수동관리 (자동증가)</option>
+                    <option value="manual">수동관리 (고정)</option>
                   </select>
                 </div>
-                {militaryPersonnelForm.calculationMode === "manualAuto" && (
-                  <Input label="기준연도" type="number" value={militaryPersonnelForm.manualBaseYear || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, manualBaseYear: v }))} placeholder={String(effectiveMilitaryReferenceYear || new Date().getFullYear())} />
+                {(militaryPersonnelForm.calculationMode === "manual" || militaryPersonnelForm.calculationMode === "manualAuto") && (
+                  <>
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-slate-700">현재구분(최초)</label>
+                      <select
+                        value={militaryPersonnelForm.manualCategory || ""}
+                        onChange={(e) => setMilitaryPersonnelForm((f) => ({ ...f, manualCategory: e.target.value as "예비군" | "민방위" | "대상아님" | "" }))}
+                        className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400"
+                      >
+                        <option value="">선택하세요</option>
+                        <option value="예비군">예비군</option>
+                        <option value="민방위">민방위</option>
+                        <option value="대상아님">대상아님</option>
+                      </select>
+                    </div>
+                    {militaryPersonnelForm.calculationMode === "manualAuto" && (
+                      <Input label="기준연도" type="number" value={militaryPersonnelForm.manualBaseYear || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, manualBaseYear: v }))} placeholder={String(effectiveMilitaryReferenceYear || new Date().getFullYear())} />
+                    )}
+                    <Input label="기준연차" type="number" value={militaryPersonnelForm.manualYear || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, manualYear: v }))} />
+                  </>
                 )}
-                <Input label="기준연차" type="number" value={militaryPersonnelForm.manualYear || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, manualYear: v }))} />
-              </>
-            )}
-            <div className="space-y-1 rounded-2xl border border-slate-300 bg-slate-50 p-3 md:col-span-2 xl:col-span-3">
-              <div className="text-sm font-medium text-slate-700">판정 결과 (기준연도 {effectiveMilitaryReferenceYear || new Date().getFullYear()})</div>
-              <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm text-slate-600">
-                <span>현재구분: <b className="text-slate-900">{getMilitaryCategory(militaryPersonnelForm, effectiveMilitaryReferenceYear)}</b></span>
-                <span>예비군연차: {getReserveAnnualLeave(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</span>
-                <span>민방위연차: {getCivilDefenseAnnualLeave(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</span>
-                <span>훈련연차: {getTrainingYear(militaryPersonnelForm, effectiveMilitaryReferenceYear) || "-"}</span>
-                <span>교육대상: {(() => {
-                  const cat = getMilitaryCategory(militaryPersonnelForm, effectiveMilitaryReferenceYear);
-                  if (cat === "대상아님") return "비대상";
-                  // 예비군 7~8년차 등 훈련 시간이 0이면 "훈련비대상"으로 표기(혼동 방지)
-                  return computeRequiredTraining(militaryPersonnelForm).hours > 0 ? "대상" : "훈련비대상";
-                })()}</span>
-                <span>훈련유형: {computeRequiredTraining(militaryPersonnelForm).label}</span>
               </div>
             </div>
-            <Input label="군별" value={militaryPersonnelForm.serviceBranch} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, serviceBranch: v }))} />
-            <div>
-              <SelectInput label="재직상태" value={militaryPersonnelForm.status || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, status: v }))} options={militaryCodeValues.employmentStatus || [""]} />
-            </div>
-            <div>
-              <div className="flex items-end gap-3">
-                <label className="mb-2 block text-sm font-medium text-slate-700">동원여부</label>
-                <div className="flex items-center gap-3">
-                  <label className="flex items-center gap-2 text-sm"><input type="radio" name="mobilization" checked={!!militaryPersonnelForm.mobilization} onChange={() => setMilitaryPersonnelForm((f) => ({ ...f, mobilization: true }))} />동원</label>
-                  <label className="flex items-center gap-2 text-sm"><input type="radio" name="mobilization" checked={!militaryPersonnelForm.mobilization} onChange={() => setMilitaryPersonnelForm((f) => ({ ...f, mobilization: false }))} />동원미지정</label>
+
+            {/* ③ 군 복무정보 */}
+            <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
+              <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>군 복무정보</h4>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <Input label="군별" value={militaryPersonnelForm.serviceBranch} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, serviceBranch: v }))} />
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">동원여부</label>
+                  <div className="flex items-center gap-4 py-2">
+                    <label className="flex items-center gap-2 text-sm"><input type="radio" name="mobilization" checked={!!militaryPersonnelForm.mobilization} onChange={() => setMilitaryPersonnelForm((f) => ({ ...f, mobilization: true }))} />동원</label>
+                    <label className="flex items-center gap-2 text-sm"><input type="radio" name="mobilization" checked={!militaryPersonnelForm.mobilization} onChange={() => setMilitaryPersonnelForm((f) => ({ ...f, mobilization: false }))} />동원미지정</label>
+                  </div>
+                  <div className="mt-1 text-xs text-slate-400">예비군 1~4년차만 적용 (5년차 이상은 기본/작계, 동원여부 무관)</div>
                 </div>
               </div>
-              <div className="mt-1 text-xs text-slate-400">예비군 1~4년차만 적용 (5년차 이상은 기본/작계, 동원여부 무관)</div>
             </div>
-            <Input label="군번" value={militaryPersonnelForm.serviceNumber || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, serviceNumber: v }))} />
-            <Input label="비상연락망" value={militaryPersonnelForm.emergencyContact || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, emergencyContact: v }))} />
-            <Input label="비상연락망(관계)" value={militaryPersonnelForm.emergencyRelation || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, emergencyRelation: v }))} />
-            <Input label="직장번호" value={militaryPersonnelForm.workPhone || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, workPhone: v }))} />
-            <Input label="E-mail" value={militaryPersonnelForm.email || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, email: v }))} />
-            <Input label="은행명" value={militaryPersonnelForm.bankName || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, bankName: v }))} />
-            <Input label="계좌번호" value={militaryPersonnelForm.accountNumber || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, accountNumber: v }))} />
-            <Input label="비고" value={militaryPersonnelForm.notes} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, notes: v }))} />
+
+            {/* 자동 계산 결과 */}
+            {(() => {
+              const refYear = effectiveMilitaryReferenceYear || new Date().getFullYear();
+              const cat = getMilitaryCategory(militaryPersonnelForm, effectiveMilitaryReferenceYear);
+              const reserve = getReserveAnnualLeave(militaryPersonnelForm, effectiveMilitaryReferenceYear);
+              const civil = getCivilDefenseAnnualLeave(militaryPersonnelForm, effectiveMilitaryReferenceYear);
+              const trainingYear = getTrainingYear(militaryPersonnelForm, effectiveMilitaryReferenceYear);
+              const required = computeRequiredTraining(militaryPersonnelForm);
+              const eduTarget = cat === "대상아님" ? "비대상" : (required.hours > 0 ? "대상" : "훈련비대상");
+              const badge = (text: string, color: string) => (
+                <span className={`status-badge inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold ${color}`}>{text}</span>
+              );
+              return (
+                <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
+                  <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>자동 계산 결과 <span className="text-xs font-normal text-slate-400">(기준연도 {refYear})</span></h4>
+                  <div className="flex flex-wrap gap-2">
+                    {badge(`현재구분 ${cat}`, "bg-slate-200 text-slate-800")}
+                    {badge(`예비군연차 ${reserve || "-"}`, "bg-blue-100 text-blue-700")}
+                    {badge(`민방위연차 ${civil || "-"}`, "bg-green-100 text-green-700")}
+                    {badge(`훈련연차 ${trainingYear || "-"}`, "bg-indigo-100 text-indigo-700")}
+                    {badge(`훈련유형 ${required.label}`, "bg-amber-100 text-amber-700")}
+                    {badge(`교육시간 ${required.hours}시간`, "bg-purple-100 text-purple-700")}
+                    {badge(`교육대상 ${eduTarget}`, eduTarget === "대상" ? "bg-rose-100 text-rose-700" : "bg-slate-200 text-slate-600")}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ④ 비상 연락처 */}
+            <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
+              <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>비상 연락처</h4>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <Input label="비상연락망" value={militaryPersonnelForm.emergencyContact || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, emergencyContact: v }))} />
+                <Input label="관계" value={militaryPersonnelForm.emergencyRelation || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, emergencyRelation: v }))} />
+              </div>
+            </div>
+
+            {/* ⑤ 금융정보 */}
+            <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
+              <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>금융정보</h4>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <Input label="은행명" value={militaryPersonnelForm.bankName || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, bankName: v }))} />
+                <Input label="계좌번호" value={militaryPersonnelForm.accountNumber || ""} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, accountNumber: v }))} />
+              </div>
+            </div>
+
+            {/* ⑥ 기타 */}
+            <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
+              <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>기타</h4>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-slate-700">비고</label>
+                <textarea
+                  value={militaryPersonnelForm.notes}
+                  onChange={(e) => setMilitaryPersonnelForm((f) => ({ ...f, notes: e.target.value }))}
+                  rows={3}
+                  className="w-full rounded-2xl border border-slate-300 px-3 py-3 outline-none focus:border-slate-400"
+                />
+              </div>
+            </div>
           </div>,
           () => setShowMilitaryPersonnelForm(false),
           saveMilitaryPersonnel,
