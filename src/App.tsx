@@ -4429,6 +4429,13 @@ export default function App() {
     if (!occupantPayload) return currentOccupants;
 
     if (existingOccupant) {
+      // updatedAt 은 매번 새로 찍히므로 비교에서 제외 — 실질 내용이 같으면 기존 객체/배열을 그대로 유지한다.
+      // (이게 없으면 newHires 변경마다 occupants 가 새 객체로 교체되어 저장 useEffect 가 무한 반복됨)
+      const { updatedAt: _newU, ...materialNew } = occupantPayload;
+      const { updatedAt: _oldU, ...materialOld } = existingOccupant;
+      if (JSON.stringify(materialNew) === JSON.stringify(materialOld)) {
+        return currentOccupants; // 변경 없음 → 같은 배열 참조 유지(불필요한 state 갱신/저장 루프 차단)
+      }
       return currentOccupants.map((o, i) => (i === matchIdx ? occupantPayload : o));
     }
 
@@ -5024,13 +5031,8 @@ export default function App() {
     if (!isSupabaseAvailable()) return;
 
     const timer = setTimeout(async () => {
-      console.log("[SAVE] dorm module effect triggered", {
-        isLoading,
-        dorms: dorms.length,
-        dormContracts: dormContracts.length,
-        newHires: newHires.length,
-        occupants: occupants.length,
-      });
+      // 변경사항이 없어 저장을 건너뛰는 경우에는 로그를 남기지 않는다(콘솔 반복 출력 방지).
+      // 실제 저장이 일어날 때만 아래에서 [SAVE] 로그를 출력한다.
       // Do not run Supabase save during initial loading or when the change originated from realtime.
       if (isLoading || !isInitialLoadCompleteRef.current) return; // 최초 로딩 완료 전 저장 차단(중복 방지)
       // 하자접수 담당자(maintenance_reporter)는 기숙사/계약/신입사원/입주자 관리자 데이터를 저장하지 않음(401 방지).
