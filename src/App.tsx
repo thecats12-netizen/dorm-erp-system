@@ -1386,8 +1386,31 @@ const codeCategoryLabel = (key: string): string => CODE_CATEGORY_LABELS[key] || 
 
 // 저장 스냅샷 직렬화 — 저장 effect와 로드 직후 시드가 동일한 방식을 쓰도록 단일 함수로 통일.
 // (정규화/순서 차이로 인한 오탐을 막기 위해 저장 payload와 동일한 형태를 사용)
+// 저장 dedup 스냅샷에서 제외할 휘발성 필드.
+// updatedAt 은 로컬은 "YYYY-MM-DD"(slice)로, Supabase timestamptz 라운드트립 후엔 풀 타임스탬프로 돌아와
+// 저장→Realtime 에코 때마다 값이 달라진다. 이를 스냅샷에 포함하면 "저장→에코→재저장" 무한 루프가 발생하므로
+// updatedAt/createdAt 등 시간 필드는 dedup 비교에서 제외한다(실제 내용 변경만 저장 트리거).
+const SNAPSHOT_VOLATILE_KEYS = new Set(["updatedAt", "createdAt", "changedAt", "deletedAt", "permanentDeletedAt"]);
+function stripVolatile(arr: unknown[]): unknown[] {
+  if (!Array.isArray(arr)) return arr as unknown[];
+  return arr.map((item) => {
+    if (!item || typeof item !== "object") return item;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
+      if (SNAPSHOT_VOLATILE_KEYS.has(k)) continue;
+      out[k] = v;
+    }
+    return out;
+  });
+}
+
 function dormModuleSnapshot(s: { dorms: unknown[]; occupants: unknown[]; dormContracts: unknown[]; newHires: unknown[] }): string {
-  return JSON.stringify({ dorms: s.dorms, occupants: s.occupants, dormContracts: s.dormContracts, newHires: s.newHires });
+  return JSON.stringify({
+    dorms: stripVolatile(s.dorms),
+    occupants: stripVolatile(s.occupants),
+    dormContracts: stripVolatile(s.dormContracts),
+    newHires: stripVolatile(s.newHires),
+  });
 }
 
 function operationalModuleSnapshot(
@@ -1397,12 +1420,12 @@ function operationalModuleSnapshot(
   // 비admin 은 권한 없는 테이블을 빈 배열로 저장하므로 스냅샷도 동일하게.
   // 단 auditLogs 는 INSERT 경로 감지를 위해 항상 전체 포함.
   return JSON.stringify({
-    cleaningReports: s.cleaningReports,
-    defects: s.defects,
-    inventory: isAdmin ? s.inventory : [],
-    settlementRecords: isAdmin ? s.settlementRecords : [],
-    settlementItems: isAdmin ? s.settlementItems : [],
-    auditLogs: s.auditLogs,
+    cleaningReports: stripVolatile(s.cleaningReports),
+    defects: stripVolatile(s.defects),
+    inventory: isAdmin ? stripVolatile(s.inventory) : [],
+    settlementRecords: isAdmin ? stripVolatile(s.settlementRecords) : [],
+    settlementItems: isAdmin ? stripVolatile(s.settlementItems) : [],
+    auditLogs: stripVolatile(s.auditLogs),
   });
 }
 
