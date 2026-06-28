@@ -183,17 +183,108 @@ function mapProfileToLoginUser(profile: Profile, authUserEmail?: string): LoginU
   } as LoginUser;
 }
 
-function openAddressSearch(onSelected: (roadAddress: string) => void) {
-  if (!window.daum?.Postcode) {
-    alert("주소검색 스크립트가 아직 로드되지 않았습니다.");
-    return;
-  }
+// Daum(카카오) 우편번호 서비스 스크립트 소스(index.html 미로딩/실패 시 동적 로딩 폴백용)
+const DAUM_POSTCODE_SRC = "https://t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js";
 
-  new window.daum.Postcode({
-    oncomplete: function (data: any) {
-      onSelected(data.roadAddress || "");
-    },
-  }).open();
+// 스크립트가 아직 없으면 동적으로 1회만 로드(중복 로딩 방지). window.daum.Postcode 존재 여부로 판단.
+function loadDaumPostcodeScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (window.daum?.Postcode) {
+      resolve();
+      return;
+    }
+    const existing = document.getElementById("daum-postcode-script") as HTMLScriptElement | null;
+    if (existing) {
+      // 이미 추가된 스크립트가 로드 완료되길 대기(중복 추가 방지)
+      if (window.daum?.Postcode) {
+        resolve();
+        return;
+      }
+      existing.addEventListener("load", () => (window.daum?.Postcode ? resolve() : reject(new Error("postcode unavailable"))));
+      existing.addEventListener("error", () => reject(new Error("script load error")));
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = "daum-postcode-script";
+    script.src = DAUM_POSTCODE_SRC;
+    script.async = true;
+    script.onload = () => (window.daum?.Postcode ? resolve() : reject(new Error("postcode unavailable")));
+    script.onerror = () => reject(new Error("script load error"));
+    document.body.appendChild(script);
+  });
+}
+
+// 주소찾기 공통 함수: 데스크탑/태블릿/모바일 모두 "레이어(모달) 방식"으로 통일.
+// window.open(팝업) 방식은 모바일 팝업 차단/새창 제약으로 실패하므로 embed 사용.
+// 계약/기숙사/하자접수 등 주소찾기 버튼이 있는 모든 곳에서 이 함수를 호출한다.
+function openAddressSearch(onSelected: (roadAddress: string) => void) {
+  const showError = () => alert("주소검색 서비스를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.");
+
+  const run = () => {
+    if (!window.daum?.Postcode) {
+      showError();
+      return;
+    }
+
+    // 중앙 정렬 오버레이
+    const overlay = document.createElement("div");
+    overlay.style.cssText =
+      "position:fixed;inset:0;z-index:99999;background:rgba(15,23,42,0.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
+
+    // 본문 패널: 모바일 90vw / 데스크탑 480px, 높이 80vh
+    const panel = document.createElement("div");
+    panel.style.cssText =
+      "position:relative;width:90vw;max-width:480px;height:80vh;max-height:640px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 20px 50px rgba(0,0,0,0.35);display:flex;flex-direction:column;";
+
+    // 헤더(제목 + 닫기 버튼)
+    const header = document.createElement("div");
+    header.style.cssText =
+      "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 14px;border-bottom:1px solid #e2e8f0;flex:0 0 auto;background:#ffffff;";
+    const title = document.createElement("span");
+    title.textContent = "주소 검색";
+    title.style.cssText = "font-size:14px;font-weight:600;color:#0f172a;";
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.textContent = "닫기 ✕";
+    closeBtn.style.cssText =
+      "border:none;background:#f1f5f9;border-radius:8px;padding:6px 12px;font-size:13px;color:#334155;cursor:pointer;";
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+
+    // 우편번호 위젯 임베드 영역
+    const embedArea = document.createElement("div");
+    embedArea.style.cssText = "flex:1 1 auto;width:100%;min-height:0;";
+
+    panel.appendChild(header);
+    panel.appendChild(embedArea);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    const cleanup = () => {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    };
+    closeBtn.onclick = cleanup;
+    // 바깥(어두운 영역) 클릭 시 닫기
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) cleanup();
+    });
+
+    new window.daum.Postcode({
+      oncomplete: function (data: any) {
+        // 도로명주소 우선, 없으면 지번주소로 폴백
+        onSelected(data.roadAddress || data.address || data.jibunAddress || "");
+        cleanup();
+      },
+      width: "100%",
+      height: "100%",
+    }).embed(embedArea, { autoClose: false });
+  };
+
+  if (window.daum?.Postcode) {
+    run();
+  } else {
+    loadDaumPostcodeScript().then(run).catch(showError);
+  }
 }
 
 /**
@@ -20797,7 +20888,24 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <SelectInput label="지역" value={dormForm.site} onChange={(v) => setDormForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
             <SelectInput label="성별" value={dormForm.gender} onChange={(v) => setDormForm((f) => ({ ...f, gender: v as "남" | "여" }))} options={["남", "여"]} />
             <Input label="건물명" value={dormForm.buildingName} onChange={(v) => setDormForm((f) => ({ ...f, buildingName: v }))} />
-            <Input label="주소" value={dormForm.address} onChange={(v) => setDormForm((f) => ({ ...f, address: v }))} />
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400">주소</label>
+                <button
+                  type="button"
+                  onClick={() => openAddressSearch((roadAddress) => setDormForm((f) => ({ ...f, address: roadAddress })))}
+                  className={`${theme.darkMode ? "rounded-2xl border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-slate-300 hover:bg-slate-950" : "rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"}`}
+                >
+                  주소찾기
+                </button>
+              </div>
+              <input
+                value={dormForm.address}
+                onChange={(e) => setDormForm((f) => ({ ...f, address: e.target.value }))}
+                placeholder="도로명주소"
+                className={`${theme.darkMode ? "w-full rounded-2xl border border-slate-600 bg-slate-950 px-3 py-3 outline-none focus:border-slate-400" : "w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400"}`}
+              />
+            </div>
             <Input label="동" value={dormForm.dong} onChange={(v) => setDormForm((f) => ({ ...f, dong: stripDongHoSuffix(v) }))} />
             <Input label="호수" value={dormForm.roomHo} onChange={(v) => setDormForm((f) => ({ ...f, roomHo: stripDongHoSuffix(v) }))} />
             <Input label="평수" value={dormForm.pyeong} onChange={(v) => setDormForm((f) => ({ ...f, pyeong: v }))} />
