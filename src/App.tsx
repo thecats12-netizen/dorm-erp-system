@@ -309,16 +309,39 @@ function isInTrash(x: { isDeleted?: boolean; isPermanentDeleted?: boolean }): bo
   return x.isDeleted === true && x.isPermanentDeleted !== true;
 }
 
+// 로드 데이터 중복 제거: id 기준(있으면), 없으면 fallbackKey 기준. 제거 시 [DEDUPED] 경고 출력.
+// (새로고침/재접속 시 동일 레코드가 중복 누적되어 통계가 늘어나는 문제 방지)
+function dedupeRecords<T extends Record<string, any>>(arr: T[] | null | undefined, type: string, fallbackKey: (x: T) => string): T[] {
+  if (!Array.isArray(arr)) return [];
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const x of arr) {
+    const id = x && x.id != null ? String(x.id).trim() : "";
+    const key = id ? `id:${id}` : `k:${fallbackKey(x)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(x);
+  }
+  if (out.length !== arr.length) console.warn("[DEDUPED]", { type, before: arr.length, after: out.length });
+  return out;
+}
+
+// 중복 제거용 fallback 키(id 없을 때). 소문자/공백 정리.
+function recordDormKey(x: { site?: string; buildingName?: string; dong?: string; roomHo?: string }): string {
+  return `${x.site || ""}|${x.buildingName || ""}|${x.dong || ""}|${x.roomHo || ""}`.trim().toLowerCase();
+}
+
 // 현재 거주자(거주중/만료예정, 퇴실/과거/삭제 제외) 기준. 정원 0이면 0%(NaN 방지).
 // 공실 수 = 정원 - 현재거주자, 공실률 = 공실/정원*100, 사용률 = 거주자/정원*100.
 function computeVacancyStats(
   dormList: Array<{ id: string; capacity?: number }>,
-  occupants: Array<{ dormId: string; status: string; isDeleted?: boolean }>
+  occupants: Array<{ dormId: string; status: string; isDeleted?: boolean; deletedAt?: string; isPermanentDeleted?: boolean }>
 ) {
   const totalCapacity = dormList.reduce((sum, d) => sum + (d.capacity || 6), 0);
   const dormIds = new Set(dormList.map((d) => d.id));
+  // 삭제 데이터(isDeleted/deletedAt/isPermanentDeleted) 전부 제외 — 통계 부풀림 방지.
   const currentResidents = occupants.filter(
-    (o) => !o.isDeleted && ["거주중", "만료예정"].includes(o.status) && dormIds.has(o.dormId)
+    (o) => !o.isDeleted && !o.deletedAt && !o.isPermanentDeleted && ["거주중", "만료예정"].includes(o.status) && dormIds.has(o.dormId)
   ).length;
   const vacancy = Math.max(totalCapacity - currentResidents, 0);
   return {
@@ -1314,6 +1337,8 @@ export default function App() {
   const [militaryTrainingAutoConfig, setMilitaryTrainingAutoConfig] = useState<{ enabled: boolean; targetStatuses: string[] }>({ enabled: true, targetStatuses: ["재직"] });
   const realtimeUpdateSourceRef = useRef<Set<string>>(new Set());
   // 직전 저장 스냅샷(저장 payload의 안정 직렬화) — 동일 데이터 반복 저장 방지용
+  // 최초 데이터 로딩 완료 플래그 — 로딩 중에는 자동 save effect 가 실행되어 중복 저장되지 않도록 보호.
+  const isInitialLoadCompleteRef = useRef<boolean>(false);
   const lastDormSnapshotRef = useRef<string>("");
   const lastOperationalSnapshotRef = useRef<string>("");
   const lastMilitarySnapshotRef = useRef<string>("");
@@ -2477,11 +2502,16 @@ export default function App() {
             // Dorm module
             if (dormRes.status === "fulfilled") {
               const remoteDormModule = dormRes.value;
-              setDorms(remoteDormModule?.dorms || []);
-              setOccupants(remoteDormModule?.occupants || []);
-              setDormContracts(remoteDormModule?.dormContracts || []);
-              setNewHires(remoteDormModule?.newHires || []);
-              console.log("[LOAD] Dorm module from Supabase: state set");
+              // Supabase 데이터만 사용 + id(없으면 키) 기준 중복 제거. localStorage 와 병합하지 않음.
+              const dDorms = dedupeRecords(remoteDormModule?.dorms || [], "dorms", recordDormKey);
+              const dOcc = dedupeRecords(remoteDormModule?.occupants || [], "occupants", (o) => `${recordDormKey(o as any)}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`);
+              const dContracts = dedupeRecords(remoteDormModule?.dormContracts || [], "dormContracts", recordDormKey);
+              const dNew = dedupeRecords(remoteDormModule?.newHires || [], "newHires", (h) => `${(h.name || "").trim()}|${(h.phone || "").replace(/\D/g, "")}|${h.site || ""}`);
+              setDorms(dDorms);
+              setOccupants(dOcc);
+              setDormContracts(dContracts);
+              setNewHires(dNew);
+              console.log("[LOAD] dorms:", dDorms.length, "contracts:", dContracts.length, "newHires:", dNew.length, "occupants:", dOcc.length);
             } else {
               // 세션은 유효하나 dorm 모듈 로드가 일시적으로 실패한 경우.
               // 기존 화면 데이터를 비우지 않고(로그아웃하지 않고) 유지하여 "보였다 안 보였다" 방지.
@@ -2492,13 +2522,16 @@ export default function App() {
             // Operational module (dorm 로드 성공 시에만 적용 — source-of-truth 일관성 유지)
             if (useSupabase && opRes.status === "fulfilled") {
               const remoteOperationalModule = opRes.value;
-              setCleaningReports(remoteOperationalModule?.cleaningReports || []);
-              setDefects(remoteOperationalModule?.defects || []);
-              setInventory(remoteOperationalModule?.inventory || []);
+              const dCleaning = dedupeRecords(remoteOperationalModule?.cleaningReports || [], "cleaningReports", (r) => `${recordDormKey(r as any)}|${r.reportDate || ""}`);
+              const dDefects = dedupeRecords(remoteOperationalModule?.defects || [], "defects", (d) => `${(d.site || "")}|${(d.buildingName || "")}|${(d.dong || "")}|${(d.ho || "")}|${d.receiptDate || ""}|${(d.requestText || "").slice(0, 20)}`);
+              const dInv = dedupeRecords(remoteOperationalModule?.inventory || [], "inventory", (i) => `${recordDormKey(i as any)}|${(i.itemName || "").trim()}|${(i.modelName || "").trim()}`);
+              setCleaningReports(dCleaning);
+              setDefects(dDefects);
+              setInventory(dInv);
               setSettlementRecords(remoteOperationalModule?.settlementRecords || []);
               setSettlementItems((remoteOperationalModule?.settlementItems as unknown as SettlementItem[]) || []);
               setAuditLogs(remoteOperationalModule?.auditLogs || []);
-              console.log("[LOAD] Operational module from Supabase: state set");
+              console.log("[LOAD] inventory:", dInv.length, "defects:", dDefects.length, "cleaningReports:", dCleaning.length);
             } else if (opRes.status === "rejected") {
               console.error("[LOAD] Failed to load operational module from Supabase:", opRes.reason);
               useSupabase = false;
@@ -2626,10 +2659,12 @@ export default function App() {
       setCurrentUser(null);
     } finally {
       console.log("[LOAD] === Initial data load completed ===");
+      isInitialLoadCompleteRef.current = true; // 이후부터 자동 save 허용
       setIsLoading(false);
     }
   };
 
+  isInitialLoadCompleteRef.current = false; // 재로드 시작 시 save 차단
   loadInitialData();
 }, [tenantId, dataReloadKey]);
 
@@ -3185,77 +3220,6 @@ export default function App() {
   };
 
   // 휴지통 백업(JSON) 다운로드 — 삭제(숨김) 항목만
-  // [요청6] 자동생성 의심 데이터 정리(관리자 전용, 임시). 의심 데이터만 휴지통으로 soft-delete(복구 가능).
-  //   판정: 자동 마커("[자동]"/"퇴실자:"), 주요 필드/접수일 공백, 등록자 공백, 동일 기숙사·동·호 중복.
-  //   정상(사용자/Excel/기존 Supabase) 데이터는 보존. 삭제 전 확인창 표시.
-  const cleanupSuspectedAutoData = async () => {
-    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
-    const blank = (s?: string | null) => !s || !String(s).trim();
-    const dormHoKey = (site?: string, b?: string, dg?: string, h?: string) =>
-      `${(site || "").trim()}|${(b || "").trim()}|${stripDongHoSuffix(dg || "")}|${stripDongHoSuffix(h || "")}`;
-
-    // 하자접수 의심: 자동 마커 / 접수일 공백 / (점검자·접수자·신청내용 모두 공백)
-    const suspectDefects = defects.filter(
-      (d) => !d.isDeleted && (
-        (d.requestText || "").includes("[자동]") ||
-        blank(d.receiptDate) ||
-        (blank(d.inspectorName) && blank(d.reporterName) && blank(d.requestText))
-      )
-    );
-    // 청소보고 의심: 자동 마커("[자동]" 또는 "퇴실자:")
-    const suspectCleaning = cleaningReports.filter(
-      (r) => !r.isDeleted && ((r.memo || "").includes("[자동]") || (r.memo || "").trim().startsWith("퇴실자:"))
-    );
-    // 신입사원 의심: 이름 공백(핵심 식별값 없음)
-    const suspectNewHires = newHires.filter((h) => !h.isDeleted && blank(h.name));
-    // 신규계약 의심: 건물명·주소 모두 공백(핵심 식별값 없음)
-    const suspectContracts = dormContracts.filter((c) => !c.isDeleted && blank(c.buildingName) && blank(c.address));
-
-    // 동일 기숙사·동·호 중복 하자접수: 같은 키가 2건 이상이고, 등록자/신청내용이 공백인 추가본만 의심
-    const defectKeyCount = new Map<string, number>();
-    defects.filter((d) => !d.isDeleted).forEach((d) => {
-      const k = dormHoKey(d.site, d.buildingName, d.dong, d.ho);
-      defectKeyCount.set(k, (defectKeyCount.get(k) || 0) + 1);
-    });
-    const dupDefects = defects.filter(
-      (d) => !d.isDeleted && (defectKeyCount.get(dormHoKey(d.site, d.buildingName, d.dong, d.ho)) || 0) > 1 &&
-        blank(d.reporterName) && blank(d.requestText)
-    );
-
-    const defectIds = new Set([...suspectDefects, ...dupDefects].map((d) => d.id));
-    const cleaningIds = new Set(suspectCleaning.map((r) => r.id));
-    const newHireIds = new Set(suspectNewHires.map((h) => h.id));
-    const contractIds = new Set(suspectContracts.map((c) => c.id));
-    const total = defectIds.size + cleaningIds.size + newHireIds.size + contractIds.size;
-
-    if (total === 0) {
-      await appAlert("자동생성 의심 데이터 정리", "의심 데이터가 없습니다. (모두 정상)");
-      return;
-    }
-    const ok = await appConfirm(
-      "자동생성 의심 데이터 정리",
-      `자동생성 의심 데이터를 휴지통으로 이동할까요?\n\n` +
-        `· 하자접수 ${defectIds.size}건\n· 청소보고 ${cleaningIds.size}건\n· 신입사원 ${newHireIds.size}건\n· 신규계약 ${contractIds.size}건\n\n` +
-        `정상 데이터는 영향받지 않으며, 휴지통에서 복구할 수 있습니다.`,
-      { confirmText: "휴지통으로 이동", tone: "danger" }
-    );
-    if (!ok) return;
-    const now = new Date().toISOString();
-    const by = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
-    const mark = <T extends { id: string; isDeleted?: boolean; deletedAt?: string; deletedBy?: string; updatedAt?: string }>(arr: T[], ids: Set<string>): T[] =>
-      arr.map((x) => (ids.has(x.id) ? { ...x, isDeleted: true, deletedAt: now, deletedBy: by, updatedAt: now } : x));
-    if (defectIds.size) setDefects((prev) => mark(prev, defectIds));
-    if (cleaningIds.size) setCleaningReports((prev) => mark(prev, cleaningIds));
-    if (newHireIds.size) setNewHires((prev) => mark(prev, newHireIds));
-    if (contractIds.size) setDormContracts((prev) => mark(prev, contractIds));
-    // 상태 변경 → 자동저장 effect 가 Supabase/localStorage 반영. 감사로그 기록.
-    [...defectIds].forEach((id) => createAuditLog({ targetType: "defect", targetId: id, actionType: "delete", changedBy: by, beforeValue: "", afterValue: "자동생성 의심 정리(휴지통)", memo: "cleanupSuspectedAutoData" }));
-    [...contractIds].forEach((id) => createAuditLog({ targetType: "dormContract", targetId: id, actionType: "delete", changedBy: by, beforeValue: "", afterValue: "자동생성 의심 정리(휴지통)", memo: "cleanupSuspectedAutoData" }));
-    [...newHireIds].forEach((id) => createAuditLog({ targetType: "newHire", targetId: id, actionType: "delete", changedBy: by, beforeValue: "", afterValue: "자동생성 의심 정리(휴지통)", memo: "cleanupSuspectedAutoData" }));
-    [...cleaningIds].forEach((id) => createAuditLog({ targetType: "cleaningReport", targetId: id, actionType: "delete", changedBy: by, beforeValue: "", afterValue: "자동생성 의심 정리(휴지통)", memo: "cleanupSuspectedAutoData" }));
-    await appAlert("자동생성 의심 데이터 정리", `${total}건을 휴지통으로 이동했습니다. 휴지통에서 확인·복구할 수 있습니다.`);
-  };
-
   const downloadTrashBackup = () => {
     if (!canManageUsers(currentUser)) { void appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
     downloadJsonFile(
@@ -4287,14 +4251,20 @@ export default function App() {
     hire: NewHireEmployee,
     currentOccupants: Occupant[]
   ): Occupant[] => {
-    const existingOccupant = currentOccupants.find((o) => o.sourceNewHireId === hire.id);
+    // 매칭: ① sourceNewHireId, ② (이름+연락처+기숙사) — sourceNewHireId 미저장(컬럼/Excel) 시에도
+    //   새로고침마다 중복 입주자가 생성되지 않도록 보강. 매칭되면 update, 없을 때만 1건 추가.
+    const norm = (s?: string) => (s || "").replace(/\D/g, "");
+    const matchIdx = currentOccupants.findIndex(
+      (o) =>
+        (!!hire.id && o.sourceNewHireId === hire.id) ||
+        (!!hire.name && o.employeeName === hire.name && norm(o.phone) === norm(hire.phone) && (o.dormId || "") === (hire.dormId || ""))
+    );
+    const existingOccupant = matchIdx >= 0 ? currentOccupants[matchIdx] : undefined;
     const occupantPayload = buildOccupantFromNewHire(hire, existingOccupant);
     if (!occupantPayload) return currentOccupants;
 
     if (existingOccupant) {
-      return currentOccupants.map((o) =>
-        o.sourceNewHireId === hire.id ? occupantPayload : o
-      );
+      return currentOccupants.map((o, i) => (i === matchIdx ? occupantPayload : o));
     }
 
     return [occupantPayload, ...currentOccupants];
@@ -4877,7 +4847,7 @@ export default function App() {
         occupants: occupants.length,
       });
       // Do not run Supabase save during initial loading or when the change originated from realtime.
-      if (isLoading) return;
+      if (isLoading || !isInitialLoadCompleteRef.current) return; // 최초 로딩 완료 전 저장 차단(중복 방지)
       // 하자접수 담당자(maintenance_reporter)는 기숙사/계약/신입사원/입주자 관리자 데이터를 저장하지 않음(401 방지).
       if (currentUser?.role === "maintenance_reporter") return;
       // 저장 대상 payload 스냅샷(동일 데이터면 저장 생략)
@@ -4936,7 +4906,7 @@ export default function App() {
     if (!isSupabaseAvailable()) return;
 
     const timer = setTimeout(async () => {
-      if (isLoading) return;
+      if (isLoading || !isInitialLoadCompleteRef.current) return; // 최초 로딩 완료 전 저장 차단(중복 방지)
 
       // 권한 기반 저장 범위 제한 (RLS 403 회피, RLS 완화 없음)
       // - admin: 전체 저장
@@ -5297,7 +5267,7 @@ export default function App() {
     // (전체 계약으로 먼저 dedup 하면, 같은 호실의 종료/해지 기록이 updatedAt 이 더 최신일 때
     //  유효 계약을 덮어써서 카드가 누락되던 버그 수정 → 신규계약 유효 수와 카드 수 일치)
     const validContracts = dormContracts
-      .filter((c) => !c.isDeleted)
+      .filter((c) => !c.isDeleted && !c.deletedAt && !c.isPermanentDeleted)
       .filter((c) => c.contractStatus !== "종료" && c.contractStatus !== "해지");
 
     const latestContractByDorm = new Map<string, DormContract>();
@@ -6469,7 +6439,7 @@ export default function App() {
   const occupancyCountByDorm = useMemo(() => {
     const map = new Map<string, number>();
     occupants.forEach((o) => {
-      if (!o.isDeleted && ["거주중", "만료예정"].includes(o.status)) {
+      if (!o.isDeleted && !o.deletedAt && !o.isPermanentDeleted && ["거주중", "만료예정"].includes(o.status)) {
         map.set(o.dormId, (map.get(o.dormId) || 0) + 1);
       }
     });
@@ -11890,7 +11860,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       const operationalDormCount = operationalRegionDorms.length;
       const totalCapacity = operationalRegionDorms.reduce((sum, d) => sum + (d.capacity || 0), 0);
       const relevantOccupants = occupants.filter((o) => {
-        if (o.isDeleted || !activeStatus.includes(o.status)) return false;
+        if (o.isDeleted || o.deletedAt || o.isPermanentDeleted || !activeStatus.includes(o.status)) return false;
         const dorm = operationalDorms.find((d) => d.id === o.dormId) || dorms.find((d) => d.id === o.dormId);
         return dorm?.site === site && dorm?.gender === gender;
       });
@@ -19633,16 +19603,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   >
                     휴지통 백업 복원
                   </button>
-                  {canManageUsers(currentUser) && (
-                    <button
-                      type="button"
-                      onClick={() => void cleanupSuspectedAutoData()}
-                      className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100"
-                      title="자동생성 의심 데이터(자동 마커/공백/중복)를 휴지통으로 이동(복구 가능)"
-                    >
-                      자동생성 의심 데이터 정리
-                    </button>
-                  )}
                   <input
                     ref={trashBackupInputRef}
                     type="file"
