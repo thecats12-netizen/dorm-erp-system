@@ -2716,7 +2716,9 @@ export default function App() {
               // Supabase 데이터만 사용 + id(없으면 키) 기준 중복 제거. localStorage 와 병합하지 않음.
               const dDorms = dedupeRecords(remoteDormModule?.dorms || [], "dorms", recordDormKey);
               // sanitize: 빈/필수값 없는 행은 화면·상태에서 제외(기존 정상 데이터는 보존)
-              const dOcc = sanitizeOccupants(dedupeRecords(remoteDormModule?.occupants || [], "occupants", (o) => `${recordDormKey(o as any)}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`));
+              const rawOcc = remoteDormModule?.occupants || [];
+              const dOcc = sanitizeOccupants(dedupeRecords(rawOcc, "occupants", (o) => `${recordDormKey(o as any)}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`));
+              console.log("occupants loaded (DB)", rawOcc.length, "→ 표시 대상(이름 정상)", dOcc.length);
               const dContracts = sanitizeDormContracts(dedupeRecords(remoteDormModule?.dormContracts || [], "dormContracts", recordDormKey));
               const dNew = sanitizeNewHires(dedupeRecords(remoteDormModule?.newHires || [], "newHires", (h) => `${(h.name || "").trim()}|${(h.phone || "").replace(/\D/g, "")}|${h.site || ""}`));
               setDorms(dDorms);
@@ -6232,9 +6234,11 @@ export default function App() {
   }, [visibleNewHires, selectedNewHireIds]);
 
   const visibleOccupants = useMemo(() => {
-    return occupants.filter((o) => {
+    const result = occupants.filter((o) => {
       if (o.isDeleted) return false;
-      if (!isRealName(o.employeeName)) return false; // sanitize: 이름 없는/"-" 행 제외
+      // #9: 빈 name / 빈 dormId / 빈 occupantId 는 표시 제외(자동생성·오염 데이터)
+      if (!isRealName(o.employeeName)) return false;
+      if (!o.id || !hasText(o.dormId)) return false;
       // 권한 필터링
       if (currentUser?.role === "maintenance_reporter") {
         if (o.dormId !== currentUser.dormId) return false;
@@ -6244,11 +6248,14 @@ export default function App() {
         return false;
       }
 
+      // 기숙사 매칭: id 로 조회(occupant 에는 호실 정보가 없어 site 기준 폴백).
+      // ⚠️ 매칭 실패해도 입주자를 숨기지 않는다(과거 dormId/계약 id 불일치로 전원 0명 표시되던 버그 방지).
       const dorm =
         operationalDorms.find((d) => d.id === o.dormId) ||
-        dorms.find((d) => d.id === o.dormId);
-      if (!dorm) return false;
-      if (occupantSiteFilter !== "전체" && dorm.site !== occupantSiteFilter) return false;
+        dorms.find((d) => d.id === o.dormId) ||
+        null;
+      const site = dorm?.site || o.site;
+      if (occupantSiteFilter !== "전체" && site !== occupantSiteFilter) return false;
       if (occupantGenderFilter !== "전체" && o.gender !== occupantGenderFilter) return false;
       if (occupantStatusFilter !== "전체") {
         if (occupantStatusFilter === "거주중") {
@@ -6257,9 +6264,11 @@ export default function App() {
           if (o.status !== occupantStatusFilter) return false;
         }
       }
-      const text = `${dorm.site} ${dorm.buildingName} ${dorm.dong} ${dorm.roomHo} ${o.employeeName} ${o.department} ${o.phone} ${o.status}`.toLowerCase();
+      const text = `${site} ${dorm?.buildingName || ""} ${dorm?.dong || ""} ${dorm?.roomHo || ""} ${o.employeeName} ${o.department} ${o.phone} ${o.status}`.toLowerCase();
       return !occupantSearch || text.includes(occupantSearch.toLowerCase());
     });
+    if (occupants.length > 0) console.log("occupants loaded", occupants.length, "occupants visible", result.length);
+    return result;
   }, [occupants, dorms, operationalDorms, occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter, currentUser]);
 
   const selectedDetailDorm = operationalDorms.find((dorm) => dorm.id === selectedDormDetailId) || null;
@@ -6287,12 +6296,25 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operationalDorms, currentUser, occupantMenuFilterSite, occupantMenuFilterGender, occupantMenuFilterSearch, visibleOccupants]);
 
+  // 입주자가 "현재 입주자 메뉴 범위"에 속하는지 판정.
+  // occupant 에는 호실 정보가 없고 dormId 가 과거 계약/기숙사 id 와 어긋날 수 있어, 기숙사 카드 id 매칭에만
+  // 의존하면 입주자가 전원 숨겨질 수 있다. → id 매칭 OR 메뉴 지역/성별 범위 매칭으로 표시를 보장한다.
+  const occupantMenuDormIdSet = useMemo(() => new Set(filteredDormsForOccupantMenu.map((d) => d.id)), [filteredDormsForOccupantMenu]);
+  const occupantInMenuDorms = (o: { dormId?: string; site?: string; gender?: string }): boolean => {
+    if (o.dormId && occupantMenuDormIdSet.has(o.dormId)) return true;
+    // 카드 매칭 실패 폴백: 메뉴 지역/성별 필터 범위에 들면 표시(입주자 누락 방지).
+    if (occupantMenuFilterSite !== "전체" && (o.site || "") !== occupantMenuFilterSite) return false;
+    if (occupantMenuFilterGender !== "전체" && (o.gender || "") !== occupantMenuFilterGender) return false;
+    return true;
+  };
+
   // 선택 기숙사(또는 필터된 기숙사들) 기준 입주자 전체 이력(상태 필터 적용 전) — 통계/표시용
   const occupantScopedList = useMemo(
     () => visibleOccupants.filter((o) =>
-      selectedDormId ? o.dormId === selectedDormId : filteredDormsForOccupantMenu.some((d) => d.id === o.dormId)
+      selectedDormId ? o.dormId === selectedDormId : occupantInMenuDorms(o)
     ),
-    [visibleOccupants, selectedDormId, filteredDormsForOccupantMenu]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [visibleOccupants, selectedDormId, occupantMenuDormIdSet, occupantMenuFilterSite, occupantMenuFilterGender]
   );
 
   const visibleUsers = useMemo(() => {
@@ -15533,18 +15555,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           visibleOccupants
                             .filter((o) => {
                               if (selectedDormId) return o.dormId === selectedDormId;
-                              return filteredDormsForOccupantMenu.some((d) => d.id === o.dormId);
+                              return occupantInMenuDorms(o);
                             })
                             .filter((o) => selectedOccupantIds.includes(o.id)).length > 0 &&
                           visibleOccupants
                             .filter((o) => {
                               if (selectedDormId) return o.dormId === selectedDormId;
-                              return filteredDormsForOccupantMenu.some((d) => d.id === o.dormId);
+                              return occupantInMenuDorms(o);
                             })
                             .filter((o) => selectedOccupantIds.includes(o.id)).length ===
                             visibleOccupants.filter((o) => {
                               if (selectedDormId) return o.dormId === selectedDormId;
-                              return filteredDormsForOccupantMenu.some((d) => d.id === o.dormId);
+                              return occupantInMenuDorms(o);
                             }).length
                         }
                         onChange={(e) => {
@@ -15553,7 +15575,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               visibleOccupants
                                 .filter((o) => {
                                   if (selectedDormId) return o.dormId === selectedDormId;
-                                  return filteredDormsForOccupantMenu.some((d) => d.id === o.dormId);
+                                  return occupantInMenuDorms(o);
                                 })
                                 .map((o) => o.id)
                             );
@@ -15591,7 +15613,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         if (selectedDormId) {
                           return o.dormId === selectedDormId;
                         }
-                        if (!filteredDormsForOccupantMenu.some((d) => d.id === o.dormId)) return false;
+                        if (!occupantInMenuDorms(o)) return false;
                         if (occupantMenuFilterStatus !== "전체") {
                           const ds = occupantDisplayStatus(o);
                           if (occupantMenuFilterStatus === "현재거주") return ds === "거주중";
