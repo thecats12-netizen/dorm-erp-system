@@ -454,6 +454,26 @@ function sanitizeDefects<T extends { requestText?: string }>(arr: T[]): T[] {
   return arr.filter((d) => hasText(d.requestText));
 }
 
+// 사진 배열 정상화: 배열이 아니거나 문자열이 아닌 항목/빈값을 제거(잘못된 image 배열로 인한 Supabase 500 방지).
+function sanitizePhotoArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === "string" && x.trim() !== "");
+}
+// 청소보고서 저장 sanitize: 영구삭제 제외 + 사진 배열 정상화(빈값/NULL/잘못된 배열 제거).
+function sanitizeCleaningReportsForSave<T extends { isPermanentDeleted?: boolean; beforePhotoDataUrls?: unknown; afterPhotoDataUrls?: unknown }>(arr: T[]): T[] {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((r) => !r.isPermanentDeleted)
+    .map((r) => ({ ...r, beforePhotoDataUrls: sanitizePhotoArray(r.beforePhotoDataUrls), afterPhotoDataUrls: sanitizePhotoArray(r.afterPhotoDataUrls) }));
+}
+// 하자접수 저장 sanitize: 영구삭제 제외 + 내용 필수 + 사진 배열 정상화.
+function sanitizeDefectsForSave<T extends { requestText?: string; isPermanentDeleted?: boolean; requestPhotoDataUrls?: unknown; completionPhotoDataUrls?: unknown }>(arr: T[]): T[] {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((d) => hasText(d.requestText) && !d.isPermanentDeleted)
+    .map((d) => ({ ...d, requestPhotoDataUrls: sanitizePhotoArray(d.requestPhotoDataUrls), completionPhotoDataUrls: sanitizePhotoArray(d.completionPhotoDataUrls) }));
+}
+
 // 현재 거주자(거주중/만료예정, 퇴실/과거/삭제 제외) 기준. 정원 0이면 0%(NaN 방지).
 // 공실 수 = 정원 - 현재거주자, 공실률 = 공실/정원*100, 사용률 = 거주자/정원*100.
 function computeVacancyStats(
@@ -2001,7 +2021,7 @@ export default function App() {
   const [occupantStatusFilter, setOccupantStatusFilter] = useState<string>("전체");
   const [occupantMenuFilterSite, setOccupantMenuFilterSite] = useState<Site | "전체">("전체");
   const [occupantMenuFilterGender, setOccupantMenuFilterGender] = useState<"남" | "여" | "전체">("전체");
-  const [occupantMenuFilterStatus, setOccupantMenuFilterStatus] = useState<"전체" | "현재거주" | "만료예정" | "퇴실과거" | "배정대기">("전체");
+  const [occupantMenuFilterStatus, setOccupantMenuFilterStatus] = useState<"전체" | "거주중" | "만료예정" | "퇴실" | "과거거주" | "배정대기">("전체");
   const [occupantMenuFilterSearch, setOccupantMenuFilterSearch] = useState("");
 
   useEffect(() => {
@@ -5235,10 +5255,11 @@ export default function App() {
       // 담당자(maintenance_reporter/dorm_manager)는 "본인 담당 기숙사"의 청소/하자만 저장(권한 외 데이터 전송 금지 → 401/403 방지).
       const ownDormId = currentUser?.dormId || "";
       const scopeOwn = role === "maintenance_reporter" || role === "dorm_manager";
-      const scopedCleaningReports = scopeOwn ? cleaningReports.filter((r) => r.dormId === ownDormId) : cleaningReports;
-      // sanitize: 하자신청내용 없는 하자, 비품명 없는 비품은 저장하지 않음(빈 행 누적 방지)
-      const scopedDefects = sanitizeDefects(scopeOwn ? defects.filter((d) => d.dormId === ownDormId) : defects);
-      const sanitizedInventory = sanitizeInventory(inventory);
+      // sanitize: 영구삭제 제외 + 사진 배열 정상화(빈값/NULL/잘못된 image 배열로 인한 Supabase 500 방지)
+      const scopedCleaningReports = sanitizeCleaningReportsForSave(scopeOwn ? cleaningReports.filter((r) => r.dormId === ownDormId) : cleaningReports);
+      // sanitize: 하자신청내용 없는 하자/영구삭제 제외 + 사진 배열 정상화, 비품명 없는 비품 제외(빈 행 누적/500 방지)
+      const scopedDefects = sanitizeDefectsForSave(scopeOwn ? defects.filter((d) => d.dormId === ownDormId) : defects);
+      const sanitizedInventory = sanitizeInventory(inventory).filter((i) => !i.isPermanentDeleted);
       // 감사로그는 아직 전송되지 않은 신규 건만 전송(매 저장마다 전체 누적 재전송 → 타임아웃 방지).
       const unsyncedAuditLogs = auditLogs.filter((l) => l.id && !syncedAuditIdsRef.current.has(l.id));
       // 실제 저장 payload (비admin 은 권한 없는 테이블을 빈 배열로 전달 → upsert no-op, 403 방지)
@@ -5787,6 +5808,42 @@ export default function App() {
     return [...occList, ...supplement];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [occupants, newHires, operationalDorms, dorms, dormContracts, dormKeyToOpId]);
+
+  // ============================================================================
+  // [공통 통계 기준 #5] 모든 화면(대시보드 v4 / 지역별 상세 / 시뮬레이션 / 보고서)이 동일 함수 사용.
+  //  - getUnifiedOccupants(): 통합 입주자 목록(occupants + 배정 newHires 보완, canonical dormId)
+  //  - isCurrentResident(): 현재 거주자 판정(거주중/만료예정/신규입주/입주/배정 등 + 모호 상태 보정, 퇴실/과거/삭제 제외)
+  //  - unifiedCurrentResidents: "현재 사용중 기숙사(operationalDorms)"에 속한 현재 거주자 단일 목록
+  //  - getRegionStats(): 지역/성별별 현재 거주자/정원/공실 — 위 단일 목록에서 집계(화면 간 불일치 제거)
+  // ============================================================================
+  const getUnifiedOccupants = (): Occupant[] => normalizedOccupants;
+  const isCurrentResident = (o: Parameters<typeof isCurrentResidentOccupant>[0]): boolean => isCurrentResidentOccupant(o);
+
+  const operationalDormById = useMemo(() => {
+    const m = new Map<string, OperationalDorm>();
+    operationalDorms.forEach((d) => m.set(d.id, d));
+    return m;
+  }, [operationalDorms]);
+
+  // 현재 거주자 단일 목록: 통합 입주자 중 "현재 사용중 기숙사"에 속하고 현재 거주 상태인 사람만.
+  const unifiedCurrentResidents = useMemo(
+    () => normalizedOccupants.filter((o) => isCurrentResidentOccupant(o) && operationalDormById.has(o.dormId)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [normalizedOccupants, operationalDormById]
+  );
+
+  // 지역/성별 단위 통계(현재 거주자/정원/공실/입주율) — 모든 메뉴 공통.
+  const getRegionStats = (site: Site, gender: "남" | "여") => {
+    const regionDorms = operationalDorms.filter((d) => d.site === site && d.gender === gender);
+    const totalCapacity = regionDorms.reduce((sum, d) => sum + (d.capacity || 0), 0);
+    const currentResidents = unifiedCurrentResidents.filter((o) => {
+      const dorm = operationalDormById.get(o.dormId);
+      return dorm?.site === site && dorm?.gender === gender;
+    }).length;
+    const vacancy = Math.max(totalCapacity - currentResidents, 0);
+    const occupancyRate = totalCapacity > 0 ? Math.round((currentResidents / totalCapacity) * 100) : 0;
+    return { dormCount: regionDorms.length, totalCapacity, currentResidents, vacancy, occupancyRate };
+  };
 
   // 계약 표시 상태 단일 helper(테이블/필터/KPI/Excel 공통). 종료/해지/만료예정/연장은 유지,
   // 그 외(공실/진행중 등 활성)는 실제 입주자 수 기준(0=공실, 정원미만=사용중, 정원이상=만실).
@@ -12350,15 +12407,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       const operationalRegionDorms = operationalDorms.filter((d) => d.site === site && d.gender === gender);
       const dormCount = regionDorms.length;
       const operationalDormCount = operationalRegionDorms.length;
-      const totalCapacity = operationalRegionDorms.reduce((sum, d) => sum + (d.capacity || 0), 0);
-      const relevantOccupants = occupants.filter((o) => {
-        if (o.isDeleted || o.deletedAt || o.isPermanentDeleted || !activeStatus.includes(o.status)) return false;
-        const dorm = operationalDorms.find((d) => d.id === o.dormId) || dorms.find((d) => d.id === o.dormId);
-        return dorm?.site === site && dorm?.gender === gender;
-      });
-      const currentResidents = relevantOccupants.length;
-      const vacancy = Math.max(totalCapacity - currentResidents, 0);
-      const occupancyRate = totalCapacity > 0 ? Math.round((currentResidents / totalCapacity) * 100) : 0;
+      // 공통 기준 getRegionStats 로 현재 거주자/정원/공실/입주율 산출(대시보드 v4 현거주자 합계와 일치)
+      const rs = getRegionStats(site, gender);
+      const totalCapacity = rs.totalCapacity;
+      const currentResidents = rs.currentResidents;
+      const vacancy = rs.vacancy;
+      const occupancyRate = rs.occupancyRate;
       const expiringCount = operationalRegionDorms.filter((d) => d.leaseStatus === "만료예정").length;
       const unprocessedDefects = defects.filter(
         (d) => !d.isDeleted && d.defectStatus !== "완료" && operationalRegionDorms.some((room) => room.id === d.dormId)
@@ -12381,7 +12435,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         unsubmittedCleaning,
       };
     });
-  }, [dorms, operationalDorms, occupants, defects, cleaningReports]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dorms, operationalDorms, occupants, newHires, defects, cleaningReports, unifiedCurrentResidents]);
 
   // 운영 현황 차트 데이터 (대시보드 시각화) — isDeleted/종료·해지/퇴실 제외, 0분모=0 처리
   const dashboardChartData = useMemo(() => {
@@ -12477,7 +12532,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const dashboardStat = {
     dormCount: uniqueActiveDormContracts.length,
-    currentResidents: occupants.filter(isCurrentResidentStatus).length,
+    // 공통 기준: 현재 사용중 기숙사의 현재 거주자 단일 목록(지역별 상세 통계 합계와 동일)
+    currentResidents: unifiedCurrentResidents.length,
     totalVacancy: dormSummary.reduce((sum, item) => sum + item.vacancy, 0),
     openDefects: defects.filter((d) => !d.isDeleted && d.defectStatus !== "완료").length,
     inventoryCount: inventory.filter((i) => !i.isDeleted).length,
@@ -12978,7 +13034,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="text-sm font-medium text-slate-500">기숙사 수(현재 사용중인 기숙사 수)</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.dormCount}</div>
               </button>
-              <button type="button" onClick={() => { setOccupantMenuFilterStatus("현재거주"); setOccupantMenuFilterSite("전체"); setOccupantMenuFilterGender("전체"); setOccupantMenuFilterSearch(""); setSelectedDormId(""); setActiveTab("occupants"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+              <button type="button" onClick={() => { setOccupantMenuFilterStatus("거주중"); setOccupantMenuFilterSite("전체"); setOccupantMenuFilterGender("전체"); setOccupantMenuFilterSearch(""); setSelectedDormId(""); setActiveTab("occupants"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">현 거주자</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.currentResidents}</div>
               </button>
@@ -15356,8 +15412,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.moveOutDate)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.actualMoveOutDate)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.cheonanMoveDate)}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{(h.residenceStatus as string) === "자동선택" ? calculateNewHireResidenceStatus(h) : h.residenceStatus}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{(h.moveInType as string) === "자동선택" ? calculateMoveInType(h, newHires) : h.moveInType}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{getNewHireStatus(h)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{getNewHireType(h, newHires)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.extensionReason || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs erp-col-memo" title={h.notes || ""}>{h.notes || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.createdAt)}</td>
@@ -15603,7 +15659,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="flex flex-wrap items-center gap-2">
                 <FilterSelect label="지역" value={occupantMenuFilterSite} onChange={(v) => setOccupantMenuFilterSite(v as Site | "전체")} options={["전체", "평택", "천안"]} />
                 <FilterSelect label="성별" value={occupantMenuFilterGender} onChange={(v) => setOccupantMenuFilterGender(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
-                <FilterSelect label="상태" value={occupantMenuFilterStatus} onChange={(v) => setOccupantMenuFilterStatus(v as "전체" | "현재거주" | "만료예정" | "퇴실과거" | "배정대기")} options={["전체", "현재거주", "만료예정", "퇴실과거", "배정대기"]} />
+                <FilterSelect label="상태" value={occupantMenuFilterStatus} onChange={(v) => setOccupantMenuFilterStatus(v as "전체" | "거주중" | "만료예정" | "퇴실" | "과거거주" | "배정대기")} options={["전체", "거주중", "만료예정", "퇴실", "과거거주", "배정대기"]} />
                 <input type="text" placeholder="이름/부서/연락처/건물/동/호/현관 검색..." value={occupantMenuFilterSearch} onChange={(e) => setOccupantMenuFilterSearch(e.target.value)} className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"}`} />
               </div>
               <div className="text-xs text-slate-500">
@@ -15723,9 +15779,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         if (!occupantInMenuDorms(o)) return false;
                         if (occupantMenuFilterStatus !== "전체") {
                           const ds = occupantDisplayStatus(o);
-                          if (occupantMenuFilterStatus === "현재거주") return ds === "거주중";
+                          if (occupantMenuFilterStatus === "거주중") return ds === "거주중";
                           if (occupantMenuFilterStatus === "만료예정") return ds === "만료예정";
-                          if (occupantMenuFilterStatus === "퇴실과거") return ds === "퇴실" || ds === "과거거주";
+                          if (occupantMenuFilterStatus === "퇴실") return ds === "퇴실";
+                          if (occupantMenuFilterStatus === "과거거주") return ds === "과거거주";
                           if (occupantMenuFilterStatus === "배정대기") return false; // 실제 입주자는 배정대기 아님
                         }
                         return true;
