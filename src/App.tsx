@@ -422,6 +422,37 @@ function recordDormKey(x: { site?: string; buildingName?: string; dong?: string;
   return `${x.site || ""}|${x.buildingName || ""}|${x.dong || ""}|${x.roomHo || ""}`.trim().toLowerCase();
 }
 
+// ============================================================================
+// 데이터 sanitize: 빈 행/자동생성 의심 행(필수값 없는 행)을 화면/저장에서 제외.
+// 로드(fetch)·저장(Supabase/localStorage)·Realtime 수신 시 공통 적용. 기존 정상 데이터는 보존.
+// ============================================================================
+const hasText = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
+// 신규계약: 건물명/주소/임대인명 중 하나라도 있어야 유효(셋 다 비면 제외)
+function sanitizeDormContracts<T extends { buildingName?: string; address?: string; landlordName?: string }>(arr: T[]): T[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((c) => hasText(c.buildingName) || hasText(c.address) || hasText(c.landlordName));
+}
+// 신입사원: 이름 필수
+function sanitizeNewHires<T extends { name?: string }>(arr: T[]): T[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((h) => hasText(h.name));
+}
+// 입주자: 이름(employeeName) 필수
+function sanitizeOccupants<T extends { employeeName?: string }>(arr: T[]): T[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((o) => hasText(o.employeeName));
+}
+// 비품: 비품명 필수
+function sanitizeInventory<T extends { itemName?: string }>(arr: T[]): T[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((i) => hasText(i.itemName));
+}
+// 하자접수: 하자신청내용(requestText) 필수
+function sanitizeDefects<T extends { requestText?: string }>(arr: T[]): T[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((d) => hasText(d.requestText));
+}
+
 // 현재 거주자(거주중/만료예정, 퇴실/과거/삭제 제외) 기준. 정원 0이면 0%(NaN 방지).
 // 공실 수 = 정원 - 현재거주자, 공실률 = 공실/정원*100, 사용률 = 거주자/정원*100.
 function computeVacancyStats(
@@ -2647,9 +2678,10 @@ export default function App() {
               const remoteDormModule = dormRes.value;
               // Supabase 데이터만 사용 + id(없으면 키) 기준 중복 제거. localStorage 와 병합하지 않음.
               const dDorms = dedupeRecords(remoteDormModule?.dorms || [], "dorms", recordDormKey);
-              const dOcc = dedupeRecords(remoteDormModule?.occupants || [], "occupants", (o) => `${recordDormKey(o as any)}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`);
-              const dContracts = dedupeRecords(remoteDormModule?.dormContracts || [], "dormContracts", recordDormKey);
-              const dNew = dedupeRecords(remoteDormModule?.newHires || [], "newHires", (h) => `${(h.name || "").trim()}|${(h.phone || "").replace(/\D/g, "")}|${h.site || ""}`);
+              // sanitize: 빈/필수값 없는 행은 화면·상태에서 제외(기존 정상 데이터는 보존)
+              const dOcc = sanitizeOccupants(dedupeRecords(remoteDormModule?.occupants || [], "occupants", (o) => `${recordDormKey(o as any)}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`));
+              const dContracts = sanitizeDormContracts(dedupeRecords(remoteDormModule?.dormContracts || [], "dormContracts", recordDormKey));
+              const dNew = sanitizeNewHires(dedupeRecords(remoteDormModule?.newHires || [], "newHires", (h) => `${(h.name || "").trim()}|${(h.phone || "").replace(/\D/g, "")}|${h.site || ""}`));
               setDorms(dDorms);
               setOccupants(dOcc);
               setDormContracts(dContracts);
@@ -2666,8 +2698,9 @@ export default function App() {
             if (useSupabase && opRes.status === "fulfilled") {
               const remoteOperationalModule = opRes.value;
               const dCleaning = dedupeRecords(remoteOperationalModule?.cleaningReports || [], "cleaningReports", (r) => `${recordDormKey(r as any)}|${r.reportDate || ""}`);
-              const dDefects = dedupeRecords(remoteOperationalModule?.defects || [], "defects", (d) => `${(d.site || "")}|${(d.buildingName || "")}|${(d.dong || "")}|${(d.ho || "")}|${d.receiptDate || ""}|${(d.requestText || "").slice(0, 20)}`);
-              const dInv = dedupeRecords(remoteOperationalModule?.inventory || [], "inventory", (i) => `${recordDormKey(i as any)}|${(i.itemName || "").trim()}|${(i.modelName || "").trim()}`);
+              // sanitize: 하자신청내용 없는 하자, 비품명 없는 비품 제외(기존 정상 데이터는 보존)
+              const dDefects = sanitizeDefects(dedupeRecords(remoteOperationalModule?.defects || [], "defects", (d) => `${(d.site || "")}|${(d.buildingName || "")}|${(d.dong || "")}|${(d.ho || "")}|${d.receiptDate || ""}|${(d.requestText || "").slice(0, 20)}`));
+              const dInv = sanitizeInventory(dedupeRecords(remoteOperationalModule?.inventory || [], "inventory", (i) => `${recordDormKey(i as any)}|${(i.itemName || "").trim()}|${(i.modelName || "").trim()}`));
               // 사진 보존 병합: 로드 결과의 사진이 비어 있는데 메모리(이전 상태)에 사진이 있으면 그 값을 유지(빈값 덮어쓰기 방지).
               setCleaningReports((prevReports) => {
                 const prevById = new Map(prevReports.map((r) => [r.id, r]));
@@ -3205,35 +3238,8 @@ export default function App() {
     }
   };
 
-  const resetDemoData = async () => {
-    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
-    const ok = await appConfirm(
-      "시스템 설정",
-      "샘플(데모) 데이터를 불러오시겠습니까?\n\n기존 운영 데이터는 삭제하지 않고, [샘플] 표시가 붙은 데모 데이터를 추가합니다.",
-      { confirmText: "샘플 추가" }
-    );
-    if (!ok) return;
-    const now = new Date().toISOString();
-    const today = now.slice(0, 10);
-    const stamp = Date.now();
-    const mkDorm = (n: number): Dorm => ({
-      id: `demo-dorm-${stamp}-${n}`, site: "평택", gender: "남",
-      buildingName: `[샘플] 데모기숙사 ${n}`, address: `평택시 샘플로 ${n}`, dong: "101", roomHo: `${n}01`,
-      pyeong: "24", capacity: 6, managerUserId: "", contractStart: today, contractEnd: "2027-12-31",
-      contractAmount: "0", leaseStatus: "사용중", 공동현관: "1234", 세대현관: "5678", prepaymentDeposit: 0,
-      realEstateName: "[샘플] 부동산", balanceDate: "", notes: "데모 데이터", createdAt: now, updatedAt: now, isDeleted: false,
-    });
-    const d1 = mkDorm(1), d2 = mkDorm(2);
-    const mkOcc = (dorm: Dorm, name: string): Occupant => ({
-      id: `demo-occ-${stamp}-${name}`, dormId: dorm.id, site: dorm.site, employeeName: `[샘플] ${name}`,
-      gender: "남", department: "[샘플]부서", phone: "010-0000-0000", moveInDate: today, moveOutDueDate: "",
-      status: "거주중", isNewHireAssignment: false, notes: "데모 데이터", createdAt: now, updatedAt: now, isDeleted: false,
-    });
-    setDorms((prev) => [d1, d2, ...prev]);
-    setOccupants((prev) => [mkOcc(d1, "홍길동"), mkOcc(d2, "김철수"), ...prev]);
-    setSettingsSavedAt(new Date().toLocaleString());
-    await appAlert("시스템 설정", "샘플(데모) 데이터를 추가했습니다.\n\n목록에서 [샘플] 표시로 확인할 수 있으며, 휴지통/삭제로 정리할 수 있습니다.");
-  };
+  // 데모(샘플) 데이터 생성 기능은 제거되었습니다.
+  // (운영 환경에서 샘플/자동생성 데이터가 만들어지지 않도록 함 — 등록/엑셀/배정 등 사용자 액션으로만 데이터 생성)
 
   const resetAdminAccount = async () => {
     if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
@@ -5103,9 +5109,10 @@ export default function App() {
           {
             tenantId,
             dorms,
-            occupants,
-            dormContracts,
-            newHires,
+            // 저장 시에도 빈/필수값 없는 행은 제외(자동생성/빈 행이 Supabase 에 쌓이지 않게)
+            occupants: sanitizeOccupants(occupants),
+            dormContracts: sanitizeDormContracts(dormContracts),
+            newHires: sanitizeNewHires(newHires),
           },
           session.user.id
         );
@@ -5161,13 +5168,15 @@ export default function App() {
       const ownDormId = currentUser?.dormId || "";
       const scopeOwn = role === "maintenance_reporter" || role === "dorm_manager";
       const scopedCleaningReports = scopeOwn ? cleaningReports.filter((r) => r.dormId === ownDormId) : cleaningReports;
-      const scopedDefects = scopeOwn ? defects.filter((d) => d.dormId === ownDormId) : defects;
+      // sanitize: 하자신청내용 없는 하자, 비품명 없는 비품은 저장하지 않음(빈 행 누적 방지)
+      const scopedDefects = sanitizeDefects(scopeOwn ? defects.filter((d) => d.dormId === ownDormId) : defects);
+      const sanitizedInventory = sanitizeInventory(inventory);
       // 실제 저장 payload (비admin 은 권한 없는 테이블을 빈 배열로 전달 → upsert no-op, 403 방지)
       const operationalPayload = {
         tenantId,
         cleaningReports: scopedCleaningReports,
         defects: scopedDefects,
-        inventory: isAdmin ? inventory : [],
+        inventory: isAdmin ? sanitizedInventory : [],
         settlementRecords: isAdmin ? settlementRecords : [],
         settlementItems: isAdmin ? settlementItems : [],
         auditLogs: isAdmin ? auditLogs : [],
@@ -6089,6 +6098,8 @@ export default function App() {
   const visibleDormContracts = useMemo(() => {
     return dormContracts.filter((c) => {
       if (c.isDeleted) return false;
+      // sanitize: 건물명/주소/임대인명이 모두 없는 빈 행은 표시하지 않음
+      if (!hasText(c.buildingName) && !hasText(c.address) && !hasText(c.landlordName)) return false;
       // 권한 필터링
       if (currentUser?.role === "maintenance_reporter") {
         // maintenance_reporter는 자신의 site 데이터만 볼 수 있음
@@ -6115,6 +6126,7 @@ export default function App() {
   const visibleNewHires = useMemo(() => {
     return newHires.filter((h) => {
       if (h.isDeleted) return false;
+      if (!hasText(h.name)) return false; // sanitize: 이름 없는 행 제외
       // 권한 필터링
       if (currentUser?.role === "maintenance_reporter") {
         if (h.dormId !== currentUser.dormId) return false;
@@ -6162,6 +6174,7 @@ export default function App() {
   const visibleOccupants = useMemo(() => {
     return occupants.filter((o) => {
       if (o.isDeleted) return false;
+      if (!hasText(o.employeeName)) return false; // sanitize: 이름 없는 행 제외
       // 권한 필터링
       if (currentUser?.role === "maintenance_reporter") {
         if (o.dormId !== currentUser.dormId) return false;
@@ -6250,6 +6263,7 @@ export default function App() {
   const visibleInventory = useMemo(() => {
     return inventory.filter((i) => {
       if (i.isDeleted) return false;
+      if (!hasText(i.itemName)) return false; // sanitize: 비품명 없는 행 제외
       // 권한 필터링
       if (currentUser?.role === "maintenance_reporter") {
         if (i.dormId !== currentUser.dormId) return false;
@@ -6384,6 +6398,7 @@ export default function App() {
   const visibleDefects = useMemo(() => {
     const filterDefects = (d: DefectRequest) => {
       if (d.isDeleted) return false;
+      if (!hasText(d.requestText)) return false; // sanitize: 하자신청내용 없는 행 제외
       const defectDorm = findOperationalDormForDefect(d);
       const text = `${d.receiptDate} ${d.inspectorName} ${d.dormManagerName} ${defectDorm?.buildingName || d.buildingName} ${defectDorm?.dong || d.dong} ${defectDorm?.roomHo || d.ho} ${d["공동현관"]} ${d["세대현관"]} ${d.roadAddress} ${d.defectStatus} ${d.requestText} ${d.completeText} ${d.reporterName}`.toLowerCase();
       const matchesStatus = defectStatusFilter === "전체" || d.defectStatus === defectStatusFilter;
@@ -18559,15 +18574,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   }`}
                 >
                   전체 데이터 초기화
-                </button>
-                <button
-                  onClick={resetDemoData}
-                  disabled={!canEditData(currentUser)}
-                  className={`w-full sm:w-auto rounded-2xl border border-slate-300 bg-slate-50 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 ${
-                    !canEditData(currentUser) ? "cursor-not-allowed opacity-50" : ""
-                  }`}
-                >
-                  데모 데이터 로드
                 </button>
                 <button
                   onClick={resetAdminAccount}
