@@ -1498,6 +1498,8 @@ export default function App() {
   const userMutationTickRef = useRef<number>(0);
   const lastSavedDormTickRef = useRef<number>(0);
   const lastSavedOpTickRef = useRef<number>(0);
+  // 이미 Supabase 에 전송한 감사로그 id — 매 저장마다 전체 누적 로그를 재전송하지 않도록(타임아웃 방지).
+  const syncedAuditIdsRef = useRef<Set<string>>(new Set());
   const lastMilitarySnapshotRef = useRef<string>("");
   const lastAppSettingsSnapshotRef = useRef<string>("");
   // 군대 모듈: 로드/Realtime 로 적용된 변경(사용자 수정 아님)을 dirty 에서 제외하기 위한 플래그.
@@ -1787,7 +1789,7 @@ export default function App() {
     if (["dorms", "occupants", "new_hires", "dorm_contracts"].includes(table)) {
       realtimeUpdateSourceRef.current.add("dorm_module");
     }
-    if (["cleaning_reports", "defect_requests", "inventory_items", "audit_logs"].includes(table)) {
+    if (["cleaning_reports", "defect_requests", "inventory_items", "audit_logs", "settlement_records", "settlement_items"].includes(table)) {
       realtimeUpdateSourceRef.current.add("operational_module");
     }
 
@@ -1804,6 +1806,8 @@ export default function App() {
         case "defect_requests": removeById(setDefects); break;
         case "inventory_items": removeById(setInventory); break;
         case "audit_logs": removeById(setAuditLogs); break;
+        case "settlement_records": removeById(setSettlementRecords); break;
+        case "settlement_items": removeById(setSettlementItems); break;
         default: break;
       }
       return;
@@ -1834,6 +1838,12 @@ export default function App() {
       case "audit_logs":
         setAuditLogs((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeAuditLog));
         break;
+      case "settlement_records":
+        setSettlementRecords((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeSettlementRecord));
+        break;
+      case "settlement_items":
+        setSettlementItems((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeSettlementItem));
+        break;
       default:
         break;
     }
@@ -1852,6 +1862,32 @@ export default function App() {
     memo: row.memo || undefined,
     changes: row.changes || undefined,
   });
+
+  // 정산 Realtime 매퍼(다른 기기 변경 즉시 반영용). 서비스의 toDomainSettlement* 와 동일 매핑.
+  const toDomainRealtimeSettlementRecord = (row: any): SettlementRecord => ({
+    id: row.id,
+    settlementYear: row.settlement_year || "",
+    settlementMonth: row.settlement_month || "",
+    dormId: row.dorm_id || "",
+    miscCost: row.misc_cost ?? 0,
+    notes: row.notes || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || row.created_at || new Date().toISOString(),
+  });
+  const toDomainRealtimeSettlementItem = (row: any): SettlementItem => ({
+    id: row.id,
+    settlementYear: row.settlement_year || "",
+    settlementMonth: row.settlement_month || "",
+    dormId: row.dorm_id || "",
+    category: row.category || "",
+    details: row.details || "",
+    amount: row.amount ?? 0,
+    burdenType: row.burden_type || "",
+    targetName: row.target_name || "",
+    memo: row.memo || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || row.created_at || new Date().toISOString(),
+  } as SettlementItem);
 
   // profiles Realtime: 사용자관리/담당자 표시는 Supabase profiles 단일 출처 → 변경 시 재조회로 동기화.
   const handleProfilesRealtime = () => {
@@ -2704,6 +2740,8 @@ export default function App() {
               // 사진 보존 병합: 로드 결과의 사진이 비어 있는데 메모리(이전 상태)에 사진이 있으면 그 값을 유지(빈값 덮어쓰기 방지).
               setCleaningReports((prevReports) => {
                 const prevById = new Map(prevReports.map((r) => [r.id, r]));
+                // 사진 보존 병합: 로드 결과 사진이 비어 있는데 메모리에 있으면 유지(빈값 덮어쓰기 방지).
+                // (초기 로딩 속도/콘솔 과부하 방지를 위해 레코드별 로그는 출력하지 않음)
                 return dCleaning.map((r) => {
                   const prev = prevById.get(r.id);
                   const before = (Array.isArray(r.beforePhotoDataUrls) && r.beforePhotoDataUrls.length > 0)
@@ -2712,18 +2750,17 @@ export default function App() {
                   const after = (Array.isArray(r.afterPhotoDataUrls) && r.afterPhotoDataUrls.length > 0)
                     ? r.afterPhotoDataUrls
                     : (prev?.afterPhotoDataUrls?.length ? prev.afterPhotoDataUrls : (r.afterPhotoDataUrls || []));
-                  const next = { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
-                  // 디버깅: 사진 개수로 어느 단계에서 사라지는지 추적(base64 원문은 콘솔 과부하 방지를 위해 개수만 출력)
-                  console.log("[PHOTO LOAD]", next.id, { before: before.length, after: after.length });
-                  if (before.length === 0 && after.length === 0) console.warn("[PHOTO MISSING]", next.id);
-                  return next;
+                  return { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
                 });
               });
               setDefects(dDefects);
               setInventory(dInv);
               setSettlementRecords(remoteOperationalModule?.settlementRecords || []);
               setSettlementItems((remoteOperationalModule?.settlementItems as unknown as SettlementItem[]) || []);
-              setAuditLogs(remoteOperationalModule?.auditLogs || []);
+              const loadedAuditLogs = remoteOperationalModule?.auditLogs || [];
+              // 로드된 감사로그는 이미 Supabase 에 존재 → synced 로 표시(다음 저장에서 전체 재전송/타임아웃 방지)
+              loadedAuditLogs.forEach((l) => { if (l.id) syncedAuditIdsRef.current.add(l.id); });
+              setAuditLogs(loadedAuditLogs);
               console.log("[LOAD] inventory:", dInv.length, "defects:", dDefects.length, "cleaningReports:", dCleaning.length);
             } else if (opRes.status === "rejected") {
               console.error("[LOAD] Failed to load operational module from Supabase:", opRes.reason);
@@ -3240,6 +3277,26 @@ export default function App() {
 
   // 데모(샘플) 데이터 생성 기능은 제거되었습니다.
   // (운영 환경에서 샘플/자동생성 데이터가 만들어지지 않도록 함 — 등록/엑셀/배정 등 사용자 액션으로만 데이터 생성)
+
+  // 관리자용 정리: 이름(name/employeeName)이 없는 입주자(과거 자동생성 오염 데이터)를 화면/Supabase 에서 제거.
+  const cleanupNamelessOccupants = async () => {
+    if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    const targets = occupants.filter((o) => !hasText(o.employeeName));
+    if (targets.length === 0) { await appAlert("시스템 설정", "이름 없는 입주자 데이터가 없습니다."); return; }
+    const ok = await appConfirm(
+      "시스템 설정",
+      `이름이 없는 입주자 ${targets.length}건을 삭제하시겠습니까?\n\n(과거 자동생성된 빈 입주자 데이터 정리 — 되돌릴 수 없습니다.)`,
+      { confirmText: "삭제" }
+    );
+    if (!ok) return;
+    const targetIds = new Set(targets.map((o) => o.id));
+    // 로컬 state 제거 + Supabase 행 hard delete(있으면)
+    setOccupants((prev) => prev.filter((o) => !targetIds.has(o.id)));
+    if (isSupabaseAvailable()) {
+      try { await deleteRowsByIds("occupants", targets.map((o) => o.id)); } catch (e) { console.warn("[cleanupNamelessOccupants] 삭제 경고:", (e as { message?: string })?.message || e); }
+    }
+    await appAlert("시스템 설정", `이름 없는 입주자 ${targets.length}건을 삭제했습니다.`);
+  };
 
   const resetAdminAccount = async () => {
     if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
@@ -4411,7 +4468,9 @@ export default function App() {
     hire: NewHireEmployee,
     existingOccupant?: Occupant
   ): Occupant | null => {
+    // 필수값 가드: 이름/연락처/기숙사(dormId)가 정상값일 때만 입주자 생성(빈/NULL 이름 입주자 자동생성 방지).
     if (!hire.dormId) return null;
+    if (!hasText(hire.name) || !hasText(hire.phone)) return null;
 
     // 삭제 상태는 신입사원(원본)을 따라감 → 삭제/복원이 입주자에 그대로 전파
     const inheritedDeleted = hire.isDeleted || false;
@@ -4966,7 +5025,6 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     };
     
-    console.log("[PHOTO SAVE]", autoFilledForm.id, { before: autoFilledForm.beforePhotoDataUrls?.length || 0, after: autoFilledForm.afterPhotoDataUrls?.length || 0 });
     setCleaningReports((prev) => [autoFilledForm, ...prev]);
     createAuditLog({
       targetType: "cleaningReport",
@@ -5099,12 +5157,6 @@ export default function App() {
       dormSavingRef.current = true;
       setSaveStatus("saving");
       try {
-        console.debug("[SAVE] Saving dorm module to Supabase", {
-          dorms: dorms.length,
-          dormContracts: dormContracts.length,
-          newHires: newHires.length,
-          occupants: occupants.length,
-        });
         await saveDormModule(
           {
             tenantId,
@@ -5122,8 +5174,6 @@ export default function App() {
         lastDormAlertRef.current = ""; // 성공 시 알림 dedup 초기화
         setOperationalSyncError(null);
         flashSaveStatus("saved");
-        console.log("[SAVE] contracts saved:", dormContracts.length);
-        console.log("[SAVE] newHires saved:", newHires.length);
       } catch (error) {
         const err = error as { status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown };
         console.error("Supabase dorm module sync failed:", {
@@ -5171,6 +5221,8 @@ export default function App() {
       // sanitize: 하자신청내용 없는 하자, 비품명 없는 비품은 저장하지 않음(빈 행 누적 방지)
       const scopedDefects = sanitizeDefects(scopeOwn ? defects.filter((d) => d.dormId === ownDormId) : defects);
       const sanitizedInventory = sanitizeInventory(inventory);
+      // 감사로그는 아직 전송되지 않은 신규 건만 전송(매 저장마다 전체 누적 재전송 → 타임아웃 방지).
+      const unsyncedAuditLogs = auditLogs.filter((l) => l.id && !syncedAuditIdsRef.current.has(l.id));
       // 실제 저장 payload (비admin 은 권한 없는 테이블을 빈 배열로 전달 → upsert no-op, 403 방지)
       const operationalPayload = {
         tenantId,
@@ -5179,7 +5231,7 @@ export default function App() {
         inventory: isAdmin ? sanitizedInventory : [],
         settlementRecords: isAdmin ? settlementRecords : [],
         settlementItems: isAdmin ? settlementItems : [],
-        auditLogs: isAdmin ? auditLogs : [],
+        auditLogs: isAdmin ? unsyncedAuditLogs : [],
       };
       // 동일 데이터 반복 저장 방지용 스냅샷 — 비admin INSERT 경로 감지를 위해 auditLogs 전체 포함
       const snapshot = operationalModuleSnapshot(
@@ -5219,10 +5271,12 @@ export default function App() {
         });
         setOperationalSyncError(null);
         await saveOperationalModule(operationalPayload, session.user.id);
-        // 비admin 작업 감사로그는 신규 행만 별도 저장(upsert ignoreDuplicates → 409/500 없음, 실패해도 warn 만)
+        // 비admin 작업 감사로그도 신규 건만 별도 저장(upsert ignoreDuplicates + 타임아웃 → 실패해도 warn 1회)
         if (!isAdmin) {
-          await insertAuditLogsScoped(auditLogs, tenantId, session.user.id);
+          await insertAuditLogsScoped(unsyncedAuditLogs, tenantId, session.user.id);
         }
+        // 전송 완료한 감사로그 id 기록 → 다음 저장에서 재전송하지 않음
+        unsyncedAuditLogs.forEach((l) => { if (l.id) syncedAuditIdsRef.current.add(l.id); });
         lastOperationalSnapshotRef.current = snapshot;
         lastSavedOpTickRef.current = tick; // 이 저장으로 반영된 사용자 액션 시점 기록
         operationalFailRef.current = { snap: "", count: 0 }; // 성공 → 실패 카운트 초기화
@@ -5350,6 +5404,16 @@ export default function App() {
         )
         .on(
           "postgres_changes",
+          { event: "*", schema: "public", table: "settlement_records", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("settlement_records", payload)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "settlement_items", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("settlement_items", payload)
+        )
+        .on(
+          "postgres_changes",
           { event: "*", schema: "public", table: "military_module_data", filter: `tenant_id=eq.${tenantId}` },
           (payload) => handleMilitaryRealtimeRow(payload)
         )
@@ -5405,15 +5469,10 @@ export default function App() {
     if (!isSupabaseAvailable()) saveJson(SETTLEMENT_ITEMS_KEY, settlementItems, tenantId);
   }, [settlementItems, tenantId, isLoading]);
 
-  useEffect(() => {
-    if (!newHires.length) return;
-    // 삭제된 신입사원은 동기화에서 제외 (삭제된 입주자 부활 방지)
-    setOccupants((prevOccupants) =>
-      newHires
-        .filter((newHire) => !newHire.isDeleted)
-        .reduce((acc, newHire) => upsertOccupantFromNewHire(newHire, acc), prevOccupants)
-    );
-  }, [newHires]);
+  // [제거됨] newHires 변경마다 occupants 를 자동 생성/동기화하던 useEffect.
+  // 이 effect 가 fetch/Realtime 수신으로 newHires 가 바뀔 때마다 실행되어, 이름/필수값이 없는
+  // 입주자(occupants)가 자동 생성·저장되는 원인이었다. 입주자 생성은 사용자 액션
+  // (신입사원 배정/입주자 추가/엑셀업로드/저장)에서만 upsertOccupantFromNewHire 를 직접 호출한다.
 
   useEffect(() => {
     if (isLoading) return;
@@ -8768,7 +8827,6 @@ export default function App() {
         updatedAt: new Date().toISOString(),
       };
 
-      console.log("[PHOTO SAVE]", payload.id, { before: payload.beforePhotoDataUrls?.length || 0, after: payload.afterPhotoDataUrls?.length || 0 });
       setCleaningReports((prev) => prev.map((report) => (report.id === existing.id ? payload : report)));
 
       const actionType = existing.cleanStatus !== payload.cleanStatus ? "statusChange" : "update";
@@ -18583,6 +18641,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   }`}
                 >
                   관리자 계정 초기화
+                </button>
+                <button
+                  onClick={cleanupNamelessOccupants}
+                  disabled={!canManageUsers(currentUser)}
+                  className={`w-full sm:w-auto rounded-2xl border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100 ${
+                    !canManageUsers(currentUser) ? "cursor-not-allowed opacity-50" : ""
+                  }`}
+                >
+                  이름 없는 입주자 정리
                 </button>
                 {settingsSavedAt && (
                   <div className="text-xs text-slate-500">저장됨: {settingsSavedAt}</div>

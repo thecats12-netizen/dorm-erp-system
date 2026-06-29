@@ -441,6 +441,7 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
 // upsert(on_conflict=id, ignoreDuplicates) 사용 → 이미 저장된 id 를 다시 보내도
 // "INSERT ... ON CONFLICT DO NOTHING" 으로 처리되어 409 duplicate key / 500 오류가 발생하지 않는다.
 // (기존: plain insert 로 누적 감사로그 전체를 매 저장마다 재전송 → 409/500 콘솔 스팸의 원인)
+let auditWarnedOnce = false; // timeout/실패 경고는 1회만 출력(콘솔 반복 방지)
 export const insertAuditLogsScoped = async (
   auditLogs: AuditLog[],
   tenantId: string,
@@ -449,14 +450,23 @@ export const insertAuditLogsScoped = async (
   if (!isSupabaseAvailable()) return;
   if (!auditLogs || auditLogs.length === 0) return;
   try {
-    const { error } = await supabase!
+    // 8초 타임아웃: 감사로그 저장이 지연돼도 전체 저장 흐름을 막지 않는다(부가기능).
+    const upsertPromise = supabase!
       .from("audit_logs")
       .upsert(auditLogs.map((log) => toDbAuditLog(log, tenantId, userId)), { onConflict: "id", ignoreDuplicates: true });
-    if (error) {
-      // 감사로그 저장 실패는 실제 데이터 저장과 무관 → 경고만(앱 동작/저장 성공에는 영향 없음).
-      console.warn("[audit_logs] 변경이력 저장 실패(무시):", (error as { message?: string })?.message || error);
+    const timeout = new Promise<{ error: { message: string } }>((resolve) =>
+      setTimeout(() => resolve({ error: { message: "timeout" } }), 8000)
+    );
+    const { error } = (await Promise.race([upsertPromise, timeout])) as { error: { message?: string } | null };
+    if (error && !auditWarnedOnce) {
+      auditWarnedOnce = true;
+      // 감사로그 저장 실패/타임아웃은 실제 데이터 저장과 무관 → 1회만 경고(이후 조용히 무시).
+      console.warn("[audit_logs] 변경이력 저장 실패/지연(무시, 1회만 표시):", (error as { message?: string })?.message || error);
     }
   } catch (e) {
-    console.warn("[audit_logs] 변경이력 저장 예외(무시):", (e as { message?: string })?.message || e);
+    if (!auditWarnedOnce) {
+      auditWarnedOnce = true;
+      console.warn("[audit_logs] 변경이력 저장 예외(무시, 1회만 표시):", (e as { message?: string })?.message || e);
+    }
   }
 };
