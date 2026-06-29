@@ -323,11 +323,14 @@ export const loadDormModule = async (tenantId: string): Promise<DormModuleState 
   }
 
   try {
+    // tenant_id 호환 조회: 단일 테넌트 운영이지만 기존 행의 tenant_id 가 "default"/"기본"/NULL 등으로
+    // 섞여 있어 .eq("tenant_id", ...) 로는 누락되는 문제가 있었다(데이터가 있는데 화면에 안 보임).
+    // → 테넌트 필터 없이 전체 조회(RLS 로 접근 범위 제한). 저장은 계속 tenant_id 를 기록해 점진적으로 정규화.
     const [dormsResult, occupantsResult, dormContractsResult, newHiresResult] = await Promise.all([
-      supabase!.from("dorms").select("*").eq("tenant_id", tenantId),
-      supabase!.from("occupants").select("*").eq("tenant_id", tenantId),
-      supabase!.from("dorm_contracts").select("*").eq("tenant_id", tenantId),
-      supabase!.from("new_hires").select("*").eq("tenant_id", tenantId),
+      supabase!.from("dorms").select("*"),
+      supabase!.from("occupants").select("*"),
+      supabase!.from("dorm_contracts").select("*"),
+      supabase!.from("new_hires").select("*"),
     ]);
 
     if (dormsResult.error || occupantsResult.error || dormContractsResult.error || newHiresResult.error) {

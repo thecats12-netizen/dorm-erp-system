@@ -437,10 +437,11 @@ function sanitizeNewHires<T extends { name?: string }>(arr: T[]): T[] {
   if (!Array.isArray(arr)) return [];
   return arr.filter((h) => hasText(h.name));
 }
-// 입주자: 이름(employeeName) 필수
+// 입주자: 이름(employeeName) 필수 — NULL/빈값/"-" 는 제외(자동생성/오염 데이터 차단)
+const isRealName = (v: unknown): boolean => hasText(v) && (v as string).trim() !== "-";
 function sanitizeOccupants<T extends { employeeName?: string }>(arr: T[]): T[] {
   if (!Array.isArray(arr)) return [];
-  return arr.filter((o) => hasText(o.employeeName));
+  return arr.filter((o) => isRealName(o.employeeName));
 }
 // 비품: 비품명 필수
 function sanitizeInventory<T extends { itemName?: string }>(arr: T[]): T[] {
@@ -3281,7 +3282,7 @@ export default function App() {
   // 관리자용 정리: 이름(name/employeeName)이 없는 입주자(과거 자동생성 오염 데이터)를 화면/Supabase 에서 제거.
   const cleanupNamelessOccupants = async () => {
     if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
-    const targets = occupants.filter((o) => !hasText(o.employeeName));
+    const targets = occupants.filter((o) => !isRealName(o.employeeName));
     if (targets.length === 0) { await appAlert("시스템 설정", "이름 없는 입주자 데이터가 없습니다."); return; }
     const ok = await appConfirm(
       "시스템 설정",
@@ -4468,9 +4469,9 @@ export default function App() {
     hire: NewHireEmployee,
     existingOccupant?: Occupant
   ): Occupant | null => {
-    // 필수값 가드: 이름/연락처/기숙사(dormId)가 정상값일 때만 입주자 생성(빈/NULL 이름 입주자 자동생성 방지).
+    // 필수값 가드: 이름/연락처/기숙사(dormId)가 정상값일 때만 입주자 생성(빈/NULL/"-" 이름 입주자 자동생성 방지).
     if (!hire.dormId) return null;
-    if (!hasText(hire.name) || !hasText(hire.phone)) return null;
+    if (!isRealName(hire.name) || !hasText(hire.phone)) return null;
 
     // 삭제 상태는 신입사원(원본)을 따라감 → 삭제/복원이 입주자에 그대로 전파
     const inheritedDeleted = hire.isDeleted || false;
@@ -6233,7 +6234,7 @@ export default function App() {
   const visibleOccupants = useMemo(() => {
     return occupants.filter((o) => {
       if (o.isDeleted) return false;
-      if (!hasText(o.employeeName)) return false; // sanitize: 이름 없는 행 제외
+      if (!isRealName(o.employeeName)) return false; // sanitize: 이름 없는/"-" 행 제외
       // 권한 필터링
       if (currentUser?.role === "maintenance_reporter") {
         if (o.dormId !== currentUser.dormId) return false;

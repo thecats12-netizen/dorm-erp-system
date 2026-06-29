@@ -348,30 +348,40 @@ export const loadOperationalModule = async (tenantId: string): Promise<Operation
   }
 
   try {
+    // tenant_id 호환 조회(필터 없이 전체 조회 — 기존 행의 tenant_id 가 default/기본/NULL 로 섞여도 누락 방지).
+    // 또한 테이블 하나가 실패(타임아웃 등)해도 나머지는 표시되도록 allSettled + 개별 폴백([]) 처리.
     const [cleaningResult, defectsResult, inventoryResult, settlementRecordsResult, settlementItemsResult, auditLogsResult] =
-      await Promise.all([
-        supabase!.from("cleaning_reports").select("*").eq("tenant_id", tenantId),
-        supabase!.from("defect_requests").select("*").eq("tenant_id", tenantId),
-        supabase!.from("inventory_items").select("*").eq("tenant_id", tenantId),
-        supabase!.from("settlement_records").select("*").eq("tenant_id", tenantId),
-        supabase!.from("settlement_items").select("*").eq("tenant_id", tenantId),
-        supabase!.from("audit_logs").select("*").eq("tenant_id", tenantId),
+      await Promise.allSettled([
+        supabase!.from("cleaning_reports").select("*"),
+        supabase!.from("defect_requests").select("*"),
+        supabase!.from("inventory_items").select("*"),
+        supabase!.from("settlement_records").select("*"),
+        supabase!.from("settlement_items").select("*"),
+        supabase!.from("audit_logs").select("*"),
       ]);
 
-    if (cleaningResult.error || defectsResult.error || inventoryResult.error || settlementRecordsResult.error || settlementItemsResult.error || auditLogsResult.error) {
-      console.error("Supabase operational module load error:",
-        cleaningResult.error || defectsResult.error || inventoryResult.error || settlementRecordsResult.error || settlementItemsResult.error || auditLogsResult.error);
-      return null;
-    }
+    // 각 테이블 결과를 안전하게 추출(실패/에러 시 빈 배열). 하나가 실패해도 전체를 null 로 만들지 않는다.
+    const rowsOf = (res: PromiseSettledResult<any>, label: string): any[] => {
+      if (res.status === "rejected") {
+        console.warn(`[loadOperationalModule] ${label} 조회 실패(빈 값으로 처리):`, (res.reason as { message?: string })?.message || res.reason);
+        return [];
+      }
+      const { data, error } = res.value as { data: any[] | null; error: { message?: string } | null };
+      if (error) {
+        console.warn(`[loadOperationalModule] ${label} 조회 오류(빈 값으로 처리):`, error.message || error);
+        return [];
+      }
+      return data || [];
+    };
 
     return {
       tenantId,
-      cleaningReports: (cleaningResult.data || []).map(toDomainCleaningReport),
-      defects: (defectsResult.data || []).map(toDomainDefectRequest),
-      inventory: (inventoryResult.data || []).map(toDomainInventoryItem),
-      settlementRecords: (settlementRecordsResult.data || []).map(toDomainSettlementRecord),
-      settlementItems: (settlementItemsResult.data || []).map(toDomainSettlementItem),
-      auditLogs: (auditLogsResult.data || []).map(toDomainAuditLog),
+      cleaningReports: rowsOf(cleaningResult, "cleaning_reports").map(toDomainCleaningReport),
+      defects: rowsOf(defectsResult, "defect_requests").map(toDomainDefectRequest),
+      inventory: rowsOf(inventoryResult, "inventory_items").map(toDomainInventoryItem),
+      settlementRecords: rowsOf(settlementRecordsResult, "settlement_records").map(toDomainSettlementRecord),
+      settlementItems: rowsOf(settlementItemsResult, "settlement_items").map(toDomainSettlementItem),
+      auditLogs: rowsOf(auditLogsResult, "audit_logs").map(toDomainAuditLog),
     };
   } catch (error) {
     console.error("Supabase operational module load exception:", error);
