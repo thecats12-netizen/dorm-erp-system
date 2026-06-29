@@ -109,7 +109,8 @@ const toDbOccupant = (occupant: Occupant, tenantId: string, userId: string) => (
 
 const toDomainOccupant = (row: any): Occupant => ({
   id: row.id,
-  dormId: row.dorm_id || "",
+  // dorm 참조 컬럼명이 섞여 있어도(dorm_id / assigned_dorm_id / contract_id 등) 정상 매핑.
+  dormId: row.dorm_id || row.assigned_dorm_id || row.assignedDormId || row.contract_id || row.contractId || row.dormId || "",
   site: row.site,
   employeeName: row.employee_name || "",
   gender: row.gender || "남",

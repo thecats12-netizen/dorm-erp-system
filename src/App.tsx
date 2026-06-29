@@ -1577,7 +1577,7 @@ export default function App() {
 
   const toDomainRealtimeOccupant = (row: any): Occupant => ({
     id: row.id,
-    dormId: row.dorm_id || "",
+    dormId: row.dorm_id || row.assigned_dorm_id || row.assignedDormId || row.contract_id || row.contractId || row.dormId || "",
     site: row.site || "",
     employeeName: row.employee_name || "",
     gender: row.gender || "남",
@@ -4636,9 +4636,24 @@ export default function App() {
   // ============================================
 
   // 기숙사별 현재 거주중 인원 계산
+  // #6: status 가 거주중/입주/배정/재직/빈값 등으로 섞여 있어도, 입실일이 있고 퇴실(예정)일이 없거나
+  //     미래면 현재 거주자로 인정. 명시적 퇴실/천안이동/삭제만 제외.
+  const isCurrentResidentOccupant = (o: { status?: string; isDeleted?: boolean; moveInDate?: string; moveOutDueDate?: string; actualMoveOutDate?: string }): boolean => {
+    if (o.isDeleted) return false;
+    const today = new Date().toISOString().slice(0, 10);
+    if (o.status === "퇴실" || o.status === "천안이동" || o.status === "미배정") return false;
+    if (o.actualMoveOutDate && o.actualMoveOutDate <= today) return false;
+    if (["거주중", "만료예정", "신규입주", "입주", "배정", "재직", "대기중"].includes(o.status || "")) return true;
+    // 상태가 모호/빈값: 입실일이 있고 퇴실예정일이 없거나 미래면 거주중으로 간주
+    const movedIn = !!(o.moveInDate && o.moveInDate <= today);
+    const notMovedOut = !o.moveOutDueDate || o.moveOutDueDate >= today;
+    return movedIn && notMovedOut;
+  };
+
   const getCurrentResidentCount = (dormId: string): number => {
-    return occupants.filter(
-      (occ) => occ.dormId === dormId && !occ.isDeleted && occ.status !== "퇴실"
+    // normalizedOccupants(=canonical dormId) 기준으로 카운트 → 과거 id 불일치로 0/6 표시되던 문제 해결
+    return normalizedOccupants.filter(
+      (occ) => occ.dormId === dormId && isCurrentResidentOccupant(occ)
     ).length;
   };
 
@@ -5690,6 +5705,34 @@ export default function App() {
     return [...contractBased, ...standalone];
   }, [dormContracts, dorms]);
 
+  // occupant.dormId 가 과거 계약/기숙사 id 와 어긋나도(또는 다른 id 공간이어도) 현재 카드와 매칭되도록
+  // canonical operationalDorm id 로 정규화. id 직접 일치 → dorms/contracts 의 id→호실키 → operationalDorm 매칭.
+  const dormKeyToOpId = useMemo(() => {
+    const m = new Map<string, string>();
+    operationalDorms.forEach((d) => m.set(getDormKey(d.site, d.buildingName, d.dong, d.roomHo), d.id));
+    return m;
+  }, [operationalDorms]);
+  const resolveCanonicalDormId = (rawId?: string): string => {
+    const id = (rawId || "").trim();
+    if (!id) return "";
+    if (operationalDorms.some((d) => d.id === id)) return id; // 이미 canonical
+    const src = dorms.find((d) => d.id === id) || dormContracts.find((c) => c.id === id);
+    if (src) {
+      const canonical = dormKeyToOpId.get(getDormKey(src.site, src.buildingName, src.dong, src.roomHo));
+      if (canonical) return canonical;
+    }
+    return id; // 매칭 실패 시 원본 유지(숨기지 않음)
+  };
+  // 입주자 dormId 를 canonical 로 치환한 목록(읽기 전용 — 저장/업서트 없음). 카운트/목록/visible 공통 사용.
+  const normalizedOccupants = useMemo(
+    () => occupants.map((o) => {
+      const cid = resolveCanonicalDormId(o.dormId);
+      return cid === o.dormId ? o : { ...o, dormId: cid };
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [occupants, operationalDorms, dorms, dormContracts, dormKeyToOpId]
+  );
+
   // 계약 표시 상태 단일 helper(테이블/필터/KPI/Excel 공통). 종료/해지/만료예정/연장은 유지,
   // 그 외(공실/진행중 등 활성)는 실제 입주자 수 기준(0=공실, 정원미만=사용중, 정원이상=만실).
   // operationalDorms 직후에 정의해 visibleDormContracts 등에서 안전하게 사용(자체 입주자 카운트).
@@ -6234,7 +6277,7 @@ export default function App() {
   }, [visibleNewHires, selectedNewHireIds]);
 
   const visibleOccupants = useMemo(() => {
-    const result = occupants.filter((o) => {
+    const result = normalizedOccupants.filter((o) => {
       if (o.isDeleted) return false;
       // #9: 빈 name / 빈 dormId / 빈 occupantId 는 표시 제외(자동생성·오염 데이터)
       if (!isRealName(o.employeeName)) return false;
@@ -6267,9 +6310,10 @@ export default function App() {
       const text = `${site} ${dorm?.buildingName || ""} ${dorm?.dong || ""} ${dorm?.roomHo || ""} ${o.employeeName} ${o.department} ${o.phone} ${o.status}`.toLowerCase();
       return !occupantSearch || text.includes(occupantSearch.toLowerCase());
     });
-    if (occupants.length > 0) console.log("occupants loaded", occupants.length, "occupants visible", result.length);
+    console.log("[VIEW] visible occupants:", result.length, "(loaded:", occupants.length, ")");
     return result;
-  }, [occupants, dorms, operationalDorms, occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter, currentUser]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [normalizedOccupants, dorms, operationalDorms, occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter, currentUser]);
 
   const selectedDetailDorm = operationalDorms.find((dorm) => dorm.id === selectedDormDetailId) || null;
   const selectedDetailOccupants = selectedDetailDorm
@@ -6310,9 +6354,13 @@ export default function App() {
 
   // 선택 기숙사(또는 필터된 기숙사들) 기준 입주자 전체 이력(상태 필터 적용 전) — 통계/표시용
   const occupantScopedList = useMemo(
-    () => visibleOccupants.filter((o) =>
-      selectedDormId ? o.dormId === selectedDormId : occupantInMenuDorms(o)
-    ),
+    () => {
+      const list = visibleOccupants.filter((o) =>
+        selectedDormId ? o.dormId === selectedDormId : occupantInMenuDorms(o)
+      );
+      if (selectedDormId) console.log("[MATCH] selected dorm occupants:", list.length, "(dormId:", selectedDormId, ")");
+      return list;
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [visibleOccupants, selectedDormId, occupantMenuDormIdSet, occupantMenuFilterSite, occupantMenuFilterGender]
   );
@@ -6794,13 +6842,15 @@ export default function App() {
 
   const occupancyCountByDorm = useMemo(() => {
     const map = new Map<string, number>();
-    occupants.forEach((o) => {
-      if (!o.isDeleted && !o.deletedAt && !o.isPermanentDeleted && ["거주중", "만료예정"].includes(o.status)) {
+    // canonical dormId(normalizedOccupants) + 관대한 거주 판정(#6) 기준 — 카드 상태(공실/사용중/만실)가 실제 인원과 일치.
+    normalizedOccupants.forEach((o) => {
+      if (!o.deletedAt && !o.isPermanentDeleted && isCurrentResidentOccupant(o)) {
         map.set(o.dormId, (map.get(o.dormId) || 0) + 1);
       }
     });
     return map;
-  }, [occupants]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [normalizedOccupants]);
 
   // 카드 상태 표시는 계약상태 텍스트가 아니라 "실제 현재 인원" 기준으로 우선 계산.
   // 0명=공실, 정원 미만=사용중, 정원 이상=만실.
