@@ -5723,15 +5723,70 @@ export default function App() {
     }
     return id; // 매칭 실패 시 원본 유지(숨기지 않음)
   };
-  // 입주자 dormId 를 canonical 로 치환한 목록(읽기 전용 — 저장/업서트 없음). 카운트/목록/visible 공통 사용.
-  const normalizedOccupants = useMemo(
-    () => occupants.map((o) => {
+  // 입주자 표시용 통합 목록(읽기 전용 — 저장/업서트 없음). 카운트/목록/visible 공통 사용.
+  // ① occupants 를 canonical dormId 로 정규화 + 이름/연락처 등이 비면 newHires(sourceNewHireId/이름+연락처)에서 보완
+  // ② occupant 행이 없는 "배정된 신입사원"은 표시용 입주자로 합성(자동 INSERT 아님 — 화면에만 보완)
+  const normalizedOccupants = useMemo(() => {
+    const digits = (s?: string) => (s || "").replace(/\D/g, "");
+    const nhById = new Map(newHires.map((h) => [h.id, h]));
+    const findNhFor = (o: Occupant) => {
+      if (o.sourceNewHireId && nhById.has(o.sourceNewHireId)) return nhById.get(o.sourceNewHireId);
+      return newHires.find((h) => isRealName(h.name) && h.name === o.employeeName && digits(h.phone) === digits(o.phone) && digits(o.phone) !== "");
+    };
+
+    // ① occupants 정규화 + 보완
+    const occList: Occupant[] = occupants.map((o) => {
       const cid = resolveCanonicalDormId(o.dormId);
-      return cid === o.dormId ? o : { ...o, dormId: cid };
-    }),
+      let employeeName = o.employeeName, phone = o.phone, department = o.department;
+      let moveInDate = o.moveInDate, moveOutDueDate = o.moveOutDueDate, gender = o.gender, site = o.site;
+      if (!isRealName(employeeName) || !hasText(phone)) {
+        const nh = findNhFor(o);
+        if (nh) {
+          if (!isRealName(employeeName)) employeeName = nh.name;
+          phone = phone || nh.phone;
+          department = department || nh.department;
+          moveInDate = moveInDate || nh.moveInDate;
+          moveOutDueDate = moveOutDueDate || nh.moveOutDate;
+          gender = gender || nh.gender;
+          site = site || nh.site;
+        }
+      }
+      return { ...o, dormId: cid, employeeName, phone, department, moveInDate, moveOutDueDate, gender, site };
+    });
+
+    // ② occupant 가 이미 커버하는 newHire(중복 합성 방지)
+    const coveredNhIds = new Set(occList.map((o) => o.sourceNewHireId).filter(Boolean) as string[]);
+    const coveredNameKeys = new Set(occList.map((o) => `${(o.employeeName || "").trim()}|${digits(o.phone)}|${o.dormId}`));
+
+    const supplement: Occupant[] = newHires
+      .filter((h) => !h.isDeleted && isRealName(h.name) && hasText(h.dormId))
+      .filter((h) => getNewHireStatus(h) !== "퇴실") // 배정/거주 상태만(퇴실 제외)
+      .filter((h) => !coveredNhIds.has(h.id))
+      .filter((h) => !coveredNameKeys.has(`${h.name.trim()}|${digits(h.phone)}|${resolveCanonicalDormId(h.dormId)}`))
+      .map((h) => ({
+        id: `nh-occ-${h.id}`,
+        dormId: resolveCanonicalDormId(h.dormId),
+        site: h.site,
+        employeeName: h.name,
+        gender: h.gender,
+        department: h.department,
+        phone: h.phone,
+        moveInDate: h.moveInDate,
+        moveOutDueDate: h.moveOutDate,
+        status: (h.moveInDate ? "거주중" : "대기중") as Occupant["status"],
+        isNewHireAssignment: true,
+        notes: "",
+        expectedMoveInDate: h.expectedMoveInDate,
+        expectedMoveOutDate: h.expectedMoveOutDate,
+        actualMoveOutDate: h.actualMoveOutDate,
+        sourceNewHireId: h.id,
+        createdAt: h.createdAt,
+        updatedAt: h.updatedAt,
+      } as Occupant));
+
+    return [...occList, ...supplement];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [occupants, operationalDorms, dorms, dormContracts, dormKeyToOpId]
-  );
+  }, [occupants, newHires, operationalDorms, dorms, dormContracts, dormKeyToOpId]);
 
   // 계약 표시 상태 단일 helper(테이블/필터/KPI/Excel 공통). 종료/해지/만료예정/연장은 유지,
   // 그 외(공실/진행중 등 활성)는 실제 입주자 수 기준(0=공실, 정원미만=사용중, 정원이상=만실).
@@ -6136,7 +6191,8 @@ export default function App() {
       vacancy: Math.max((dorm.capacity || 6) - getCurrentResidentCount(dorm.id), 0),
       available: (dorm.capacity || 6) - getCurrentResidentCount(dorm.id) > 0,
     }));
-  }, [operationalDorms, occupants]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalDorms, occupants, newHires]);
 
   const visibleDorms = useMemo(() => {
     return operationalDorms.filter((dorm) => {
@@ -6144,7 +6200,7 @@ export default function App() {
       if (dormSiteFilter !== "전체" && dorm.site !== dormSiteFilter) return false;
       if (dormGenderFilter !== "전체" && dorm.gender !== dormGenderFilter) return false;
       if (dormStatusFilter !== "전체") {
-        const residentCount = occupants.filter((o) => !o.isDeleted && o.dormId === dorm.id && ["거주중", "만료예정"].includes(o.status)).length;
+        const residentCount = normalizedOccupants.filter((o) => o.dormId === dorm.id && isCurrentResidentOccupant(o)).length;
         if (dormStatusFilter === "공실" && residentCount > 0) return false;
         if (dormStatusFilter === "사용중" && residentCount === 0) return false;
       }
@@ -6154,7 +6210,8 @@ export default function App() {
       }
       return true;
     });
-  }, [operationalDorms, occupants, currentUser, dormSearch, dormSiteFilter, dormGenderFilter, dormStatusFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalDorms, normalizedOccupants, currentUser, dormSearch, dormSiteFilter, dormGenderFilter, dormStatusFilter]);
 
   // 기숙사/입주자 데이터가 "안 보이는" 사유를 사용자에게 안내. (담당 기숙사 미지정/불일치 등)
   // 관리자/뷰어는 전체 표시되므로 안내 대상이 아니다.
@@ -16074,7 +16131,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 const count = selectedNewHiresForAssignment.length;
                 const capacity = selectedDorm?.capacity || 6;
                 const currentOccupants = selectedDorm
-                  ? occupants.filter((o) => o.dormId === selectedDorm.id && !o.isDeleted && ["거주중", "만료예정"].includes(o.status)).length
+                  ? normalizedOccupants.filter((o) => o.dormId === selectedDorm.id && isCurrentResidentOccupant(o)).length
                   : 0;
                 const remaining = Math.max(capacity - currentOccupants, 0);
                 const totalAfter = currentOccupants + count;
