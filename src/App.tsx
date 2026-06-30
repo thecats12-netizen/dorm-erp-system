@@ -2156,6 +2156,8 @@ export default function App() {
   const [newHireSiteFilter, setNewHireSiteFilter] = useState<Site | "전체">("전체");
   const [newHireGenderFilter, setNewHireGenderFilter] = useState<"남" | "여" | "전체">("전체");
   const [newHireAssignmentFilter, setNewHireAssignmentFilter] = useState<"전체" | "배정완료" | "미배정">("전체");
+  // 신입사원 거주상태 필터(computedStatus 기준: 거주중/퇴실/만료예정/미배정). 통계 버킷과 동일 함수 사용.
+  const [newHireStatusFilter, setNewHireStatusFilter] = useState<"전체" | "거주중" | "퇴실" | "만료예정" | "미배정">("전체");
   const [simulationSearch, setSimulationSearch] = useState("");
   const [simulationSiteFilter, setSimulationSiteFilter] = useState<Site | "전체">("전체");
   const [simulationGenderFilter, setSimulationGenderFilter] = useState<"남" | "여" | "전체">("전체");
@@ -6530,13 +6532,16 @@ export default function App() {
       const isUnassigned = isUnassignedNewHire(h); // 공통 미배정 기준(대시보드와 동일)
       if (newHireAssignmentFilter === "배정완료" && isUnassigned) return false;
       if (newHireAssignmentFilter === "미배정" && !isUnassigned) return false;
+      // 거주상태 필터: 통계와 동일한 공통 분류(getNewHireStatBucket) 기준
+      if (newHireStatusFilter !== "전체" && getNewHireStatBucket(h) !== newHireStatusFilter) return false;
       if (newHireSearch) {
         const text = `${site} ${h.gender} ${h.name} ${h.phone} ${h.department} ${h.dormId} ${h.buildingName} ${h.dong} ${h.roomHo} ${h.expectedMoveInDate} ${h.moveInDate} ${h.expectedMoveOutDate} ${h.moveOutDate} ${h.actualMoveOutDate} ${h.cheonanMoveDate} ${h.residenceStatus} ${h.moveInType} ${h.extensionReason} ${h.notes}`.toLowerCase();
         return text.includes(newHireSearch.toLowerCase());
       }
       return true;
     });
-  }, [newHires, newHireSearch, newHireSiteFilter, newHireGenderFilter, newHireAssignmentFilter, currentUser]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newHires, newHireSearch, newHireSiteFilter, newHireGenderFilter, newHireAssignmentFilter, newHireStatusFilter, currentUser]);
 
   useEffect(() => {
     if (selectedDormContractIds.length === 0) return;
@@ -7747,7 +7752,7 @@ export default function App() {
 
   // ── 목록 페이지네이션(20개씩) — 필터/검색 적용 결과(filtered) 기준, resetKey 변경 시 1페이지 ──
   const dormContractPg = usePagination(visibleDormContracts, { resetKey: `${dormContractSearch}|${dormContractSiteFilter}|${dormContractStatusFilter}|${dormContractExpiryMonthFilter}` });
-  const newHirePg = usePagination(visibleNewHires, { resetKey: `${newHireSearch}|${newHireSiteFilter}|${newHireGenderFilter}|${newHireAssignmentFilter}` });
+  const newHirePg = usePagination(visibleNewHires, { resetKey: `${newHireSearch}|${newHireSiteFilter}|${newHireGenderFilter}|${newHireAssignmentFilter}|${newHireStatusFilter}` });
   const cleaningReportPg = usePagination(visibleCleaningReports, { resetKey: `${cleaningYear}|${cleaningMonth}|${cleaningDormSiteFilter}|${cleaningDormSearch}|${cleaningManagerFilter}|${cleaningStatusFilter}` });
   // 청소관리 상단 기숙사 목록: 10개씩 페이지네이션(검색/필터 변경 시 1페이지로 초기화).
   const cleaningDormPg = usePagination(visibleCleaningDormRows, { pageSize: 10, resetKey: `${cleaningDormSiteFilter}|${cleaningDormSearch}|${cleaningManagerFilter}|${cleaningStatusFilter}|${cleaningYear}|${cleaningMonth}` });
@@ -12649,17 +12654,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       return { label: `${s.site} ${s.gender}`, total, inUse, vacant: Math.max(total - inUse, 0) };
     });
 
-    // 2) 월별 입주율 추이 (최근 6개월): 현 거주자 / 총 정원
+    // 2) 월별 입주율 추이 (최근 12개월): 각 월 말 기준 거주 인원 / 총 정원.
+    //    실제 데이터(입주자 + 배정 신입사원=normalizedOccupants) 기준. 연장은 거주중으로 포함, 퇴실/미배정 제외.
+    const occMonths = Array.from({ length: 12 }, (_, idx) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - (11 - idx), 1);
+      return { label: `${d.getMonth() + 1}월`, end: new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59) };
+    });
     const totalCapacity = operationalDorms.reduce((sum, d) => sum + (d.capacity || 0), 0);
-    const occupancyTrend = months.map((m) => {
-      const residents = occupants.filter((o) => {
-        if (o.isDeleted) return false;
-        const moveIn = o.moveInDate ? new Date(o.moveInDate) : null;
-        if (!moveIn || Number.isNaN(moveIn.valueOf()) || moveIn > m.end) return false;
-        const out = o.actualMoveOutDate ? new Date(o.actualMoveOutDate) : null;
-        if (out && !Number.isNaN(out.valueOf()) && out < m.start) return false;
-        return true;
-      }).length;
+    // 해당 월 말일 기준 거주 여부: 입실일 ≤ 월말, (실제퇴실일 없음 또는 월말 이후), 기숙사 배정됨, 퇴실 아님.
+    const isResidentActiveInMonth = (o: Occupant, monthEnd: Date): boolean => {
+      if (o.isDeleted) return false;
+      if (!o.dormId || !o.dormId.trim()) return false; // 미배정 제외
+      if (o.status === "퇴실" || o.status === "천안이동") return false; // 퇴실 제외(연장은 퇴실 아님 → 포함)
+      const moveIn = o.moveInDate ? new Date(o.moveInDate) : null;
+      if (!moveIn || Number.isNaN(moveIn.valueOf()) || moveIn > monthEnd) return false;
+      const out = o.actualMoveOutDate ? new Date(o.actualMoveOutDate) : null;
+      if (out && !Number.isNaN(out.valueOf()) && out <= monthEnd) return false; // 월말 전에 이미 퇴실
+      return true;
+    };
+    const occupancyTrend = occMonths.map((m) => {
+      const residents = normalizedOccupants.filter((o) => isResidentActiveInMonth(o, m.end)).length;
       return { label: m.label, rate: safeRate(residents, totalCapacity), residents, capacity: totalCapacity };
     });
 
@@ -12692,7 +12706,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     });
 
     return { regionStatus, occupancyTrend, expiryTrend, defectTrend, cleaningTrend };
-  }, [siteGenderStats, operationalDorms, occupants, defects, cleaningReports, occupancyCountByDorm]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [siteGenderStats, operationalDorms, occupants, normalizedOccupants, defects, cleaningReports, occupancyCountByDorm]);
 
   // 월 필터 옵션 (데이터 내 실제 월 + 차트 표시 구간 합집합, 오름차순)
   const dormContractMonthOptions = useMemo(() => {
@@ -15387,6 +15402,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   value={newHireAssignmentFilter}
                   onChange={(v) => setNewHireAssignmentFilter(v as "전체" | "배정완료" | "미배정")}
                   options={["전체", "배정완료", "미배정"]}
+                />
+                <FilterSelect
+                  label="거주상태"
+                  value={newHireStatusFilter}
+                  onChange={(v) => setNewHireStatusFilter(v as "전체" | "거주중" | "퇴실" | "만료예정" | "미배정")}
+                  options={["전체", "거주중", "퇴실", "만료예정", "미배정"]}
                 />
                 <input
                   type="text"
