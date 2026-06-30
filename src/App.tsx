@@ -1193,17 +1193,17 @@ function isUnassignedNewHire(h: NewHireEmployee): boolean {
 
 // 신입사원 통계 단일 분류: 모든 row 를 정확히 하나의 버킷(거주중/퇴실/만료예정/미배정)에 배정.
 // → 거주중+퇴실+만료예정+미배정 합계가 총 신입사원 수와 항상 일치(누락 없음). 연장은 거주중에 포함.
-// 실제 퇴실일/퇴실일이 있으면 무엇보다 퇴실 우선.
+// 퇴실 확정은 "실제 퇴실일(actualMoveOutDate)" 또는 명시적 퇴실 상태만. (예정퇴실일/계약종료일만 있으면 퇴실 아님)
 function getNewHireStatBucket(h: NewHireEmployee): "거주중" | "퇴실" | "만료예정" | "미배정" {
-  const hasMovedOut = Boolean(
-    (h as { actualMoveOutDate?: string }).actualMoveOutDate ||
-    (h as { moveOutDate?: string }).moveOutDate
-  );
-  const st = getNewHireStatus(h);
-  if (hasMovedOut || st === "퇴실") return "퇴실";
+  const raw = String((h.residenceStatus as string) || "").trim();
+  // 1) 실제 퇴실: 실제퇴실일이 있거나 상태가 명시적으로 퇴실일 때만(예정일/계약종료일만으로는 퇴실 아님)
+  if (h.actualMoveOutDate || raw === "퇴실") return "퇴실";
+  const st = getNewHireStatus(h); // 자동선택이면 actualMoveOutDate 기준 계산값(퇴실/만료예정/연장/거주중/대기중)
+  if (st === "퇴실") return "퇴실";
+  // 2) 만료예정(예정퇴실일/계약종료일이 30일 이내)
   if (st === "만료예정") return "만료예정";
-  if (st === "거주중" || st === "연장") return "거주중"; // 연장 → 거주중 포함
-  // 그 외(대기중 등): 기숙사 배정되어 있으면 거주중, 아니면 미배정 (누락 방지)
+  // 3) 거주중(연장 포함). 대기중이어도 기숙사 배정되어 있으면 거주중.
+  if (st === "거주중" || st === "연장" || raw === "연장" || raw === "거주중") return "거주중";
   const hasDorm = Boolean(
     (h.dormId && h.dormId.trim()) ||
     ((h.buildingName || "").trim() && (h.roomHo || "").trim())
@@ -6543,6 +6543,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [newHires, newHireSearch, newHireSiteFilter, newHireGenderFilter, newHireAssignmentFilter, newHireStatusFilter, currentUser]);
 
+  // [1] 통계 합계 검증(개발 모드): 거주중+퇴실+만료예정+미배정 = 총 신입사원 이 아니면 경고.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const b = { 거주중: 0, 퇴실: 0, 만료예정: 0, 미배정: 0 };
+    visibleNewHires.forEach((h) => { b[getNewHireStatBucket(h)] += 1; });
+    const sum = b.거주중 + b.퇴실 + b.만료예정 + b.미배정;
+    if (sum !== visibleNewHires.length) console.warn("[신입사원 통계 불일치]", { total: visibleNewHires.length, sum, diff: visibleNewHires.length - sum });
+  }, [visibleNewHires]);
+
   useEffect(() => {
     if (selectedDormContractIds.length === 0) return;
     const visibleIds = new Set(visibleDormContracts.map((c) => c.id));
@@ -6600,8 +6609,17 @@ export default function App() {
   }, [normalizedOccupants, dorms, operationalDorms, occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter, currentUser]);
 
   const selectedDetailDorm = operationalDorms.find((dorm) => dorm.id === selectedDormDetailId) || null;
+  // 상세보기 입주자: 현재 거주자 먼저, 퇴실/과거거주는 아래로 정렬(현재 인원 계산은 별도로 퇴실 제외).
   const selectedDetailOccupants = selectedDetailDorm
-    ? visibleOccupants.filter((occupant) => occupant.dormId === selectedDormDetailId)
+    ? visibleOccupants
+        .filter((occupant) => occupant.dormId === selectedDormDetailId)
+        .slice()
+        .sort((a, b) => {
+          const am = ["퇴실", "과거거주"].includes(occupantDisplayStatus(a)) ? 1 : 0;
+          const bm = ["퇴실", "과거거주"].includes(occupantDisplayStatus(b)) ? 1 : 0;
+          if (am !== bm) return am - bm; // 현재 거주자(0) 먼저, 퇴실(1) 나중
+          return (b.moveInDate || "").localeCompare(a.moveInDate || "");
+        })
     : [];
   const selectedDetailInventory = selectedDetailDorm
     ? inventory.filter((item) => item.dormId === selectedDormDetailId && !item.isDeleted)
@@ -12654,10 +12672,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       return { label: `${s.site} ${s.gender}`, total, inUse, vacant: Math.max(total - inUse, 0) };
     });
 
-    // 2) 월별 입주율 추이 (최근 12개월): 각 월 말 기준 거주 인원 / 총 정원.
+    // 2) 월별 입주율 추이 (최근 6개월): 각 월 말 기준 거주 인원 / 총 정원.
     //    실제 데이터(입주자 + 배정 신입사원=normalizedOccupants) 기준. 연장은 거주중으로 포함, 퇴실/미배정 제외.
-    const occMonths = Array.from({ length: 12 }, (_, idx) => {
-      const d = new Date(now.getFullYear(), now.getMonth() - (11 - idx), 1);
+    const occMonths = Array.from({ length: 6 }, (_, idx) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - (5 - idx), 1);
       return { label: `${d.getMonth() + 1}월`, end: new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59) };
     });
     const totalCapacity = operationalDorms.reduce((sum, d) => sum + (d.capacity || 0), 0);
@@ -16203,12 +16221,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           </tr>
                         </thead>
                         <tbody>
-                          {selectedDetailOccupants.map((occupant) => (
-                            <tr key={occupant.id} className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}`}>
+                          {selectedDetailOccupants.map((occupant) => {
+                            const movedOut = ["퇴실", "과거거주"].includes(occupantDisplayStatus(occupant));
+                            return (
+                            <tr key={occupant.id} className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"} ${movedOut ? (theme.darkMode ? "bg-slate-950/40 text-slate-500" : "bg-slate-50 text-slate-400") : ""}`}>
                               <td className="px-3 py-3">{occupant.employeeName}</td>
                               <td className="px-3 py-3">{occupant.gender}</td>
                               <td className="px-3 py-3">{formatDateOnly(occupant.moveInDate || "") || "-"}</td>
-                              <td className="px-3 py-3">{occupant.status}</td>
+                              <td className="px-3 py-3">{movedOut ? <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600">퇴실</span> : occupant.status}</td>
                               <td translate="no" className="px-3 py-3 notranslate">{occupant.department}</td>
                               <td className="px-3 py-3">{maskPhone(occupant.phone)}</td>
                               <td className="px-3 py-3">{formatDateOnly(occupant.actualMoveOutDate || occupant.moveOutDueDate || "") || "-"}</td>
@@ -16220,7 +16240,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                     : "-"}
                               </td>
                             </tr>
-                          ))}
+                            );
+                          })}
                           {selectedDetailOccupants.length === 0 && (
                             <tr>
                               <td colSpan={8} className="px-3 py-8 text-center text-slate-400">
@@ -18282,13 +18303,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           c.dong === dorm.dong &&
                           c.roomHo === dorm.roomHo
                       );
-                      const dormCleanings = cleaningReports.filter(
-                        (r) =>
-                          r.buildingName === dorm.buildingName &&
-                          r.address === dorm.address &&
-                          r.dong === dorm.dong &&
-                          r.roomHo === dorm.roomHo
-                      );
+                      // 청소관리 원본(cleaningReports)과 동일 소스 기준. dorm_id 우선, 없으면 건물+동+호 정규화 키로 매칭(삭제 제외).
+                      const dormCleanings = cleaningReports.filter((r) => {
+                        if (r.isDeleted) return false;
+                        return (
+                          (r.dormId && r.dormId === dorm.id) ||
+                          makeDormMatchKey(r.site, r.buildingName, r.dong, r.roomHo) === makeDormMatchKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo)
+                        );
+                      });
                       const dormDefects = defects.filter(
                         (d) =>
                           d.buildingName === dorm.buildingName &&
