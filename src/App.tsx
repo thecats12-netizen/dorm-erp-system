@@ -1219,6 +1219,41 @@ function addDays(dateText: string, days: number) {
   return date.toISOString().slice(0, 10);
 }
 
+// 청소 주차 단일 기준(공통): "그 주의 월요일이 속한 월"의 N번째 월요일~일요일(7일) 주차.
+//  - 월~일 기준. 한 주가 다음 달로 이어져도 그 주의 "월요일이 속한 월"의 주차로 유지.
+//  - 예) 2026-06-29~2026-07-05 → 2026년 6월 5주차 / 2026-07-06~ → 2026년 7월 1주차.
+//  - 청소관리/청소보고서/문서관리/통계가 모두 이 함수 하나만 사용한다.
+function getCleaningWeekInfo(dateInput: string | Date | null | undefined): {
+  year: number; month: number; weekNumber: number; weekKey: string; weekStart: string; weekEnd: string; label: string;
+} | null {
+  if (!dateInput) return null;
+  const d = new Date(dateInput);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setHours(0, 0, 0, 0);
+  // 이번 주 월요일(weekStart)
+  const mondayOffset = (d.getDay() + 6) % 7; // 0=일..6=토 → 월요일까지 거리
+  const weekStart = new Date(d);
+  weekStart.setDate(d.getDate() - mondayOffset);
+  weekStart.setHours(0, 0, 0, 0);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
+  const year = weekStart.getFullYear();
+  const month = weekStart.getMonth() + 1; // 월요일이 속한 월(1-12)
+  // 해당 월의 첫 월요일 날짜
+  const firstOfMonth = new Date(year, weekStart.getMonth(), 1);
+  const firstMondayDate = 1 + ((8 - firstOfMonth.getDay()) % 7);
+  const weekNumber = Math.floor((weekStart.getDate() - firstMondayDate) / 7) + 1;
+  const fmt = (x: Date) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+  return {
+    year, month, weekNumber,
+    weekKey: `${year}-${String(month).padStart(2, "0")}-W${weekNumber}`,
+    weekStart: fmt(weekStart),
+    weekEnd: fmt(weekEnd),
+    label: `${year}년 ${month}월 ${weekNumber}주차`,
+  };
+}
+
 function calculateDormContractType(
   contract: DormContractFormLike,
   dormContracts: DormContract[],
@@ -2124,8 +2159,8 @@ export default function App() {
   const [defectSearch, setDefectSearch] = useState("");
   const [defectStatusFilter, setDefectStatusFilter] = useState<"전체" | "접수" | "진행중" | "완료">("전체");
   const [defectReceiptMonthFilter, setDefectReceiptMonthFilter] = useState<string>("전체");
-  const [cleaningYear, setCleaningYear] = useState(new Date().getFullYear().toString());
-  const [cleaningMonth, setCleaningMonth] = useState(String(new Date().getMonth() + 1).padStart(2, "0"));
+  const [cleaningYear, setCleaningYear] = useState<string>("전체");
+  const [cleaningMonth, setCleaningMonth] = useState<string>("전체");
   const [cleaningDormSiteFilter, setCleaningDormSiteFilter] = useState<Site | "전체">("전체");
   const [cleaningDormSearch, setCleaningDormSearch] = useState("");
   const [cleaningManagerFilter, setCleaningManagerFilter] = useState<string>("전체");
@@ -4396,30 +4431,20 @@ export default function App() {
   // 3. 주차 계산 함수 (월~금 기준, 1~5주차)
   // 주차 내 1건 이상 → O, 금요일 지나면 → X, 아직 안지나면 → 예정
   // ============================================
+  // 공통 주차 기준(getCleaningWeekInfo)으로 통일 — "월요일이 속한 월"의 주차 번호 반환.
   const getWeekOfMonth = (date: string): number => {
-    const d = new Date(date);
-    const firstDay = new Date(d.getFullYear(), d.getMonth(), 1);
-    
-    // 첫 번째 월요일을 찾기
-    let firstMonday = new Date(firstDay);
-    const firstDayOfWeek = firstDay.getDay(); // 0=일, 1=월, ..., 6=토
-    if (firstDayOfWeek !== 1) {
-      firstMonday.setDate(firstDay.getDate() + ((1 - firstDayOfWeek + 7) % 7));
-    }
-    
-    // 현재 날짜가 첫 번째 월요일 이전이면 week 0
-    if (d < firstMonday) return 0;
-    
-    // 주차 계산
-    const weekNumber = Math.floor((d.getTime() - firstMonday.getTime()) / (7 * 24 * 60 * 60 * 1000)) + 1;
-    return Math.min(weekNumber, 5); // 최대 5주차
+    const info = getCleaningWeekInfo(date);
+    return info ? info.weekNumber : 0;
   };
 
+  // 청소 월 라벨도 "월요일이 속한 월" 기준(주차와 일관). 6/29~7/5 → 2026-06.
   const getMonthLabel = (date: string): string => {
-    const d = new Date(date);
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, "0");
-    return `${year}-${month}`;
+    const info = getCleaningWeekInfo(date);
+    if (!info) {
+      const d = new Date(date);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    }
+    return `${info.year}-${String(info.month).padStart(2, "0")}`;
   };
 
   const getWeekLabel = (date: string): string => {
@@ -6851,10 +6876,11 @@ export default function App() {
       if (report.isDeleted) return false;
       const reportDate = parseSafeDate(report.reportDate);
       const reportDorm = findOperationalDormForCleaningReport(report);
+      // 연도/월 "전체"면 필터 미적용. 적용 시에는 주차 기준 월(getCleaningWeekInfo: 월요일이 속한 월)으로 매칭.
+      const wk = getCleaningWeekInfo(report.reportDate);
       const matchesYearMonth =
-        reportDate &&
-        reportDate.getFullYear() === Number(cleaningYear) &&
-        reportDate.getMonth() + 1 === Number(cleaningMonth);
+        (cleaningYear === "전체" || (wk != null && wk.year === Number(cleaningYear))) &&
+        (cleaningMonth === "전체" || (wk != null && wk.month === Number(cleaningMonth)));
       const matchesSite =
         cleaningDormSiteFilter === "전체" ||
         (reportDorm?.site || report.site) === cleaningDormSiteFilter;
@@ -6924,13 +6950,13 @@ export default function App() {
     return day === 0 || day === 6;
   };
 
-  // 주차 = 매월 월요일 시작, 월요일~일요일(7일). 1주차는 그 달 1일이 속한 월~일 주.
+  // 주차 = "그 달의 첫 월요일"부터 7일 단위(getCleaningWeekInfo 와 동일 기준). N주차 = 첫 월요일 + (N-1)*7.
+  // 예) 2026-06 1주차=6/1~6/7 … 5주차=6/29~7/5, 2026-07 1주차=7/6~7/12.
   const getWeekRange = (year: string, month: string, weekNo: number) => {
     const monthIndex = Number(month) - 1;
-    const first = new Date(Number(year), monthIndex, 1);
-    const offset = (first.getDay() + 6) % 7; // 1일이 속한 주의 월요일까지의 보정
-    const startDay = 1 + (weekNo - 1) * 7 - offset;
-    const start = new Date(Number(year), monthIndex, startDay);
+    const firstOfMonth = new Date(Number(year), monthIndex, 1);
+    const firstMondayDate = 1 + ((8 - firstOfMonth.getDay()) % 7); // 그 달의 첫 월요일 날짜
+    const start = new Date(Number(year), monthIndex, firstMondayDate + (weekNo - 1) * 7);
     start.setHours(0, 0, 0, 0);
     const end = new Date(start);
     end.setDate(start.getDate() + 6); // 월~일 7일
@@ -6979,7 +7005,10 @@ export default function App() {
 
 
   const getCleaningWeeklyStatus = (dorm: Dorm, weekNo: number) => {
-    const range = getWeekRange(cleaningYear, cleaningMonth, weekNo);
+    // 주차 그리드는 특정 월이 필요하므로 "전체"면 현재 연/월로 대체(목록 필터의 전체와 별개).
+    const effYear = cleaningYear === "전체" ? String(new Date().getFullYear()) : cleaningYear;
+    const effMonth = cleaningMonth === "전체" ? String(new Date().getMonth() + 1) : cleaningMonth;
+    const range = getWeekRange(effYear, effMonth, weekNo);
     const dormKey = matchDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
     const reports = cleaningReports.filter((report) => {
       if (report.isDeleted || report.isPermanentDeleted) return false;
@@ -7091,16 +7120,29 @@ export default function App() {
     }
   }, [visibleCleaningDormRows, selectedCleaningDormId]);
 
+  // [5] 담당자 필터 옵션: 현재 운영 기숙사의 실제 담당자(프로필 dorm_id 기준 포함) 이름 — 중복 제거/빈값 제외/오름차순.
   const managerFilterOptions = useMemo(() => {
     const names = new Set<string>();
     operationalDorms.forEach((dorm) => {
-      if (dorm.managerUserId) {
-        const manager = users.find((u) => u.id === dorm.managerUserId);
-        if (manager) names.add(manager.displayName);
-      }
+      const m = getDormManagerUser(dorm.id);
+      const name = (m?.displayName || m?.username || "").trim();
+      if (name && name !== "-") names.add(name);
     });
-    return Array.from(names).sort();
-  }, [operationalDorms, users]);
+    return Array.from(names).sort((a, b) => a.localeCompare(b, "ko"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalDorms, users, dorms]);
+
+  // [4] 연도 옵션: 실제 청소보고서 데이터에 존재하는 연도(주차 기준) — 최신 연도 우선. 없으면 올해.
+  const cleaningYearOptions = useMemo(() => {
+    const years = new Set<string>();
+    cleaningReports.forEach((r) => {
+      if (r.isDeleted) return;
+      const wk = getCleaningWeekInfo(r.reportDate);
+      if (wk) years.add(String(wk.year));
+    });
+    if (years.size === 0) years.add(String(new Date().getFullYear()));
+    return Array.from(years).sort((a, b) => b.localeCompare(a));
+  }, [cleaningReports]);
 
   // 선택된 기숙사가 있으면 그 기숙사만, 없으면 전체(visible) — 요약/담당자감점/현황 공통 범위.
   const cleaningScopeDormRows = useMemo(() => {
@@ -18379,7 +18421,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     {cleaningReports.slice(-5).reverse().map((report) => (
                       <div key={report.id} className={`rounded-2xl p-3 shadow-sm text-xs ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
                         <div className={`font-medium truncate ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{report.buildingName} {formatDong(report.dong)}-{formatRoomHo(report.roomHo)}</div>
-                        <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>{report.monthLabel} {report.weekLabel}</div>
+                        <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>{getCleaningWeekInfo(report.reportDate)?.label || `${report.monthLabel} ${report.weekLabel}`}</div>
                       </div>
                     ))}
                   </div>
@@ -18618,8 +18660,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             )}
 
             <div className="grid gap-4 lg:grid-cols-3">
-              <Input label="연도" value={cleaningYear} onChange={(v) => setCleaningYear(v)} placeholder="YYYY" />
-              <Input label="월" value={cleaningMonth} onChange={(v) => setCleaningMonth(v)} placeholder="MM" />
+              <SelectInput label="연도" value={cleaningYear} onChange={(v) => setCleaningYear(v)} options={["전체", ...cleaningYearOptions]} />
+              <SelectInput label="월" value={cleaningMonth} onChange={(v) => setCleaningMonth(v)} options={["전체", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]} />
               {!isMaintenanceReporter && (
                 <SelectInput label="지역" value={cleaningDormSiteFilter} onChange={(v) => setCleaningDormSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
               )}
