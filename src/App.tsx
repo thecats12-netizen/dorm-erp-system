@@ -1243,8 +1243,20 @@ function daysBetween(start: string, end: string) {
   return Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
 }
 
+// 계약 자동계산 상태 배지 기본색(테마 colorMap 에 없을 때 사용). 디자인 유지 + 상태별 색만 연결(#5).
+const CONTRACT_STATUS_COLORS: Record<string, string> = {
+  사용중: "#DCFCE7", // 초록
+  만실: "#DCFCE7", // 초록
+  예정: "#DBEAFE", // 파랑
+  만료: "#FEF3C7", // 노랑/주황
+  종료: "#E5E7EB", // 회색
+  해지: "#FEE2E2", // 연한 빨강
+  공실: "#E5E7EB", // 회색
+  계약없음: "#FECACA", // 빨강(연)
+  확인필요: "#FECACA", // 빨강
+};
 function badgeColor(theme: ThemeSettings, value: string) {
-  return theme.colorMap[value] || "#E5E7EB";
+  return theme.colorMap[value] || CONTRACT_STATUS_COLORS[value] || "#E5E7EB";
 }
 
 // 성별 정규화 + 색상(정산관리 등): 남=파랑, 여=분홍, 혼합=보라, 미지정=회색
@@ -5926,18 +5938,49 @@ export default function App() {
   // 계약 표시 상태 단일 helper(테이블/필터/KPI/Excel 공통). 종료/해지/만료예정/연장은 유지,
   // 그 외(공실/진행중 등 활성)는 실제 입주자 수 기준(0=공실, 정원미만=사용중, 정원이상=만실).
   // operationalDorms 직후에 정의해 visibleDormContracts 등에서 안전하게 사용(자체 입주자 카운트).
-  const getContractDisplayStatus = (c: DormContract): string => {
-    const stored = c.contractStatus as string;
-    // [요청2] 수동 선택값(자동선택/빈값 제외)은 그대로 우선 표시(공실/진행중/만료예정/연장/종료/해지 등).
-    if (stored && stored !== "자동선택") return stored;
-    // 자동선택(또는 빈값) → 현재 점유 인원 기준 자동 계산(0=공실, 정원미만=사용중, 정원이상=만실).
-    const key = makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo);
+  // ============================================================================
+  // [공통] 계약 자동계산 상태 — 신규계약 테이블/통계/필터/Excel, 계약 등록·수정 모달, 입주자 메뉴가 모두 공유.
+  //  - DB 원본 contractStatus 는 유지(저장 시 자동 덮어쓰지 않음). 화면 표시·통계에서만 사용.
+  //  - 종료/해지(수동 확정) 우선 → 시작 전=예정 → 종료일 경과=만료 → 활성 구간은 실제 점유(공실/사용중/만실).
+  //  - getOccupancyStatus 는 뒤에서 정의되므로 점유 계산은 여기서 인라인(정의 순서/TDZ 회피).
+  // ============================================================================
+  const getContractComputedStatus = (c: { site?: string; buildingName?: string; dong?: string; roomHo?: string; contractStart?: string; contractEnd?: string; contractStatus?: string }): string => {
+    const stored = (c.contractStatus || "").trim();
+    if (stored === "종료") return "종료";
+    if (stored === "해지") return "해지";
+    const today = new Date().toISOString().slice(0, 10);
+    const start = (c.contractStart || "").slice(0, 10);
+    const end = (c.contractEnd || "").slice(0, 10);
+    if (start && start > today) return "예정"; // 시작 전
+    if (end && end < today) return "만료"; // 종료일 경과
+    const key = makeDormMatchKey(c.site || "", c.buildingName || "", c.dong || "", c.roomHo || "");
     const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
     if (!dorm) return "공실";
     const count = occupants.filter((o) => !o.isDeleted && o.dormId === dorm.id && ["거주중", "만료예정"].includes(o.status)).length;
     const cap = dorm.capacity && dorm.capacity > 0 ? dorm.capacity : 6;
     return count <= 0 ? "공실" : count >= cap ? "만실" : "사용중";
   };
+
+  // 입주자 → 해당 기숙사의 계약을 찾아 자동계산 상태 반환(같은 호실 중복 계약은 사용중>예정>종료일 늦은>최신 수정 순 선택).
+  const getOccupantContractComputedStatus = (o: Occupant): string => {
+    const dorm = operationalDorms.find((d) => d.id === o.dormId) || dorms.find((d) => d.id === o.dormId);
+    if (!dorm) return "계약없음";
+    const key = makeDormMatchKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+    const matched = dormContracts.filter((c) => !c.isDeleted && makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === key);
+    if (matched.length === 0) return "계약없음";
+    const rank = (s: string) => (s === "사용중" || s === "만실" ? 0 : s === "예정" ? 1 : 2);
+    const pick = matched.slice().sort((a, b) => {
+      const ra = rank(getContractComputedStatus(a)), rb = rank(getContractComputedStatus(b));
+      if (ra !== rb) return ra - rb;
+      const ea = (a.contractEnd || ""), eb = (b.contractEnd || "");
+      if (ea !== eb) return eb.localeCompare(ea); // 종료일 늦은 순
+      return (b.updatedAt || "").localeCompare(a.updatedAt || ""); // 최신 수정 순
+    })[0];
+    return getContractComputedStatus(pick);
+  };
+
+  // 신규계약 테이블/통계/필터/Excel 공통 표시 상태 = 공통 자동계산(모달 자동계산과 동일).
+  const getContractDisplayStatus = (c: DormContract): string => getContractComputedStatus(c);
 
   // [요청2] 계약유형 표시: 수동 선택값 우선, "자동선택"이면 신규/재계약 등을 계산해 표시만(저장값은 자동선택 유지).
   const getContractTypeDisplay = (c: DormContract): string => {
@@ -7142,16 +7185,8 @@ export default function App() {
   }, [operationalDorms, pastDormsForAssign, dormAssignStatusAll, assignmentSiteFilter, assignmentGenderFilter, assignmentStatusFilter]);
 
   // 계약 등록/수정 폼의 자동계산 상태(안내문용): 종료/해지(수동) → 그대로, 만료일 경과 → 만료, 그 외 → 실제 인원 기준(공실/사용중/만실).
-  const computeFormContractStatus = (f: DormContractFormState): "공실" | "사용중" | "만실" | "만료" | "종료" | "해지" => {
-    if (f.contractStatus === "종료") return "종료";
-    if (f.contractStatus === "해지") return "해지";
-    const today = new Date().toISOString().slice(0, 10);
-    const end = f.contractEnd || "";
-    if (end && end < today) return "만료";
-    const key = makeDormMatchKey(f.site, f.buildingName, f.dong, f.roomHo);
-    const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
-    return dorm ? getOccupancyStatus(dorm.id, dorm.capacity) : "공실";
-  };
+  // 모달 자동계산 표시 = 신규계약 테이블과 동일한 공통 함수 사용(표·모달 일치).
+  const computeFormContractStatus = (f: DormContractFormState): string => getContractComputedStatus(f);
 
   // 현재 사용중(operationalDorms = 종료/해지/isDeleted 제외) 기숙사 중 계약 만료 예정 전체 목록(가까운 순).
   const expiringDormsAll = useMemo(() => {
@@ -15045,7 +15080,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   label="상태"
                   value={dormContractStatusFilter}
                   onChange={(v) => setDormContractStatusFilter(v)}
-                  options={["전체", "공실", "사용중", "만실", "만료예정", "연장", "종료", "해지"]}
+                  options={["전체", "공실", "사용중", "만실", "예정", "만료", "종료", "해지"]}
                 />
                 <FilterSelect
                   label="만료월"
@@ -15935,10 +15970,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{dormCommonEntrance(dorm)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{dormUnitEntrance(dorm)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{(() => {
-                          if (!dorm) return "-";
-                          const k = makeDormMatchKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
-                          const c = dormContracts.find((x) => !x.isDeleted && x.contractStatus !== "종료" && x.contractStatus !== "해지" && makeDormMatchKey(x.site, x.buildingName, x.dong, x.roomHo) === k);
-                          return c ? getContractDisplayStatus(c) : getOccupancyStatus(dorm.id, dorm.capacity);
+                          // 신규계약 테이블/모달과 동일한 공통 자동계산 사용(같은 호실 계약을 찾아 상태 표시).
+                          const cs = getOccupantContractComputedStatus(o);
+                          return (
+                            <span
+                              className="rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-slate-300 dark:ring-slate-400 status-badge"
+                              style={{ backgroundColor: badgeColor(theme, cs) }}
+                            >
+                              {cs}
+                            </span>
+                          );
                         })()}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(o.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractRemainLabel(o.dormId)}</td>
