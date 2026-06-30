@@ -5958,26 +5958,25 @@ export default function App() {
   // ============================================================================
   // [공통] 계약 자동계산 상태 — 신규계약 테이블/통계/필터/Excel, 계약 등록·수정 모달, 입주자 계약상태, 기숙사 카드 공유.
   //  - DB 원본 contractStatus 는 유지(저장 시 자동 덮어쓰지 않음). 화면 표시·통계에서만 사용.
-  //  - 핵심(#1①/#8): 해당 기숙사(건물+동+호)에 현재 거주자가 1명 이상이면 무조건 "진행중"(공실 불가).
-  //  - 입주자 0 일 때만 날짜 기준: 시작 전=진행중, 종료일 경과=종료, 종료 30일 이내=만료예정, 그 외=공실.
-  //  - 수동 확정(종료/해지)만 점유보다 우선.
+  //  - 입주자 메뉴 카드와 동일한 "실제 배정 인원" 기준(계약 status 로 판단하지 않음):
+  //      0명 = 공실 / 정원 이상 = 만실 / 그 외(1~정원미만) = 사용중. 정원 없으면 6.
+  //  - 수동 확정(종료/해지)만 인원보다 우선.
   // ============================================================================
+  const getDormUsageStatus = (currentCount: number, capacity: number): string => {
+    if (currentCount <= 0) return "공실";
+    if (capacity > 0 && currentCount >= capacity) return "만실";
+    return "사용중";
+  };
   const getContractComputedStatus = (c: { site?: string; buildingName?: string; dong?: string; roomHo?: string; contractStart?: string; contractEnd?: string; contractStatus?: string }): string => {
     const stored = (c.contractStatus || "").trim();
     if (stored === "종료") return "종료";
     if (stored === "해지") return "해지";
-    // ① 현재 거주자(배정 신입사원 포함) 1명 이상 → 무조건 진행중
+    // 실제 배정 인원(배정 신입사원 포함, 퇴실/삭제 제외) 기준 — 입주자 메뉴 카드와 동일.
     const cKey = makeDormMatchKey(c.site || "", c.buildingName || "", c.dong || "", c.roomHo || "");
-    const occupiedCount = currentResidentCountByDormKey.get(cKey) || 0;
-    if (occupiedCount > 0) return "진행중";
-    // ② 입주자 0 → 계약기간 기준
-    const today = new Date().toISOString().slice(0, 10);
-    const start = (c.contractStart || "").slice(0, 10);
-    const end = (c.contractEnd || "").slice(0, 10);
-    if (start && start > today) return "진행중"; // 시작 전(예정) → 진행중
-    if (end && end < today) return "종료"; // 종료일 경과
-    if (end) { const d = daysDiff(end); if (d >= 0 && d <= 30) return "만료예정"; } // 만료 임박
-    return "공실"; // 입주자 0 → 공실
+    const count = currentResidentCountByDormKey.get(cKey) || 0;
+    const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === cKey);
+    const capacity = dorm?.capacity && dorm.capacity > 0 ? dorm.capacity : 6;
+    return getDormUsageStatus(count, capacity);
   };
 
   // 입주자 → 해당 기숙사의 계약을 찾아 자동계산 상태 반환(같은 호실 중복 계약은 진행중>만료예정>종료일 늦은>최신 수정 순 선택).
@@ -5987,7 +5986,7 @@ export default function App() {
     const key = makeDormMatchKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
     const matched = dormContracts.filter((c) => !c.isDeleted && makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === key);
     if (matched.length === 0) return "계약없음";
-    const rank = (s: string) => (s === "진행중" ? 0 : s === "만료예정" ? 1 : 2);
+    const rank = (s: string) => (s === "사용중" || s === "만실" ? 0 : 2);
     const pick = matched.slice().sort((a, b) => {
       const ra = rank(getContractComputedStatus(a)), rb = rank(getContractComputedStatus(b));
       if (ra !== rb) return ra - rb;
@@ -15075,8 +15074,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
               {([
                 { label: "총 계약 건수", value: visibleDormContracts.length },
-                { label: "진행중", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "진행중").length },
-                { label: "만료예정", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "만료예정").length },
+                { label: "사용중", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "사용중").length },
+                { label: "만실", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "만실").length },
                 { label: "공실", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "공실").length },
               ]).map((s) => (
                 <div key={s.label} className={`rounded-xl border px-3 py-2 ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
@@ -15099,7 +15098,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   label="상태"
                   value={dormContractStatusFilter}
                   onChange={(v) => setDormContractStatusFilter(v)}
-                  options={["전체", "공실", "진행중", "만료예정", "연장", "종료", "해지"]}
+                  options={["전체", "공실", "사용중", "만실", "종료", "해지"]}
                 />
                 <FilterSelect
                   label="만료월"
