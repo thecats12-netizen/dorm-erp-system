@@ -1136,12 +1136,13 @@ function calculateNewHireResidenceStatus(employee: NewHireFormLike): NewHireResi
 
   const endDate = moveOutDate || expectedMoveOutDate;
 
-  if (!hasAddressInfo || !moveInDate) return "대기중";
-  if (actualMoveOutDate && actualMoveOutDate <= today) return "퇴실";
-  if (endDate && endDate < today && !actualMoveOutDate) return "연장";
-  if (endDate && daysDiff(endDate) <= 30) return "만료예정";
-  if (moveInDate && moveInDate <= today) return "거주중";
-  return "대기중";
+  // #3: 기숙사 미배정 → 대기중 / 실제 퇴실일 존재 → 퇴실 / 계약종료 임박 → 만료예정 / 배정+퇴실안함 → 거주중.
+  // (배정되면 moveInDate 가 없어도 거주중으로 인정 — 단일/일괄배정 직후 즉시 거주중 반영)
+  if (!hasAddressInfo) return "대기중"; // 미배정
+  if (actualMoveOutDate && actualMoveOutDate <= today) return "퇴실"; // 실제 퇴실
+  if (endDate && endDate < today && !actualMoveOutDate) return "연장"; // 종료일 경과(미퇴실)
+  if (endDate && daysDiff(endDate) >= 0 && daysDiff(endDate) <= 30) return "만료예정"; // 만료 30일 이내
+  return "거주중"; // 배정 + 퇴실 안함
 }
 
 function calculateMoveInType(
@@ -5935,40 +5936,38 @@ export default function App() {
     return { dormCount: regionDorms.length, totalCapacity, currentResidents, vacancy, occupancyRate };
   };
 
-  // 계약 표시 상태 단일 helper(테이블/필터/KPI/Excel 공통). 종료/해지/만료예정/연장은 유지,
-  // 그 외(공실/진행중 등 활성)는 실제 입주자 수 기준(0=공실, 정원미만=사용중, 정원이상=만실).
-  // operationalDorms 직후에 정의해 visibleDormContracts 등에서 안전하게 사용(자체 입주자 카운트).
   // ============================================================================
   // [공통] 계약 자동계산 상태 — 신규계약 테이블/통계/필터/Excel, 계약 등록·수정 모달, 입주자 메뉴가 모두 공유.
   //  - DB 원본 contractStatus 는 유지(저장 시 자동 덮어쓰지 않음). 화면 표시·통계에서만 사용.
-  //  - 종료/해지(수동 확정) 우선 → 시작 전=예정 → 종료일 경과=만료 → 활성 구간은 실제 점유(공실/사용중/만실).
-  //  - getOccupancyStatus 는 뒤에서 정의되므로 점유 계산은 여기서 인라인(정의 순서/TDZ 회피).
+  //  - 핵심(#1①/#8): 해당 기숙사에 현재 거주자(배정 신입사원 포함)가 1명 이상이면 무조건 "진행중"(공실 불가).
+  //  - 입주자 0 일 때만 날짜 기준: 시작 전=진행중, 종료일 경과=종료, 종료 30일 이내=만료예정, 그 외=공실.
+  //  - 수동 확정(종료/해지)만 점유보다 우선.
   // ============================================================================
   const getContractComputedStatus = (c: { site?: string; buildingName?: string; dong?: string; roomHo?: string; contractStart?: string; contractEnd?: string; contractStatus?: string }): string => {
     const stored = (c.contractStatus || "").trim();
     if (stored === "종료") return "종료";
     if (stored === "해지") return "해지";
+    const key = makeDormMatchKey(c.site || "", c.buildingName || "", c.dong || "", c.roomHo || "");
+    const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
+    const occ = dorm ? getCurrentResidentCount(dorm.id) : 0;
+    if (occ >= 1) return "진행중"; // 입주자 있으면 무조건 진행중(공실 불가)
     const today = new Date().toISOString().slice(0, 10);
     const start = (c.contractStart || "").slice(0, 10);
     const end = (c.contractEnd || "").slice(0, 10);
-    if (start && start > today) return "예정"; // 시작 전
-    if (end && end < today) return "만료"; // 종료일 경과
-    const key = makeDormMatchKey(c.site || "", c.buildingName || "", c.dong || "", c.roomHo || "");
-    const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
-    if (!dorm) return "공실";
-    const count = occupants.filter((o) => !o.isDeleted && o.dormId === dorm.id && ["거주중", "만료예정"].includes(o.status)).length;
-    const cap = dorm.capacity && dorm.capacity > 0 ? dorm.capacity : 6;
-    return count <= 0 ? "공실" : count >= cap ? "만실" : "사용중";
+    if (start && start > today) return "진행중"; // 시작 전(예정) → 진행중
+    if (end && end < today) return "종료"; // 종료일 경과
+    if (end) { const d = daysDiff(end); if (d >= 0 && d <= 30) return "만료예정"; } // 만료 임박
+    return "공실"; // 입주자 0 → 공실
   };
 
-  // 입주자 → 해당 기숙사의 계약을 찾아 자동계산 상태 반환(같은 호실 중복 계약은 사용중>예정>종료일 늦은>최신 수정 순 선택).
+  // 입주자 → 해당 기숙사의 계약을 찾아 자동계산 상태 반환(같은 호실 중복 계약은 진행중>만료예정>종료일 늦은>최신 수정 순 선택).
   const getOccupantContractComputedStatus = (o: Occupant): string => {
     const dorm = operationalDorms.find((d) => d.id === o.dormId) || dorms.find((d) => d.id === o.dormId);
     if (!dorm) return "계약없음";
     const key = makeDormMatchKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
     const matched = dormContracts.filter((c) => !c.isDeleted && makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === key);
     if (matched.length === 0) return "계약없음";
-    const rank = (s: string) => (s === "사용중" || s === "만실" ? 0 : s === "예정" ? 1 : 2);
+    const rank = (s: string) => (s === "진행중" ? 0 : s === "만료예정" ? 1 : 2);
     const pick = matched.slice().sort((a, b) => {
       const ra = rank(getContractComputedStatus(a)), rb = rank(getContractComputedStatus(b));
       if (ra !== rb) return ra - rb;
@@ -15056,8 +15055,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
               {([
                 { label: "총 계약 건수", value: visibleDormContracts.length },
-                { label: "사용중", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "사용중").length },
-                { label: "만실", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "만실").length },
+                { label: "진행중", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "진행중").length },
+                { label: "만료예정", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "만료예정").length },
                 { label: "공실", value: visibleDormContracts.filter((c) => getContractDisplayStatus(c) === "공실").length },
               ]).map((s) => (
                 <div key={s.label} className={`rounded-xl border px-3 py-2 ${theme.darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
@@ -15080,7 +15079,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   label="상태"
                   value={dormContractStatusFilter}
                   onChange={(v) => setDormContractStatusFilter(v)}
-                  options={["전체", "공실", "사용중", "만실", "예정", "만료", "종료", "해지"]}
+                  options={["전체", "공실", "진행중", "만료예정", "연장", "종료", "해지"]}
                 />
                 <FilterSelect
                   label="만료월"
