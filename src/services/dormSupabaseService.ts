@@ -361,7 +361,7 @@ export const saveDormModule = async (
     return;
   }
 
-  console.debug("[SAVE] saveDormModule payload lengths", {
+  if (import.meta.env.DEV) console.debug("[SAVE] saveDormModule changed rows", {
     dorms: payload.dorms.length,
     occupants: payload.occupants.length,
     dormContracts: payload.dormContracts.length,
@@ -372,103 +372,43 @@ export const saveDormModule = async (
   let dormsPayload: any[] = [];
   let successfulTables = 0;
 
-  // Save each table independently so one failure doesn't abort the whole save
-  try {
-    dormsPayload = payload.dorms.map((d) => toDbDorm(d, payload.tenantId, userId));
-    console.debug("[DORM_SAVE_PAYLOAD] dorms upsert payload count:", dormsPayload.length);
-    if (dormsPayload.length > 0) {
-      console.debug("[DORM_SAVE_PAYLOAD] first dorm:", JSON.stringify(dormsPayload[0], null, 2));
-    }
-    const { error } = await supabase!.from("dorms").upsert(dormsPayload, { onConflict: "id" });
-    if (error) {
-      console.error("[DORM_ERROR] Dorms upsert error code:", error.code);
-      console.error("[DORM_ERROR] Dorms upsert error message:", error.message);
-      console.error("[DORM_ERROR] Dorms upsert error details:", error.details);
-      console.error("[DORM_ERROR] Dorms upsert error hint:", error.hint);
-      console.error("[DORM_ERROR] Dorms upsert error full:", error);
-      console.error("[DORM_ERROR] Dorms upsert payload:", JSON.stringify(dormsPayload, null, 2));
-      errors.push(`dorms:${error.message || error}`);
-    } else {
-      successfulTables += 1;
-    }
-  } catch (e: any) {
-    console.error("[DORM_ERROR] Dorms upsert exception:", e);
-    console.error("[DORM_ERROR] Exception details - payload length:", dormsPayload.length);
-    console.error("[DORM_ERROR] First dorm in payload:", dormsPayload[0]);
-    errors.push(`dorms:${e.message || String(e)}`);
+  // 변경 행이 하나도 없으면 해당 테이블 upsert 자체를 건너뜀(불필요한 네트워크 요청 제거).
+  if (payload.dorms.length + payload.occupants.length + payload.dormContracts.length + payload.newHires.length === 0) {
+    return;
   }
 
-  try {
-    const occupantsPayload = payload.occupants.map((o) => toDbOccupant(o, payload.tenantId, userId));
-    const { error } = await supabase!.from("occupants").upsert(occupantsPayload, { onConflict: "id" });
-    if (error) {
-      console.error("[OCCUPANT_ERROR] Occupants upsert error code:", error.code);
-      console.error("[OCCUPANT_ERROR] Occupants upsert error message:", error.message);
-      console.error("[OCCUPANT_ERROR] Occupants upsert error details:", error.details);
-      console.error("[OCCUPANT_ERROR] Occupants upsert error hint:", error.hint);
-      console.error("[OCCUPANT_ERROR] Occupants upsert error full:", error);
-      console.error("[OCCUPANT_ERROR] Occupants payload:", JSON.stringify(occupantsPayload, null, 2));
-      errors.push(`occupants:${error.message || error}`);
-    } else {
-      successfulTables += 1;
+  // 테이블별 독립 저장(한 테이블 실패가 다른 테이블/본 저장을 중단시키지 않음).
+  // 변경 행이 없으면 upsert 호출 없이 성공 처리(불필요한 네트워크 요청 제거 → 속도 개선).
+  const upsertTable = async (table: string, rows: any[]) => {
+    if (rows.length === 0) { successfulTables += 1; return; }
+    try {
+      const { error } = await supabase!.from(table).upsert(rows, { onConflict: "id" });
+      if (error) {
+        console.error(`[${table}] upsert 실패`, { code: error.code, message: error.message, details: error.details, hint: error.hint });
+        errors.push(`${table}:${error.message || error}`);
+      } else {
+        successfulTables += 1;
+      }
+    } catch (e: any) {
+      console.error(`[${table}] upsert 예외`, e?.message || e);
+      errors.push(`${table}:${e?.message || String(e)}`);
     }
-  } catch (e: any) {
-    console.error("[OCCUPANT_ERROR] Occupants upsert exception:", e);
-    console.error("[OCCUPANT_ERROR] Occupants payload length:", payload.occupants.length);
-    errors.push(`occupants:${e.message || String(e)}`);
-  }
+  };
 
-  try {
-    const dormContractPayload = payload.dormContracts.map((c) => toDbDormContract(c, payload.tenantId, userId));
-    console.debug("[SAVE] dorm_contracts upsert payload count:", dormContractPayload.length);
-    if (dormContractPayload.length > 0) {
-      console.debug("[SAVE] dorm_contracts first payload:", JSON.stringify(dormContractPayload[0], null, 2));
-    }
-    const { error } = await supabase!.from("dorm_contracts").upsert(dormContractPayload, { onConflict: "id" });
-    if (error) {
-      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error code:", error.code);
-      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error message:", error.message);
-      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error details:", error.details);
-      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error hint:", error.hint);
-      console.error("[DORMCONTRACT_ERROR] DormContracts upsert error full:", error);
-      console.error("[DORMCONTRACT_ERROR] DormContracts payload:", JSON.stringify(dormContractPayload, null, 2));
-      errors.push(`dorm_contracts:${error.message || error}`);
-    } else {
-      successfulTables += 1;
-    }
-  } catch (e: any) {
-    console.error("[DORMCONTRACT_ERROR] DormContracts upsert exception:", e);
-    console.error("[DORMCONTRACT_ERROR] DormContracts payload length:", payload.dormContracts.length);
-    errors.push(`dorm_contracts:${e.message || String(e)}`);
-  }
+  dormsPayload = payload.dorms.map((d) => toDbDorm(d, payload.tenantId, userId));
+  await upsertTable("dorms", dormsPayload);
+  await upsertTable("occupants", payload.occupants.map((o) => toDbOccupant(o, payload.tenantId, userId)));
+  await upsertTable("dorm_contracts", payload.dormContracts.map((c) => toDbDormContract(c, payload.tenantId, userId)));
+  await upsertTable("new_hires", payload.newHires.map((h) => toDbNewHire(h, payload.tenantId, userId)));
 
-  try {
-    const newHiresPayload = payload.newHires.map((h) => toDbNewHire(h, payload.tenantId, userId));
-    const { error } = await supabase!.from("new_hires").upsert(newHiresPayload, { onConflict: "id" });
-    if (error) {
-      console.error("[NEWHIRE_ERROR] NewHires upsert error code:", error.code);
-      console.error("[NEWHIRE_ERROR] NewHires upsert error message:", error.message);
-      console.error("[NEWHIRE_ERROR] NewHires upsert error details:", error.details);
-      console.error("[NEWHIRE_ERROR] NewHires upsert error hint:", error.hint);
-      console.error("[NEWHIRE_ERROR] NewHires upsert error full:", error);
-      console.error("[NEWHIRE_ERROR] NewHires payload:", JSON.stringify(newHiresPayload, null, 2));
-      errors.push(`new_hires:${error.message || error}`);
-    } else {
-      successfulTables += 1;
-    }
-  } catch (e: any) {
-    console.error("[NEWHIRE_ERROR] NewHires upsert exception:", e);
-    console.error("[NEWHIRE_ERROR] NewHires payload length:", payload.newHires.length);
-    errors.push(`new_hires:${e.message || String(e)}`);
-  }
-
+  // 변경 행이 있는 테이블 중 하나라도 실패하면 저장 실패로 처리(throw) → 호출부에서 해시 미커밋 → 다음 저장에 재시도.
+  // (upsert 는 멱등이라 성공한 테이블을 다시 보내도 안전하므로 부분 실패 시 전체 재시도가 안전하다.)
   if (errors.length) {
-    const msg = `Some Supabase dorm module upserts failed: ${errors.join("; ")}`;
-    console.error(msg);
-    if (successfulTables === 0) {
-      throw new Error(translateSupabaseError(msg));
-    }
+    const first = errors[0];
+    console.error("[saveDormModule] 변경 행 저장 실패:", errors.join("; "));
+    throw new Error(translateSupabaseError(first));
   }
+  void successfulTables; // (참고용)
 };
 
 export const upsertDorm = async (dorm: Dorm, tenantId: string, userId: string): Promise<void> => {

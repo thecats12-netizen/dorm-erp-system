@@ -1476,6 +1476,26 @@ function stripVolatile(arr: unknown[]): unknown[] {
   });
 }
 
+// 단일 행 변경 감지용 해시(휘발성 시간 필드 제외). 저장 시 "변경된 행만 upsert"로 속도 개선.
+function rowHash(row: { id?: string }): string {
+  return JSON.stringify(stripVolatile([row])[0]);
+}
+// 변경된 행만 추려서 반환(이전 저장 해시와 다른 행). seenRef 에는 table:id → hash 저장.
+function pickChangedRows<T extends { id: string }>(table: string, rows: T[], seenRef: Map<string, string>): T[] {
+  const out: T[] = [];
+  for (const r of rows) {
+    if (!r || !r.id) continue;
+    if (seenRef.get(`${table}:${r.id}`) !== rowHash(r)) out.push(r);
+  }
+  return out;
+}
+// 저장 성공한 행들의 해시를 기록(다음 저장에서 재전송하지 않도록).
+function commitRowHashes<T extends { id: string }>(table: string, rows: T[], seenRef: Map<string, string>): void {
+  for (const r of rows) {
+    if (r && r.id) seenRef.set(`${table}:${r.id}`, rowHash(r));
+  }
+}
+
 function dormModuleSnapshot(s: { dorms: unknown[]; occupants: unknown[]; dormContracts: unknown[]; newHires: unknown[] }): string {
   return JSON.stringify({
     dorms: stripVolatile(s.dorms),
@@ -1541,6 +1561,8 @@ export default function App() {
   const lastSavedOpTickRef = useRef<number>(0);
   // 이미 Supabase 에 전송한 감사로그 id — 매 저장마다 전체 누적 로그를 재전송하지 않도록(타임아웃 방지).
   const syncedAuditIdsRef = useRef<Set<string>>(new Set());
+  // 저장된 행별 해시(table:id → hash). "변경된 행만 upsert"로 매 저장마다 전체 재전송을 막아 저장 속도 개선.
+  const savedRowHashRef = useRef<Map<string, string>>(new Map());
   const lastMilitarySnapshotRef = useRef<string>("");
   const lastAppSettingsSnapshotRef = useRef<string>("");
   // 군대 모듈: 로드/Realtime 로 적용된 변경(사용자 수정 아님)을 dirty 에서 제외하기 위한 플래그.
@@ -2976,6 +2998,19 @@ export default function App() {
       currentUser?.role === "admin"
     );
     lastMilitarySnapshotRef.current = JSON.stringify(getMilitaryModuleState());
+    // 행별 해시 시드: 로드된 데이터는 이미 DB에 있으므로 "변경 없음"으로 표시 →
+    // 이후 저장 시 사용자가 바꾼 행만 전송(전체 재upsert 방지, 저장 속도 개선).
+    const seen = savedRowHashRef.current;
+    seen.clear();
+    commitRowHashes("dorms", dorms, seen);
+    commitRowHashes("occupants", occupants, seen);
+    commitRowHashes("dorm_contracts", dormContracts, seen);
+    commitRowHashes("new_hires", newHires, seen);
+    commitRowHashes("cleaning_reports", cleaningReports, seen);
+    commitRowHashes("defect_requests", defects, seen);
+    commitRowHashes("inventory_items", inventory, seen);
+    commitRowHashes("settlement_records", settlementRecords, seen);
+    commitRowHashes("settlement_items", settlementItems, seen);
     // 로드 완료 시점에만 1회 시드 (state 변경 시는 각 저장 effect가 처리)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoading]);
@@ -5215,17 +5250,27 @@ export default function App() {
       dormSavingRef.current = true;
       setSaveStatus("saving");
       try {
+        // 변경된 행만 전송(전체 재upsert 방지 → 저장 속도 크게 개선). 빈/필수값 없는 행은 sanitize 로 제외.
+        const seen = savedRowHashRef.current;
+        const changedDorms = pickChangedRows("dorms", dorms, seen);
+        const changedOcc = pickChangedRows("occupants", sanitizeOccupants(occupants), seen);
+        const changedContracts = pickChangedRows("dorm_contracts", sanitizeDormContracts(dormContracts), seen);
+        const changedNew = pickChangedRows("new_hires", sanitizeNewHires(newHires), seen);
         await saveDormModule(
           {
             tenantId,
-            dorms,
-            // 저장 시에도 빈/필수값 없는 행은 제외(자동생성/빈 행이 Supabase 에 쌓이지 않게)
-            occupants: sanitizeOccupants(occupants),
-            dormContracts: sanitizeDormContracts(dormContracts),
-            newHires: sanitizeNewHires(newHires),
+            dorms: changedDorms,
+            occupants: changedOcc,
+            dormContracts: changedContracts,
+            newHires: changedNew,
           },
           session.user.id
         );
+        // 성공한 행만 해시 기록 → 다음 저장에서 재전송하지 않음
+        commitRowHashes("dorms", changedDorms, seen);
+        commitRowHashes("occupants", changedOcc, seen);
+        commitRowHashes("dorm_contracts", changedContracts, seen);
+        commitRowHashes("new_hires", changedNew, seen);
         lastDormSnapshotRef.current = snapshot;
         lastSavedDormTickRef.current = tick; // 이 저장으로 반영된 사용자 액션 시점 기록
         dormFailRef.current = { snap: "", count: 0 }; // 성공 → 실패 카운트 초기화
@@ -5282,14 +5327,21 @@ export default function App() {
       const sanitizedInventory = sanitizeInventory(inventory).filter((i) => !i.isPermanentDeleted);
       // 감사로그는 아직 전송되지 않은 신규 건만 전송(매 저장마다 전체 누적 재전송 → 타임아웃 방지).
       const unsyncedAuditLogs = auditLogs.filter((l) => l.id && !syncedAuditIdsRef.current.has(l.id));
+      // 변경된 행만 전송(전체 재upsert 방지 → 저장 속도 개선). audit_logs 는 이미 신규 건만 전송.
+      const opSeen = savedRowHashRef.current;
+      const changedCleaning = pickChangedRows("cleaning_reports", scopedCleaningReports, opSeen);
+      const changedDefects = pickChangedRows("defect_requests", scopedDefects, opSeen);
+      const changedInventory = isAdmin ? pickChangedRows("inventory_items", sanitizedInventory, opSeen) : [];
+      const changedSettleRec = isAdmin ? pickChangedRows("settlement_records", settlementRecords, opSeen) : [];
+      const changedSettleItem = isAdmin ? pickChangedRows("settlement_items", settlementItems, opSeen) : [];
       // 실제 저장 payload (비admin 은 권한 없는 테이블을 빈 배열로 전달 → upsert no-op, 403 방지)
       const operationalPayload = {
         tenantId,
-        cleaningReports: scopedCleaningReports,
-        defects: scopedDefects,
-        inventory: isAdmin ? sanitizedInventory : [],
-        settlementRecords: isAdmin ? settlementRecords : [],
-        settlementItems: isAdmin ? settlementItems : [],
+        cleaningReports: changedCleaning,
+        defects: changedDefects,
+        inventory: changedInventory,
+        settlementRecords: changedSettleRec,
+        settlementItems: changedSettleItem,
         auditLogs: isAdmin ? unsyncedAuditLogs : [],
       };
       // 동일 데이터 반복 저장 방지용 스냅샷 — 비admin INSERT 경로 감지를 위해 auditLogs 전체 포함
@@ -5336,6 +5388,12 @@ export default function App() {
         }
         // 전송 완료한 감사로그 id 기록 → 다음 저장에서 재전송하지 않음
         unsyncedAuditLogs.forEach((l) => { if (l.id) syncedAuditIdsRef.current.add(l.id); });
+        // 성공한 행만 해시 기록 → 다음 저장에서 재전송하지 않음
+        commitRowHashes("cleaning_reports", changedCleaning, opSeen);
+        commitRowHashes("defect_requests", changedDefects, opSeen);
+        commitRowHashes("inventory_items", changedInventory, opSeen);
+        commitRowHashes("settlement_records", changedSettleRec, opSeen);
+        commitRowHashes("settlement_items", changedSettleItem, opSeen);
         lastOperationalSnapshotRef.current = snapshot;
         lastSavedOpTickRef.current = tick; // 이 저장으로 반영된 사용자 액션 시점 기록
         operationalFailRef.current = { snap: "", count: 0 }; // 성공 → 실패 카운트 초기화

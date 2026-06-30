@@ -357,7 +357,15 @@ export const loadOperationalModule = async (tenantId: string): Promise<Operation
         supabase!.from("inventory_items").select("*"),
         supabase!.from("settlement_records").select("*"),
         supabase!.from("settlement_items").select("*"),
-        supabase!.from("audit_logs").select("*"),
+        // audit_logs(변경이력)는 비핵심 부가기능 → 전체 조회 금지(statement timeout/500 원인).
+        // tenant_id 기준 필터(이 테이블에는 organization_id 컬럼 없음) + 필요한 컬럼만 + 최신순 + 50건 제한.
+        // 실패해도 rowsOf 가 빈 배열로 처리해 앱 로딩을 막지 않음.
+        supabase!
+          .from("audit_logs")
+          .select("id, target_type, target_id, action_type, changed_by, changed_at, before_value, after_value, memo, changes, created_at")
+          .eq("tenant_id", tenantId)
+          .order("created_at", { ascending: false })
+          .limit(50),
       ]);
 
     // 각 테이블 결과를 안전하게 추출(실패/에러 시 빈 배열). 하나가 실패해도 전체를 null 로 만들지 않는다.
@@ -396,41 +404,23 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
   }
 
   try {
-    console.debug("saveOperationalModule: upserting counts", {
-      cleaning: payload.cleaningReports?.length || 0,
-      defects: payload.defects?.length || 0,
-      inventory: payload.inventory?.length || 0,
-      settlementRecords: payload.settlementRecords?.length || 0,
-      settlementItems: payload.settlementItems?.length || 0,
-      auditLogs: payload.auditLogs?.length || 0,
-    });
-    // 실제 데이터(부가기능 audit_logs 제외)만 critical 저장 — 이 중 하나라도 실패하면 throw.
-    const [cleaningResult, defectsResult, inventoryResult, settlementRecordsResult, settlementItemsResult] =
-      await Promise.all([
-        supabase!
-          .from("cleaning_reports")
-          .upsert(payload.cleaningReports.map((report) => toDbCleaningReport(report, payload.tenantId, userId)), { onConflict: "id" }),
-        supabase!
-          .from("defect_requests")
-          .upsert(payload.defects.map((defect) => toDbDefectRequest(defect, payload.tenantId, userId)), { onConflict: "id" }),
-        supabase!
-          .from("inventory_items")
-          .upsert(payload.inventory.map((item) => toDbInventoryItem(item, payload.tenantId, userId)), { onConflict: "id" }),
-        supabase!
-          .from("settlement_records")
-          .upsert(payload.settlementRecords.map((record) => toDbSettlementRecord(record, payload.tenantId, userId)), { onConflict: "id" }),
-        supabase!
-          .from("settlement_items")
-          .upsert(payload.settlementItems.map((item) => toDbSettlementItem(item, payload.tenantId, userId)), { onConflict: "id" }),
-      ]);
+    // 변경 행이 있는 테이블만 upsert(빈 배열은 네트워크 요청 생략 → 속도 개선). 하나라도 실패하면 throw.
+    const ops: any[] = [];
+    if (payload.cleaningReports.length) ops.push(supabase!.from("cleaning_reports").upsert(payload.cleaningReports.map((r) => toDbCleaningReport(r, payload.tenantId, userId)), { onConflict: "id" }));
+    if (payload.defects.length) ops.push(supabase!.from("defect_requests").upsert(payload.defects.map((d) => toDbDefectRequest(d, payload.tenantId, userId)), { onConflict: "id" }));
+    if (payload.inventory.length) ops.push(supabase!.from("inventory_items").upsert(payload.inventory.map((i) => toDbInventoryItem(i, payload.tenantId, userId)), { onConflict: "id" }));
+    if (payload.settlementRecords.length) ops.push(supabase!.from("settlement_records").upsert(payload.settlementRecords.map((r) => toDbSettlementRecord(r, payload.tenantId, userId)), { onConflict: "id" }));
+    if (payload.settlementItems.length) ops.push(supabase!.from("settlement_items").upsert(payload.settlementItems.map((i) => toDbSettlementItem(i, payload.tenantId, userId)), { onConflict: "id" }));
 
-    if (cleaningResult.error || defectsResult.error || inventoryResult.error || settlementRecordsResult.error || settlementItemsResult.error) {
-      const err = cleaningResult.error || defectsResult.error || inventoryResult.error || settlementRecordsResult.error || settlementItemsResult.error;
-      // provide more helpful logging if RLS/permission issue
-      if (err && /permission|row level security|RLS/i.test(JSON.stringify(err))) {
-        console.error("Supabase permission/RLS error detected:", err);
+    if (ops.length > 0) {
+      const results = await Promise.all(ops);
+      const firstErr = (results as Array<{ error: any }>).find((r) => r.error)?.error;
+      if (firstErr) {
+        if (/permission|row level security|RLS/i.test(JSON.stringify(firstErr))) {
+          console.error("Supabase permission/RLS error detected:", firstErr);
+        }
+        throw new Error(translateSupabaseError((firstErr as any)?.message || String(firstErr)));
       }
-      throw new Error(translateSupabaseError((err as any)?.message || String(err)));
     }
 
     // 부가기능: 변경이력(audit_logs)은 실패해도 전체 저장을 실패로 처리하지 않음(경고만).
