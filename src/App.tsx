@@ -5936,10 +5936,29 @@ export default function App() {
     return { dormCount: regionDorms.length, totalCapacity, currentResidents, vacancy, occupancyRate };
   };
 
+  // 호실키(건물+동+호 정규화)별 "현재 거주자 수" 맵. 배정 신입사원 포함(normalizedOccupants),
+  // 실제 퇴실/삭제 제외(isCurrentResidentOccupant). occupant 엔 호실 정보가 없으므로 dorm 을 경유해 키로 집계.
+  // → 계약↔입주자 매칭이 dorm_id 불일치여도 "건물+동+호" 기준으로 정확히 카운트(공실 오판 방지).
+  const currentResidentCountByDormKey = useMemo(() => {
+    const dormById = new Map<string, { site: string; buildingName: string; dong: string; roomHo: string }>();
+    operationalDorms.forEach((d) => dormById.set(d.id, d));
+    dorms.forEach((d) => { if (!dormById.has(d.id)) dormById.set(d.id, d); });
+    const m = new Map<string, number>();
+    normalizedOccupants.forEach((o) => {
+      if (!isCurrentResidentOccupant(o)) return;
+      const od = dormById.get(o.dormId);
+      if (!od) return;
+      const k = makeDormMatchKey(od.site, od.buildingName, od.dong, od.roomHo);
+      m.set(k, (m.get(k) || 0) + 1);
+    });
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [normalizedOccupants, operationalDorms, dorms]);
+
   // ============================================================================
-  // [공통] 계약 자동계산 상태 — 신규계약 테이블/통계/필터/Excel, 계약 등록·수정 모달, 입주자 메뉴가 모두 공유.
+  // [공통] 계약 자동계산 상태 — 신규계약 테이블/통계/필터/Excel, 계약 등록·수정 모달, 입주자 계약상태, 기숙사 카드 공유.
   //  - DB 원본 contractStatus 는 유지(저장 시 자동 덮어쓰지 않음). 화면 표시·통계에서만 사용.
-  //  - 핵심(#1①/#8): 해당 기숙사에 현재 거주자(배정 신입사원 포함)가 1명 이상이면 무조건 "진행중"(공실 불가).
+  //  - 핵심(#1①/#8): 해당 기숙사(건물+동+호)에 현재 거주자가 1명 이상이면 무조건 "진행중"(공실 불가).
   //  - 입주자 0 일 때만 날짜 기준: 시작 전=진행중, 종료일 경과=종료, 종료 30일 이내=만료예정, 그 외=공실.
   //  - 수동 확정(종료/해지)만 점유보다 우선.
   // ============================================================================
@@ -5947,10 +5966,11 @@ export default function App() {
     const stored = (c.contractStatus || "").trim();
     if (stored === "종료") return "종료";
     if (stored === "해지") return "해지";
-    const key = makeDormMatchKey(c.site || "", c.buildingName || "", c.dong || "", c.roomHo || "");
-    const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === key);
-    const occ = dorm ? getCurrentResidentCount(dorm.id) : 0;
-    if (occ >= 1) return "진행중"; // 입주자 있으면 무조건 진행중(공실 불가)
+    // ① 현재 거주자(배정 신입사원 포함) 1명 이상 → 무조건 진행중
+    const cKey = makeDormMatchKey(c.site || "", c.buildingName || "", c.dong || "", c.roomHo || "");
+    const occupiedCount = currentResidentCountByDormKey.get(cKey) || 0;
+    if (occupiedCount > 0) return "진행중";
+    // ② 입주자 0 → 계약기간 기준
     const today = new Date().toISOString().slice(0, 10);
     const start = (c.contractStart || "").slice(0, 10);
     const end = (c.contractEnd || "").slice(0, 10);
