@@ -519,9 +519,10 @@ function computeVacancyStats(
 // 입주자 표시 상태: 거주중 / 만료예정 / 퇴실 / 과거거주 / 배정대기
 // (실제 퇴실일이 있으면 과거거주, status=퇴실이면 퇴실, 거주중/신규입주는 거주중)
 function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string }): "거주중" | "만료예정" | "퇴실" | "과거거주" | "배정대기" {
-  if (o.status === "미배정") return "배정대기";
+  // #5: 퇴실을 가장 먼저 판단(실제 퇴실일 존재 또는 상태 퇴실) → 퇴실/과거거주
   if (o.actualMoveOutDate) return "과거거주";
   if (o.status === "퇴실") return "퇴실";
+  if (o.status === "미배정") return "배정대기";
   if (o.status === "만료예정") return "만료예정";
   return "거주중";
 }
@@ -1188,6 +1189,26 @@ function isUnassignedNewHire(h: NewHireEmployee): boolean {
   if (h.isDeleted) return false;
   if (getNewHireStatus(h) === "퇴실") return false; // 퇴실자는 미배정 통계에서 제외
   return !(h.dormId && h.dormId.trim());
+}
+
+// 신입사원 통계 단일 분류: 모든 row 를 정확히 하나의 버킷(거주중/퇴실/만료예정/미배정)에 배정.
+// → 거주중+퇴실+만료예정+미배정 합계가 총 신입사원 수와 항상 일치(누락 없음). 연장은 거주중에 포함.
+// 실제 퇴실일/퇴실일이 있으면 무엇보다 퇴실 우선.
+function getNewHireStatBucket(h: NewHireEmployee): "거주중" | "퇴실" | "만료예정" | "미배정" {
+  const hasMovedOut = Boolean(
+    (h as { actualMoveOutDate?: string }).actualMoveOutDate ||
+    (h as { moveOutDate?: string }).moveOutDate
+  );
+  const st = getNewHireStatus(h);
+  if (hasMovedOut || st === "퇴실") return "퇴실";
+  if (st === "만료예정") return "만료예정";
+  if (st === "거주중" || st === "연장") return "거주중"; // 연장 → 거주중 포함
+  // 그 외(대기중 등): 기숙사 배정되어 있으면 거주중, 아니면 미배정 (누락 방지)
+  const hasDorm = Boolean(
+    (h.dormId && h.dormId.trim()) ||
+    ((h.buildingName || "").trim() && (h.roomHo || "").trim())
+  );
+  return hasDorm ? "거주중" : "미배정";
 }
 
 function addDays(dateText: string, days: number) {
@@ -2076,7 +2097,7 @@ export default function App() {
   const [occupantStatusFilter, setOccupantStatusFilter] = useState<string>("전체");
   const [occupantMenuFilterSite, setOccupantMenuFilterSite] = useState<Site | "전체">("전체");
   const [occupantMenuFilterGender, setOccupantMenuFilterGender] = useState<"남" | "여" | "전체">("전체");
-  const [occupantMenuFilterStatus, setOccupantMenuFilterStatus] = useState<"전체" | "거주중" | "만료예정" | "퇴실" | "과거거주" | "배정대기">("전체");
+  const [occupantMenuFilterStatus, setOccupantMenuFilterStatus] = useState<"전체" | "거주중" | "만료예정" | "대기중" | "퇴실">("거주중");
   const [occupantMenuFilterSearch, setOccupantMenuFilterSearch] = useState("");
 
   useEffect(() => {
@@ -2817,9 +2838,14 @@ export default function App() {
               const dInv = sanitizeInventory(dedupeRecords(remoteOperationalModule?.inventory || [], "inventory", (i) => `${recordDormKey(i as any)}|${(i.itemName || "").trim()}|${(i.modelName || "").trim()}`));
               // 사진 보존 병합: 로드 결과의 사진이 비어 있는데 메모리(이전 상태)에 사진이 있으면 그 값을 유지(빈값 덮어쓰기 방지).
               setCleaningReports((prevReports) => {
+                // [3] 조회 실패(타임아웃 등)로 빈 배열이 와도 기존 목록을 비우지 않음(보였다 안 보였다 방지).
+                //     단 실제로 0건이었을 수도 있으나, 직전에 데이터가 있었다면 유지하는 편이 안전(다음 정상 로드/Realtime 로 갱신).
+                if (dCleaning.length === 0 && prevReports.length > 0) {
+                  console.warn("[청소보고서] 로드 결과 0건 — 조회 실패 가능성, 기존 목록 유지");
+                  return prevReports;
+                }
                 const prevById = new Map(prevReports.map((r) => [r.id, r]));
                 // 사진 보존 병합: 로드 결과 사진이 비어 있는데 메모리에 있으면 유지(빈값 덮어쓰기 방지).
-                // (초기 로딩 속도/콘솔 과부하 방지를 위해 레코드별 로그는 출력하지 않음)
                 return dCleaning.map((r) => {
                   const prev = prevById.get(r.id);
                   const before = (Array.isArray(r.beforePhotoDataUrls) && r.beforePhotoDataUrls.length > 0)
@@ -10867,7 +10893,8 @@ const exportExcel = () => {
     }));
     fileName = "신규계약현황.xlsx";
   } else if (activeTab === "dormContracts") {
-    rows = visibleDormContracts.map((c) => ({
+    // [4] 기본 내보내기는 화면 상태 필터와 무관하게 전체 이력(종료/해지 포함). 삭제만 제외 + 빈 행 sanitize.
+    rows = sanitizeDormContracts(dormContracts.filter((c) => !c.isDeleted)).map((c) => ({
       지역: c.site,
       도로명주소: c.address,
       건물명: c.buildingName,
@@ -10951,7 +10978,8 @@ const exportExcel = () => {
       });
     fileName = "정산관리.xlsx";
   } else if (activeTab === "newHires") {
-    rows = visibleNewHires.map((h) => {
+    // [4] 기본 내보내기는 화면 상태 필터와 무관하게 전체 이력(거주중/연장/만료예정/미배정/퇴실 모두). 삭제만 제외 + 빈 행 sanitize.
+    rows = sanitizeNewHires(newHires.filter((h) => !h.isDeleted)).map((h) => {
       const dorm =
         operationalDorms.find((d) => d.id === h.dormId) ||
         dorms.find((d) => d.id === h.dormId) || null;
@@ -12532,6 +12560,25 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
     const activeStatus = ["거주중", "신규입주", "만료예정"] as Occupant["status"][];
 
+    // [5] 청소 미제출(해당 주차 기준): 이번 주(월~일)에 제출된 보고서가 있는 기숙사를 "제출 완료"로 보고,
+    //     지역/성별 대상 기숙사 중 미제출 수 = 대상 수 - 제출 완료 수(음수 방지). 누적 status 기준 아님.
+    const nowW = new Date();
+    const wkStart = new Date(nowW.getFullYear(), nowW.getMonth(), nowW.getDate());
+    wkStart.setDate(wkStart.getDate() - ((wkStart.getDay() + 6) % 7)); // 이번 주 월요일 00:00
+    wkStart.setHours(0, 0, 0, 0);
+    const wkEnd = new Date(wkStart);
+    wkEnd.setDate(wkStart.getDate() + 6);
+    wkEnd.setHours(23, 59, 59, 999);
+    const submittedIdSet = new Set<string>();
+    const submittedKeySet = new Set<string>();
+    cleaningReports.forEach((r) => {
+      if (r.isDeleted || r.isPermanentDeleted) return;
+      const d = parseSafeDate(r.reportDate);
+      if (!d || d < wkStart || d > wkEnd) return;
+      if (r.dormId) submittedIdSet.add(r.dormId);
+      submittedKeySet.add(makeDormMatchKey(r.site, r.buildingName, r.dong, r.roomHo));
+    });
+
     return combinations.map(({ site, gender }) => {
       const regionDorms = uniqueActiveDormContracts.filter((d) => d.site === site && d.gender === gender);
       const operationalRegionDorms = operationalDorms.filter((d) => d.site === site && d.gender === gender);
@@ -12547,9 +12594,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       const unprocessedDefects = defects.filter(
         (d) => !d.isDeleted && d.defectStatus !== "완료" && operationalRegionDorms.some((room) => room.id === d.dormId)
       ).length;
-      const unsubmittedCleaning = cleaningReports.filter(
-        (r) => !r.isDeleted && r.cleanStatus === "미제출" && operationalRegionDorms.some((room) => room.id === r.dormId)
+      // 이번 주 제출 완료 기숙사(id 또는 호실키 매칭) 수를 대상 수에서 차감. 음수 방지(Math.max).
+      const submittedCount = operationalRegionDorms.filter((d) =>
+        submittedIdSet.has(d.id) || submittedKeySet.has(makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo))
       ).length;
+      const unsubmittedCleaning = Math.max(0, operationalRegionDorms.length - submittedCount);
 
       return {
         site,
@@ -15313,10 +15362,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="mb-2 text-xs text-slate-400">통계는 현재 필터(지역/성별/배정/검색) 적용 후 기준이며, 아래 목록 총 {visibleNewHires.length}건과 일치합니다.</div>
             <div className="grid gap-4 mb-6 md:grid-cols-4">
               <MiniStat label="총 신입사원" value={`${visibleNewHires.length}`} />
-              <MiniStat label="거주중" value={`${visibleNewHires.filter((h) => getNewHireStatus(h) === "거주중").length}`} />
-              <MiniStat label="퇴실" value={`${visibleNewHires.filter((h) => getNewHireStatus(h) === "퇴실").length}`} />
-              <MiniStat label="만료예정" value={`${visibleNewHires.filter((h) => getNewHireStatus(h) === "만료예정").length}`} />
-              <MiniStat label="미배정" value={`${visibleNewHires.filter((h) => isUnassignedNewHire(h)).length}`} />
+              <MiniStat label="거주중" value={`${visibleNewHires.filter((h) => getNewHireStatBucket(h) === "거주중").length}`} />
+              <MiniStat label="퇴실" value={`${visibleNewHires.filter((h) => getNewHireStatBucket(h) === "퇴실").length}`} />
+              <MiniStat label="만료예정" value={`${visibleNewHires.filter((h) => getNewHireStatBucket(h) === "만료예정").length}`} />
+              <MiniStat label="미배정" value={`${visibleNewHires.filter((h) => getNewHireStatBucket(h) === "미배정").length}`} />
             </div>
 
             <div className="mb-6 flex flex-wrap items-center gap-2 justify-between">
@@ -15790,7 +15839,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="flex flex-wrap items-center gap-2">
                 <FilterSelect label="지역" value={occupantMenuFilterSite} onChange={(v) => setOccupantMenuFilterSite(v as Site | "전체")} options={["전체", "평택", "천안"]} />
                 <FilterSelect label="성별" value={occupantMenuFilterGender} onChange={(v) => setOccupantMenuFilterGender(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
-                <FilterSelect label="상태" value={occupantMenuFilterStatus} onChange={(v) => setOccupantMenuFilterStatus(v as "전체" | "거주중" | "만료예정" | "퇴실" | "과거거주" | "배정대기")} options={["전체", "거주중", "만료예정", "퇴실", "과거거주", "배정대기"]} />
+                <FilterSelect label="상태" value={occupantMenuFilterStatus} onChange={(v) => setOccupantMenuFilterStatus(v as "전체" | "거주중" | "만료예정" | "대기중" | "퇴실")} options={["전체", "거주중", "만료예정", "대기중", "퇴실"]} />
                 <input type="text" placeholder="이름/부서/연락처/건물/동/호/현관 검색..." value={occupantMenuFilterSearch} onChange={(e) => setOccupantMenuFilterSearch(e.target.value)} className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"}`} />
               </div>
               <div className="text-xs text-slate-500">
@@ -15912,13 +15961,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           const ds = occupantDisplayStatus(o);
                           if (occupantMenuFilterStatus === "거주중") return ds === "거주중";
                           if (occupantMenuFilterStatus === "만료예정") return ds === "만료예정";
-                          if (occupantMenuFilterStatus === "퇴실") return ds === "퇴실";
-                          if (occupantMenuFilterStatus === "과거거주") return ds === "과거거주";
-                          if (occupantMenuFilterStatus === "배정대기") return false; // 실제 입주자는 배정대기 아님
+                          if (occupantMenuFilterStatus === "퇴실") return ds === "퇴실" || ds === "과거거주"; // 퇴실/과거거주 모두 퇴실로 조회
+                          if (occupantMenuFilterStatus === "대기중") return false; // 실제 입주자는 대기중 아님(미배정 newHire는 아래 merge)
                         }
                         return true;
                       }),
-                    ...(occupantMenuFilterStatus === "전체" || occupantMenuFilterStatus === "배정대기"
+                    ...(occupantMenuFilterStatus === "전체" || occupantMenuFilterStatus === "대기중"
                       ? filteredUnassignedNewHires.map((h) => ({
                           id: `newhire-${h.id}`,
                           site: h.site,
@@ -15960,11 +16008,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     .map((o) => {
                       // 기숙사 기준 단일 조회(dormId 우선, 실패 시 호실키 재매칭). 공동현관/세대현관 등 파생값에 사용.
                       const dorm = getOccupantDorm(o);
+                      // 퇴실/과거거주 행은 거주중과 쉽게 구분되도록 아주 연한 회색 배경 + 흐린 글자(#7).
+                      const isMovedOut = ["퇴실", "과거거주"].includes(occupantDisplayStatus(o));
                       return (
                         <tr
                           key={o.id}
                           onDoubleClick={() => handleOccupantRowDoubleClick(o)}
-                          className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}`}
+                          className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"} ${isMovedOut ? (theme.darkMode ? "bg-slate-950/40 text-slate-500" : "bg-slate-50 text-slate-400") : ""}`}
                         >
                         <td className="px-3 py-3">
                           <label className="inline-flex items-center justify-center gap-2">
