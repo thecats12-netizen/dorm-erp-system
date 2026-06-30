@@ -454,6 +454,26 @@ function sanitizeDefects<T extends { requestText?: string }>(arr: T[]): T[] {
   return arr.filter((d) => hasText(d.requestText));
 }
 
+// 저장 오류를 원인별 한글 메시지로 분류(권한/네트워크/스키마/필수값). 개발자용 원문은 콘솔에만.
+function classifySaveError(error: unknown): string {
+  const e = error as { code?: string | number; status?: number; message?: string; details?: string; hint?: string };
+  const msg = `${e?.message ?? ""} ${e?.details ?? ""} ${e?.hint ?? ""} ${e?.code ?? ""}`.toLowerCase();
+  const status = Number(e?.status ?? e?.code);
+  if (/permission|rls|row level security|forbidden|not authorized|jwt|로그인|권한/.test(msg) || status === 401 || status === 403) {
+    return "저장 권한이 없습니다. 다시 로그인하거나 관리자에게 문의해주세요.";
+  }
+  if (/failed to fetch|networkerror|network request failed|timeout|econn|net::|연결/.test(msg)) {
+    return "네트워크 연결이 불안정합니다. 잠시 후 다시 시도해주세요.";
+  }
+  if (/does not exist|schema cache|column|relation|pgrst|undefined/.test(msg) || status === 400) {
+    return "데이터 형식 문제로 저장하지 못했습니다. 관리자에게 문의해주세요.";
+  }
+  if (/null value|not-null|not null|required|invalid input|violates/.test(msg)) {
+    return "필수값이 누락되어 저장하지 못했습니다. 입력값을 확인해주세요.";
+  }
+  return "저장 중 문제가 발생했습니다. 잠시 후 다시 시도해주세요.";
+}
+
 // 사진 배열 정상화: 배열이 아니거나 문자열이 아닌 항목/빈값을 제거(잘못된 image 배열로 인한 Supabase 500 방지).
 function sanitizePhotoArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
@@ -2738,14 +2758,14 @@ export default function App() {
               // sanitize: 빈/필수값 없는 행은 화면·상태에서 제외(기존 정상 데이터는 보존)
               const rawOcc = remoteDormModule?.occupants || [];
               const dOcc = sanitizeOccupants(dedupeRecords(rawOcc, "occupants", (o) => `${recordDormKey(o as any)}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`));
-              console.log("occupants loaded (DB)", rawOcc.length, "→ 표시 대상(이름 정상)", dOcc.length);
+              if (import.meta.env.DEV) console.log("[LOAD] occupants:", rawOcc.length, "→ 표시", dOcc.length);
               const dContracts = sanitizeDormContracts(dedupeRecords(remoteDormModule?.dormContracts || [], "dormContracts", recordDormKey));
               const dNew = sanitizeNewHires(dedupeRecords(remoteDormModule?.newHires || [], "newHires", (h) => `${(h.name || "").trim()}|${(h.phone || "").replace(/\D/g, "")}|${h.site || ""}`));
               setDorms(dDorms);
               setOccupants(dOcc);
               setDormContracts(dContracts);
               setNewHires(dNew);
-              console.log("[LOAD] dorms:", dDorms.length, "contracts:", dContracts.length, "newHires:", dNew.length, "occupants:", dOcc.length);
+              if (import.meta.env.DEV) console.log("[LOAD] dorms:", dDorms.length, "contracts:", dContracts.length, "newHires:", dNew.length, "occupants:", dOcc.length);
             } else {
               // 세션은 유효하나 dorm 모듈 로드가 일시적으로 실패한 경우.
               // 기존 화면 데이터를 비우지 않고(로그아웃하지 않고) 유지하여 "보였다 안 보였다" 방지.
@@ -5227,7 +5247,7 @@ export default function App() {
           ? { snap: snapshot, count: dormFailRef.current.count + 1 }
           : { snap: snapshot, count: 1 };
         // 화면에는 Supabase 원문 alert 대신 한글 안내만 표시(팝업 없음).
-        setOperationalSyncError("저장 권한이 없거나 연결이 불안정합니다. 잠시 후 다시 시도해주세요.");
+        setOperationalSyncError(classifySaveError(error));
         flashSaveStatus("error");
       } finally {
         dormSavingRef.current = false;
@@ -5347,7 +5367,7 @@ export default function App() {
           ? { snap: snapshot, count: operationalFailRef.current.count + 1 }
           : { snap: snapshot, count: 1 };
         // 화면에는 Supabase 원문 alert 대신 한글 안내만 표시(팝업 없음).
-        setOperationalSyncError("저장 권한이 없거나 연결이 불안정합니다. 잠시 후 다시 시도해주세요.");
+        setOperationalSyncError(classifySaveError(error));
         flashSaveStatus("error");
       } finally {
         operationalSavingRef.current = false;
@@ -5928,7 +5948,8 @@ export default function App() {
       if (o.isDeleted) { excluded.삭제++; return; }
       if (!isCurrentResidentStatus(o)) { excluded.상태제외++; return; } // 대시보드와 동일 기준
       if (!o.dormId || !o.dormId.trim()) { excluded.미배정++; return; }
-      if (!scopedDormIds.has(o.dormId)) { excluded.기숙사매칭실패++; console.warn("[정산] 기숙사 매칭 실패", { id: o.id, name: o.employeeName, dormId: o.dormId }); return; }
+      // 매칭 실패는 "오류"가 아니라 "미매칭 데이터"(운영목록 외 기숙사) — 반복 console.warn 도배 금지(아래 dev 요약 1회만).
+      if (!scopedDormIds.has(o.dormId)) { excluded.기숙사매칭실패++; return; }
       const key = `${o.dormId}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`; // 동일 인원/기숙사 중복 1명
       if (seen.has(key)) { excluded.중복제외++; return; }
       seen.add(key);
@@ -6424,7 +6445,6 @@ export default function App() {
       const text = `${site} ${dorm?.buildingName || ""} ${dorm?.dong || ""} ${dorm?.roomHo || ""} ${o.employeeName} ${o.department} ${o.phone} ${o.status}`.toLowerCase();
       return !occupantSearch || text.includes(occupantSearch.toLowerCase());
     });
-    console.log("[VIEW] visible occupants:", result.length, "(loaded:", occupants.length, ")");
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [normalizedOccupants, dorms, operationalDorms, occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter, currentUser]);
@@ -6472,7 +6492,6 @@ export default function App() {
       const list = visibleOccupants.filter((o) =>
         selectedDormId ? o.dormId === selectedDormId : occupantInMenuDorms(o)
       );
-      if (selectedDormId) console.log("[MATCH] selected dorm occupants:", list.length, "(dormId:", selectedDormId, ")");
       return list;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -15180,6 +15199,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
 
+            <div className="mb-2 text-xs text-slate-400">통계는 현재 필터(지역/성별/배정/검색) 적용 후 기준이며, 아래 목록 총 {visibleNewHires.length}건과 일치합니다.</div>
             <div className="grid gap-4 mb-6 md:grid-cols-4">
               <MiniStat label="총 신입사원" value={`${visibleNewHires.length}`} />
               <MiniStat label="거주중" value={`${visibleNewHires.filter((h) => getNewHireStatus(h) === "거주중").length}`} />
