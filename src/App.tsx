@@ -79,6 +79,7 @@ import {
   loadPreMoveInInspections,
   savePreMoveInInspections,
 } from "./services/preMoveInInspectionService";
+import { uploadTempFileAndSign } from "./services/pdfStorageService";
 import {
   emptyPreMoveInInspection,
   INSPECTION_STATUS_OPTIONS,
@@ -311,22 +312,54 @@ function isMobileOrTablet(): boolean {
   return /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(ua) || iPadOS;
 }
 
-// 인쇄용 HTML 문서를 안전하게 여는 공통 helper (청소/하자/보고서 PDF 공용).
+// 모바일에서 비동기 업로드 후 window.open 은 팝업 차단(제스처 소실)되므로, 클릭 시점에
+// 미리 빈 탭을 확보해 둔 뒤 생성/업로드가 끝나면 그 탭을 실제 URL 로 이동시킨다.
+function openPlaceholderTabIfMobile(): Window | null {
+  if (!isMobileOrTablet()) return null;
+  try { return window.open("", "_blank"); } catch { return null; }
+}
+
+// Blob 을 Storage(generated-pdfs)에 임시 업로드 → 10분 signed(https) URL 로 열기.
+// 업로드 실패/미지원이면 blob URL 로 fallback(즉시 revoke 금지, 120초 뒤 해제).
+// 모바일 blob 직접 열기의 "파일에 액세스할 수 없음" 오류를 https URL 로 회피.
+async function deliverViaSignedUrl(
+  blob: Blob,
+  fileName: string,
+  contentType: string,
+  tenantId: string,
+  preTab: Window | null
+): Promise<void> {
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const signed = await uploadTempFileAndSign(blob, fileName, contentType, tenantId);
+    const target = signed || blobUrl; // Storage 실패 시에만 blob URL 사용
+    if (preTab && !preTab.closed) {
+      preTab.location.href = target;
+    } else {
+      const w = window.open(target, "_blank", "noopener,noreferrer");
+      if (!w) window.location.href = target;
+    }
+  } catch (e) {
+    console.error("[PDF 열기 실패]", e);
+    if (preTab && !preTab.closed) { try { preTab.location.href = blobUrl; } catch { /* noop */ } }
+  } finally {
+    // Blob URL 즉시 revoke 금지 — 120초 뒤 해제.
+    setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch { /* noop */ } }, 120000);
+  }
+}
+
+// 인쇄용 HTML 문서를 안전하게 여는 공통 helper (청소/하자/입주전점검/공지/보고서 PDF 공용).
 // - PC: 새 창을 열어 HTML을 쓰고, HTML 내부 스크립트로 자동 인쇄(→PDF 저장) — 기존 동작 유지.
-// - 모바일/태블릿: 팝업+자동인쇄가 앱을 멈추게/종료시키므로 Blob URL을 새 탭으로 열어
-//   사용자가 브라우저 공유/인쇄(→PDF 저장)를 직접 하도록 fallback. 자동 window.print() 는 제거.
+// - 모바일/태블릿: 자동 window.print() 무력화 + Storage 업로드 후 https signed URL 로 열기
+//   (blob 직접 열기 오류 회피). Storage 미설정이면 blob 새 탭으로 fallback.
 // 어떤 경우에도 예외로 앱 전체가 죽지 않도록 try/catch 로 감싸고 안내만 표시한다.
-function openPrintableDocument(html: string, opts?: { windowName?: string; features?: string }): boolean {
+function openPrintableDocument(html: string, opts?: { windowName?: string; features?: string; fileBase?: string; tenantId?: string }): boolean {
   try {
     if (isMobileOrTablet()) {
-      // 모바일: 자동 인쇄(window.print) 를 무력화(크래시/멈춤 방지) 후 Blob 새 탭 미리보기.
       const safeHtml = html.replace(/window\.print\s*\(\s*\)/g, "void 0");
       const blob = new Blob([safeHtml], { type: "text/html;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const w = window.open(url, "_blank", "noopener,noreferrer");
-      if (!w) window.location.href = url; // 팝업 차단 시 같은 탭 이동(뒤로가기로 복귀, 앱 미종료)
-      // Blob URL 즉시 revoke 금지("파일에 액세스할 수 없음" 방지) — 120초 뒤 해제.
-      setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 120000);
+      const preTab = openPlaceholderTabIfMobile(); // 제스처 내 즉시 빈 탭 확보
+      void deliverViaSignedUrl(blob, `${opts?.fileBase || "report"}.html`, "text/html;charset=utf-8", opts?.tenantId || "", preTab);
       return true;
     }
     const w = window.open("", opts?.windowName || "_blank", opts?.features || "");
@@ -345,63 +378,47 @@ function openPrintableDocument(html: string, opts?: { windowName?: string; featu
   }
 }
 
-// PDF Blob 안전 다운로드 (jsPDF 등에서 생성한 Blob 공용). 모든 PDF Blob 다운로드가 이 함수를 사용.
-// 우선순위: (모바일) Web Share(파일 공유) → 새 창(탭) → 같은 탭 이동 / (PC) <a download>.
-// 핵심: Blob URL 을 즉시 revoke 하지 않고 120초 뒤 해제 → 모바일 "파일에 액세스할 수 없음" 오류 방지.
+// PDF Blob 안전 다운로드 (jsPDF 등에서 생성한 Blob 공용).
+// - PC: <a download> 로 저장(기존 동작 유지).
+// - 모바일: Storage 업로드 → https signed URL 로 열기(미리 확보한 preTab 이동). blob 직접 열기 금지.
 // 실패해도 앱이 죽지 않도록 try/catch + 안내.
-async function downloadBlobSafe(blob: Blob, fileName: string): Promise<boolean> {
+async function downloadBlobSafe(blob: Blob, fileName: string, tenantId = "", preTab: Window | null = null): Promise<boolean> {
   try {
     if (!blob || blob.size === 0) throw new Error("PDF Blob is empty");
     const safeFileName = fileName.toLowerCase().endsWith(".pdf") ? fileName : `${fileName}.pdf`;
-    const mobile = isMobileOrTablet();
-
-    // 1) 모바일/태블릿 + Web Share(파일 공유) 지원 시 우선 사용 → iOS/Android 저장·공유 UX 일치.
-    if (mobile && typeof navigator !== "undefined" && typeof (navigator as any).canShare === "function") {
-      try {
-        const file = new File([blob], safeFileName, { type: "application/pdf" });
-        if ((navigator as any).canShare({ files: [file] })) {
-          await (navigator as any).share({ files: [file], title: safeFileName });
-          return true;
-        }
-      } catch (shareErr) {
-        // 사용자가 공유창을 취소(AbortError)하면 조용히 종료. 그 외 오류는 아래 fallback 진행.
-        if ((shareErr as { name?: string })?.name === "AbortError") return false;
-      }
+    if (isMobileOrTablet()) {
+      await deliverViaSignedUrl(blob, safeFileName, "application/pdf", tenantId, preTab);
+      return true;
     }
-
     const url = URL.createObjectURL(blob);
-    if (mobile) {
-      // 2) 새 창(탭)으로 PDF 열기 → 실패 시 같은 탭 이동. a.download 는 모바일에서 자주 막힘.
-      const opened = window.open(url, "_blank", "noopener,noreferrer");
-      if (!opened) window.location.href = url;
-    } else {
-      // 3) PC: <a download> 로 저장(기존 동작 유지).
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = safeFileName;
-      link.rel = "noopener noreferrer";
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    }
-    // Blob URL 즉시 revoke 금지 — 120초 뒤 해제.
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = safeFileName;
+    link.rel = "noopener noreferrer";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
     setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 120000);
     return true;
   } catch (e) {
     console.error("[PDF 다운로드 실패]", e);
-    alert("PDF를 다운로드하지 못했습니다. 모바일에서는 공유 또는 새 창 열기를 허용한 뒤 다시 시도해주세요.");
+    if (preTab && !preTab.closed) { try { preTab.close(); } catch { /* noop */ } }
+    alert("PDF를 다운로드하지 못했습니다. 모바일에서는 새 창 열기를 허용한 뒤 다시 시도해주세요.");
     return false;
   }
 }
 
 // Blob 생성 함수를 받아 안전 다운로드까지 처리하는 공통 진입점(스펙 시그니처).
+// 모바일은 생성(비동기) 전에 placeholder 탭을 확보해 팝업 차단을 회피한다.
 // PDF 생성 단계 실패도 앱을 종료시키지 않고 안내만 표시한다.
-async function downloadPdfSafely(fileName: string, createPdfBlob: () => Promise<Blob>): Promise<boolean> {
+async function downloadPdfSafely(fileName: string, createPdfBlob: () => Promise<Blob>, tenantId = ""): Promise<boolean> {
+  const preTab = openPlaceholderTabIfMobile();
   try {
     const blob = await createPdfBlob();
-    return await downloadBlobSafe(blob, fileName);
+    return await downloadBlobSafe(blob, fileName, tenantId, preTab);
   } catch (e) {
     console.error("[PDF 생성 실패]", e);
+    if (preTab && !preTab.closed) { try { preTab.close(); } catch { /* noop */ } }
     alert("PDF를 생성하지 못했습니다. 다시 시도해주세요.");
     return false;
   }
@@ -3677,7 +3694,7 @@ export default function App() {
   };
   const BACKUPS_KEY = "erp-data-backups";
   const BACKUP_VERSION = "v4";
-  const MAX_BACKUPS = 10;
+  const MAX_BACKUPS = 5;
   const [backups, setBackups] = useState<DataBackup[]>(() => loadJson<DataBackup[]>(BACKUPS_KEY, [], tenantId));
   const [selectedBackupId, setSelectedBackupId] = useState<string | null>(null);
   const [recycleBinSubTab, setRecycleBinSubTab] = useState<"trash" | "backup">("trash");
@@ -8556,7 +8573,7 @@ export default function App() {
         }
         if (!doc) throw new Error("PDF 생성할 이미지가 없습니다.");
         return doc.output("blob");
-      });
+      }, tenantId);
     } catch (e) {
       console.error("PDF 생성 실패:", e);
       await appAlert("기숙사 ERP 알림", "PDF 생성 중 오류가 발생했습니다.");
@@ -9594,7 +9611,7 @@ export default function App() {
       ${sectionHtml}
       <script>document.title=${JSON.stringify(opts.fileBase)};setTimeout(function(){window.print();},400);</script>
       </body></html>`;
-    openPrintableDocument(html);
+    openPrintableDocument(html, { fileBase: opts.fileBase, tenantId });
   };
 
   const reportFileDate = (raw?: string): string =>
@@ -10673,7 +10690,7 @@ export default function App() {
       <table>${rows}</table>
       <script>setTimeout(function(){window.print();},400);</script>
       </body></html>`;
-    openPrintableDocument(html, { windowName: "notice-print", features: "width=800,height=900" });
+    openPrintableDocument(html, { windowName: "notice-print", features: "width=800,height=900", fileBase: `공지_${notice.title || ""}`, tenantId });
   };
 
   // Generate summary reports into militaryReports state
@@ -12242,7 +12259,7 @@ const openReportPdf = (type: PdfReportType, autoPrint: boolean) => {
   if (autoPrint) {
     html = html.replace(/<\/body>/i, `<script>setTimeout(function(){window.print();},400);</script></body>`);
   }
-  const opened = openPrintableDocument(html, { windowName: "report-pdf", features: "width=1024,height=768" });
+  const opened = openPrintableDocument(html, { windowName: "report-pdf", features: "width=1024,height=768", fileBase: `보고서_${PDF_REPORT_LABELS[type] || type}`, tenantId });
   if (!opened) return;
   createAuditLog({
     targetType: "system",
