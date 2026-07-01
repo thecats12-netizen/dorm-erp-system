@@ -287,6 +287,78 @@ function openAddressSearch(onSelected: (roadAddress: string) => void) {
   }
 }
 
+// 모바일/태블릿 판별 (iOS Safari / Android Chrome 대응)
+function isMobileDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  // iPadOS 13+ 는 Macintosh 로 위장하므로 터치 여부로 보강 판별.
+  const iPadOS = /Macintosh/i.test(ua) && typeof document !== "undefined" && "ontouchend" in document;
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || iPadOS;
+}
+
+// 인쇄용 HTML 문서를 안전하게 여는 공통 helper (청소/하자/보고서 PDF 공용).
+// - PC: 새 창을 열어 HTML을 쓰고, HTML 내부 스크립트로 자동 인쇄(→PDF 저장) — 기존 동작 유지.
+// - 모바일/태블릿: 팝업+자동인쇄가 앱을 멈추게/종료시키므로 Blob URL을 새 탭으로 열어
+//   사용자가 브라우저 공유/인쇄(→PDF 저장)를 직접 하도록 fallback. 자동 window.print() 는 제거.
+// 어떤 경우에도 예외로 앱 전체가 죽지 않도록 try/catch 로 감싸고 안내만 표시한다.
+function openPrintableDocument(html: string, opts?: { windowName?: string; features?: string }): boolean {
+  try {
+    if (isMobileDevice()) {
+      // 모바일: 자동 인쇄(window.print) 를 무력화(크래시/멈춤 방지) 후 Blob 새 탭 미리보기.
+      const safeHtml = html.replace(/window\.print\s*\(\s*\)/g, "void 0");
+      const blob = new Blob([safeHtml], { type: "text/html;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const w = window.open(url, "_blank", "noopener,noreferrer");
+      if (!w) window.location.href = url; // 팝업 차단 시 같은 탭 이동(뒤로가기로 복귀, 앱 미종료)
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 60000);
+      return true;
+    }
+    const w = window.open("", opts?.windowName || "_blank", opts?.features || "");
+    if (!w) {
+      alert("팝업이 차단되었습니다. 브라우저 팝업을 허용해주세요.");
+      return false;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    return true;
+  } catch (e) {
+    console.error("[문서 열기 실패]", e);
+    alert("문서를 여는 중 오류가 발생했습니다. 다시 시도해주세요.");
+    return false;
+  }
+}
+
+// PDF Blob 안전 다운로드 (jsPDF 등에서 생성한 Blob 공용).
+// - PC: <a download> 클릭으로 파일 저장.
+// - 모바일: download 속성이 무시되는 경우가 많아 새 탭 미리보기로 fallback(앱 종료 방지).
+// 실패해도 앱이 죽지 않도록 try/catch + 안내.
+async function downloadBlobSafe(blob: Blob, fileName: string): Promise<boolean> {
+  try {
+    if (!blob || blob.size === 0) throw new Error("PDF Blob is empty");
+    const name = fileName.toLowerCase().endsWith(".pdf") ? fileName : `${fileName}.pdf`;
+    const url = URL.createObjectURL(blob);
+    if (isMobileDevice()) {
+      const w = window.open(url, "_blank", "noopener,noreferrer");
+      if (!w) window.location.href = url;
+    } else {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      link.rel = "noopener";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 10000);
+    return true;
+  } catch (e) {
+    console.error("[PDF 다운로드 실패]", e);
+    alert("PDF를 다운로드하지 못했습니다. 다시 시도해주세요.");
+    return false;
+  }
+}
+
 /**
  * v4 통합 운영 대시보드
  *
@@ -519,9 +591,8 @@ function computeVacancyStats(
 // 입주자 표시 상태: 거주중 / 만료예정 / 퇴실 / 과거거주 / 배정대기
 // (실제 퇴실일이 있으면 과거거주, status=퇴실이면 퇴실, 거주중/신규입주는 거주중)
 function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string }): "거주중" | "만료예정" | "퇴실" | "과거거주" | "배정대기" {
-  // #5: 퇴실을 가장 먼저 판단(실제 퇴실일 존재 또는 상태 퇴실) → 퇴실/과거거주
-  if (o.actualMoveOutDate) return "과거거주";
-  if (o.status === "퇴실") return "퇴실";
+  // 퇴실 최우선(실제 퇴실일 존재 또는 상태 퇴실) → 표시는 "과거거주"로 통일(통계는 퇴실 그룹으로 계산).
+  if (o.actualMoveOutDate || o.status === "퇴실") return "과거거주";
   if (o.status === "미배정") return "배정대기";
   if (o.status === "만료예정") return "만료예정";
   return "거주중";
@@ -1151,21 +1222,27 @@ function calculateMoveInType(
   allEmployees: NewHireEmployee[]
 ): MoveInType {
   const hasAddressInfo = Boolean(employee.buildingName?.trim() && employee.dong?.trim() && employee.roomHo?.trim());
-  if (!hasAddressInfo) return "대기자";
+  if (!hasAddressInfo) return "대기자"; // 기숙사 미배정
 
+  // 사용자가 명시적으로 '연장' 상태를 지정했으면 연장 유지(자동계산이 덮어쓰지 않도록).
+  if ((employee.residenceStatus as string) === "연장") return "연장";
+
+  // 동일인(이름+연락처)의 과거 기록. 연락처가 비어 있으면 오매칭 방지를 위해 그룹핑에서 제외.
+  // createdAt 누락에도 안전하게 정렬(undefined.localeCompare 크래시 방지).
   const previousRecords = allEmployees
-    .filter((e) => e.id !== employee.id && e.name === employee.name && e.phone === employee.phone)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    .filter((e) => e.id !== employee.id && !!e.phone && e.name === employee.name && e.phone === employee.phone)
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
 
-  if (previousRecords.length === 0) return "신규";
+  if (previousRecords.length === 0) return "신규"; // 첫 배정 = 신규입주
 
   const last = previousRecords[previousRecords.length - 1];
   const currentMoveInDate = employee.moveInDate || "";
   const lastEndDate = last.moveOutDate || last.expectedMoveOutDate || "";
 
-  if (!currentMoveInDate) return "재입주";
+  // 같은 기숙사에서 계약/입주기간이 곧바로 이어지면 연장.
   if (
     lastEndDate &&
+    currentMoveInDate &&
     currentMoveInDate === addDays(lastEndDate, 1) &&
     employee.buildingName === last.buildingName &&
     employee.dong === last.dong &&
@@ -1174,6 +1251,7 @@ function calculateMoveInType(
     return "연장";
   }
 
+  // 과거 거주 이력이 있고 연장이 아니면(퇴실 후 재입주 또는 다른 기숙사로 이동) 재입주.
   return "재입주";
 }
 
@@ -1183,7 +1261,10 @@ function getNewHireStatus(h: NewHireEmployee): NewHireResidenceStatus {
   return (h.residenceStatus as string) === "자동선택" ? calculateNewHireResidenceStatus(h) : h.residenceStatus;
 }
 function getNewHireType(h: NewHireEmployee, allEmployees: NewHireEmployee[]): MoveInType {
-  return (h.moveInType as string) === "자동선택" ? calculateMoveInType(h, allEmployees) : h.moveInType;
+  // 저장값 우선. "자동선택"/빈값/자동일 때만 자동 계산(사용자 직접 선택값은 유지).
+  const raw = String(h.moveInType ?? "").trim();
+  const isAuto = !raw || raw === "자동선택" || raw === "자동" || raw === "-";
+  return isAuto ? calculateMoveInType(h, allEmployees) : h.moveInType;
 }
 function isUnassignedNewHire(h: NewHireEmployee): boolean {
   if (h.isDeleted) return false;
@@ -4783,7 +4864,8 @@ export default function App() {
     if (o.isDeleted) return false;
     const today = new Date().toISOString().slice(0, 10);
     if (o.status === "퇴실" || o.status === "천안이동" || o.status === "미배정") return false;
-    if (o.actualMoveOutDate && o.actualMoveOutDate <= today) return false;
+    // 실제퇴실일이 있으면(과거거주) 현재 인원/만실/사용중/공실 계산에서 제외 — 표시(occupantDisplayStatus)와 일치.
+    if (o.actualMoveOutDate) return false;
     if (["거주중", "만료예정", "신규입주", "입주", "배정", "재직", "대기중"].includes(o.status || "")) return true;
     // 상태가 모호/빈값: 입실일이 있고 퇴실예정일이 없거나 미래면 거주중으로 간주
     const movedIn = !!(o.moveInDate && o.moveInDate <= today);
@@ -8385,9 +8467,11 @@ export default function App() {
         const scale = Math.min((pw - margin * 2) / w, (ph - margin * 2) / h);
         const dw = w * scale, dh = h * scale;
         const fmt = dataUrlExt(urls[i]).toUpperCase() === "PNG" ? "PNG" : "JPEG";
-        doc.addImage(urls[i], fmt, (pw - dw) / 2, (ph - dh) / 2, dw, dh);
+        // 'FAST' 압축: 모바일 메모리 초과/멈춤 방지 (품질 영향 미미).
+        doc.addImage(urls[i], fmt, (pw - dw) / 2, (ph - dh) / 2, dw, dh, undefined, "FAST");
       }
-      if (doc) doc.save(fileName);
+      // doc.save() 는 모바일에서 실패/앱 종료 위험 → Blob 다운로드(모바일은 새 탭 미리보기)로 변경.
+      if (doc) await downloadBlobSafe(doc.output("blob"), fileName);
     } catch (e) {
       console.error("PDF 생성 실패:", e);
       await appAlert("기숙사 ERP 알림", "PDF 생성 중 오류가 발생했습니다.");
@@ -9158,10 +9242,7 @@ export default function App() {
       ${sectionHtml}
       <script>document.title=${JSON.stringify(opts.fileBase)};setTimeout(function(){window.print();},400);</script>
       </body></html>`;
-    const w = window.open("", "_blank");
-    if (!w) { alert("팝업이 차단되었습니다. 브라우저 팝업을 허용해 주세요."); return; }
-    w.document.write(html);
-    w.document.close();
+    openPrintableDocument(html);
   };
 
   const reportFileDate = (raw?: string): string =>
@@ -10240,11 +10321,7 @@ export default function App() {
       <table>${rows}</table>
       <script>setTimeout(function(){window.print();},400);</script>
       </body></html>`;
-    const w = window.open("", "notice-print", "width=800,height=900");
-    if (!w) return alert('팝업이 차단되었습니다. 팝업을 허용해주세요.');
-    w.document.open();
-    w.document.write(html);
-    w.document.close();
+    openPrintableDocument(html, { windowName: "notice-print", features: "width=800,height=900" });
   };
 
   // Generate summary reports into militaryReports state
@@ -11807,18 +11884,14 @@ const generateReportHtml = (type: PdfReportType): string => {
 };
 
 const openReportPdf = (type: PdfReportType, autoPrint: boolean) => {
-  const html = generateReportHtml(type);
-  const w = window.open("", "report-pdf", "width=1024,height=768");
-  if (!w) {
-    alert("팝업이 차단되었습니다. 팝업을 허용해주세요.");
-    return;
-  }
-  w.document.open();
-  w.document.write(html);
-  w.document.close();
+  let html = generateReportHtml(type);
+  // autoPrint(=PDF 저장) 시 HTML 내부 스크립트로 인쇄 실행. 모바일에서는 helper 가 이 스크립트를 무력화하고
+  // 새 탭 미리보기로 대체하여 앱 종료를 방지한다. PC 는 기존처럼 자동 인쇄창이 뜬다.
   if (autoPrint) {
-    setTimeout(() => w.print(), 400);
+    html = html.replace(/<\/body>/i, `<script>setTimeout(function(){window.print();},400);</script></body>`);
   }
+  const opened = openPrintableDocument(html, { windowName: "report-pdf", features: "width=1024,height=768" });
+  if (!opened) return;
   createAuditLog({
     targetType: "system",
     targetId: type,
@@ -15673,7 +15746,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.moveOutDate)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.actualMoveOutDate)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{formatDateOnly(h.cheonanMoveDate)}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs">{getNewHireStatus(h)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs">{(() => { const st = getNewHireStatus(h); return st === "퇴실" ? "과거거주" : st === "연장" ? "거주중" : st; })()}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{getNewHireType(h, newHires)}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs">{h.extensionReason || "-"}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs erp-col-memo" title={h.notes || ""}>{h.notes || "-"}</td>
@@ -16140,7 +16213,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           {(() => {
                             const ds = occupantDisplayStatus(o);
                             const colorKey = ds === "과거거주" ? "퇴실" : ds === "배정대기" ? "공실" : ds;
-                            const outDate = o.actualMoveOutDate || o.moveOutDueDate || (o as { expectedMoveOutDate?: string }).expectedMoveOutDate || "";
+                            const actualOut = o.actualMoveOutDate || "";
                             return (
                               <div className="flex flex-col items-start gap-0.5">
                                 <span
@@ -16149,8 +16222,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 >
                                   {ds}
                                 </span>
-                                {(ds === "퇴실" || ds === "과거거주") && outDate && (
-                                  <span className="text-[0.7rem] text-slate-400">퇴실 {formatDateOnly(outDate)}</span>
+                                {ds === "과거거주" && actualOut && (
+                                  <span className="text-[0.7rem] text-slate-400">실제퇴실 {formatDateOnly(actualOut)}</span>
                                 )}
                               </div>
                             );
@@ -16270,13 +16343,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               <td className="px-3 py-3">{occupant.employeeName}</td>
                               <td className="px-3 py-3">{occupant.gender}</td>
                               <td className="px-3 py-3">{formatDateOnly(occupant.moveInDate || "") || "-"}</td>
-                              <td className="px-3 py-3">{movedOut ? <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600">퇴실</span> : occupant.status}</td>
+                              <td className="px-3 py-3">{movedOut ? <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600">과거거주</span> : occupant.status}</td>
                               <td translate="no" className="px-3 py-3 notranslate">{occupant.department}</td>
                               <td className="px-3 py-3">{maskPhone(occupant.phone)}</td>
-                              <td className="px-3 py-3">{formatDateOnly(occupant.actualMoveOutDate || occupant.moveOutDueDate || "") || "-"}</td>
+                              <td className="px-3 py-3">{movedOut ? (formatDateOnly(occupant.actualMoveOutDate || "") || "-") : (formatDateOnly(occupant.moveOutDueDate || "") || "-")}</td>
                               <td className="px-3 py-3">
-                                {occupant.actualMoveOutDate
-                                  ? "퇴실완료"
+                                {movedOut
+                                  ? "퇴실"
                                   : occupant.moveOutDueDate
                                     ? (daysDiff(occupant.moveOutDueDate) < 0 ? "만료" : String(daysDiff(occupant.moveOutDueDate)))
                                     : "-"}
