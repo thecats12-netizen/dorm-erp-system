@@ -8,7 +8,16 @@
 html, body, #root { max-width: 100%; overflow-x: hidden; }
 
 /* 고정 min-width 테이블은 컨테이너 내부에서만 가로 스크롤되도록(뷰포트를 밀지 않게). */
-.erp-table-container, .overflow-auto, .overflow-x-auto { max-width: 100%; -webkit-overflow-scrolling: touch; }
+.erp-table-container, .overflow-auto, .overflow-x-auto, .table-scroll { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* 모바일/태블릿 레이아웃 안정화(화면 회전 시 깨짐 방지). 기기 자동회전 잠금은 그대로 존중하며,
+   웹앱에서 orientation 을 강제로 잠그거나 화면을 회전시키지 않는다(코드 없음). */
+html, body, #root { min-height: 100%; width: 100%; }
+body { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
+#root { min-height: 100dvh; }
+
+/* 모달: 회전/작은 화면에서도 화면 너비/높이 안에서 보이고 내부 스크롤되도록 안전장치. */
+.modal-content { max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); overflow: auto; }
 
 /* 상태 배지/칩: 배경이 항상 밝은 파스텔(colorMap)이므로 글씨는 항상 진한색으로 고정.
    다크모드의 text-slate 반전/밝은 글씨 상속으로 인한 "글씨 안 보임"을 무력화한다. */

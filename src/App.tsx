@@ -302,13 +302,13 @@ function openAddressSearch(onSelected: (roadAddress: string) => void) {
   }
 }
 
-// 모바일/태블릿 판별 (iOS Safari / Android Chrome 대응)
-function isMobileDevice(): boolean {
+// 모바일/태블릿 판별 (iOS Safari / iPad / Android Chrome 대응)
+function isMobileOrTablet(): boolean {
   if (typeof navigator === "undefined") return false;
   const ua = navigator.userAgent || "";
   // iPadOS 13+ 는 Macintosh 로 위장하므로 터치 여부로 보강 판별.
   const iPadOS = /Macintosh/i.test(ua) && typeof document !== "undefined" && "ontouchend" in document;
-  return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || iPadOS;
+  return /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(ua) || iPadOS;
 }
 
 // 인쇄용 HTML 문서를 안전하게 여는 공통 helper (청소/하자/보고서 PDF 공용).
@@ -318,14 +318,15 @@ function isMobileDevice(): boolean {
 // 어떤 경우에도 예외로 앱 전체가 죽지 않도록 try/catch 로 감싸고 안내만 표시한다.
 function openPrintableDocument(html: string, opts?: { windowName?: string; features?: string }): boolean {
   try {
-    if (isMobileDevice()) {
+    if (isMobileOrTablet()) {
       // 모바일: 자동 인쇄(window.print) 를 무력화(크래시/멈춤 방지) 후 Blob 새 탭 미리보기.
       const safeHtml = html.replace(/window\.print\s*\(\s*\)/g, "void 0");
       const blob = new Blob([safeHtml], { type: "text/html;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const w = window.open(url, "_blank", "noopener,noreferrer");
       if (!w) window.location.href = url; // 팝업 차단 시 같은 탭 이동(뒤로가기로 복귀, 앱 미종료)
-      setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 60000);
+      // Blob URL 즉시 revoke 금지("파일에 액세스할 수 없음" 방지) — 120초 뒤 해제.
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 120000);
       return true;
     }
     const w = window.open("", opts?.windowName || "_blank", opts?.features || "");
@@ -344,32 +345,64 @@ function openPrintableDocument(html: string, opts?: { windowName?: string; featu
   }
 }
 
-// PDF Blob 안전 다운로드 (jsPDF 등에서 생성한 Blob 공용).
-// - PC: <a download> 클릭으로 파일 저장.
-// - 모바일: download 속성이 무시되는 경우가 많아 새 탭 미리보기로 fallback(앱 종료 방지).
+// PDF Blob 안전 다운로드 (jsPDF 등에서 생성한 Blob 공용). 모든 PDF Blob 다운로드가 이 함수를 사용.
+// 우선순위: (모바일) Web Share(파일 공유) → 새 창(탭) → 같은 탭 이동 / (PC) <a download>.
+// 핵심: Blob URL 을 즉시 revoke 하지 않고 120초 뒤 해제 → 모바일 "파일에 액세스할 수 없음" 오류 방지.
 // 실패해도 앱이 죽지 않도록 try/catch + 안내.
 async function downloadBlobSafe(blob: Blob, fileName: string): Promise<boolean> {
   try {
     if (!blob || blob.size === 0) throw new Error("PDF Blob is empty");
-    const name = fileName.toLowerCase().endsWith(".pdf") ? fileName : `${fileName}.pdf`;
+    const safeFileName = fileName.toLowerCase().endsWith(".pdf") ? fileName : `${fileName}.pdf`;
+    const mobile = isMobileOrTablet();
+
+    // 1) 모바일/태블릿 + Web Share(파일 공유) 지원 시 우선 사용 → iOS/Android 저장·공유 UX 일치.
+    if (mobile && typeof navigator !== "undefined" && typeof (navigator as any).canShare === "function") {
+      try {
+        const file = new File([blob], safeFileName, { type: "application/pdf" });
+        if ((navigator as any).canShare({ files: [file] })) {
+          await (navigator as any).share({ files: [file], title: safeFileName });
+          return true;
+        }
+      } catch (shareErr) {
+        // 사용자가 공유창을 취소(AbortError)하면 조용히 종료. 그 외 오류는 아래 fallback 진행.
+        if ((shareErr as { name?: string })?.name === "AbortError") return false;
+      }
+    }
+
     const url = URL.createObjectURL(blob);
-    if (isMobileDevice()) {
-      const w = window.open(url, "_blank", "noopener,noreferrer");
-      if (!w) window.location.href = url;
+    if (mobile) {
+      // 2) 새 창(탭)으로 PDF 열기 → 실패 시 같은 탭 이동. a.download 는 모바일에서 자주 막힘.
+      const opened = window.open(url, "_blank", "noopener,noreferrer");
+      if (!opened) window.location.href = url;
     } else {
+      // 3) PC: <a download> 로 저장(기존 동작 유지).
       const link = document.createElement("a");
       link.href = url;
-      link.download = name;
-      link.rel = "noopener";
+      link.download = safeFileName;
+      link.rel = "noopener noreferrer";
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
     }
-    setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 10000);
+    // Blob URL 즉시 revoke 금지 — 120초 뒤 해제.
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 120000);
     return true;
   } catch (e) {
     console.error("[PDF 다운로드 실패]", e);
-    alert("PDF를 다운로드하지 못했습니다. 다시 시도해주세요.");
+    alert("PDF를 다운로드하지 못했습니다. 모바일에서는 공유 또는 새 창 열기를 허용한 뒤 다시 시도해주세요.");
+    return false;
+  }
+}
+
+// Blob 생성 함수를 받아 안전 다운로드까지 처리하는 공통 진입점(스펙 시그니처).
+// PDF 생성 단계 실패도 앱을 종료시키지 않고 안내만 표시한다.
+async function downloadPdfSafely(fileName: string, createPdfBlob: () => Promise<Blob>): Promise<boolean> {
+  try {
+    const blob = await createPdfBlob();
+    return await downloadBlobSafe(blob, fileName);
+  } catch (e) {
+    console.error("[PDF 생성 실패]", e);
+    alert("PDF를 생성하지 못했습니다. 다시 시도해주세요.");
     return false;
   }
 }
@@ -3050,7 +3083,8 @@ export default function App() {
                 const authUser = authRes.status === "fulfilled" ? authRes.value : undefined;
                 console.log("[LOAD] User profile loaded:", profile.id, profile.email);
                 setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
-                setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
+                // 하자접수 담당자 기본 진입 메뉴: 청소관리(하자접수는 계속 클릭 접근 가능).
+                setActiveTab(profile.role === "maintenance_reporter" ? "cleaningReports" : "dashboard");
               }
             } else if (profileRes.status === "rejected") {
               console.error("[LOAD] Failed to load user profile:", profileRes.reason);
@@ -8398,7 +8432,8 @@ export default function App() {
           return;
         }
         setCurrentUser(mapProfileToLoginUser(profile, authUser?.email ?? undefined));
-        setActiveTab(profile.role === "maintenance_reporter" ? "defects" : "dashboard");
+        // 하자접수 담당자 기본 진입 메뉴: 청소관리(하자접수는 계속 클릭 접근 가능).
+        setActiveTab(profile.role === "maintenance_reporter" ? "cleaningReports" : "dashboard");
         setLoginError("");
         // 로그인 직후 Supabase 데이터 강제 재로드 → 새로고침 없이 데이터 표시.
         // isLoading 을 동기로 켜서 빈 인증 화면이 한 프레임도 노출되지 않도록 함(로딩 화면 즉시 표시).
@@ -8421,7 +8456,8 @@ export default function App() {
     }
 
     setCurrentUser(found);
-    setActiveTab(found.role === "maintenance_reporter" ? "defects" : "dashboard");
+    // 하자접수 담당자 기본 진입 메뉴: 청소관리(하자접수는 계속 클릭 접근 가능).
+    setActiveTab(found.role === "maintenance_reporter" ? "cleaningReports" : "dashboard");
     setLoginError("");
   };
 
@@ -8489,38 +8525,48 @@ export default function App() {
 
   // 이미지 일괄: PDF(이미지 1장당 1페이지) 다운로드
   const downloadImagesAsPdf = async (urls: string[], fileName: string) => {
+    // 중복 클릭 방지(생성 중 재진입 차단) — 모바일 메모리 초과/앱 종료 방지.
+    if (pdfBusyRef.current) return;
+    pdfBusyRef.current = true;
     try {
-      const { jsPDF } = await import("jspdf");
-      const loadSize = (url: string) => new Promise<{ w: number; h: number }>((resolve) => {
-        const im = new Image();
-        im.onload = () => resolve({ w: im.naturalWidth || 1, h: im.naturalHeight || 1 });
-        im.onerror = () => resolve({ w: 1, h: 1 });
-        im.src = url;
+      const isMobile = isMobileOrTablet();
+      // 생성(무거움)과 다운로드(공유/새창/저장)를 downloadPdfSafely 로 일원화. 실패해도 앱 종료 없음.
+      await downloadPdfSafely(fileName, async () => {
+        const { jsPDF } = await import("jspdf");
+        const loadSize = (url: string) => new Promise<{ w: number; h: number }>((resolve) => {
+          const im = new Image();
+          im.onload = () => resolve({ w: im.naturalWidth || 1, h: im.naturalHeight || 1 });
+          im.onerror = () => resolve({ w: 1, h: 1 });
+          im.src = url;
+        });
+        let doc: any = null;
+        for (let i = 0; i < urls.length; i++) {
+          const { w, h } = await loadSize(urls[i]);
+          const orientation = w >= h ? "landscape" : "portrait";
+          if (!doc) doc = new jsPDF({ orientation, unit: "pt", format: "a4" });
+          else doc.addPage("a4", orientation);
+          const pw = doc.internal.pageSize.getWidth();
+          const ph = doc.internal.pageSize.getHeight();
+          const margin = 24;
+          const scale = Math.min((pw - margin * 2) / w, (ph - margin * 2) / h);
+          const dw = w * scale, dh = h * scale;
+          const fmt = dataUrlExt(urls[i]).toUpperCase() === "PNG" ? "PNG" : "JPEG";
+          // 모바일은 'FAST'(메모리 절감), PC 는 'MEDIUM'(품질). 기존 이미지/레이아웃은 동일.
+          doc.addImage(urls[i], fmt, (pw - dw) / 2, (ph - dh) / 2, dw, dh, undefined, isMobile ? "FAST" : "MEDIUM");
+        }
+        if (!doc) throw new Error("PDF 생성할 이미지가 없습니다.");
+        return doc.output("blob");
       });
-      let doc: any = null;
-      for (let i = 0; i < urls.length; i++) {
-        const { w, h } = await loadSize(urls[i]);
-        const orientation = w >= h ? "landscape" : "portrait";
-        if (!doc) doc = new jsPDF({ orientation, unit: "pt", format: "a4" });
-        else doc.addPage("a4", orientation);
-        const pw = doc.internal.pageSize.getWidth();
-        const ph = doc.internal.pageSize.getHeight();
-        const margin = 24;
-        const scale = Math.min((pw - margin * 2) / w, (ph - margin * 2) / h);
-        const dw = w * scale, dh = h * scale;
-        const fmt = dataUrlExt(urls[i]).toUpperCase() === "PNG" ? "PNG" : "JPEG";
-        // 'FAST' 압축: 모바일 메모리 초과/멈춤 방지 (품질 영향 미미).
-        doc.addImage(urls[i], fmt, (pw - dw) / 2, (ph - dh) / 2, dw, dh, undefined, "FAST");
-      }
-      // doc.save() 는 모바일에서 실패/앱 종료 위험 → Blob 다운로드(모바일은 새 탭 미리보기)로 변경.
-      if (doc) await downloadBlobSafe(doc.output("blob"), fileName);
     } catch (e) {
       console.error("PDF 생성 실패:", e);
       await appAlert("기숙사 ERP 알림", "PDF 생성 중 오류가 발생했습니다.");
+    } finally {
+      pdfBusyRef.current = false;
     }
   };
 
 
+  const pdfBusyRef = useRef(false); // PDF 생성 중복 클릭 방지(생성 중 재진입 차단)
   const manualSignOutRef = useRef(false);
   const logout = async () => {
     // 군대 모듈 저장 필요 상태면 로그아웃 전 경고(앱 내부 동작이라 beforeunload 미발생)
@@ -12932,13 +12978,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   useEffect(() => {
     if (isMaintenanceAccessUser && activeTab !== "cleaningReports" && activeTab !== "defects") {
-      setActiveTab("defects");
+      // 허용 외 탭이면 기본 진입 메뉴(청소관리)로 이동. 하자접수는 계속 클릭 접근 가능.
+      setActiveTab("cleaningReports");
       return;
     }
     // 관리자 전용 탭(시스템설정/휴지통·백업/사용자관리)에 비관리자가 진입하면 허용 메뉴로 자동 이동
     const adminOnlyTabs: TabKey[] = ["settings", "recycleBin", "users", "militarySettings"];
     if (currentUser && currentUser.role !== "admin" && adminOnlyTabs.includes(activeTab)) {
-      setActiveTab(isMaintenanceAccessUser ? "defects" : "dashboard");
+      setActiveTab(isMaintenanceAccessUser ? "cleaningReports" : "dashboard");
     }
   }, [isMaintenanceAccessUser, activeTab, currentUser]);
 
