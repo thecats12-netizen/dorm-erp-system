@@ -1211,7 +1211,7 @@ function calculateNewHireResidenceStatus(employee: NewHireFormLike): NewHireResi
   // #3: 기숙사 미배정 → 대기중 / 실제 퇴실일 존재 → 퇴실 / 계약종료 임박 → 만료예정 / 배정+퇴실안함 → 거주중.
   // (배정되면 moveInDate 가 없어도 거주중으로 인정 — 단일/일괄배정 직후 즉시 거주중 반영)
   if (!hasAddressInfo) return "대기중"; // 미배정
-  if (actualMoveOutDate && actualMoveOutDate <= today) return "퇴실"; // 실제 퇴실
+  if (actualMoveOutDate) return "퇴실"; // 실제 퇴실일 최우선(예정/미래 여부와 무관하게 퇴실)
   if (endDate && endDate < today && !actualMoveOutDate) return "연장"; // 종료일 경과(미퇴실)
   if (endDate && daysDiff(endDate) >= 0 && daysDiff(endDate) <= 30) return "만료예정"; // 만료 30일 이내
   return "거주중"; // 배정 + 퇴실 안함
@@ -1258,6 +1258,8 @@ function calculateMoveInType(
 // 신입사원 상태/유형/미배정 단일 기준(대시보드·메뉴·필터·Excel 공통).
 // 저장값 우선, "자동선택"일 때만 계산값 사용. 미배정 = 삭제 아님 + 퇴실 아님 + dormId 없음.
 function getNewHireStatus(h: NewHireEmployee): NewHireResidenceStatus {
+  // 실제퇴실일 최우선: 있으면 저장된 거주상태(거주중 등)와 무관하게 퇴실로 판정.
+  if (h.actualMoveOutDate && h.actualMoveOutDate.trim()) return "퇴실";
   return (h.residenceStatus as string) === "자동선택" ? calculateNewHireResidenceStatus(h) : h.residenceStatus;
 }
 function getNewHireType(h: NewHireEmployee, allEmployees: NewHireEmployee[]): MoveInType {
@@ -5986,19 +5988,23 @@ export default function App() {
       const cid = resolveCanonicalDormId(o.dormId);
       let employeeName = o.employeeName, phone = o.phone, department = o.department;
       let moveInDate = o.moveInDate, moveOutDueDate = o.moveOutDueDate, gender = o.gender, site = o.site;
-      if (!isRealName(employeeName) || !hasText(phone)) {
-        const nh = findNhFor(o);
-        if (nh) {
-          if (!isRealName(employeeName)) employeeName = nh.name;
-          phone = phone || nh.phone;
-          department = department || nh.department;
-          moveInDate = moveInDate || nh.moveInDate;
-          moveOutDueDate = moveOutDueDate || nh.moveOutDate;
-          gender = gender || nh.gender;
-          site = site || nh.site;
-        }
+      let status = o.status;
+      let actualMoveOutDate = o.actualMoveOutDate;
+      // 매칭되는 신입사원 원본과 항상 대조 — 이름/연락처 보완뿐 아니라 실제퇴실일/퇴실상태도 동기화.
+      // (입주자 행 저장값이 오래되어 퇴실자가 '거주중'으로 남아 표시/카운트되던 문제 방지)
+      const nh = findNhFor(o);
+      if (nh) {
+        if (!isRealName(employeeName)) employeeName = nh.name;
+        phone = phone || nh.phone;
+        department = department || nh.department;
+        moveInDate = moveInDate || nh.moveInDate;
+        moveOutDueDate = moveOutDueDate || nh.moveOutDate;
+        gender = gender || nh.gender;
+        site = site || nh.site;
+        actualMoveOutDate = actualMoveOutDate || nh.actualMoveOutDate;
+        if (getNewHireStatus(nh) === "퇴실") status = "퇴실" as Occupant["status"];
       }
-      return { ...o, dormId: cid, employeeName, phone, department, moveInDate, moveOutDueDate, gender, site };
+      return { ...o, dormId: cid, employeeName, phone, department, moveInDate, moveOutDueDate, gender, site, status, actualMoveOutDate };
     });
 
     // ② occupant 가 이미 커버하는 newHire(중복 합성 방지)
@@ -6007,7 +6013,7 @@ export default function App() {
 
     const supplement: Occupant[] = newHires
       .filter((h) => !h.isDeleted && isRealName(h.name) && hasText(h.dormId))
-      .filter((h) => getNewHireStatus(h) !== "퇴실") // 배정/거주 상태만(퇴실 제외)
+      // 퇴실자도 포함 — 입주자 메뉴/상세보기에 '과거거주'로 표시(현재 인원 카운트는 isCurrentResidentOccupant 가 제외).
       .filter((h) => !coveredNhIds.has(h.id))
       .filter((h) => !coveredNameKeys.has(`${h.name.trim()}|${digits(h.phone)}|${resolveCanonicalDormId(h.dormId)}`))
       .map((h) => ({
@@ -6020,7 +6026,8 @@ export default function App() {
         phone: h.phone,
         moveInDate: h.moveInDate,
         moveOutDueDate: h.moveOutDate,
-        status: (h.moveInDate ? "거주중" : "대기중") as Occupant["status"],
+        // 퇴실(실제퇴실일/퇴실상태)이면 퇴실, 아니면 입실일 유무로 거주중/대기중.
+        status: (getNewHireStatus(h) === "퇴실" ? "퇴실" : h.moveInDate ? "거주중" : "대기중") as Occupant["status"],
         isNewHireAssignment: true,
         notes: "",
         expectedMoveInDate: h.expectedMoveInDate,
