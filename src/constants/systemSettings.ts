@@ -50,6 +50,7 @@ export function getDefaultSystemSettings(): SystemSettings {
       { id: "12", groupName: "운영관리", menuName: "정산관리", tabKey: "settlementManagement", isVisible: true, order: 2, requiredRoles: ["admin", "viewer"] },
       { id: "13", groupName: "운영관리", menuName: "알림관리", tabKey: "notificationManagement", isVisible: true, order: 3, requiredRoles: ["admin", "viewer", "maintenance_reporter", "dorm_manager"] },
       { id: "14", groupName: "운영관리", menuName: "문서관리", tabKey: "documentManagement", isVisible: true, order: 4, requiredRoles: ["admin", "viewer"] },
+      { id: "25", groupName: "운영관리", menuName: "입주전 점검", tabKey: "preMoveInInspection", isVisible: true, order: 5, requiredRoles: ["admin", "viewer"] },
       { id: "15", groupName: "운영관리", menuName: "보고서", tabKey: "reportManagement", isVisible: true, order: 5, requiredRoles: ["admin", "viewer"] },
       { id: "16", groupName: "군대관리", menuName: "군인대시보드", tabKey: "militaryDashboard", isVisible: true, order: 1, requiredRoles: ["admin", "viewer"] },
       { id: "17", groupName: "군대관리", menuName: "인사관리", tabKey: "personnelManagement", isVisible: true, order: 2, requiredRoles: ["admin", "viewer"] },

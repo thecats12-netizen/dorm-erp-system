@@ -76,6 +76,21 @@ import {
   insertAuditLogsScoped,
 } from "./services/operationalSupabaseService";
 import {
+  loadPreMoveInInspections,
+  savePreMoveInInspections,
+} from "./services/preMoveInInspectionService";
+import {
+  emptyPreMoveInInspection,
+  INSPECTION_STATUS_OPTIONS,
+  CLEANING_STATUS_OPTIONS,
+  FACILITY_STATUS_OPTIONS,
+  SUPPLY_STATUS_OPTIONS,
+  DEFECT_YN_OPTIONS,
+  INSPECTION_PHOTO_CATEGORIES,
+  type PreMoveInInspection,
+  type InspectionPhoto,
+} from "./types/preMoveInInspection";
+import {
   signInWithEmail,
   signOut as supabaseSignOut,
   onAuthStateChange,
@@ -412,6 +427,7 @@ const getTabLabel = (tabKey: TabKey) => {
     case "notificationManagement": return "알림관리";
     case "documentManagement": return "문서관리";
     case "cleaningReports": return "청소관리";
+    case "preMoveInInspection": return "입주전 점검";
     case "reportManagement": return "보고서";
     case "settings": return "시스템설정";
     case "defects": return "하자접수";
@@ -599,6 +615,7 @@ function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string 
 }
 
 const SETTLEMENT_ITEMS_KEY = "settlementItems";
+const PRE_MOVE_IN_INSPECTIONS_KEY = "preMoveInInspections";
 
 type SettlementItemCategory = "장충금" | "홈클린" | "하자복구" | "비품구매" | "비품매각" | "시설파손" | "기타";
 type SettlementBurdenType = "회사지급" | "거주자부담" | "회사환급" | "거주자환급";
@@ -1682,6 +1699,24 @@ export default function App() {
   const [leases, setLeases] = useState<LeaseContract[]>([]);
   const [dormContracts, setDormContracts] = useState<DormContract[]>([]);
   const [cleaningReports, setCleaningReports] = useState<CleaningReport[]>([]);
+  // 입주전 점검(운영관리) — 독립 테이블. 로컬+Supabase 병행 저장(기존 운영 저장 흐름과 분리).
+  const [preMoveInInspections, setPreMoveInInspections] = useState<PreMoveInInspection[]>([]);
+  const [showPreInspectionForm, setShowPreInspectionForm] = useState(false);
+  const [editingPreInspectionId, setEditingPreInspectionId] = useState<string | null>(null);
+  const [preInspectionForm, setPreInspectionForm] = useState<Omit<PreMoveInInspection, "id" | "createdAt" | "updatedAt">>(emptyPreMoveInInspection());
+  const [preInspectionDetailId, setPreInspectionDetailId] = useState<string | null>(null);
+  const [preInspectionPhotoCategory, setPreInspectionPhotoCategory] = useState<string>(INSPECTION_PHOTO_CATEGORIES[0]);
+  const [preInspectionUploading, setPreInspectionUploading] = useState(false);
+  const [preInspectionSearch, setPreInspectionSearch] = useState("");
+  const [preInspectionSiteFilter, setPreInspectionSiteFilter] = useState("전체");
+  const [preInspectionGenderFilter, setPreInspectionGenderFilter] = useState("전체");
+  const [preInspectionStatusFilter, setPreInspectionStatusFilter] = useState("전체");
+  const [preInspectionCleaningFilter, setPreInspectionCleaningFilter] = useState("전체");
+  const [preInspectionDefectFilter, setPreInspectionDefectFilter] = useState("전체");
+  const [preInspectionManagerFilter, setPreInspectionManagerFilter] = useState("전체");
+  const [preInspectionMonthFilter, setPreInspectionMonthFilter] = useState("전체");
+  const lastPreInspectionSnapshotRef = useRef<string>("");
+  const preInspectionSavingRef = useRef(false);
   const [newHires, setNewHires] = useState<NewHireEmployee[]>([]);
   const [sales, setSales] = useState<SaleRecord[]>([]);
   const [defects, setDefects] = useState<DefectRequest[]>([]);
@@ -9163,6 +9198,270 @@ export default function App() {
     }));
   };
 
+  // ============================================================================
+  // 입주전 점검(운영관리) — 로드/저장/핸들러 (독립 테이블, 기존 저장 흐름과 분리)
+  // ============================================================================
+  // 스냅샷: updatedAt 만 제외(동일 데이터 반복 저장 방지). 사진(base64)은 포함해 변경 감지.
+  const preInspectionSnapshot = (rows: PreMoveInInspection[]) =>
+    JSON.stringify(rows.map(({ updatedAt: _u, ...rest }) => rest));
+
+  // 로드: 로컬 우선 표시 → Supabase 있으면 덮어쓰기(로그인 시). 스냅샷 갱신으로 로드-직후 저장 루프 방지.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const local = loadJson<PreMoveInInspection[]>(PRE_MOVE_IN_INSPECTIONS_KEY, [], tenantId);
+      if (!cancelled && Array.isArray(local) && local.length) {
+        setPreMoveInInspections(local);
+        lastPreInspectionSnapshotRef.current = preInspectionSnapshot(local);
+      }
+      if (isSupabaseAvailable() && currentUser?.id) {
+        const session = await getCurrentSession();
+        if (session?.user?.id) {
+          const remote = await loadPreMoveInInspections(tenantId);
+          if (!cancelled && remote) {
+            setPreMoveInInspections(remote);
+            lastPreInspectionSnapshotRef.current = preInspectionSnapshot(remote);
+          }
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, currentUser?.id]);
+
+  // 저장: 로컬은 항상, Supabase 는 변경분이 있을 때만 upsert. 실패해도 앱 흐름 막지 않음(warn).
+  useEffect(() => {
+    if (!currentUser) return;
+    saveJson(PRE_MOVE_IN_INSPECTIONS_KEY, preMoveInInspections, tenantId);
+    const snapshot = preInspectionSnapshot(preMoveInInspections);
+    if (snapshot === lastPreInspectionSnapshotRef.current) return;
+    if (!isSupabaseAvailable()) { lastPreInspectionSnapshotRef.current = snapshot; return; }
+    let cancelled = false;
+    (async () => {
+      if (preInspectionSavingRef.current) return;
+      preInspectionSavingRef.current = true;
+      try {
+        const session = await getCurrentSession();
+        if (!session?.user?.id) return;
+        await savePreMoveInInspections(preMoveInInspections, tenantId, session.user.id);
+        if (!cancelled) lastPreInspectionSnapshotRef.current = snapshot;
+      } catch (e) {
+        console.warn("[입주전 점검] 저장 실패(로컬은 유지):", (e as { message?: string })?.message || e);
+      } finally {
+        preInspectionSavingRef.current = false;
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preMoveInInspections, currentUser, tenantId]);
+
+  // 사진 업로드(여러 장 + 카메라). 기존 readFileDataUrl 로 압축. 분류는 현재 선택 카테고리로.
+  const handlePreInspectionPhotos = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setPreInspectionUploading(true);
+    try {
+      const urls = await Promise.all(Array.from(files).map((file) => readFileDataUrl(file)));
+      const added: InspectionPhoto[] = urls.map((dataUrl) => ({ category: preInspectionPhotoCategory, description: "", dataUrl }));
+      setPreInspectionForm((prev) => ({ ...prev, photos: [...prev.photos, ...added] }));
+    } catch (e) {
+      console.error("입주전 점검 사진 업로드 실패:", e);
+      await appAlert("입주전 점검", "사진 업로드 중 오류가 발생했습니다.");
+    } finally {
+      setPreInspectionUploading(false);
+    }
+  };
+  const removePreInspectionPhoto = (idx: number) =>
+    setPreInspectionForm((prev) => ({ ...prev, photos: prev.photos.filter((_, i) => i !== idx) }));
+  const updatePreInspectionPhoto = (idx: number, patch: Partial<InspectionPhoto>) =>
+    setPreInspectionForm((prev) => ({ ...prev, photos: prev.photos.map((p, i) => (i === idx ? { ...p, ...patch } : p)) }));
+
+  // 계약 선택 → 지역/성별/주소/건물/동/호수/계약일/임대인 자동입력 + 매칭 기숙사 dormId.
+  const applyContractToInspection = (contractId: string) => {
+    const c = dormContracts.find((x) => x.id === contractId);
+    if (!c) { setPreInspectionForm((f) => ({ ...f, contractId: "" })); return; }
+    const dorm = operationalDorms.find((d) =>
+      d.buildingName === c.buildingName && stripDongHoSuffix(d.dong) === stripDongHoSuffix(c.dong) && stripDongHoSuffix(d.roomHo) === stripDongHoSuffix(c.roomHo)
+    );
+    setPreInspectionForm((f) => ({
+      ...f,
+      contractId,
+      dormId: dorm?.id || f.dormId,
+      site: c.site || f.site,
+      gender: c.gender || f.gender,
+      address: c.address || f.address,
+      buildingName: c.buildingName || f.buildingName,
+      dong: c.dong || f.dong,
+      roomHo: c.roomHo || f.roomHo,
+      contractStartDate: c.contractStart || f.contractStartDate,
+      contractEndDate: c.contractEnd || f.contractEndDate,
+      landlordName: c.landlordName || f.landlordName,
+    }));
+  };
+
+  // 입주예정자(신입사원) 선택 → 이름/연락처/부서/입주예정일 자동입력.
+  const applyOccupantToInspection = (newHireId: string) => {
+    const h = newHires.find((x) => x.id === newHireId);
+    if (!h) { setPreInspectionForm((f) => ({ ...f, occupantId: "" })); return; }
+    setPreInspectionForm((f) => ({
+      ...f,
+      occupantId: newHireId,
+      expectedMoveInName: h.name || f.expectedMoveInName,
+      expectedMoveInPhone: h.phone || f.expectedMoveInPhone,
+      expectedMoveInDept: h.department || f.expectedMoveInDept,
+      expectedMoveInDate: h.expectedMoveInDate || h.moveInDate || f.expectedMoveInDate,
+      site: f.site || h.site,
+      gender: f.gender || h.gender,
+    }));
+  };
+
+  const openPreInspectionCreate = () => {
+    setEditingPreInspectionId(null);
+    setPreInspectionForm(emptyPreMoveInInspection());
+    setPreInspectionPhotoCategory(INSPECTION_PHOTO_CATEGORIES[0]);
+    setShowPreInspectionForm(true);
+  };
+  const openPreInspectionEdit = (row: PreMoveInInspection) => {
+    const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = row;
+    setEditingPreInspectionId(row.id);
+    setPreInspectionForm({ ...rest });
+    setShowPreInspectionForm(true);
+  };
+  const savePreInspection = () => {
+    const now = new Date().toISOString();
+    if (editingPreInspectionId) {
+      setPreMoveInInspections((prev) =>
+        prev.map((r) => (r.id === editingPreInspectionId ? { ...r, ...preInspectionForm, id: r.id, createdAt: r.createdAt, updatedAt: now } : r))
+      );
+    } else {
+      const created: PreMoveInInspection = { ...preInspectionForm, id: crypto.randomUUID(), createdAt: now, updatedAt: now };
+      setPreMoveInInspections((prev) => [created, ...prev]);
+    }
+    createAuditLog({
+      targetType: "system",
+      targetId: editingPreInspectionId || "new",
+      actionType: editingPreInspectionId ? "update" : "create",
+      changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+      beforeValue: "",
+      afterValue: JSON.stringify({ building: preInspectionForm.buildingName, status: preInspectionForm.inspectionStatus }),
+      memo: `입주전 점검 ${editingPreInspectionId ? "수정" : "등록"}: ${preInspectionForm.buildingName} ${preInspectionForm.dong}-${preInspectionForm.roomHo}`,
+    });
+    setShowPreInspectionForm(false);
+    setEditingPreInspectionId(null);
+  };
+  const deletePreInspection = async (id: string) => {
+    const ok = await appConfirm("입주전 점검", "이 점검 기록을 삭제하시겠습니까?", { confirmText: "삭제" });
+    if (!ok) return;
+    const now = new Date().toISOString();
+    // 소프트 삭제(휴지통 정책과 동일하게 is_deleted 플래그 저장 → Supabase upsert 로 반영).
+    setPreMoveInInspections((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, isDeleted: true, deletedAt: now, deletedBy: currentUser?.username || "", updatedAt: now } : r))
+    );
+  };
+
+  // 입주전 점검 PDF — 기존 공통 사진 보고서 helper(printPhotoReport, 모바일 안전 다운로드) 재사용.
+  const printPreInspection = (r: PreMoveInInspection) => {
+    const photosByCategory = INSPECTION_PHOTO_CATEGORIES
+      .map((cat) => ({ heading: cat, urls: r.photos.filter((p) => p.category === cat).map((p) => p.dataUrl) }))
+      .filter((s) => s.urls.length > 0);
+    const sections = photosByCategory.length ? photosByCategory : [{ heading: "사진", urls: r.photos.map((p) => p.dataUrl) }];
+    printPhotoReport({
+      title: "입주전 점검 보고서",
+      fileBase: `입주전점검_${r.buildingName || "기숙사"}_${reportFileDate(r.inspectionDate)}`,
+      infoRows: [
+        { label: "점검일", value: formatDateOnly(r.inspectionDate) || "-" },
+        { label: "점검상태", value: r.inspectionStatus || "-" },
+        { label: "지역", value: r.site || "-" },
+        { label: "성별", value: r.gender || "-" },
+        { label: "건물명", value: r.buildingName || "-" },
+        { label: "동/호수", value: `${r.dong || "-"} / ${r.roomHo || "-"}` },
+        { label: "주소", value: r.address || "-", full: true },
+        { label: "계약기간", value: `${formatDateOnly(r.contractStartDate) || "-"} ~ ${formatDateOnly(r.contractEndDate) || "-"}` },
+        { label: "임대인", value: r.landlordName || "-" },
+        { label: "입주예정자", value: `${r.expectedMoveInName || "-"} ${r.expectedMoveInPhone ? "(" + r.expectedMoveInPhone + ")" : ""}` },
+        { label: "부서", value: r.expectedMoveInDept || "-" },
+        { label: "입주예정일", value: formatDateOnly(r.expectedMoveInDate) || "-" },
+        { label: "담당자", value: r.inspectorName || "-" },
+        { label: "청소상태", value: r.cleaningStatus || "-" },
+        { label: "시설상태", value: r.facilityStatus || "-" },
+        { label: "비품상태", value: r.supplyStatus || "-" },
+        { label: "하자여부", value: r.hasDefect || "-" },
+        { label: "하자내용", value: r.defectDescription || "-", full: true },
+        { label: "조치필요사항", value: r.actionRequired || "-", full: true },
+        { label: "비고", value: r.memo || "-", full: true },
+      ],
+      sections,
+    });
+  };
+
+  const exportPreInspectionExcel = () => {
+    const rows = visiblePreInspections.map((r) => ({
+      점검일: formatDateOnly(r.inspectionDate),
+      지역: r.site,
+      성별: r.gender,
+      건물명: r.buildingName,
+      동: r.dong,
+      호수: r.roomHo,
+      주소: r.address,
+      계약시작일: formatDateOnly(r.contractStartDate),
+      계약종료일: formatDateOnly(r.contractEndDate),
+      임대인: r.landlordName,
+      입주예정자: r.expectedMoveInName,
+      연락처: r.expectedMoveInPhone,
+      부서: r.expectedMoveInDept,
+      입주예정일: formatDateOnly(r.expectedMoveInDate),
+      담당자: r.inspectorName,
+      점검상태: r.inspectionStatus,
+      청소상태: r.cleaningStatus,
+      시설상태: r.facilityStatus,
+      비품상태: r.supplyStatus,
+      하자여부: r.hasDefect,
+      하자내용: r.defectDescription,
+      조치필요사항: r.actionRequired,
+      비고: r.memo,
+      사진수: r.photos.length,
+      등록일: formatDateOnly(r.createdAt),
+    }));
+    const worksheet = XLSX.utils.json_to_sheet(rows.map(sanitizeExcelRow));
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "입주전점검");
+    XLSX.writeFile(workbook, "입주전점검현황.xlsx");
+  };
+
+  // 조회/필터/검색 적용된 표시 목록.
+  const visiblePreInspections = useMemo(() => {
+    const term = preInspectionSearch.trim().toLowerCase();
+    return preMoveInInspections
+      .filter((r) => !r.isDeleted && !r.isPermanentDeleted)
+      .filter((r) => preInspectionSiteFilter === "전체" || r.site === preInspectionSiteFilter)
+      .filter((r) => preInspectionGenderFilter === "전체" || r.gender === preInspectionGenderFilter)
+      .filter((r) => preInspectionStatusFilter === "전체" || r.inspectionStatus === preInspectionStatusFilter)
+      .filter((r) => preInspectionCleaningFilter === "전체" || r.cleaningStatus === preInspectionCleaningFilter)
+      .filter((r) => preInspectionDefectFilter === "전체" || r.hasDefect === preInspectionDefectFilter)
+      .filter((r) => preInspectionManagerFilter === "전체" || r.inspectorName === preInspectionManagerFilter)
+      .filter((r) => preInspectionMonthFilter === "전체" || (r.inspectionDate || "").slice(0, 7) === preInspectionMonthFilter)
+      .filter((r) => !term || `${r.buildingName} ${r.dong} ${r.roomHo} ${r.expectedMoveInName} ${r.inspectorName} ${r.defectDescription}`.toLowerCase().includes(term))
+      .sort((a, b) => (b.inspectionDate || "").localeCompare(a.inspectionDate || ""));
+  }, [preMoveInInspections, preInspectionSearch, preInspectionSiteFilter, preInspectionGenderFilter, preInspectionStatusFilter, preInspectionCleaningFilter, preInspectionDefectFilter, preInspectionManagerFilter, preInspectionMonthFilter]);
+
+  const preInspectionManagerOptions = useMemo(
+    () => ["전체", ...Array.from(new Set(preMoveInInspections.filter((r) => !r.isDeleted).map((r) => r.inspectorName).filter(Boolean)))],
+    [preMoveInInspections]
+  );
+  const preInspectionMonthOptions = useMemo(
+    () => ["전체", ...Array.from(new Set(preMoveInInspections.filter((r) => !r.isDeleted).map((r) => (r.inspectionDate || "").slice(0, 7)).filter(Boolean))).sort((a, b) => b.localeCompare(a))],
+    [preMoveInInspections]
+  );
+  const preInspectionStats = useMemo(() => {
+    const active = preMoveInInspections.filter((r) => !r.isDeleted && !r.isPermanentDeleted);
+    return {
+      total: active.length,
+      waiting: active.filter((r) => r.inspectionStatus === "점검대기").length,
+      actionNeeded: active.filter((r) => r.inspectionStatus === "조치필요").length,
+      movable: active.filter((r) => r.inspectionStatus === "입주가능").length,
+      withPhotos: active.filter((r) => r.photos.length > 0).length,
+    };
+  }, [preMoveInInspections]);
+
   // 청소보고서의 청소 전/후 사진을 합쳐 단일 "사진" 목록으로 반환 (표시 통합용, 데이터는 그대로)
   const getCleaningPhotos = (report: { beforePhotoDataUrls?: string[]; afterPhotoDataUrls?: string[] }): string[] => [
     ...(report.beforePhotoDataUrls || []),
@@ -12543,6 +12842,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     documentManagement: "documentManagement",
     reportManagement: "reportManagement",
     cleaningReports: "reportManagement",
+    preMoveInInspection: "reportManagement",
     defects: "defects",
     users: "users",
     settings: "settings",
@@ -18531,6 +18831,277 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
           </section>
         )}
+
+        {activeTab === "preMoveInInspection" && (
+          <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">입주전 점검</h2>
+                <p className={`text-sm ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>기숙사 계약 후 입주 전 방 상태를 사진으로 기록·증빙합니다.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={exportPreInspectionExcel} className={`rounded-2xl px-4 py-2 text-sm font-semibold ${theme.darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>📊 Excel</button>
+                {canEditData(currentUser) && (
+                  <button onClick={openPreInspectionCreate} className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">＋ 점검 등록</button>
+                )}
+              </div>
+            </div>
+
+            {/* 통계 카드 */}
+            <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-5">
+              <MiniStat label="전체 점검" value={`${preInspectionStats.total}`} />
+              <MiniStat label="점검대기" value={`${preInspectionStats.waiting}`} />
+              <MiniStat label="조치필요" value={`${preInspectionStats.actionNeeded}`} />
+              <MiniStat label="입주가능" value={`${preInspectionStats.movable}`} />
+              <MiniStat label="사진등록 완료" value={`${preInspectionStats.withPhotos}`} />
+            </div>
+
+            {/* 필터/검색 */}
+            <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+              <FilterSelect label="지역" value={preInspectionSiteFilter} onChange={setPreInspectionSiteFilter} options={["전체", "평택", "천안"]} />
+              <FilterSelect label="성별" value={preInspectionGenderFilter} onChange={setPreInspectionGenderFilter} options={["전체", "남", "여"]} />
+              <FilterSelect label="점검상태" value={preInspectionStatusFilter} onChange={setPreInspectionStatusFilter} options={["전체", ...INSPECTION_STATUS_OPTIONS]} />
+              <FilterSelect label="청소상태" value={preInspectionCleaningFilter} onChange={setPreInspectionCleaningFilter} options={["전체", ...CLEANING_STATUS_OPTIONS]} />
+              <FilterSelect label="하자여부" value={preInspectionDefectFilter} onChange={setPreInspectionDefectFilter} options={["전체", ...DEFECT_YN_OPTIONS]} />
+              <FilterSelect label="담당자" value={preInspectionManagerFilter} onChange={setPreInspectionManagerFilter} options={preInspectionManagerOptions} />
+              <FilterSelect label="점검월" value={preInspectionMonthFilter} onChange={setPreInspectionMonthFilter} options={preInspectionMonthOptions} />
+              <div className="lg:col-span-2">
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-400">검색</label>
+                <input value={preInspectionSearch} onChange={(e) => setPreInspectionSearch(e.target.value)} placeholder="건물명/동/호수/입주예정자/담당자/하자내용" className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-slate-400" />
+              </div>
+            </div>
+
+            {/* 리스트 */}
+            <div className="overflow-x-auto rounded-2xl ring-1 ring-slate-200">
+              <table className="min-w-full text-sm">
+                <thead className={theme.darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-50 text-slate-500"}>
+                  <tr className="text-left">
+                    <th className="px-3 py-3 whitespace-nowrap">점검일</th>
+                    <th className="px-3 py-3 whitespace-nowrap">지역</th>
+                    <th className="px-3 py-3 whitespace-nowrap">성별</th>
+                    <th className="px-3 py-3 whitespace-nowrap">건물명</th>
+                    <th className="px-3 py-3 whitespace-nowrap">동</th>
+                    <th className="px-3 py-3 whitespace-nowrap">호수</th>
+                    <th className="px-3 py-3 whitespace-nowrap">입주예정자</th>
+                    <th className="px-3 py-3 whitespace-nowrap">입주예정일</th>
+                    <th className="px-3 py-3 whitespace-nowrap">담당자</th>
+                    <th className="px-3 py-3 whitespace-nowrap">점검상태</th>
+                    <th className="px-3 py-3 whitespace-nowrap">청소상태</th>
+                    <th className="px-3 py-3 whitespace-nowrap">시설상태</th>
+                    <th className="px-3 py-3 whitespace-nowrap">하자여부</th>
+                    <th className="px-3 py-3 whitespace-nowrap">사진수</th>
+                    <th className="px-3 py-3 whitespace-nowrap text-center">작업</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visiblePreInspections.map((r) => (
+                    <tr key={r.id} className={`border-t ${theme.darkMode ? "border-slate-700" : "border-slate-100"}`}>
+                      <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(r.inspectionDate) || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{r.site || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{r.gender || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{r.buildingName || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{formatDong(r.dong) || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{formatRoomHo(r.roomHo) || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{r.expectedMoveInName || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(r.expectedMoveInDate) || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{r.inspectorName || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap"><span className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">{r.inspectionStatus || "-"}</span></td>
+                      <td className="px-3 py-3 whitespace-nowrap">{r.cleaningStatus || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{r.facilityStatus || "-"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">{r.hasDefect === "있음" ? <span className="rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700">있음</span> : "없음"}</td>
+                      <td className="px-3 py-3 whitespace-nowrap text-center">{r.photos.length}</td>
+                      <td className="px-3 py-3 whitespace-nowrap">
+                        <div className="flex justify-center gap-1">
+                          <button onClick={() => setPreInspectionDetailId(r.id)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">상세</button>
+                          {canEditData(currentUser) && <button onClick={() => openPreInspectionEdit(r)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">수정</button>}
+                          <button onClick={() => printPreInspection(r)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">PDF</button>
+                          {canEditData(currentUser) && <button onClick={() => deletePreInspection(r.id)} className="rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">삭제</button>}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {visiblePreInspections.length === 0 && (
+                    <tr><td colSpan={15} className="px-4 py-12 text-center text-slate-400">입주전 점검 데이터가 없습니다.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {/* 입주전 점검 등록/수정 모달 */}
+        {showPreInspectionForm && (
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={() => setShowPreInspectionForm(false)}>
+            <div className={`my-8 w-full max-w-4xl rounded-3xl p-6 shadow-xl ${theme.darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="text-lg font-semibold">{editingPreInspectionId ? "입주전 점검 수정" : "입주전 점검 등록"}</h3>
+                <button onClick={() => setShowPreInspectionForm(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">✕</button>
+              </div>
+
+              {/* 계약/입주자 연동 */}
+              <div className={`mb-4 rounded-2xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+                <h4 className="mb-3 text-sm font-semibold">계약 / 입주예정자 연동</h4>
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="mb-2 block text-sm font-medium text-slate-700">기숙사 계약 선택</label>
+                    <select value={preInspectionForm.contractId} onChange={(e) => applyContractToInspection(e.target.value)} className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-slate-400">
+                      <option value="">미선택 (직접 입력 가능)</option>
+                      {dormContracts.filter((c) => !c.isDeleted && !c.isPermanentDeleted).map((c) => (
+                        <option key={c.id} value={c.id}>{`${c.buildingName || "-"} ${c.dong || ""}-${c.roomHo || ""} (${c.site || ""})`}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-medium text-slate-700">입주예정자(신입사원) 선택</label>
+                    <select value={preInspectionForm.occupantId} onChange={(e) => applyOccupantToInspection(e.target.value)} className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-slate-400">
+                      <option value="">미선택 (배정 전에도 등록 가능)</option>
+                      {newHires.filter((h) => !h.isDeleted && isRealName(h.name)).map((h) => (
+                        <option key={h.id} value={h.id}>{`${h.name} ${h.phone || ""} ${h.department || ""}`}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* 기본/위치 정보 */}
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <Input label="점검일" type="date-text" value={preInspectionForm.inspectionDate} onChange={(v) => setPreInspectionForm((f) => ({ ...f, inspectionDate: v }))} />
+                <SelectInput label="지역" value={preInspectionForm.site} onChange={(v) => setPreInspectionForm((f) => ({ ...f, site: v }))} options={["", "평택", "천안"]} />
+                <SelectInput label="성별" value={preInspectionForm.gender} onChange={(v) => setPreInspectionForm((f) => ({ ...f, gender: v }))} options={["", "남", "여"]} />
+                <Input label="담당자" value={preInspectionForm.inspectorName} onChange={(v) => setPreInspectionForm((f) => ({ ...f, inspectorName: v }))} />
+                <Input label="건물명" value={preInspectionForm.buildingName} onChange={(v) => setPreInspectionForm((f) => ({ ...f, buildingName: v }))} />
+                <Input label="동" value={preInspectionForm.dong} onChange={(v) => setPreInspectionForm((f) => ({ ...f, dong: v }))} />
+                <Input label="호수" value={preInspectionForm.roomHo} onChange={(v) => setPreInspectionForm((f) => ({ ...f, roomHo: v }))} />
+                <Input label="주소" value={preInspectionForm.address} onChange={(v) => setPreInspectionForm((f) => ({ ...f, address: v }))} />
+                <Input label="계약시작일" type="date-text" value={preInspectionForm.contractStartDate} onChange={(v) => setPreInspectionForm((f) => ({ ...f, contractStartDate: v }))} />
+                <Input label="계약종료일" type="date-text" value={preInspectionForm.contractEndDate} onChange={(v) => setPreInspectionForm((f) => ({ ...f, contractEndDate: v }))} />
+                <Input label="임대인" value={preInspectionForm.landlordName} onChange={(v) => setPreInspectionForm((f) => ({ ...f, landlordName: v }))} />
+                <Input label="입주예정일" type="date-text" value={preInspectionForm.expectedMoveInDate} onChange={(v) => setPreInspectionForm((f) => ({ ...f, expectedMoveInDate: v }))} />
+                <Input label="입주예정자" value={preInspectionForm.expectedMoveInName} onChange={(v) => setPreInspectionForm((f) => ({ ...f, expectedMoveInName: v }))} />
+                <Input label="입주예정자 연락처" value={preInspectionForm.expectedMoveInPhone} onChange={(v) => setPreInspectionForm((f) => ({ ...f, expectedMoveInPhone: v }))} />
+                <Input label="입주예정자 부서" value={preInspectionForm.expectedMoveInDept} onChange={(v) => setPreInspectionForm((f) => ({ ...f, expectedMoveInDept: v }))} />
+              </div>
+
+              {/* 점검 상태 */}
+              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+                <SelectInput label="점검상태" value={preInspectionForm.inspectionStatus} onChange={(v) => setPreInspectionForm((f) => ({ ...f, inspectionStatus: v }))} options={[...INSPECTION_STATUS_OPTIONS]} />
+                <SelectInput label="청소상태" value={preInspectionForm.cleaningStatus} onChange={(v) => setPreInspectionForm((f) => ({ ...f, cleaningStatus: v }))} options={[...CLEANING_STATUS_OPTIONS]} />
+                <SelectInput label="시설상태" value={preInspectionForm.facilityStatus} onChange={(v) => setPreInspectionForm((f) => ({ ...f, facilityStatus: v }))} options={[...FACILITY_STATUS_OPTIONS]} />
+                <SelectInput label="비품상태" value={preInspectionForm.supplyStatus} onChange={(v) => setPreInspectionForm((f) => ({ ...f, supplyStatus: v }))} options={[...SUPPLY_STATUS_OPTIONS]} />
+                <SelectInput label="하자여부" value={preInspectionForm.hasDefect} onChange={(v) => setPreInspectionForm((f) => ({ ...f, hasDefect: v }))} options={[...DEFECT_YN_OPTIONS]} />
+              </div>
+
+              <div className="mt-4 grid grid-cols-1 gap-4">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">하자내용</label>
+                  <textarea value={preInspectionForm.defectDescription} onChange={(e) => setPreInspectionForm((f) => ({ ...f, defectDescription: e.target.value }))} rows={2} className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-slate-400" />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">조치필요사항</label>
+                  <textarea value={preInspectionForm.actionRequired} onChange={(e) => setPreInspectionForm((f) => ({ ...f, actionRequired: e.target.value }))} rows={2} className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-slate-400" />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">비고</label>
+                  <textarea value={preInspectionForm.memo} onChange={(e) => setPreInspectionForm((f) => ({ ...f, memo: e.target.value }))} rows={2} className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-slate-400" />
+                </div>
+              </div>
+
+              {/* 사진 업로드 */}
+              <div className={`mt-4 rounded-2xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+                <div className="mb-3 flex flex-wrap items-end gap-3">
+                  <div className="w-40">
+                    <SelectInput label="사진 분류" value={preInspectionPhotoCategory} onChange={setPreInspectionPhotoCategory} options={[...INSPECTION_PHOTO_CATEGORIES]} />
+                  </div>
+                  <label className="cursor-pointer rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">
+                    사진 선택
+                    <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => { handlePreInspectionPhotos(e.target.files); e.currentTarget.value = ""; }} />
+                  </label>
+                  <label className="cursor-pointer rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
+                    📷 카메라 촬영
+                    <input type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={(e) => { handlePreInspectionPhotos(e.target.files); e.currentTarget.value = ""; }} />
+                  </label>
+                  {preInspectionUploading && <span className="text-sm text-slate-500">업로드 중…</span>}
+                  <span className="text-sm text-slate-500">총 {preInspectionForm.photos.length}장</span>
+                </div>
+                {preInspectionForm.photos.length > 0 && (
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                    {preInspectionForm.photos.map((p, idx) => (
+                      <div key={idx} className="rounded-xl border border-slate-200 bg-white p-2">
+                        <img src={p.dataUrl} alt="점검사진" className="h-28 w-full rounded-lg object-cover" />
+                        <div className="mt-1">
+                          <select value={p.category} onChange={(e) => updatePreInspectionPhoto(idx, { category: e.target.value })} className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs">
+                            {INSPECTION_PHOTO_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                          <input value={p.description} onChange={(e) => updatePreInspectionPhoto(idx, { description: e.target.value })} placeholder="설명" className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1 text-xs" />
+                          <button onClick={() => removePreInspectionPhoto(idx)} className="mt-1 w-full rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">삭제</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-6 flex justify-end gap-2">
+                <button onClick={() => setShowPreInspectionForm(false)} className="rounded-2xl border border-slate-300 px-5 py-2.5 text-sm font-semibold hover:bg-slate-50">취소</button>
+                <button onClick={savePreInspection} className="rounded-2xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-800">{editingPreInspectionId ? "수정" : "등록"}</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 입주전 점검 상세 모달 */}
+        {preInspectionDetailId && (() => {
+          const r = preMoveInInspections.find((x) => x.id === preInspectionDetailId);
+          if (!r) return null;
+          return (
+            <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={() => setPreInspectionDetailId(null)}>
+              <div className={`my-8 w-full max-w-3xl rounded-3xl p-6 shadow-xl ${theme.darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+                <div className="mb-4 flex items-center justify-between">
+                  <h3 className="text-lg font-semibold">입주전 점검 상세</h3>
+                  <div className="flex gap-2">
+                    <button onClick={() => printPreInspection(r)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">PDF</button>
+                    <button onClick={() => setPreInspectionDetailId(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">✕</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
+                  <CompactField label="점검일" value={formatDateOnly(r.inspectionDate) || "-"} />
+                  <CompactField label="점검상태" value={r.inspectionStatus || "-"} />
+                  <CompactField label="담당자" value={r.inspectorName || "-"} />
+                  <CompactField label="지역/성별" value={`${r.site || "-"} / ${r.gender || "-"}`} />
+                  <CompactField label="건물명" value={r.buildingName || "-"} />
+                  <CompactField label="동/호수" value={`${r.dong || "-"} / ${r.roomHo || "-"}`} />
+                  <CompactField label="주소" value={r.address || "-"} className="col-span-2 md:col-span-3" />
+                  <CompactField label="계약기간" value={`${formatDateOnly(r.contractStartDate) || "-"} ~ ${formatDateOnly(r.contractEndDate) || "-"}`} className="md:col-span-2" />
+                  <CompactField label="임대인" value={r.landlordName || "-"} />
+                  <CompactField label="입주예정자" value={r.expectedMoveInName || "-"} />
+                  <CompactField label="연락처" value={r.expectedMoveInPhone || "-"} />
+                  <CompactField label="부서" value={r.expectedMoveInDept || "-"} />
+                  <CompactField label="입주예정일" value={formatDateOnly(r.expectedMoveInDate) || "-"} />
+                  <CompactField label="청소상태" value={r.cleaningStatus || "-"} />
+                  <CompactField label="시설상태" value={r.facilityStatus || "-"} />
+                  <CompactField label="비품상태" value={r.supplyStatus || "-"} />
+                  <CompactField label="하자여부" value={r.hasDefect || "-"} />
+                  <CompactField label="하자내용" value={r.defectDescription || "-"} className="col-span-2 md:col-span-3" />
+                  <CompactField label="조치필요사항" value={r.actionRequired || "-"} className="col-span-2 md:col-span-3" />
+                  <CompactField label="비고" value={r.memo || "-"} className="col-span-2 md:col-span-3" />
+                </div>
+                {r.photos.length > 0 && (
+                  <div className="mt-4">
+                    <h4 className="mb-2 text-sm font-semibold">사진 ({r.photos.length}장)</h4>
+                    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                      {r.photos.map((p, idx) => (
+                        <div key={idx} className="rounded-xl border border-slate-200 bg-white p-2">
+                          <img src={p.dataUrl} alt="점검사진" className="h-28 w-full rounded-lg object-cover" />
+                          <div className="mt-1 text-xs text-slate-500">{p.category}{p.description ? ` · ${p.description}` : ""}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         {activeTab === "reportManagement" && (
           <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>

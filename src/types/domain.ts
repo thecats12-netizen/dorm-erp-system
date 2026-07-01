@@ -477,6 +477,7 @@ export type TabKey =
   | "notificationManagement"
   | "documentManagement"
   | "cleaningReports"
+  | "preMoveInInspection"
   | "reportManagement"
   | "settings"
   | "recycleBin"

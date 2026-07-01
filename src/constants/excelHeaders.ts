@@ -194,6 +194,7 @@ export const TABLE_TYPE_BY_TAB: Record<TabKey, TableType | null> = {
   notificationManagement: null,
   documentManagement: null,
   cleaningReports: "cleaningReport",
+  preMoveInInspection: null,
   reportManagement: null,
   settings: null,
   recycleBin: null,
