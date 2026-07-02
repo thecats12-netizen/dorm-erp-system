@@ -669,6 +669,8 @@ function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string 
 
 const SETTLEMENT_ITEMS_KEY = "settlementItems";
 const PRE_MOVE_IN_INSPECTIONS_KEY = "preMoveInInspections";
+// 청소보고서 원본 리스트 "즉시 표시"용 경량 캐시(사진 base64 제외, 개수만). 기존 CLEANING_REPORTS_KEY 와 별개.
+const CLEANING_REPORTS_CACHE_KEY = "cleaning-reports-raw-cache-v1";
 
 type SettlementItemCategory = "장충금" | "홈클린" | "하자복구" | "비품구매" | "비품매각" | "시설파손" | "기타";
 type SettlementBurdenType = "회사지급" | "거주자부담" | "회사환급" | "거주자환급";
@@ -9372,13 +9374,25 @@ export default function App() {
     }
   };
 
-  // 청소 데이터가 필요한 메뉴 진입 시 지연 조회(초기 로딩 블로킹 없음). 60초 캐시로 매번 재조회 방지.
+  // 청소 데이터가 필요한 메뉴 진입 시: (1) 경량 캐시로 즉시 표시 → (2) 백그라운드 최신 조회.
+  // 캐시가 있으면 "불러오는 중" 없이 기존 리스트가 바로 보인다. 60초 캐시로 매번 재조회 방지.
   useEffect(() => {
     if (["cleaningReports", "dashboard", "documentManagement", "reportManagement"].includes(activeTab)) {
-      void loadCleaningReports(false);
+      if (cleaningReports.length === 0 && !cleaningReportsHydratedRef.current) {
+        hydrateCleaningReportsFromCache(); // 캐시 즉시 복원(있으면)
+      }
+      void loadCleaningReports(false); // 백그라운드 최신 조회(기존 리스트 유지)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, currentUser?.id]);
+
+  // 청소보고서 state 변경 시 경량 캐시 자동 갱신(등록/수정/삭제/실시간/조회 모두 커버).
+  // 빈 배열이면 저장하지 않아 캐시가 지워지지 않는다.
+  useEffect(() => {
+    if (cleaningReports.length === 0) return;
+    saveCleaningReportsCache(cleaningReports);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cleaningReports]);
 
   // 변경이력(감사로그)은 초기 로딩에서 제외 → 휴지통관리 화면 진입 시에만 지연 조회(60초 캐시).
   // 실패/빈 결과 시 기존 목록 유지(빈 배열 덮어쓰기 금지).
@@ -9671,6 +9685,49 @@ export default function App() {
     ...(report.beforePhotoDataUrls || []),
     ...(report.afterPhotoDataUrls || []),
   ];
+
+  // 사진 개수: 실제 로드된 base64 가 있으면 그 개수, 없으면 캐시에 저장된 개수(__photoCount) 사용.
+  // → 경량 캐시로 즉시 표시된 행도 "사진없음"이 아니라 정확한 장수를 보여준다.
+  const getCleaningPhotoCount = (report: any): number => {
+    const live = (report?.beforePhotoDataUrls?.length || 0) + (report?.afterPhotoDataUrls?.length || 0);
+    if (live > 0) return live;
+    if (typeof report?.__photoCount === "number") return report.__photoCount;
+    return 0;
+  };
+
+  // 경량 캐시 저장(사진 base64 제외, 개수만) — 저장 실패해도 앱에 영향 없음(saveJson 이 quota 예외 흡수).
+  const saveCleaningReportsCache = (rows: CleaningReport[]) => {
+    try {
+      if (!rows || rows.length === 0) return; // 빈 값으로 캐시 덮어쓰지 않음
+      const lightRows = rows.map((r) => ({
+        ...r,
+        beforePhotoDataUrls: [],
+        afterPhotoDataUrls: [],
+        __photoCount: getCleaningPhotoCount(r),
+      }));
+      saveJson(CLEANING_REPORTS_CACHE_KEY, { fetchedAt: Date.now(), rows: lightRows }, tenantId);
+    } catch (e) {
+      console.warn("[cleaning_reports cache save skipped]", e);
+    }
+  };
+
+  // 청소관리 진입 시 Supabase 조회 전에 경량 캐시를 복원해 원본 리스트를 즉시 표시.
+  const cleaningReportsHydratedRef = useRef(false);
+  const hydrateCleaningReportsFromCache = () => {
+    try {
+      const cached = loadJson<{ fetchedAt?: number; rows?: CleaningReport[] } | null>(CLEANING_REPORTS_CACHE_KEY, null, tenantId);
+      if (!cached || !Array.isArray(cached.rows) || cached.rows.length === 0) return false;
+      setCleaningReports((prev) => (prev.length > 0 ? prev : (cached.rows as CleaningReport[]))); // 이미 데이터 있으면 유지
+      cleaningReportsFetchedAtRef.current = cached.fetchedAt || 0;
+      setCleaningReportsLoaded(true);
+      return true;
+    } catch (e) {
+      console.warn("[cleaning_reports cache hydrate skipped]", e);
+      return false;
+    } finally {
+      cleaningReportsHydratedRef.current = true;
+    }
+  };
 
   // 하자접수 사진(접수/완료) 공통 추출 — 청소관리 getCleaningPhotos 와 동일 패턴.
   const getDefectRequestPhotos = (d: { requestPhotoDataUrls?: string[]; completionPhotoDataUrls?: string[] }): string[] => [
@@ -19827,7 +19884,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">
                           {(() => {
                             const photos = getCleaningPhotos(report);
-                            if (photos.length === 0) return <span className="text-xs text-rose-500">사진없음</span>;
+                            const count = getCleaningPhotoCount(report); // base64 없으면 캐시 개수 사용
+                            if (count === 0) return <span className="text-xs text-rose-500">사진없음</span>;
+                            // 캐시로 즉시 표시된 행(사진 base64 아직 미로드): 썸네일 없이 장수만 표시(백그라운드 조회 후 썸네일 표시).
+                            if (photos.length === 0) return <span className="text-xs font-medium text-blue-600">사진 {count}장</span>;
                             return (
                               <button
                                 type="button"
