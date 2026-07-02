@@ -72,6 +72,7 @@ import {
 } from "./services/dormSupabaseService";
 import {
   loadOperationalModule,
+  loadCleaningReportsModule,
   saveOperationalModule,
   insertAuditLogsScoped,
 } from "./services/operationalSupabaseService";
@@ -1768,6 +1769,9 @@ export default function App() {
   const [preInspectionMonthFilter, setPreInspectionMonthFilter] = useState("전체");
   const lastPreInspectionSnapshotRef = useRef<string>("");
   const preInspectionSavingRef = useRef(false);
+  // 청소보고서 지연 로딩(60초 캐시) — 메뉴 진입 시에만 조회, 초기 로딩 제외.
+  const cleaningReportsFetchedAtRef = useRef<number>(0);
+  const cleaningReportsLoadingRef = useRef(false);
   const [newHires, setNewHires] = useState<NewHireEmployee[]>([]);
   const [sales, setSales] = useState<SaleRecord[]>([]);
   const [defects, setDefects] = useState<DefectRequest[]>([]);
@@ -3846,10 +3850,18 @@ export default function App() {
     militaryModuleData: getMilitaryModuleState(),
   });
 
+  const MAX_BACKUP_BYTES = 2 * 1024 * 1024; // 2MB: 이 이상이면 오래된 백업부터 제거, 그래도 크면 skip
+  const backupBytes = (arr: DataBackup[]): number => {
+    try { return new Blob([JSON.stringify(arr)]).size; } catch { return JSON.stringify(arr).length; }
+  };
   const persistBackups = (next: DataBackup[]) => {
     // 1) 최근 MAX_BACKUPS 개만 유지 (newest-first 이므로 앞에서부터 자름)
     let candidate = next.slice(0, MAX_BACKUPS);
-    // 2) 저장 시도 → 용량 초과로 실패하면 가장 오래된 백업(배열 끝)부터 제거 후 재시도
+    // 2) 총 용량이 2MB 초과면 오래된 백업(배열 끝)부터 제거(QuotaExceeded 예방)
+    while (candidate.length > 1 && backupBytes(candidate) > MAX_BACKUP_BYTES) {
+      candidate = candidate.slice(0, candidate.length - 1);
+    }
+    // 3) 저장 시도 → 실패(용량 초과)하면 가장 오래된 백업부터 제거 후 재시도
     while (candidate.length > 0) {
       if (saveJson(BACKUPS_KEY, candidate, tenantId)) {
         setBackupRestoreError(null);
@@ -3859,11 +3871,9 @@ export default function App() {
       }
       candidate = candidate.slice(0, candidate.length - 1);
     }
-    // 모든 백업을 비워도 저장 실패 → 경고만 출력(앱 중단 없음)
-    saveJson(BACKUPS_KEY, [], tenantId);
-    setBackups([]);
-    console.warn("백업 저장 실패: 저장 공간이 부족하여 백업을 비웠습니다.");
-    setBackupRestoreError("백업 저장 공간이 부족합니다. 오래된 백업을 삭제하거나 JSON으로 내려받아 보관하세요.");
+    // 4) 그래도 저장 불가 → 이번 백업은 건너뛴다(경고만). 기존 백업/저장/복구에는 영향 없음.
+    //    (토스트/에러 상태 표시 없음, 저장 실패로 처리하지 않음 — Supabase 본 저장은 이미 성공)
+    console.warn("[백업] 저장 공간 부족으로 이번 백업을 건너뜁니다(본 저장/복구에는 영향 없음).");
   };
 
   const createBackup = (type: "manual" | "auto"): DataBackup => {
@@ -9302,6 +9312,47 @@ export default function App() {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, currentUser?.id]);
+
+  // 청소보고서 지연 로딩: 초기 로딩에서 제외되므로 청소 데이터가 필요한 메뉴 진입 시 조회.
+  // 60초 캐시 + 백그라운드 새로고침(화면 유지) + 실패 시 기존 목록 유지(빈 배열 덮어쓰기 금지).
+  const loadCleaningReports = async (force = false) => {
+    if (!isSupabaseAvailable() || !currentUser?.id) return;
+    if (cleaningReportsLoadingRef.current) return;
+    const fresh = Date.now() - cleaningReportsFetchedAtRef.current < 60 * 1000;
+    if (!force && fresh && cleaningReports.length > 0) return; // 60초 캐시(있으면 재조회 생략)
+    cleaningReportsLoadingRef.current = true;
+    try {
+      const session = await getCurrentSession();
+      if (!session?.user?.id) return;
+      const remote = await loadCleaningReportsModule(tenantId);
+      if (!remote) return; // 조회 실패(null) → 기존 목록 유지
+      // 사진 보존 병합(로드 결과 사진이 비었는데 메모리에 있으면 유지) — 기존 초기 로드와 동일 패턴.
+      setCleaningReports((prev) => {
+        const prevById = new Map(prev.map((r) => [r.id, r]));
+        return remote.map((r) => {
+          const p = prevById.get(r.id);
+          const before = (Array.isArray(r.beforePhotoDataUrls) && r.beforePhotoDataUrls.length > 0)
+            ? r.beforePhotoDataUrls : (p?.beforePhotoDataUrls?.length ? p.beforePhotoDataUrls : (r.beforePhotoDataUrls || []));
+          const after = (Array.isArray(r.afterPhotoDataUrls) && r.afterPhotoDataUrls.length > 0)
+            ? r.afterPhotoDataUrls : (p?.afterPhotoDataUrls?.length ? p.afterPhotoDataUrls : (r.afterPhotoDataUrls || []));
+          return { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
+        });
+      });
+      cleaningReportsFetchedAtRef.current = Date.now();
+    } catch (e) {
+      console.warn("cleaning_reports 조회 실패(기존 목록 유지):", e);
+    } finally {
+      cleaningReportsLoadingRef.current = false;
+    }
+  };
+
+  // 청소 데이터가 필요한 메뉴 진입 시 지연 조회(초기 로딩 블로킹 없음). 60초 캐시로 매번 재조회 방지.
+  useEffect(() => {
+    if (["cleaningReports", "dashboard", "documentManagement", "reportManagement"].includes(activeTab)) {
+      void loadCleaningReports(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, currentUser?.id]);
 
   // 입주전 점검 메뉴 진입 시 조용히 재조회(기존 화면 비우지 않음). 조회 실패/빈값이면 기존 목록 유지.
   // (Realtime 이 놓친 변경분 보정용. 전체 reload 아님 — 단일 테이블 조회.)

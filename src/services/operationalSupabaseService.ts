@@ -350,9 +350,10 @@ export const loadOperationalModule = async (tenantId: string): Promise<Operation
   try {
     // tenant_id 호환 조회(필터 없이 전체 조회 — 기존 행의 tenant_id 가 default/기본/NULL 로 섞여도 누락 방지).
     // 또한 테이블 하나가 실패(타임아웃 등)해도 나머지는 표시되도록 allSettled + 개별 폴백([]) 처리.
-    const [cleaningResult, defectsResult, inventoryResult, settlementRecordsResult, settlementItemsResult, auditLogsResult] =
+    // ⚠️ cleaning_reports 는 초기 로딩에서 제외(사진 base64 대량 → statement timeout/500 유발).
+    //    → 청소관리 메뉴 진입 시 loadCleaningReportsModule() 로 지연 조회한다.
+    const [defectsResult, inventoryResult, settlementRecordsResult, settlementItemsResult, auditLogsResult] =
       await Promise.allSettled([
-        supabase!.from("cleaning_reports").select("*"),
         supabase!.from("defect_requests").select("*"),
         supabase!.from("inventory_items").select("*"),
         supabase!.from("settlement_records").select("*"),
@@ -384,7 +385,8 @@ export const loadOperationalModule = async (tenantId: string): Promise<Operation
 
     return {
       tenantId,
-      cleaningReports: rowsOf(cleaningResult, "cleaning_reports").map(toDomainCleaningReport),
+      // 초기 로딩 제외 — 청소관리 메뉴 진입 시 loadCleaningReportsModule() 로 지연 조회.
+      cleaningReports: [],
       defects: rowsOf(defectsResult, "defect_requests").map(toDomainDefectRequest),
       inventory: rowsOf(inventoryResult, "inventory_items").map(toDomainInventoryItem),
       settlementRecords: rowsOf(settlementRecordsResult, "settlement_records").map(toDomainSettlementRecord),
@@ -393,6 +395,37 @@ export const loadOperationalModule = async (tenantId: string): Promise<Operation
     };
   } catch (error) {
     console.error("Supabase operational module load exception:", error);
+    return null;
+  }
+};
+
+// 청소관리 메뉴 진입 시에만 호출하는 지연 로더.
+// - select * 금지: toDomain 이 실제로 쓰는 컬럼만 명시 조회(payload/스캔 절감).
+// - 최신순 + limit 로 statement timeout 방지(인덱스: idx_cleaning_reports_tenant_created_at).
+// - 실패 시 null 반환 → 호출부에서 기존 목록 유지(빈 배열로 덮어쓰지 않음).
+const CLEANING_REPORT_COLUMNS =
+  "id, tenant_id, report_date, site, dorm_id, building_name, address, dong, room_ho, shared_entry, unit_entry, manager_user_id, manager_name, cleaner_name, week_label, month_label, clean_status, check_result, score, memo, before_photo_data_urls, after_photo_data_urls, reporter_user_id, reporter_name, confirmed_by, confirmed_at, created_at, updated_at, is_deleted, deleted_at, deleted_by, is_permanent_deleted, permanent_deleted_at, permanent_deleted_by";
+
+export const loadCleaningReportsModule = async (
+  _tenantId: string,
+  limit = 500
+): Promise<CleaningReport[] | null> => {
+  if (!isSupabaseAvailable()) return null;
+  try {
+    // tenant_id 는 legacy(NULL/혼재) 데이터 누락 방지를 위해 필터하지 않음(기존 loadOperationalModule 정책과 동일).
+    // 인덱스는 (tenant_id, created_at) / (created_at) 모두 제공 → 최신순 정렬+limit 가 인덱스를 탄다.
+    const { data, error } = await supabase!
+      .from("cleaning_reports")
+      .select(CLEANING_REPORT_COLUMNS)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error) {
+      console.warn("[cleaning_reports] 조회 실패(기존 목록 유지):", error.message || error);
+      return null;
+    }
+    return (data || []).map(toDomainCleaningReport);
+  } catch (e) {
+    console.warn("[cleaning_reports] 조회 예외(기존 목록 유지):", (e as { message?: string })?.message || e);
     return null;
   }
 };
