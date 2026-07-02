@@ -6,15 +6,25 @@ import type { MilitaryPersonnel, TrainingRecord, MilitaryNotice, MilitaryReport 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || "").trim();
 const supabaseKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || "").trim();
 
-// URL 형식이 https 로 시작하는지까지 확인(빈값/오타/이전 프로젝트 값 방지).
-const hasValidEnv = Boolean(supabaseUrl && supabaseKey && /^https?:\/\//i.test(supabaseUrl));
+// URL 형식이 https 로 시작하는지까지 확인(빈값/오타/이전 프로젝트 값 방지). URL 끝의 / 는 제거.
+const normalizedUrl = supabaseUrl.replace(/\/+$/, "");
+const hasValidEnv = Boolean(normalizedUrl && supabaseKey && /^https?:\/\//i.test(normalizedUrl));
 if (!hasValidEnv && typeof console !== "undefined") {
-  console.warn("[supabaseService] Supabase 환경변수(VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)가 비었거나 형식이 올바르지 않습니다. 로컬 모드로 동작합니다.");
+  console.error("[supabaseService] Supabase 환경변수(VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)가 비었거나 형식이 올바르지 않습니다. 로그인 불가 — 환경변수를 확인하세요.");
 }
 
 export const isSupabaseAvailable = (): boolean => hasValidEnv;
 
-export const supabase = hasValidEnv ? createClient(supabaseUrl, supabaseKey) : null;
+// auth 옵션 명시: 세션 유지 + 자동 갱신 + URL 세션 감지 비활성(해시 파싱으로 인한 오작동 방지).
+export const supabase = hasValidEnv
+  ? createClient(normalizedUrl, supabaseKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: false,
+      },
+    })
+  : null;
 
 export const translateSupabaseError = (errorMessage: string | null | undefined): string => {
   const message = String(errorMessage || "").trim();

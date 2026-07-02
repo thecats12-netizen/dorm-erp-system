@@ -5041,6 +5041,42 @@ export default function App() {
     return residentCount === 0 ? "공실" : "사용중";
   };
 
+  // 사진 URL 통합 추출: 저장 형태(배열/JSON문자열/객체/단일값)와 필드명(camel/snake, before/after 등)이
+  // 달라도 안전하게 표시용 URL(또는 base64) 목록을 반환. 기존 데이터 구조는 변경하지 않는다(읽기 전용).
+  // ※ getCleaningWeekStatus 등 렌더 중 실행되는 함수보다 먼저 선언해야 TDZ("초기화 전 접근") 오류가 없다.
+  const getCleaningPhotoUrls = (report: any): string[] => {
+    const raw = [
+      ...(report?.beforePhotoDataUrls || []),
+      ...(report?.afterPhotoDataUrls || []),
+      ...parseMaybeJsonArray(report?.photo_urls),
+      ...parseMaybeJsonArray(report?.photoUrls),
+      ...parseMaybeJsonArray(report?.photos),
+      ...parseMaybeJsonArray(report?.images),
+      ...parseMaybeJsonArray(report?.image_urls),
+      ...parseMaybeJsonArray(report?.attachments),
+    ];
+    return raw
+      .map((item: any) =>
+        typeof item === "string"
+          ? item
+          : (item?.url || item?.publicUrl || item?.public_url || item?.previewUrl || item?.preview_url || item?.signedUrl || item?.signed_url || item?.dataUrl || item?.path || "")
+      )
+      .filter(Boolean);
+  };
+
+  // 사진 개수: 실제 사진이 있으면 그 개수, 없으면 캐시에 저장된 개수(__photoCount) 사용.
+  // → 경량 캐시로 즉시 표시된 행도 "사진없음"이 아니라 정확한 장수를 보여준다.
+  const getCleaningPhotoCount = (report: any): number => {
+    const live = getCleaningPhotoUrls(report).length;
+    if (live > 0) return live;
+    if (typeof report?.__photoCount === "number") return report.__photoCount;
+    if (typeof report?.photo_count === "number") return report.photo_count;
+    return 0;
+  };
+
+  // 리스트 썸네일: 실제 첫 사진이 있으면 그것, 없으면 캐시에 저장된 축소 썸네일(__thumb).
+  const getCleaningThumbnail = (report: any): string => getCleaningPhotoUrls(report)[0] || report?.__thumb || "";
+
   // 주차별 청소보고 상태 계산
   const getCleaningWeekStatus = (
     managerUserId: string,
@@ -7117,6 +7153,7 @@ export default function App() {
 
 
   const visibleCleaningReports = useMemo(() => {
+    try {
     return cleaningReports.filter((report) => {
       if (report.isDeleted) return false;
       const reportDate = parseSafeDate(report.reportDate);
@@ -7167,6 +7204,11 @@ export default function App() {
         (isReporter ? matchesOwnReporter : matchesPermission)
       );
     });
+    } catch (error) {
+      // 필터 중 예외가 나도 화면이 하얗게 죽지 않도록: 원본 목록을 그대로 표시(삭제된 항목만 제외).
+      console.warn("[청소관리 필터 오류] 원본 목록 표시로 대체:", error);
+      return cleaningReports.filter((r) => !r.isDeleted);
+    }
   }, [cleaningReports, cleaningYear, cleaningMonth, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, cleaningStatusFilter, selectedCleaningDormId, users, currentUser]);
 
   const deletedDorms = useMemo(() => dorms.filter(isInTrash), [dorms]);
@@ -9754,41 +9796,6 @@ export default function App() {
     ...(report.beforePhotoDataUrls || []),
     ...(report.afterPhotoDataUrls || []),
   ];
-
-  // 사진 URL 통합 추출: 저장 형태(배열/JSON문자열/객체/단일값)와 필드명(camel/snake, before/after 등)이
-  // 달라도 안전하게 표시용 URL(또는 base64) 목록을 반환. 기존 데이터 구조는 변경하지 않는다(읽기 전용).
-  const getCleaningPhotoUrls = (report: any): string[] => {
-    const raw = [
-      ...(report?.beforePhotoDataUrls || []),
-      ...(report?.afterPhotoDataUrls || []),
-      ...parseMaybeJsonArray(report?.photo_urls),
-      ...parseMaybeJsonArray(report?.photoUrls),
-      ...parseMaybeJsonArray(report?.photos),
-      ...parseMaybeJsonArray(report?.images),
-      ...parseMaybeJsonArray(report?.image_urls),
-      ...parseMaybeJsonArray(report?.attachments),
-    ];
-    return raw
-      .map((item: any) =>
-        typeof item === "string"
-          ? item
-          : (item?.url || item?.publicUrl || item?.public_url || item?.previewUrl || item?.preview_url || item?.signedUrl || item?.signed_url || item?.dataUrl || item?.path || "")
-      )
-      .filter(Boolean);
-  };
-
-  // 사진 개수: 실제 사진이 있으면 그 개수, 없으면 캐시에 저장된 개수(__photoCount) 사용.
-  // → 경량 캐시로 즉시 표시된 행도 "사진없음"이 아니라 정확한 장수를 보여준다.
-  const getCleaningPhotoCount = (report: any): number => {
-    const live = getCleaningPhotoUrls(report).length;
-    if (live > 0) return live;
-    if (typeof report?.__photoCount === "number") return report.__photoCount;
-    if (typeof report?.photo_count === "number") return report.photo_count;
-    return 0;
-  };
-
-  // 리스트 썸네일: 실제 첫 사진이 있으면 그것, 없으면 캐시에 저장된 축소 썸네일(__thumb).
-  const getCleaningThumbnail = (report: any): string => getCleaningPhotoUrls(report)[0] || report?.__thumb || "";
 
   // dataURL 이미지를 작은 썸네일(기본 96px, JPEG)로 축소 — 캐시에 base64 원본 대신 저장해 용량 절감.
   const makeThumbDataUrl = (src: string, size = 96): Promise<string> =>
