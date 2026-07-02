@@ -9303,8 +9303,12 @@ export default function App() {
         if (session?.user?.id) {
           const remote = await loadPreMoveInInspections(tenantId);
           if (!cancelled && remote) {
-            setPreMoveInInspections(remote);
-            lastPreInspectionSnapshotRef.current = preInspectionSnapshot(remote);
+            // 빈 결과([])로 로컬/기존 데이터 덮어쓰기 금지.
+            setPreMoveInInspections((prev) => {
+              if (remote.length === 0 && prev.length > 0) return prev;
+              lastPreInspectionSnapshotRef.current = preInspectionSnapshot(remote);
+              return remote;
+            });
           }
         }
       }
@@ -9326,8 +9330,13 @@ export default function App() {
       if (!session?.user?.id) return;
       const remote = await loadCleaningReportsModule(tenantId);
       if (!remote) return; // 조회 실패(null) → 기존 목록 유지
+      let applied = false;
       // 사진 보존 병합(로드 결과 사진이 비었는데 메모리에 있으면 유지) — 기존 초기 로드와 동일 패턴.
       setCleaningReports((prev) => {
+        // ★ 빈 결과([])로 기존 목록 덮어쓰기 금지(RLS/복제 지연/일시 빈 응답에도 리스트가 사라지지 않게).
+        //    "보였다 안 보였다" 의 근본 원인 — 성공했지만 0건인 응답이 데이터를 지우던 문제 차단.
+        if (remote.length === 0 && prev.length > 0) return prev;
+        applied = true;
         const prevById = new Map(prev.map((r) => [r.id, r]));
         return remote.map((r) => {
           const p = prevById.get(r.id);
@@ -9338,7 +9347,8 @@ export default function App() {
           return { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
         });
       });
-      cleaningReportsFetchedAtRef.current = Date.now();
+      // 실제 데이터를 반영한 경우에만 캐시 시각 갱신 → 빈 응답 뒤엔 즉시 재조회 가능(60초 대기 안 함).
+      if (applied) cleaningReportsFetchedAtRef.current = Date.now();
     } catch (e) {
       console.warn("cleaning_reports 조회 실패(기존 목록 유지):", e);
     } finally {
@@ -9365,8 +9375,9 @@ export default function App() {
       if (cancelled || !session?.user?.id) return;
       const remote = await loadPreMoveInInspections(tenantId);
       if (cancelled || !remote) return; // 실패(null) 시 기존 데이터 유지
-      setPreMoveInInspections(remote);
-      lastPreInspectionSnapshotRef.current = preInspectionSnapshot(remote);
+      // 빈 결과([])로 기존 목록 덮어쓰기 금지(일시 빈 응답에도 리스트 유지).
+      setPreMoveInInspections((prev) => (remote.length === 0 && prev.length > 0 ? prev : remote));
+      lastPreInspectionSnapshotRef.current = preInspectionSnapshot(remote.length === 0 ? preMoveInInspections : remote);
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
