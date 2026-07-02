@@ -73,6 +73,7 @@ import {
 import {
   loadOperationalModule,
   loadCleaningReportsModule,
+  loadCleaningReportsPhotosModule,
   loadCleaningReportPhotos,
   loadAuditLogsModule,
   saveOperationalModule,
@@ -1795,6 +1796,13 @@ export default function App() {
   const [cleaningReportsLoading, setCleaningReportsLoading] = useState(false);
   const [cleaningReportsLoaded, setCleaningReportsLoaded] = useState(false);
   const [cleaningReportsError, setCleaningReportsError] = useState<string | null>(null);
+  // 사진은 목록(메타데이터) 표시 후 백그라운드로 병합 → 병합 중엔 "사진 확인중" 표시(사진없음 오표시 방지).
+  const [cleaningPhotosLoading, setCleaningPhotosLoading] = useState(false);
+  const cleaningPhotosMergingRef = useRef(false);
+  // 수정 모달에서 기존 사진을 실제로 불러왔는지 표시 → 저장 시 미로드 상태에서 사진이 지워지는 것 방지.
+  const cleaningEditPhotosReadyRef = useRef(false);
+  // 비동기 사진 조회 완료 시점에 현재 열려 있는 편집 대상이 바뀌지 않았는지 확인용.
+  const editingCleaningReportIdRef = useRef<string | null>(null);
   // 변경이력(감사로그) 지연 로딩 캐시/가드 — 휴지통관리(변경이력) 진입 시에만 조회.
   const auditLogsFetchedAtRef = useRef<number>(0);
   const auditLogsLoadingRef = useRef(false);
@@ -5057,7 +5065,7 @@ export default function App() {
     }
 
     // 사진 통합: 전/후를 합쳐 한 장이라도 있으면 누락 아님
-    if (((report.beforePhotoDataUrls?.length || 0) + (report.afterPhotoDataUrls?.length || 0)) === 0) {
+    if (getCleaningPhotoCount(report) === 0) {
       return "사진누락";
     }
 
@@ -7252,7 +7260,7 @@ export default function App() {
     }
 
     if (reports.some((report) => report.cleanStatus === "불량")) return "불량";
-    if (reports.some((report) => ((report.beforePhotoDataUrls?.length || 0) + (report.afterPhotoDataUrls?.length || 0)) === 0)) return "사진누락";
+    if (reports.some((report) => getCleaningPhotoCount(report) === 0)) return "사진누락";
     return "O";
   };
 
@@ -9247,6 +9255,8 @@ export default function App() {
 
     setCleaningReportForm(initial);
     setEditingCleaningReportId(report?.id || null);
+    editingCleaningReportIdRef.current = report?.id || null;
+    cleaningEditPhotosReadyRef.current = true; // 신규 또는 report 로 직접 연 경우 폼 사진이 곧 원본
     setShowCleaningReportForm(true);
   };
 
@@ -9381,12 +9391,42 @@ export default function App() {
       // 실제 데이터를 반영한 경우에만 캐시 시각 갱신 → 빈 응답 뒤엔 즉시 재조회 가능(60초 대기 안 함).
       if (applied) cleaningReportsFetchedAtRef.current = Date.now();
       setCleaningReportsLoaded(true);
+      // 목록(메타데이터) 표시 직후 사진(base64)만 백그라운드 병합 → 썸네일/개수 채움(모바일 지연 방지).
+      void mergeCleaningPhotos();
     } catch (e) {
       console.warn("cleaning_reports 조회 실패(기존 목록 유지):", e);
       setCleaningReportsError("최신 청소보고서를 불러오지 못했습니다.");
     } finally {
       cleaningReportsLoadingRef.current = false;
       setCleaningReportsLoading(false);
+    }
+  };
+
+  // 사진(base64) 백그라운드 병합 — 목록은 이미 표시된 상태. 실패/타임아웃해도 목록엔 영향 없음.
+  // 서버 사진이 있으면 반영, 서버가 비었는데 메모리에 있으면 유지(빈값 덮어쓰기 방지).
+  const mergeCleaningPhotos = async () => {
+    if (!isSupabaseAvailable()) return;
+    if (cleaningPhotosMergingRef.current) return;
+    cleaningPhotosMergingRef.current = true;
+    setCleaningPhotosLoading(true);
+    try {
+      const photos = await loadCleaningReportsPhotosModule(300);
+      if (!photos || photos.length === 0) return;
+      const byId = new Map(photos.map((p) => [p.id, p]));
+      setCleaningReports((prev) =>
+        prev.map((r) => {
+          const p = byId.get(r.id);
+          if (!p) return r;
+          const before = p.before.length ? p.before : (r.beforePhotoDataUrls?.length ? r.beforePhotoDataUrls : p.before);
+          const after = p.after.length ? p.after : (r.afterPhotoDataUrls?.length ? r.afterPhotoDataUrls : p.after);
+          return { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
+        })
+      );
+    } catch (e) {
+      console.warn("cleaning 사진 병합 실패(썸네일 지연):", e);
+    } finally {
+      cleaningPhotosMergingRef.current = false;
+      setCleaningPhotosLoading(false);
     }
   };
 
@@ -9785,9 +9825,10 @@ export default function App() {
             ...r,
             beforePhotoDataUrls: [],
             afterPhotoDataUrls: [],
-            __photoCount: getCleaningPhotoCount(r),
+            // 사진 미병합(메타데이터만) 상태에서 개수 0으로 덮어쓰지 않도록 이전 캐시 개수 보존.
+            __photoCount: getCleaningPhotoCount(r) || old?.__photoCount || 0,
             __thumb: thumb,
-            __thumbSig: sig,
+            __thumbSig: sig || old?.__thumbSig || "",
           };
         })
       );
@@ -9922,7 +9963,13 @@ export default function App() {
     String(raw || "").replace(/\D/g, "").slice(0, 8) || new Date().toISOString().slice(0, 10).replace(/-/g, "");
 
   // 청소보고서 PDF — 공통 helper 사용.
-  const printCleaningReport = (report: CleaningReport) => {
+  const printCleaningReport = async (report: CleaningReport) => {
+    // 목록은 사진을 지연 로딩하므로, 사진이 아직 없으면 PDF 생성 전에 원본을 조회해 포함.
+    let photos = getCleaningPhotos(report);
+    if (photos.length === 0 && report.id && isSupabaseAvailable()) {
+      const full = await loadCleaningReportPhotos(report.id);
+      if (full) photos = [...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])];
+    }
     printPhotoReport({
       title: "청소보고서",
       fileBase: `청소보고서_${report.buildingName || "기숙사"}_${reportFileDate(report.reportDate)}`,
@@ -9934,7 +9981,7 @@ export default function App() {
         { label: "청소담당자", value: getUserDisplayName(report.cleanerName || "") },
         { label: "메모", value: report.memo || "-", full: true },
       ],
-      sections: [{ heading: "사진", urls: getCleaningPhotos(report) }],
+      sections: [{ heading: "사진", urls: photos }],
     });
   };
 
@@ -9962,7 +10009,7 @@ export default function App() {
     });
   };
 
-  const saveCleaningReport = () => {
+  const saveCleaningReport = async () => {
     if (!canCreateCleaningReport(currentUser)) return;
     if (!cleaningReportForm.buildingName.trim() || !cleaningReportForm.dong.trim() || !cleaningReportForm.roomHo.trim()) {
       alert("청소보고서 저장을 위해 기숙사 정보(건물명, 동, 호수)를 입력해주세요.");
@@ -9978,13 +10025,20 @@ export default function App() {
       : null;
 
     if (existing) {
+      let beforeP = cleaningReportForm.beforePhotoDataUrls ?? existing.beforePhotoDataUrls ?? [];
+      let afterP = cleaningReportForm.afterPhotoDataUrls ?? existing.afterPhotoDataUrls ?? [];
+      // 사진 지연 로딩 상태에서 저장 시 기존 사진이 지워지지 않도록:
+      // 수정 모달이 아직 원본 사진을 못 불러왔고(ready=false) 폼/기존 모두 비어 있으면 원본을 재조회해 유지.
+      // (ready=true 인데 비어 있으면 사용자가 실제로 삭제한 것 → 그대로 존중)
+      if (!cleaningEditPhotosReadyRef.current && beforeP.length === 0 && afterP.length === 0 && isSupabaseAvailable()) {
+        const full = await loadCleaningReportPhotos(existing.id);
+        if (full) { beforeP = full.beforePhotoDataUrls; afterP = full.afterPhotoDataUrls; }
+      }
       const payload: CleaningReport = {
         id: existing.id,
         ...cleaningReportForm,
-        // 상태/점수 등만 바꿔도 기존 이미지가 초기화되지 않도록 방어:
-        // 폼 배열이 누락(undefined)되면 기존 보고서의 사진을 유지. (사용자가 직접 삭제한 빈 배열 []은 그대로 존중)
-        beforePhotoDataUrls: cleaningReportForm.beforePhotoDataUrls ?? existing.beforePhotoDataUrls ?? [],
-        afterPhotoDataUrls: cleaningReportForm.afterPhotoDataUrls ?? existing.afterPhotoDataUrls ?? [],
+        beforePhotoDataUrls: beforeP,
+        afterPhotoDataUrls: afterP,
         createdAt: existing.createdAt,
         updatedAt: new Date().toISOString(),
       };
@@ -12595,12 +12649,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     }));
   };
 
-  const openCleaningReportEdit = (report: CleaningReport) => {
+  const openCleaningReportEdit = async (report: CleaningReport) => {
     if (!canEditCleaningReport(currentUser, report)) return;
     const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = report;
     setCleaningReportForm(rest);
     setEditingCleaningReportId(report.id);
+    editingCleaningReportIdRef.current = report.id;
     setShowCleaningReportForm(true);
+    // 목록은 사진 base64 를 지연 로딩하므로, 수정 모달은 원본 사진을 다시 조회해 기존 사진 미리보기를 보장.
+    const hasPhotos = (rest.beforePhotoDataUrls?.length || 0) + (rest.afterPhotoDataUrls?.length || 0) > 0;
+    cleaningEditPhotosReadyRef.current = hasPhotos; // 이미 사진이 있으면 로드 완료로 간주
+    if (!hasPhotos && isSupabaseAvailable()) {
+      const full = await loadCleaningReportPhotos(report.id); // 클릭(수정) 시에만 원본 조회
+      if (full && editingCleaningReportIdRef.current === report.id) {
+        setCleaningReportForm((f) => ({ ...f, beforePhotoDataUrls: full.beforePhotoDataUrls, afterPhotoDataUrls: full.afterPhotoDataUrls }));
+        setCleaningReports((prev) => prev.map((r) => (r.id === report.id ? { ...r, beforePhotoDataUrls: full.beforePhotoDataUrls, afterPhotoDataUrls: full.afterPhotoDataUrls } : r)));
+        cleaningEditPhotosReadyRef.current = true;
+      }
+    } else if (!isSupabaseAvailable()) {
+      cleaningEditPhotosReadyRef.current = true; // 로컬 데이터가 곧 원본
+    }
   };
 
   const openDormContractEdit = (c: DormContract) => {
@@ -19990,7 +20058,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">
                           {(() => {
                             const count = getCleaningPhotoCount(report); // base64/캐시 개수
-                            if (count === 0) return <span className="text-xs text-rose-500">사진없음</span>;
+                            // 사진 병합 중(메타데이터만 로드된 상태)이면 "사진없음" 대신 "확인중" 표시.
+                            if (count === 0) return cleaningPhotosLoading
+                              ? <span className="text-xs text-slate-400">사진 확인중…</span>
+                              : <span className="text-xs text-rose-500">사진없음</span>;
                             const thumb = getCleaningThumbnail(report); // 실제 첫 사진 또는 캐시 썸네일
                             return (
                               <button
@@ -20016,12 +20087,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">
                           <div className="flex flex-nowrap gap-2">
                             {canDownloadFiles && (
-                              <button onClick={() => printCleaningReport(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`} title="청소보고서 PDF 저장">
+                              <button onClick={() => void printCleaningReport(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`} title="청소보고서 PDF 저장">
                                 PDF
                               </button>
                             )}
                             {shouldShowMaintenanceControls(currentUser) && (
-                              <button onClick={() => openCleaningReportEdit(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}>
+                              <button onClick={() => void openCleaningReportEdit(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}>
                                 수정
                               </button>
                             )}
@@ -22557,7 +22628,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           <>
                             <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">전체 다운로드</button>
                             <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
-                            <button type="button" onClick={() => printCleaningReport(cleaningReportForm as CleaningReport)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF 저장</button>
+                            <button type="button" onClick={() => void printCleaningReport(cleaningReportForm as CleaningReport)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF 저장</button>
                           </>
                         )}
                         <span className="text-sm text-slate-500">총 {urls.length}장</span>

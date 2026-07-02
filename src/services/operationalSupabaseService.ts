@@ -393,12 +393,14 @@ export const loadOperationalModule = async (tenantId: string): Promise<Operation
   }
 };
 
-// 청소관리 메뉴 진입 시에만 호출하는 지연 로더.
-// - select * 금지: toDomain 이 실제로 쓰는 컬럼만 명시 조회(payload/스캔 절감).
+// 청소관리 메뉴 진입 시에만 호출하는 지연 로더 (1단계: 메타데이터만).
+// ⚠️ 사진 base64(before/after_photo_data_urls)는 목록 조회에서 제외 → 모바일/태블릿에서
+//    대용량 payload 로 인한 지연/타임아웃 방지. 사진은 2단계(loadCleaningReportsPhotosModule)
+//    또는 클릭/수정/PDF 시 loadCleaningReportPhotos 로 온디맨드 조회한다.
 // - 최신순 + limit 로 statement timeout 방지(인덱스: idx_cleaning_reports_tenant_created_at).
 // - 실패 시 null 반환 → 호출부에서 기존 목록 유지(빈 배열로 덮어쓰지 않음).
-const CLEANING_REPORT_COLUMNS =
-  "id, tenant_id, report_date, site, dorm_id, building_name, address, dong, room_ho, shared_entry, unit_entry, manager_user_id, manager_name, cleaner_name, week_label, month_label, clean_status, check_result, score, memo, before_photo_data_urls, after_photo_data_urls, reporter_user_id, reporter_name, confirmed_by, confirmed_at, created_at, updated_at, is_deleted, deleted_at, deleted_by, is_permanent_deleted, permanent_deleted_at, permanent_deleted_by";
+const CLEANING_LIST_COLUMNS =
+  "id, tenant_id, report_date, site, dorm_id, building_name, address, dong, room_ho, shared_entry, unit_entry, manager_user_id, manager_name, cleaner_name, week_label, month_label, clean_status, check_result, score, memo, reporter_user_id, reporter_name, confirmed_by, confirmed_at, created_at, updated_at, is_deleted, deleted_at, deleted_by, is_permanent_deleted, permanent_deleted_at, permanent_deleted_by";
 
 export const loadCleaningReportsModule = async (
   _tenantId: string,
@@ -410,16 +412,43 @@ export const loadCleaningReportsModule = async (
     // 인덱스는 (tenant_id, created_at) / (created_at) 모두 제공 → 최신순 정렬+limit 가 인덱스를 탄다.
     const { data, error } = await supabase!
       .from("cleaning_reports")
-      .select(CLEANING_REPORT_COLUMNS)
+      .select(CLEANING_LIST_COLUMNS)
       .order("created_at", { ascending: false })
       .limit(limit);
     if (error) {
       console.warn("[cleaning_reports] 조회 실패(기존 목록 유지):", error.message || error);
       return null;
     }
-    return (data || []).map(toDomainCleaningReport);
+    return (data || []).map(toDomainCleaningReport); // 사진 컬럼 없음 → before/after 는 [] 로 매핑
   } catch (e) {
     console.warn("[cleaning_reports] 조회 예외(기존 목록 유지):", (e as { message?: string })?.message || e);
+    return null;
+  }
+};
+
+// 2단계: 목록 표시 직후 백그라운드로 사진(base64)만 조회해 썸네일/개수를 채운다.
+// 실패/타임아웃해도 목록(메타데이터)은 이미 표시된 상태이므로 앱에 영향 없음.
+export const loadCleaningReportsPhotosModule = async (
+  limit = 300
+): Promise<Array<{ id: string; before: string[]; after: string[] }> | null> => {
+  if (!isSupabaseAvailable()) return null;
+  try {
+    const { data, error } = await supabase!
+      .from("cleaning_reports")
+      .select("id, before_photo_data_urls, after_photo_data_urls")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error) {
+      console.warn("[cleaning_reports 사진 일괄 조회 실패]", error.message || error);
+      return null;
+    }
+    return (data || []).map((r: any) => ({
+      id: r.id,
+      before: Array.isArray(r.before_photo_data_urls) ? r.before_photo_data_urls : [],
+      after: Array.isArray(r.after_photo_data_urls) ? r.after_photo_data_urls : [],
+    }));
+  } catch (e) {
+    console.warn("[cleaning_reports 사진 일괄 조회 예외]", (e as { message?: string })?.message || e);
     return null;
   }
 };
