@@ -352,21 +352,14 @@ export const loadOperationalModule = async (tenantId: string): Promise<Operation
     // 또한 테이블 하나가 실패(타임아웃 등)해도 나머지는 표시되도록 allSettled + 개별 폴백([]) 처리.
     // ⚠️ cleaning_reports 는 초기 로딩에서 제외(사진 base64 대량 → statement timeout/500 유발).
     //    → 청소관리 메뉴 진입 시 loadCleaningReportsModule() 로 지연 조회한다.
-    const [defectsResult, inventoryResult, settlementRecordsResult, settlementItemsResult, auditLogsResult] =
+    // ⚠️ audit_logs(변경이력)도 초기 로딩에서 제외(statement timeout/500 원인).
+    //    → 휴지통관리(변경이력) 화면 진입 시 loadAuditLogsModule() 로 지연 조회한다.
+    const [defectsResult, inventoryResult, settlementRecordsResult, settlementItemsResult] =
       await Promise.allSettled([
         supabase!.from("defect_requests").select("*"),
         supabase!.from("inventory_items").select("*"),
         supabase!.from("settlement_records").select("*"),
         supabase!.from("settlement_items").select("*"),
-        // audit_logs(변경이력)는 비핵심 부가기능 → 전체 조회 금지(statement timeout/500 원인).
-        // tenant_id 기준 필터(이 테이블에는 organization_id 컬럼 없음) + 필요한 컬럼만 + 최신순 + 50건 제한.
-        // 실패해도 rowsOf 가 빈 배열로 처리해 앱 로딩을 막지 않음.
-        supabase!
-          .from("audit_logs")
-          .select("id, target_type, target_id, action_type, changed_by, changed_at, before_value, after_value, memo, changes, created_at")
-          .eq("tenant_id", tenantId)
-          .order("created_at", { ascending: false })
-          .limit(50),
       ]);
 
     // 각 테이블 결과를 안전하게 추출(실패/에러 시 빈 배열). 하나가 실패해도 전체를 null 로 만들지 않는다.
@@ -391,7 +384,8 @@ export const loadOperationalModule = async (tenantId: string): Promise<Operation
       inventory: rowsOf(inventoryResult, "inventory_items").map(toDomainInventoryItem),
       settlementRecords: rowsOf(settlementRecordsResult, "settlement_records").map(toDomainSettlementRecord),
       settlementItems: rowsOf(settlementItemsResult, "settlement_items").map(toDomainSettlementItem),
-      auditLogs: rowsOf(auditLogsResult, "audit_logs").map(toDomainAuditLog),
+      // 초기 로딩 제외 — 변경이력 화면 진입 시 loadAuditLogsModule() 로 지연 조회.
+      auditLogs: [],
     };
   } catch (error) {
     console.error("Supabase operational module load exception:", error);
@@ -408,7 +402,7 @@ const CLEANING_REPORT_COLUMNS =
 
 export const loadCleaningReportsModule = async (
   _tenantId: string,
-  limit = 500
+  limit = 300
 ): Promise<CleaningReport[] | null> => {
   if (!isSupabaseAvailable()) return null;
   try {
@@ -426,6 +420,28 @@ export const loadCleaningReportsModule = async (
     return (data || []).map(toDomainCleaningReport);
   } catch (e) {
     console.warn("[cleaning_reports] 조회 예외(기존 목록 유지):", (e as { message?: string })?.message || e);
+    return null;
+  }
+};
+
+// 변경이력(감사로그) 지연 로더 — 휴지통관리(변경이력) 화면 진입 시에만 호출.
+// tenant 필터 + 최신순 + 50건 제한(인덱스: idx_audit_logs_tenant_created_at). 실패 시 null(기존 유지).
+export const loadAuditLogsModule = async (tenantId: string, limit = 50): Promise<AuditLog[] | null> => {
+  if (!isSupabaseAvailable()) return null;
+  try {
+    const { data, error } = await supabase!
+      .from("audit_logs")
+      .select("id, target_type, target_id, action_type, changed_by, changed_at, before_value, after_value, memo, changes, created_at")
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error) {
+      console.warn("[audit_logs] 조회 실패(기존 목록 유지):", error.message || error);
+      return null;
+    }
+    return (data || []).map(toDomainAuditLog);
+  } catch (e) {
+    console.warn("[audit_logs] 조회 예외(기존 목록 유지):", (e as { message?: string })?.message || e);
     return null;
   }
 };

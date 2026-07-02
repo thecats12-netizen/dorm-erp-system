@@ -73,6 +73,7 @@ import {
 import {
   loadOperationalModule,
   loadCleaningReportsModule,
+  loadAuditLogsModule,
   saveOperationalModule,
   insertAuditLogsScoped,
 } from "./services/operationalSupabaseService";
@@ -1776,6 +1777,9 @@ export default function App() {
   const [cleaningReportsLoading, setCleaningReportsLoading] = useState(false);
   const [cleaningReportsLoaded, setCleaningReportsLoaded] = useState(false);
   const [cleaningReportsError, setCleaningReportsError] = useState<string | null>(null);
+  // 변경이력(감사로그) 지연 로딩 캐시/가드 — 휴지통관리(변경이력) 진입 시에만 조회.
+  const auditLogsFetchedAtRef = useRef<number>(0);
+  const auditLogsLoadingRef = useRef(false);
   const [newHires, setNewHires] = useState<NewHireEmployee[]>([]);
   const [sales, setSales] = useState<SaleRecord[]>([]);
   const [defects, setDefects] = useState<DefectRequest[]>([]);
@@ -3080,10 +3084,13 @@ export default function App() {
               setInventory(dInv);
               setSettlementRecords(remoteOperationalModule?.settlementRecords || []);
               setSettlementItems((remoteOperationalModule?.settlementItems as unknown as SettlementItem[]) || []);
+              // audit_logs 는 초기 로딩에서 제외(지연 로딩) → remoteOperationalModule.auditLogs 는 항상 [].
+              // 빈 배열로 기존 감사로그를 덮어쓰지 않는다(지연 로드/실시간으로 채워진 값 보존).
               const loadedAuditLogs = remoteOperationalModule?.auditLogs || [];
-              // 로드된 감사로그는 이미 Supabase 에 존재 → synced 로 표시(다음 저장에서 전체 재전송/타임아웃 방지)
-              loadedAuditLogs.forEach((l) => { if (l.id) syncedAuditIdsRef.current.add(l.id); });
-              setAuditLogs(loadedAuditLogs);
+              if (loadedAuditLogs.length > 0) {
+                loadedAuditLogs.forEach((l) => { if (l.id) syncedAuditIdsRef.current.add(l.id); });
+                setAuditLogs(loadedAuditLogs);
+              }
               console.log("[LOAD] inventory:", dInv.length, "defects:", dDefects.length, "cleaningReports:", dCleaning.length);
             } else if (opRes.status === "rejected") {
               console.error("[LOAD] Failed to load operational module from Supabase:", opRes.reason);
@@ -9370,6 +9377,40 @@ export default function App() {
     if (["cleaningReports", "dashboard", "documentManagement", "reportManagement"].includes(activeTab)) {
       void loadCleaningReports(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, currentUser?.id]);
+
+  // 변경이력(감사로그)은 초기 로딩에서 제외 → 휴지통관리 화면 진입 시에만 지연 조회(60초 캐시).
+  // 실패/빈 결과 시 기존 목록 유지(빈 배열 덮어쓰기 금지).
+  useEffect(() => {
+    if (activeTab !== "recycleBin") return;
+    if (!isSupabaseAvailable() || !currentUser?.id) return;
+    if (auditLogsLoadingRef.current) return;
+    if (Date.now() - auditLogsFetchedAtRef.current < 60 * 1000 && auditLogs.length > 0) return;
+    auditLogsLoadingRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const session = await getCurrentSession();
+        if (cancelled || !session?.user?.id) return;
+        const remote = await loadAuditLogsModule(tenantId);
+        if (cancelled || !remote) return; // 실패(null) → 기존 유지
+        if (remote.length === 0) { auditLogsFetchedAtRef.current = Date.now(); return; } // 빈 결과 덮어쓰기 금지
+        remote.forEach((l) => { if (l.id) syncedAuditIdsRef.current.add(l.id); });
+        setAuditLogs((prev) => {
+          // 지연 로드 결과 + 아직 서버 미반영 로컬 신규건 병합(중복 id 제거).
+          const remoteIds = new Set(remote.map((l) => l.id));
+          const localOnly = prev.filter((l) => !remoteIds.has(l.id));
+          return [...remote, ...localOnly];
+        });
+        auditLogsFetchedAtRef.current = Date.now();
+      } catch (e) {
+        console.warn("audit_logs 조회 실패(기존 목록 유지):", e);
+      } finally {
+        auditLogsLoadingRef.current = false;
+      }
+    })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, currentUser?.id]);
 
