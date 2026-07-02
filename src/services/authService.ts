@@ -12,8 +12,8 @@ export function clearSupabaseAuthStorage(): void {
     const keys: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
-      // supabase-js 기본 저장 형식: sb-<projectRef>-auth-token (+ .code-verifier 등)
-      if (k && /^sb-.*-auth-token/.test(k)) keys.push(k);
+      // supabase 인증 관련 key 만(sb-*, supabase.auth, *auth-token). 앱 데이터 key(테넌트 프리픽스)는 미포함.
+      if (k && (k.startsWith("sb-") || k.includes("supabase.auth") || k.includes("auth-token"))) keys.push(k);
     }
     keys.forEach((k) => localStorage.removeItem(k));
     if (keys.length) console.warn("[AuthService] 손상된 인증 토큰 정리:", keys.length, "건");
@@ -74,10 +74,12 @@ export const signInWithEmail = async (
   }
 
   try {
-    const { data, error } = await supabase!.auth.signInWithPassword({
-      email,
-      password,
-    });
+    // 로그인도 CORS/네트워크 실패 시 내부 재시도로 오래 걸릴 수 있음 → 15초 타임아웃으로 무한 대기 방지.
+    const { data, error } = await withTimeout(
+      supabase!.auth.signInWithPassword({ email, password }),
+      15000,
+      { data: { session: null, user: null }, error: { message: "네트워크 오류로 로그인 요청이 시간 초과되었습니다. 인터넷 연결/Supabase 설정을 확인해주세요." } } as any
+    );
 
     if (error) {
       console.error("[AuthService] Sign in error:", error, { email });

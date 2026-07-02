@@ -3256,6 +3256,17 @@ export default function App() {
   loadInitialData();
 }, [tenantId, dataReloadKey]);
 
+  // 로딩 강제 종료 안전장치: 어떤 예외/네트워크 지연이 있어도 8초 이상 로딩 화면에 갇히지 않게 한다.
+  // (getCurrentSession 타임아웃 + finally 로 이미 종료되지만, 예상 못 한 hang 대비 최종 안전망)
+  useEffect(() => {
+    if (!isLoading) return;
+    const timer = window.setTimeout(() => {
+      console.warn("[LOAD] 초기 로딩 안전장치 발동 — 강제 종료");
+      setIsLoading(false);
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [isLoading]);
+
   // 다크모드 ↔ color-scheme 동기화 (모바일 자동 다크화 방지 + 폼/스크롤바 일치)
   useEffect(() => {
     document.documentElement.style.colorScheme = theme.darkMode ? "dark" : "light";
