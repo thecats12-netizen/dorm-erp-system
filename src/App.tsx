@@ -73,6 +73,7 @@ import {
 import {
   loadOperationalModule,
   loadCleaningReportsModule,
+  loadCleaningReportPhotos,
   loadAuditLogsModule,
   saveOperationalModule,
   insertAuditLogsScoped,
@@ -669,6 +670,21 @@ function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string 
 
 const SETTLEMENT_ITEMS_KEY = "settlementItems";
 const PRE_MOVE_IN_INSPECTIONS_KEY = "preMoveInInspections";
+
+// 사진 데이터가 배열/JSON문자열/단일 URL·dataURL 등 여러 형태로 저장돼 있어도 안전하게 배열로 변환.
+function parseMaybeJsonArray(value: any): any[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      if (value.startsWith("http") || value.startsWith("data:image")) return [value];
+    }
+  }
+  return [];
+}
 // 청소보고서 원본 리스트 "즉시 표시"용 경량 캐시(사진 base64 제외, 개수만). 기존 CLEANING_REPORTS_KEY 와 별개.
 const CLEANING_REPORTS_CACHE_KEY = "cleaning-reports-raw-cache-v1";
 
@@ -9386,11 +9402,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, currentUser?.id]);
 
-  // 청소보고서 state 변경 시 경량 캐시 자동 갱신(등록/수정/삭제/실시간/조회 모두 커버).
-  // 빈 배열이면 저장하지 않아 캐시가 지워지지 않는다.
+  // 청소보고서 state 변경 시 경량 캐시(+썸네일) 자동 갱신(등록/수정/삭제/실시간/조회 모두 커버).
+  // 디바운스 저장. 빈 배열이면 저장하지 않아 캐시가 지워지지 않는다.
   useEffect(() => {
     if (cleaningReports.length === 0) return;
-    saveCleaningReportsCache(cleaningReports);
+    scheduleCleaningCache(cleaningReports);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cleaningReports]);
 
@@ -9686,32 +9702,107 @@ export default function App() {
     ...(report.afterPhotoDataUrls || []),
   ];
 
-  // 사진 개수: 실제 로드된 base64 가 있으면 그 개수, 없으면 캐시에 저장된 개수(__photoCount) 사용.
+  // 사진 URL 통합 추출: 저장 형태(배열/JSON문자열/객체/단일값)와 필드명(camel/snake, before/after 등)이
+  // 달라도 안전하게 표시용 URL(또는 base64) 목록을 반환. 기존 데이터 구조는 변경하지 않는다(읽기 전용).
+  const getCleaningPhotoUrls = (report: any): string[] => {
+    const raw = [
+      ...(report?.beforePhotoDataUrls || []),
+      ...(report?.afterPhotoDataUrls || []),
+      ...parseMaybeJsonArray(report?.photo_urls),
+      ...parseMaybeJsonArray(report?.photoUrls),
+      ...parseMaybeJsonArray(report?.photos),
+      ...parseMaybeJsonArray(report?.images),
+      ...parseMaybeJsonArray(report?.image_urls),
+      ...parseMaybeJsonArray(report?.attachments),
+    ];
+    return raw
+      .map((item: any) =>
+        typeof item === "string"
+          ? item
+          : (item?.url || item?.publicUrl || item?.public_url || item?.previewUrl || item?.preview_url || item?.signedUrl || item?.signed_url || item?.dataUrl || item?.path || "")
+      )
+      .filter(Boolean);
+  };
+
+  // 사진 개수: 실제 사진이 있으면 그 개수, 없으면 캐시에 저장된 개수(__photoCount) 사용.
   // → 경량 캐시로 즉시 표시된 행도 "사진없음"이 아니라 정확한 장수를 보여준다.
   const getCleaningPhotoCount = (report: any): number => {
-    const live = (report?.beforePhotoDataUrls?.length || 0) + (report?.afterPhotoDataUrls?.length || 0);
+    const live = getCleaningPhotoUrls(report).length;
     if (live > 0) return live;
     if (typeof report?.__photoCount === "number") return report.__photoCount;
+    if (typeof report?.photo_count === "number") return report.photo_count;
     return 0;
   };
 
-  // 경량 캐시 저장(사진 base64 제외, 개수만) — 저장 실패해도 앱에 영향 없음(saveJson 이 quota 예외 흡수).
-  const saveCleaningReportsCache = (rows: CleaningReport[]) => {
+  // 리스트 썸네일: 실제 첫 사진이 있으면 그것, 없으면 캐시에 저장된 축소 썸네일(__thumb).
+  const getCleaningThumbnail = (report: any): string => getCleaningPhotoUrls(report)[0] || report?.__thumb || "";
+
+  // dataURL 이미지를 작은 썸네일(기본 96px, JPEG)로 축소 — 캐시에 base64 원본 대신 저장해 용량 절감.
+  const makeThumbDataUrl = (src: string, size = 96): Promise<string> =>
+    new Promise((resolve) => {
+      try {
+        if (!src || !src.startsWith("data:image")) { resolve(""); return; }
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const scale = Math.min(size / (img.width || 1), size / (img.height || 1), 1);
+            const w = Math.max(1, Math.round((img.width || 1) * scale));
+            const h = Math.max(1, Math.round((img.height || 1) * scale));
+            const c = document.createElement("canvas");
+            c.width = w; c.height = h;
+            const ctx = c.getContext("2d");
+            if (!ctx) { resolve(""); return; }
+            ctx.drawImage(img, 0, 0, w, h);
+            resolve(c.toDataURL("image/jpeg", 0.5));
+          } catch { resolve(""); }
+        };
+        img.onerror = () => resolve("");
+        img.src = src;
+      } catch { resolve(""); }
+    });
+
+  // 경량 캐시 저장(사진 base64 원본 제외 + 최근 항목만 축소 썸네일 __thumb 포함).
+  // 이전 캐시의 __thumb 는 원본 사진이 안 바뀌었으면 재사용(썸네일 재생성 비용 최소화).
+  const THUMB_CACHE_LIMIT = 60; // 최근 60건만 썸네일 생성/보관(용량·CPU 제한)
+  const cleaningCacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistCleaningCache = async (rows: CleaningReport[]) => {
     try {
       if (!rows || rows.length === 0) return; // 빈 값으로 캐시 덮어쓰지 않음
-      const lightRows = rows.map((r) => ({
-        ...r,
-        beforePhotoDataUrls: [],
-        afterPhotoDataUrls: [],
-        __photoCount: getCleaningPhotoCount(r),
-      }));
+      const existing = loadJson<{ rows?: any[] } | null>(CLEANING_REPORTS_CACHE_KEY, null, tenantId);
+      const oldById = new Map((existing?.rows || []).map((r: any) => [r.id, r]));
+      const lightRows = await Promise.all(
+        rows.map(async (r, idx) => {
+          const first = getCleaningPhotoUrls(r)[0] || "";
+          const sig = first.slice(0, 48);
+          const old = oldById.get((r as any).id) as any;
+          let thumb = old?.__thumb || "";
+          // 최근 항목 + 원본 사진(base64) 존재 + (썸네일 없음 또는 원본 변경) 일 때만 재생성.
+          if (idx < THUMB_CACHE_LIMIT && first.startsWith("data:image") && (!thumb || old?.__thumbSig !== sig)) {
+            const t = await makeThumbDataUrl(first, 96);
+            if (t) thumb = t;
+          }
+          return {
+            ...r,
+            beforePhotoDataUrls: [],
+            afterPhotoDataUrls: [],
+            __photoCount: getCleaningPhotoCount(r),
+            __thumb: thumb,
+            __thumbSig: sig,
+          };
+        })
+      );
       saveJson(CLEANING_REPORTS_CACHE_KEY, { fetchedAt: Date.now(), rows: lightRows }, tenantId);
     } catch (e) {
-      console.warn("[cleaning_reports cache save skipped]", e);
+      console.warn("[cleaning_reports cache persist skipped]", e);
     }
   };
+  // 변경 잦을 때 캐시 저장을 디바운스(썸네일 생성 반복 방지).
+  const scheduleCleaningCache = (rows: CleaningReport[]) => {
+    if (cleaningCacheTimerRef.current) clearTimeout(cleaningCacheTimerRef.current);
+    cleaningCacheTimerRef.current = setTimeout(() => { void persistCleaningCache(rows); }, 800);
+  };
 
-  // 청소관리 진입 시 Supabase 조회 전에 경량 캐시를 복원해 원본 리스트를 즉시 표시.
+  // 청소관리 진입 시 Supabase 조회 전에 경량 캐시를 복원해 원본 리스트(+썸네일)를 즉시 표시.
   const cleaningReportsHydratedRef = useRef(false);
   const hydrateCleaningReportsFromCache = () => {
     try {
@@ -9727,6 +9818,21 @@ export default function App() {
     } finally {
       cleaningReportsHydratedRef.current = true;
     }
+  };
+
+  // 사진 뷰어 열기: 리스트에서 원본을 미리 안 가져왔을 수 있으므로(캐시 표시 행) 클릭 시 원본 사진을 조회해 모달.
+  const openCleaningPhotoViewer = async (report: any) => {
+    let urls = getCleaningPhotoUrls(report);
+    if (urls.length === 0 && report?.id) {
+      const full = await loadCleaningReportPhotos(report.id); // 클릭 시에만 원본 조회
+      if (full) {
+        urls = [...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])];
+        // 조회한 원본을 메모리 상태에 반영(다음 클릭/썸네일 재사용)
+        setCleaningReports((prev) => prev.map((r) => (r.id === report.id ? { ...r, beforePhotoDataUrls: full.beforePhotoDataUrls, afterPhotoDataUrls: full.afterPhotoDataUrls } : r)));
+      }
+    }
+    if (urls.length === 0) return;
+    setImageLightbox({ urls, index: 0, title: `청소보고서 · ${report.buildingName || ""}` });
   };
 
   // 하자접수 사진(접수/완료) 공통 추출 — 청소관리 getCleaningPhotos 와 동일 패턴.
@@ -19883,20 +19989,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(report.cleanerName || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
                           {(() => {
-                            const photos = getCleaningPhotos(report);
-                            const count = getCleaningPhotoCount(report); // base64 없으면 캐시 개수 사용
+                            const count = getCleaningPhotoCount(report); // base64/캐시 개수
                             if (count === 0) return <span className="text-xs text-rose-500">사진없음</span>;
-                            // 캐시로 즉시 표시된 행(사진 base64 아직 미로드): 썸네일 없이 장수만 표시(백그라운드 조회 후 썸네일 표시).
-                            if (photos.length === 0) return <span className="text-xs font-medium text-blue-600">사진 {count}장</span>;
+                            const thumb = getCleaningThumbnail(report); // 실제 첫 사진 또는 캐시 썸네일
                             return (
                               <button
                                 type="button"
-                                onClick={() => setImageLightbox({ urls: photos, index: 0, title: `청소보고서 · ${report.buildingName || ""}` })}
+                                onClick={() => void openCleaningPhotoViewer(report)}
                                 className="inline-flex items-center gap-2"
                                 title="사진 크게 보기"
                               >
-                                <img src={photos[0]} alt="cleaning" className="h-9 w-9 rounded-md object-cover ring-1 ring-slate-300" />
-                                <span className="text-xs font-medium text-blue-600">사진 {photos.length}장</span>
+                                {thumb ? (
+                                  <img
+                                    src={thumb}
+                                    alt="cleaning"
+                                    loading="lazy"
+                                    className="h-9 w-9 rounded-md object-cover ring-1 ring-slate-300"
+                                    onError={(e) => { e.currentTarget.style.display = "none"; }}
+                                  />
+                                ) : null}
+                                <span className="text-xs font-medium text-blue-600">사진 {count}장</span>
                               </button>
                             );
                           })()}

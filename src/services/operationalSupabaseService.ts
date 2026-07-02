@@ -424,6 +424,32 @@ export const loadCleaningReportsModule = async (
   }
 };
 
+// 청소보고서 사진 상세(원본 base64) 지연 조회 — 리스트가 아닌, 사진 클릭/뷰어 열 때만 1건 조회.
+// 목록에서 원본 사진을 미리 가져오지 않기 위한 온디맨드 로더.
+export const loadCleaningReportPhotos = async (
+  reportId: string
+): Promise<{ beforePhotoDataUrls: string[]; afterPhotoDataUrls: string[] } | null> => {
+  if (!isSupabaseAvailable() || !reportId) return null;
+  try {
+    const { data, error } = await supabase!
+      .from("cleaning_reports")
+      .select("id, before_photo_data_urls, after_photo_data_urls")
+      .eq("id", reportId)
+      .single();
+    if (error) {
+      console.warn("[cleaning_reports 사진 조회 실패]", error.message || error);
+      return null;
+    }
+    return {
+      beforePhotoDataUrls: Array.isArray(data?.before_photo_data_urls) ? data!.before_photo_data_urls : [],
+      afterPhotoDataUrls: Array.isArray(data?.after_photo_data_urls) ? data!.after_photo_data_urls : [],
+    };
+  } catch (e) {
+    console.warn("[cleaning_reports 사진 조회 예외]", (e as { message?: string })?.message || e);
+    return null;
+  }
+};
+
 // 변경이력(감사로그) 지연 로더 — 휴지통관리(변경이력) 화면 진입 시에만 호출.
 // tenant 필터 + 최신순 + 50건 제한(인덱스: idx_audit_logs_tenant_created_at). 실패 시 null(기존 유지).
 export const loadAuditLogsModule = async (tenantId: string, limit = 50): Promise<AuditLog[] | null> => {
