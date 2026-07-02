@@ -55,6 +55,24 @@ create index if not exists idx_pmi_dorm on public.pre_move_in_inspections (dorm_
 create index if not exists idx_pmi_inspection_date on public.pre_move_in_inspections (inspection_date desc);
 
 -- ----------------------------------------------------------------------------
+-- Realtime 활성화: 다른 기기의 등록/수정/삭제가 새로고침 없이 반영되려면 필수.
+-- (Dashboard: Database → Replication → supabase_realtime 에 이 테이블 추가와 동일)
+-- ----------------------------------------------------------------------------
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'pre_move_in_inspections'
+  ) then
+    alter publication supabase_realtime add table public.pre_move_in_inspections;
+  end if;
+end $$;
+
+-- DELETE 이벤트에서 old row 의 id/tenant_id 를 받으려면 REPLICA IDENTITY FULL 권장
+-- (소프트 삭제는 UPDATE 라 불필요하나, 하드 DELETE 대비).
+alter table public.pre_move_in_inspections replica identity full;
+
+-- ----------------------------------------------------------------------------
 -- RLS: 로그인(authenticated) 사용자에게 CRUD 허용. 다른 운영 테이블과 동일 정책 수준.
 -- (프로젝트가 tenant 필터 없이 조회하므로 tenant 단위 세분화는 앱 레벨에서 처리)
 -- ----------------------------------------------------------------------------

@@ -78,6 +78,7 @@ import {
 import {
   loadPreMoveInInspections,
   savePreMoveInInspections,
+  rowToPreMoveInInspection,
 } from "./services/preMoveInInspectionService";
 import { uploadTempFileAndSign } from "./services/pdfStorageService";
 import {
@@ -2108,6 +2109,7 @@ export default function App() {
         case "audit_logs": removeById(setAuditLogs); break;
         case "settlement_records": removeById(setSettlementRecords); break;
         case "settlement_items": removeById(setSettlementItems); break;
+        case "pre_move_in_inspections": removeById(setPreMoveInInspections); break;
         default: break;
       }
       return;
@@ -2143,6 +2145,10 @@ export default function App() {
         break;
       case "settlement_items":
         setSettlementItems((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeSettlementItem));
+        break;
+      case "pre_move_in_inspections":
+        // 사진(photos)이 비어 들어오면 기존 값 보존(빈값 덮어쓰기 방지) — 청소/하자와 동일 패턴.
+        setPreMoveInInspections((prev) => applyRealtimeUpdate(prev, row, rowToPreMoveInInspection, ["photos"]));
         break;
       default:
         break;
@@ -5767,6 +5773,11 @@ export default function App() {
         )
         .on(
           "postgres_changes",
+          { event: "*", schema: "public", table: "pre_move_in_inspections", filter: `tenant_id=eq.${tenantId}` },
+          (payload) => handleRealtimeTableRow("pre_move_in_inspections", payload)
+        )
+        .on(
+          "postgres_changes",
           { event: "*", schema: "public", table: "military_module_data", filter: `tenant_id=eq.${tenantId}` },
           (payload) => handleMilitaryRealtimeRow(payload)
         )
@@ -9291,6 +9302,24 @@ export default function App() {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, currentUser?.id]);
+
+  // 입주전 점검 메뉴 진입 시 조용히 재조회(기존 화면 비우지 않음). 조회 실패/빈값이면 기존 목록 유지.
+  // (Realtime 이 놓친 변경분 보정용. 전체 reload 아님 — 단일 테이블 조회.)
+  useEffect(() => {
+    if (activeTab !== "preMoveInInspection") return;
+    if (!isSupabaseAvailable() || !currentUser?.id) return;
+    let cancelled = false;
+    (async () => {
+      const session = await getCurrentSession();
+      if (cancelled || !session?.user?.id) return;
+      const remote = await loadPreMoveInInspections(tenantId);
+      if (cancelled || !remote) return; // 실패(null) 시 기존 데이터 유지
+      setPreMoveInInspections(remote);
+      lastPreInspectionSnapshotRef.current = preInspectionSnapshot(remote);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // 저장: 로컬은 항상, Supabase 는 변경분이 있을 때만 upsert. 실패해도 앱 흐름 막지 않음(warn).
   useEffect(() => {

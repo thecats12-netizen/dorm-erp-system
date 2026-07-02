@@ -48,7 +48,8 @@ const toDb = (r: PreMoveInInspection, tenantId: string, userId: string) => ({
   permanent_deleted_by: r.permanentDeletedBy || null,
 });
 
-const toDomain = (row: any): PreMoveInInspection => ({
+// Realtime 구독 등 외부에서도 동일 매핑을 쓰도록 export.
+export const rowToPreMoveInInspection = (row: any): PreMoveInInspection => ({
   id: row.id,
   inspectionDate: row.inspection_date || "",
   site: row.region || row.site || "",
@@ -96,7 +97,7 @@ export const loadPreMoveInInspections = async (_tenantId: string): Promise<PreMo
       console.warn("[pre_move_in_inspections] 조회 실패(로컬 유지):", error.message || error);
       return null;
     }
-    return (data || []).map(toDomain);
+    return (data || []).map(rowToPreMoveInInspection);
   } catch (e) {
     console.warn("[pre_move_in_inspections] 조회 예외(로컬 유지):", (e as { message?: string })?.message || e);
     return null;
