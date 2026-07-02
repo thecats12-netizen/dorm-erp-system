@@ -1772,6 +1772,10 @@ export default function App() {
   // 청소보고서 지연 로딩(60초 캐시) — 메뉴 진입 시에만 조회, 초기 로딩 제외.
   const cleaningReportsFetchedAtRef = useRef<number>(0);
   const cleaningReportsLoadingRef = useRef(false);
+  // UI 표시용 상태: 로딩 중/최초 로드 완료/오류. 기존 데이터가 있으면 로딩·오류여도 리스트를 계속 표시.
+  const [cleaningReportsLoading, setCleaningReportsLoading] = useState(false);
+  const [cleaningReportsLoaded, setCleaningReportsLoaded] = useState(false);
+  const [cleaningReportsError, setCleaningReportsError] = useState<string | null>(null);
   const [newHires, setNewHires] = useState<NewHireEmployee[]>([]);
   const [sales, setSales] = useState<SaleRecord[]>([]);
   const [defects, setDefects] = useState<DefectRequest[]>([]);
@@ -9325,11 +9329,13 @@ export default function App() {
     const fresh = Date.now() - cleaningReportsFetchedAtRef.current < 60 * 1000;
     if (!force && fresh && cleaningReports.length > 0) return; // 60초 캐시(있으면 재조회 생략)
     cleaningReportsLoadingRef.current = true;
+    setCleaningReportsLoading(true); // UI: 리스트가 비어 있을 때만 로딩 표시(아래 렌더 조건에서 게이트)
+    setCleaningReportsError(null);
     try {
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
       const remote = await loadCleaningReportsModule(tenantId);
-      if (!remote) return; // 조회 실패(null) → 기존 목록 유지
+      if (!remote) { setCleaningReportsError("최신 청소보고서를 불러오지 못했습니다."); return; } // 조회 실패(null) → 기존 목록 유지
       let applied = false;
       // 사진 보존 병합(로드 결과 사진이 비었는데 메모리에 있으면 유지) — 기존 초기 로드와 동일 패턴.
       setCleaningReports((prev) => {
@@ -9349,10 +9355,13 @@ export default function App() {
       });
       // 실제 데이터를 반영한 경우에만 캐시 시각 갱신 → 빈 응답 뒤엔 즉시 재조회 가능(60초 대기 안 함).
       if (applied) cleaningReportsFetchedAtRef.current = Date.now();
+      setCleaningReportsLoaded(true);
     } catch (e) {
       console.warn("cleaning_reports 조회 실패(기존 목록 유지):", e);
+      setCleaningReportsError("최신 청소보고서를 불러오지 못했습니다.");
     } finally {
       cleaningReportsLoadingRef.current = false;
+      setCleaningReportsLoading(false);
     }
   };
 
@@ -19740,6 +19749,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </button>
                 )}
               </div>
+              {cleaningReportsError && cleaningReports.length > 0 && (
+                <div className="mb-2 text-xs text-amber-600">최신 데이터를 불러오지 못해 기존 목록을 표시 중입니다. (자동으로 다시 시도됩니다)</div>
+              )}
               <div className="erp-table-container">
                 <table className="erp-table min-w-[900px] w-full text-left">
                   <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
@@ -19812,7 +19824,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     {visibleCleaningReports.length === 0 && (
                       <tr>
                         <td colSpan={7} className="px-3 py-6 text-center text-slate-500">
-                          {isLoading ? "청소보고서를 불러오는 중입니다…" : "등록된 청소보고서가 없습니다."}
+                          {(cleaningReportsLoading || isLoading) && cleaningReports.length === 0
+                            ? "청소보고서를 불러오는 중입니다…"
+                            : cleaningReports.length > 0
+                              ? "필터 조건에 맞는 청소보고서가 없습니다."
+                              : cleaningReportsError
+                                ? "청소보고서를 불러오지 못했습니다. 잠시 후 다시 시도해주세요."
+                                : "등록된 청소보고서가 없습니다."}
                         </td>
                       </tr>
                     )}
