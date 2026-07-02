@@ -85,6 +85,7 @@ import {
   rowToPreMoveInInspection,
 } from "./services/preMoveInInspectionService";
 import { uploadTempFileAndSign } from "./services/pdfStorageService";
+import { savePdfSafely } from "./utils/savePdfSafely";
 import {
   emptyPreMoveInInspection,
   INSPECTION_STATUS_OPTIONS,
@@ -338,16 +339,17 @@ async function deliverViaSignedUrl(
   const blobUrl = URL.createObjectURL(blob);
   try {
     const signed = await uploadTempFileAndSign(blob, fileName, contentType, tenantId);
-    const target = signed || blobUrl; // Storage 실패 시에만 blob URL 사용
+    const target = signed || blobUrl; // Storage 실패 시에만 blob URL 사용(새 탭 미리보기용)
     if (preTab && !preTab.closed) {
-      preTab.location.href = target;
+      preTab.location.href = target; // 미리 연 탭에 표시(메인 창 이동 아님)
     } else {
       const w = window.open(target, "_blank", "noopener,noreferrer");
-      if (!w) window.location.href = target;
+      // 메인 창을 blob 으로 이동시키지 않는다("파일에 액세스할 수 없음" 방지). https signed URL 일 때만 같은 탭 이동 허용.
+      if (!w && signed) window.location.href = signed;
     }
   } catch (e) {
     console.error("[PDF 열기 실패]", e);
-    if (preTab && !preTab.closed) { try { preTab.location.href = blobUrl; } catch { /* noop */ } }
+    if (preTab && !preTab.closed) { try { preTab.close(); } catch { /* noop */ } }
   } finally {
     // Blob URL 즉시 revoke 금지 — 120초 뒤 해제.
     setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch { /* noop */ } }, 120000);
@@ -393,23 +395,28 @@ async function downloadBlobSafe(blob: Blob, fileName: string, tenantId = "", pre
     if (!blob || blob.size === 0) throw new Error("PDF Blob is empty");
     const safeFileName = fileName.toLowerCase().endsWith(".pdf") ? fileName : `${fileName}.pdf`;
     if (isMobileOrTablet()) {
+      // 1) Web Share(파일) 지원 → navigator.share 로 파일/메모/드라이브 저장(iOS/Android). preTab 불필요 → 닫기.
+      const file = new File([blob], safeFileName, { type: "application/pdf" });
+      if (typeof navigator !== "undefined" && (navigator as any).share && (navigator as any).canShare && (navigator as any).canShare({ files: [file] })) {
+        if (preTab && !preTab.closed) { try { preTab.close(); } catch { /* noop */ } }
+        try {
+          await (navigator as any).share({ title: safeFileName, text: "PDF 저장", files: [file] });
+          return true;
+        } catch (err) {
+          if ((err as { name?: string })?.name === "AbortError") return true; // 사용자가 취소
+          // 그 외엔 아래 signed URL 경로로 진행
+        }
+      }
+      // 2) 공유 미지원/실패 → Storage 업로드 후 https signed URL 로 열기(blob 직접 이동 금지)
       await deliverViaSignedUrl(blob, safeFileName, "application/pdf", tenantId, preTab);
       return true;
     }
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = safeFileName;
-    link.rel = "noopener noreferrer";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* noop */ } }, 120000);
-    return true;
+    // PC → 기존 다운로드(공통 savePdfSafely, 120초 후 revoke)
+    return await savePdfSafely(safeFileName, blob);
   } catch (e) {
     console.error("[PDF 다운로드 실패]", e);
     if (preTab && !preTab.closed) { try { preTab.close(); } catch { /* noop */ } }
-    alert("PDF를 다운로드하지 못했습니다. 모바일에서는 새 창 열기를 허용한 뒤 다시 시도해주세요.");
+    alert("PDF를 저장하지 못했습니다. 다시 시도해주세요.");
     return false;
   }
 }
@@ -1799,6 +1806,8 @@ export default function App() {
   const [cleaningReportsError, setCleaningReportsError] = useState<string | null>(null);
   // 사진은 목록(메타데이터) 표시 후 백그라운드로 병합 → 병합 중엔 "사진 확인중" 표시(사진없음 오표시 방지).
   const [cleaningPhotosLoading, setCleaningPhotosLoading] = useState(false);
+  // PDF 생성/저장 중 버튼 로딩(중복 클릭 방지) — 전체 화면 로딩 아님.
+  const [savingPdf, setSavingPdf] = useState(false);
   const cleaningPhotosMergingRef = useRef(false);
   // 수정 모달에서 기존 사진을 실제로 불러왔는지 표시 → 저장 시 미로드 상태에서 사진이 지워지는 것 방지.
   const cleaningEditPhotosReadyRef = useRef(false);
@@ -9984,6 +9993,9 @@ export default function App() {
 
   // 청소보고서 PDF — 공통 helper 사용.
   const printCleaningReport = async (report: CleaningReport) => {
+    if (savingPdf) return; // 중복 클릭 방지
+    setSavingPdf(true);
+    try {
     // 목록은 사진을 지연 로딩하므로, 사진이 아직 없으면 PDF 생성 전에 원본을 조회해 포함.
     let photos = getCleaningPhotos(report);
     if (photos.length === 0 && report.id && isSupabaseAvailable()) {
@@ -10003,6 +10015,9 @@ export default function App() {
       ],
       sections: [{ heading: "사진", urls: photos }],
     });
+    } finally {
+      setSavingPdf(false);
+    }
   };
 
   // 하자접수 보고서 PDF — 공통 helper 사용.
@@ -20107,8 +20122,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">
                           <div className="flex flex-nowrap gap-2">
                             {canDownloadFiles && (
-                              <button onClick={() => void printCleaningReport(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`} title="청소보고서 PDF 저장">
-                                PDF
+                              <button onClick={() => void printCleaningReport(report)} disabled={savingPdf} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"} disabled:cursor-not-allowed disabled:opacity-50`} title="청소보고서 PDF 저장">
+                                {savingPdf ? "PDF 생성 중..." : "PDF"}
                               </button>
                             )}
                             {shouldShowMaintenanceControls(currentUser) && (
@@ -22648,7 +22663,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           <>
                             <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">전체 다운로드</button>
                             <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
-                            <button type="button" onClick={() => void printCleaningReport(cleaningReportForm as CleaningReport)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF 저장</button>
+                            <button type="button" onClick={() => void printCleaningReport(cleaningReportForm as CleaningReport)} disabled={savingPdf} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50">{savingPdf ? "PDF 생성 중..." : "PDF 저장"}</button>
                           </>
                         )}
                         <span className="text-sm text-slate-500">총 {urls.length}장</span>
