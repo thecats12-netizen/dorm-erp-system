@@ -1,12 +1,20 @@
 import { createClient } from "@supabase/supabase-js";
 import type { MilitaryPersonnel, TrainingRecord, MilitaryNotice, MilitaryReport } from "../types/domain";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// 환경변수 앞뒤 공백/개행 제거 — Vercel 등에 값 붙여넣을 때 끼어드는 공백/줄바꿈이
+// 잘못된 URL/키(→ CORS/ERR_FAILED)의 흔한 원인이므로 방어적으로 trim 한다.
+const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || "").trim();
+const supabaseKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || "").trim();
 
-export const isSupabaseAvailable = (): boolean => Boolean(supabaseUrl && supabaseKey);
+// URL 형식이 https 로 시작하는지까지 확인(빈값/오타/이전 프로젝트 값 방지).
+const hasValidEnv = Boolean(supabaseUrl && supabaseKey && /^https?:\/\//i.test(supabaseUrl));
+if (!hasValidEnv && typeof console !== "undefined") {
+  console.warn("[supabaseService] Supabase 환경변수(VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)가 비었거나 형식이 올바르지 않습니다. 로컬 모드로 동작합니다.");
+}
 
-export const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+export const isSupabaseAvailable = (): boolean => hasValidEnv;
+
+export const supabase = hasValidEnv ? createClient(supabaseUrl, supabaseKey) : null;
 
 export const translateSupabaseError = (errorMessage: string | null | undefined): string => {
   const message = String(errorMessage || "").trim();

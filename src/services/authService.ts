@@ -2,6 +2,42 @@ import { supabase, isSupabaseAvailable, translateSupabaseError } from "./supabas
 import type { Session, User } from "@supabase/supabase-js";
 import type { UserRole, Site } from "../types/domain";
 
+// 네트워크/CORS 로 refresh_token 갱신이 지연·무한재시도될 때 앱이 멈추지 않도록 Promise 에 타임아웃을 건다.
+// 시간 초과 시 fallback 값으로 즉시 진행(세션 없음 처리 → 로그인/로컬 폴백). 앱이 무한 로딩되지 않게 하는 핵심.
+// 손상/만료된 Supabase 인증 토큰(localStorage 의 sb-*-auth-token)만 제거.
+// 청소/보고서/기숙사/입주자/설정 등 기존 데이터 Key 는 건드리지 않는다(전체 삭제 금지).
+export function clearSupabaseAuthStorage(): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      // supabase-js 기본 저장 형식: sb-<projectRef>-auth-token (+ .code-verifier 등)
+      if (k && /^sb-.*-auth-token/.test(k)) keys.push(k);
+    }
+    keys.forEach((k) => localStorage.removeItem(k));
+    if (keys.length) console.warn("[AuthService] 손상된 인증 토큰 정리:", keys.length, "건");
+  } catch (e) {
+    console.warn("[AuthService] 인증 토큰 정리 실패(무시):", (e as { message?: string })?.message || e);
+  }
+}
+
+export function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.warn(`[AuthService] 요청 시간 초과(${ms}ms) — 세션 없이 진행`);
+      resolve(fallback);
+    }, ms);
+    promise.then(
+      (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
+      () => { if (!settled) { settled = true; clearTimeout(timer); resolve(fallback); } }
+    );
+  });
+}
+
 /**
  * Supabase profiles 테이블의 프로필 타입
  */
@@ -95,8 +131,14 @@ export const getCurrentSession = async (): Promise<Session | null> => {
   }
 
   try {
-    const { data } = await supabase!.auth.getSession();
-    return data.session;
+    // getSession 은 만료 토큰이면 내부적으로 refresh 를 시도하며, CORS/네트워크 실패 시 재시도로 오래 걸릴 수 있음.
+    // 8초 타임아웃으로 무한 대기 방지(초기 로딩이 finally 까지 도달하도록).
+    const res = await withTimeout(
+      supabase!.auth.getSession(),
+      8000,
+      { data: { session: null }, error: null } as any
+    );
+    return res?.data?.session ?? null;
   } catch (err) {
     // 세션 만료/refresh 실패는 빨간 오류 대신 경고로(반복 출력 완화).
     console.warn("[AuthService] 세션 조회 경고:", (err as { message?: string })?.message || err);
@@ -114,8 +156,13 @@ export const getCurrentAuthUser = async (): Promise<User | null> => {
   }
 
   try {
-    const { data } = await supabase!.auth.getUser();
-    return data.user;
+    // getUser 도 네트워크 호출 → CORS/네트워크 실패 시 지연 방지를 위해 8초 타임아웃.
+    const res = await withTimeout(
+      supabase!.auth.getUser(),
+      8000,
+      { data: { user: null }, error: null } as any
+    );
+    return res?.data?.user ?? null;
   } catch (err) {
     console.error("[AuthService] Get user error:", err);
     return null;

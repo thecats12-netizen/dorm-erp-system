@@ -106,6 +106,7 @@ import {
   listProfiles,
   updateProfileOnly,
   createUserViaEdgeFunction,
+  clearSupabaseAuthStorage,
   type Profile,
 } from "./services/authService";
 import { createAuditLogEntry, getChangedFields } from "./services/auditService";
@@ -8664,8 +8665,9 @@ export default function App() {
           manualSignOutRef.current = false; // 사용자가 직접 로그아웃 → 안내 생략
           return;
         }
-        // 자동 로그아웃(세션 만료/refresh 실패) → 안내 + 로그인 화면 이동
+        // 자동 로그아웃(세션 만료/refresh 실패) → 손상 토큰만 정리 + 안내 + 로그인 화면 이동
         console.warn("[Auth] 세션 만료 감지 — 재로그인 필요");
+        clearSupabaseAuthStorage(); // 다음 로딩에서 만료 토큰 refresh 재시도로 지연되지 않도록 인증 토큰만 제거
         setCurrentUser(null);
         setLoginError("로그인 세션이 만료되었습니다. 다시 로그인해주세요.");
       }
