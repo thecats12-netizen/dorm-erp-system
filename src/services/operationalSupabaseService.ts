@@ -528,7 +528,21 @@ export const loadCleaningReportsPhotosByIds = async (
       const part = uniq.slice(i, i + CHUNK);
       const { data, error } = await supabase!.from("cleaning_reports").select("*").in("id", part);
       if (error) { console.warn("[cleaning_reports 사진 id조회 실패]", error.message || error); continue; }
-      (data || []).forEach((r: any) => out.push({ id: r.id, ...extractCleaningReportPhotos(r) }));
+      (data || []).forEach((r: any) => {
+        const photos = extractCleaningReportPhotos(r);
+        // ── 디버그: 사진 0장으로 판정된 보고서의 실제 컬럼/값 출력(원인 분석용, base64는 앞부분만).
+        if (photos.before.length + photos.after.length === 0) {
+          const photoish: Record<string, unknown> = {};
+          Object.keys(r).forEach((k) => {
+            if (/photo|image|url|path|file|attach|thumb|preview/i.test(k)) {
+              const v = r[k];
+              photoish[k] = typeof v === "string" && v.length > 100 ? `${v.slice(0, 100)}…(len=${v.length})` : v;
+            }
+          });
+          console.log("[청소사진 디버그] 리스트 사진 0장 report:", { id: r.id, allColumns: Object.keys(r), photoColumns: photoish });
+        }
+        out.push({ id: r.id, ...photos });
+      });
     }
     return out;
   } catch (e) {

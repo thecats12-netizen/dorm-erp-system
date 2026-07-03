@@ -73,7 +73,6 @@ import {
 import {
   loadOperationalModule,
   loadCleaningReportsModule,
-  loadCleaningReportsPhotosModule,
   loadCleaningReportsPhotosByIds,
   loadCleaningReportPhotos,
   loadAuditLogsModule,
@@ -1812,6 +1811,8 @@ export default function App() {
   // 수정 모달에서 기존 사진(원본) 조회 중 표시 — URL 생성 전 "사진없음" 오표시 방지.
   const [cleaningEditPhotosLoading, setCleaningEditPhotosLoading] = useState(false);
   const cleaningPhotosMergingRef = useRef(false);
+  // 사진 조회를 이미 시도한 보고서 id(반복 조회/무한 루프 방지). 사진이 정말 없는 보고서도 1회만 조회.
+  const cleaningPhotosFetchedIdsRef = useRef<Set<string>>(new Set());
   // 수정 모달에서 기존 사진을 실제로 불러왔는지 표시 → 저장 시 미로드 상태에서 사진이 지워지는 것 방지.
   const cleaningEditPhotosReadyRef = useRef(false);
   // 비동기 사진 조회 완료 시점에 현재 열려 있는 편집 대상이 바뀌지 않았는지 확인용.
@@ -9458,8 +9459,8 @@ export default function App() {
       // 실제 데이터를 반영한 경우에만 캐시 시각 갱신 → 빈 응답 뒤엔 즉시 재조회 가능(60초 대기 안 함).
       if (applied) cleaningReportsFetchedAtRef.current = Date.now();
       setCleaningReportsLoaded(true);
-      // 목록(메타데이터) 표시 직후, "표시된 보고서 id" 들의 사진을 백그라운드 병합(오래된/캐시 보고서도 포함).
-      void mergeCleaningPhotos(remote.map((r) => r.id));
+      // 사진 병합은 아래 별도 effect가 "표시된 모든 보고서(사진 미로드분)"에 대해 처리한다.
+      // (여기서 호출하면 60초 캐시로 loadCleaningReports 가 skip될 때 병합이 안 되는 문제가 있어 분리)
     } catch (e) {
       console.warn("cleaning_reports 조회 실패(기존 목록 유지):", e);
       setCleaningReportsError("최신 청소보고서를 불러오지 못했습니다.");
@@ -9472,16 +9473,17 @@ export default function App() {
   // 사진(base64) 백그라운드 병합 — 목록은 이미 표시된 상태. 실패/타임아웃해도 목록엔 영향 없음.
   // ★ "표시된 보고서 id" 기준으로 조회(최신 300건 제한 아님) → 오래된/캐시로 표시된 보고서도 사진이 채워진다.
   //   ids 미전달 시 현재 메모리 목록의 id 사용. 서버 사진 있으면 반영, 없으면 기존 유지(빈값 덮어쓰기 방지).
-  const mergeCleaningPhotos = async (ids?: string[]) => {
+  const mergeCleaningPhotos = async (ids: string[]) => {
     if (!isSupabaseAvailable()) return;
-    if (cleaningPhotosMergingRef.current) return;
-    cleaningPhotosMergingRef.current = true;
+    const targetIds = (ids || []).filter(Boolean);
+    if (targetIds.length === 0) return;
     setCleaningPhotosLoading(true);
     try {
-      const targetIds = (ids && ids.length ? ids : cleaningReports.map((r) => r.id)).filter(Boolean);
-      if (targetIds.length === 0) return;
       const photos = await loadCleaningReportsPhotosByIds(targetIds);
-      if (!photos || photos.length === 0) return;
+      if (photos === null) return; // 조회 실패 → ref에 기록하지 않음(다음 변경 시 재시도)
+      // 조회 성공(빈 결과 포함) → 시도한 id 기록(진짜 사진 없는 보고서도 1회만 조회, 무한 루프 방지)
+      targetIds.forEach((id) => cleaningPhotosFetchedIdsRef.current.add(id));
+      if (photos.length === 0) return;
       const byId = new Map(photos.map((p) => [p.id, p]));
       setCleaningReports((prev) =>
         prev.map((r) => {
@@ -9495,10 +9497,26 @@ export default function App() {
     } catch (e) {
       console.warn("cleaning 사진 병합 실패(썸네일 지연):", e);
     } finally {
-      cleaningPhotosMergingRef.current = false;
       setCleaningPhotosLoading(false);
     }
   };
+
+  // ★ 표시된 청소보고서 중 "사진이 아직 로드되지 않은" 보고서의 사진을 id 기준으로 조회·병합한다.
+  // 60초 메타데이터 캐시로 loadCleaningReports 가 skip 되어도, 캐시로 표시된 오래된 보고서까지 사진을 채운다.
+  // 이미 시도한 id(성공)는 ref로 제외해 무한 루프/반복 조회를 막고, 실패한 id는 다음에 재시도.
+  useEffect(() => {
+    if (!["cleaningReports", "dashboard", "documentManagement", "reportManagement"].includes(activeTab)) return;
+    if (!isSupabaseAvailable() || !currentUser?.id) return;
+    if (cleaningPhotosMergingRef.current) return;
+    const missing = cleaningReports
+      .filter((r) => r.id && getCleaningPhotos(r).length === 0 && !cleaningPhotosFetchedIdsRef.current.has(r.id))
+      .map((r) => r.id);
+    if (missing.length === 0) return;
+    const toFetch = missing.slice(0, 300); // 안전 상한
+    cleaningPhotosMergingRef.current = true;
+    void mergeCleaningPhotos(toFetch).finally(() => { cleaningPhotosMergingRef.current = false; });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, cleaningReports, currentUser?.id]);
 
   // 청소 데이터가 필요한 메뉴 진입 시: (1) 경량 캐시로 즉시 표시 → (2) 백그라운드 최신 조회.
   // 캐시가 있으면 "불러오는 중" 없이 기존 리스트가 바로 보인다. 60초 캐시로 매번 재조회 방지.
