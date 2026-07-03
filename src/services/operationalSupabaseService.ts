@@ -426,8 +426,49 @@ export const loadCleaningReportsModule = async (
   }
 };
 
-// 2단계: 목록 표시 직후 백그라운드로 사진(base64)만 조회해 썸네일/개수를 채운다.
-// 실패/타임아웃해도 목록(메타데이터)은 이미 표시된 상태이므로 앱에 영향 없음.
+// ── 청소보고서 사진 통합 추출(구/신 저장구조 호환) ─────────────────────────────
+// 값 형태(배열/JSON문자열/객체/URL/base64/단일값) 모두 배열로 변환.
+const toPhotoArray = (v: any): any[] => {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return [];
+    try { const p = JSON.parse(s); return Array.isArray(p) ? p : (p ? [p] : []); } catch { return [s]; }
+  }
+  if (typeof v === "object") return [v];
+  return [];
+};
+// 항목(문자열 또는 객체)에서 표시용 URL/경로 추출.
+const toPhotoUrl = (item: any): string => {
+  if (!item) return "";
+  if (typeof item === "string") return item;
+  return (
+    item.url || item.publicUrl || item.public_url || item.signedUrl || item.signed_url ||
+    item.previewUrl || item.preview_url || item.thumbnailUrl || item.thumbnail_url ||
+    item.src || item.path || item.storagePath || item.storage_path || item.filePath || item.file_path || ""
+  );
+};
+// 한 행(row)에서 모든 사진 컬럼/형태를 합쳐 before/after 배열로 반환(중복 제거). 구조 달라도 사진 복구.
+export const extractCleaningReportPhotos = (row: any): { before: string[]; after: string[] } => {
+  const dedupe = (arr: string[]) => Array.from(new Set(arr.filter(Boolean)));
+  const before = dedupe(
+    [
+      ...toPhotoArray(row?.before_photo_data_urls), ...toPhotoArray(row?.before_photos),
+      ...toPhotoArray(row?.photo_urls), ...toPhotoArray(row?.photos),
+      ...toPhotoArray(row?.image_urls), ...toPhotoArray(row?.images),
+      ...toPhotoArray(row?.attachments), ...toPhotoArray(row?.files),
+      ...toPhotoArray(row?.photoFiles), ...toPhotoArray(row?.uploadedPhotos), ...toPhotoArray(row?.cleaning_photos),
+      ...toPhotoArray(row?.preview_url), ...toPhotoArray(row?.thumbnail_url),
+    ].map(toPhotoUrl)
+  );
+  const afterAll = dedupe([...toPhotoArray(row?.after_photo_data_urls), ...toPhotoArray(row?.after_photos)].map(toPhotoUrl));
+  const after = afterAll.filter((u) => !before.includes(u)); // before 에 이미 포함된 값은 after 에서 제외
+  return { before, after };
+};
+
+// 2단계: 목록 표시 직후 백그라운드로 사진을 조회해 썸네일/개수를 채운다(구/신 저장구조 모두 지원).
+// select("*") 로 사진이 어느 컬럼에 있든 읽어온다. 실패/타임아웃해도 목록(메타데이터)은 이미 표시된 상태.
 export const loadCleaningReportsPhotosModule = async (
   limit = 300
 ): Promise<Array<{ id: string; before: string[]; after: string[] }> | null> => {
@@ -435,18 +476,14 @@ export const loadCleaningReportsPhotosModule = async (
   try {
     const { data, error } = await supabase!
       .from("cleaning_reports")
-      .select("id, before_photo_data_urls, after_photo_data_urls")
+      .select("*")
       .order("created_at", { ascending: false })
       .limit(limit);
     if (error) {
       console.warn("[cleaning_reports 사진 일괄 조회 실패]", error.message || error);
       return null;
     }
-    return (data || []).map((r: any) => ({
-      id: r.id,
-      before: Array.isArray(r.before_photo_data_urls) ? r.before_photo_data_urls : [],
-      after: Array.isArray(r.after_photo_data_urls) ? r.after_photo_data_urls : [],
-    }));
+    return (data || []).map((r: any) => ({ id: r.id, ...extractCleaningReportPhotos(r) }));
   } catch (e) {
     console.warn("[cleaning_reports 사진 일괄 조회 예외]", (e as { message?: string })?.message || e);
     return null;
@@ -460,19 +497,19 @@ export const loadCleaningReportPhotos = async (
 ): Promise<{ beforePhotoDataUrls: string[]; afterPhotoDataUrls: string[] } | null> => {
   if (!isSupabaseAvailable() || !reportId) return null;
   try {
+    // select("*") 로 사진이 어느 컬럼/형태로 저장돼 있든(구/신 저장구조) 읽어온다. maybeSingle 로 0행에도 안전.
     const { data, error } = await supabase!
       .from("cleaning_reports")
-      .select("id, before_photo_data_urls, after_photo_data_urls")
+      .select("*")
       .eq("id", reportId)
-      .single();
+      .maybeSingle();
     if (error) {
       console.warn("[cleaning_reports 사진 조회 실패]", error.message || error);
       return null;
     }
-    return {
-      beforePhotoDataUrls: Array.isArray(data?.before_photo_data_urls) ? data!.before_photo_data_urls : [],
-      afterPhotoDataUrls: Array.isArray(data?.after_photo_data_urls) ? data!.after_photo_data_urls : [],
-    };
+    if (!data) return null;
+    const { before, after } = extractCleaningReportPhotos(data);
+    return { beforePhotoDataUrls: before, afterPhotoDataUrls: after };
   } catch (e) {
     console.warn("[cleaning_reports 사진 조회 예외]", (e as { message?: string })?.message || e);
     return null;

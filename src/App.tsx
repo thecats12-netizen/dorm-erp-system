@@ -1808,6 +1808,8 @@ export default function App() {
   const [cleaningPhotosLoading, setCleaningPhotosLoading] = useState(false);
   // PDF 생성/저장 중 버튼 로딩(중복 클릭 방지) — 전체 화면 로딩 아님.
   const [savingPdf, setSavingPdf] = useState(false);
+  // 수정 모달에서 기존 사진(원본) 조회 중 표시 — URL 생성 전 "사진없음" 오표시 방지.
+  const [cleaningEditPhotosLoading, setCleaningEditPhotosLoading] = useState(false);
   const cleaningPhotosMergingRef = useRef(false);
   // 수정 모달에서 기존 사진을 실제로 불러왔는지 표시 → 저장 시 미로드 상태에서 사진이 지워지는 것 방지.
   const cleaningEditPhotosReadyRef = useRef(false);
@@ -12691,15 +12693,27 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     setEditingCleaningReportId(report.id);
     editingCleaningReportIdRef.current = report.id;
     setShowCleaningReportForm(true);
-    // 목록은 사진 base64 를 지연 로딩하므로, 수정 모달은 원본 사진을 다시 조회해 기존 사진 미리보기를 보장.
+    // 목록은 사진을 지연 로딩하고, 예전 데이터는 저장구조가 달라 목록 행에 사진이 없을 수 있으므로
+    // 수정 모달은 원본을 다시 조회(모든 사진 컬럼/형태 지원)해 기존 사진 미리보기를 보장한다.
     const hasPhotos = (rest.beforePhotoDataUrls?.length || 0) + (rest.afterPhotoDataUrls?.length || 0) > 0;
     cleaningEditPhotosReadyRef.current = hasPhotos; // 이미 사진이 있으면 로드 완료로 간주
     if (!hasPhotos && isSupabaseAvailable()) {
-      const full = await loadCleaningReportPhotos(report.id); // 클릭(수정) 시에만 원본 조회
-      if (full && editingCleaningReportIdRef.current === report.id) {
-        setCleaningReportForm((f) => ({ ...f, beforePhotoDataUrls: full.beforePhotoDataUrls, afterPhotoDataUrls: full.afterPhotoDataUrls }));
-        setCleaningReports((prev) => prev.map((r) => (r.id === report.id ? { ...r, beforePhotoDataUrls: full.beforePhotoDataUrls, afterPhotoDataUrls: full.afterPhotoDataUrls } : r)));
-        cleaningEditPhotosReadyRef.current = true;
+      setCleaningEditPhotosLoading(true); // URL/원본 생성 중 → "사진없음" 대신 로딩 표시
+      try {
+        const full = await loadCleaningReportPhotos(report.id); // 클릭(수정) 시에만 원본 조회(select * 통합)
+        if (full && editingCleaningReportIdRef.current === report.id) {
+          const dedupe = (a: string[]) => Array.from(new Set((a || []).filter(Boolean)));
+          // 조회된 기존 사진 + (조회 대기 중 사용자가 추가한 사진) 병합 → 기존/신규 모두 유지(덮어쓰기 금지).
+          setCleaningReportForm((f) => ({
+            ...f,
+            beforePhotoDataUrls: dedupe([...(full.beforePhotoDataUrls || []), ...(f.beforePhotoDataUrls || [])]),
+            afterPhotoDataUrls: dedupe([...(full.afterPhotoDataUrls || []), ...(f.afterPhotoDataUrls || [])]),
+          }));
+          setCleaningReports((prev) => prev.map((r) => (r.id === report.id ? { ...r, beforePhotoDataUrls: full.beforePhotoDataUrls, afterPhotoDataUrls: full.afterPhotoDataUrls } : r)));
+          cleaningEditPhotosReadyRef.current = true;
+        }
+      } finally {
+        if (editingCleaningReportIdRef.current === report.id) setCleaningEditPhotosLoading(false);
       }
     } else if (!isSupabaseAvailable()) {
       cleaningEditPhotosReadyRef.current = true; // 로컬 데이터가 곧 원본
@@ -22627,7 +22641,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   ];
                   const urls = merged.map((m) => m.url);
                   if (merged.length === 0) {
-                    return <div className={`rounded-2xl border border-dashed p-4 text-center text-sm ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-400"}`}>등록된 사진이 없습니다.</div>;
+                    // 기존 사진 조회 중이면 "사진없음" 대신 로딩 표시(URL/원본 생성 전 오표시 방지).
+                    return <div className={`rounded-2xl border border-dashed p-4 text-center text-sm ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-400"}`}>{cleaningEditPhotosLoading ? "기존 사진을 불러오는 중입니다..." : "등록된 사진이 없습니다."}</div>;
                   }
                   const base = `청소사진_${cleaningReportForm.buildingName || "기숙사"}_${reportFileDate(cleaningReportForm.reportDate)}`;
                   return (
