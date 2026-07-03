@@ -483,7 +483,30 @@ export const loadCleaningReportsPhotosModule = async (
       console.warn("[cleaning_reports 사진 일괄 조회 실패]", error.message || error);
       return null;
     }
-    return (data || []).map((r: any) => ({ id: r.id, ...extractCleaningReportPhotos(r) }));
+    const rows = data || [];
+    let dbg = 0;
+    return rows.map((r: any) => {
+      const photos = extractCleaningReportPhotos(r);
+      // ── 디버그: 사진 0장으로 판정된 보고서의 실제 컬럼/값을 출력(원인 분석용, base64는 앞부분만).
+      //    최근 등록은 정상인데 예전 것만 0장이면, 여기 출력으로 "예전 데이터가 어느 컬럼/형태인지" 확인.
+      if (photos.before.length + photos.after.length === 0 && dbg < 8) {
+        dbg++;
+        const photoish: Record<string, unknown> = {};
+        Object.keys(r).forEach((k) => {
+          if (/photo|image|url|path|file|attach|thumb|preview/i.test(k)) {
+            const v = r[k];
+            photoish[k] = typeof v === "string" && v.length > 100 ? `${v.slice(0, 100)}…(len=${v.length})` : v;
+          }
+        });
+        console.log("[청소사진 디버그] 사진 0장 report:", {
+          id: r.id,
+          photo_count: r.photo_count,
+          allColumns: Object.keys(r),
+          photoColumns: photoish,
+        });
+      }
+      return { id: r.id, ...photos };
+    });
   } catch (e) {
     console.warn("[cleaning_reports 사진 일괄 조회 예외]", (e as { message?: string })?.message || e);
     return null;
@@ -509,6 +532,22 @@ export const loadCleaningReportPhotos = async (
     }
     if (!data) return null;
     const { before, after } = extractCleaningReportPhotos(data);
+    // ── 디버그: 수정 클릭 시에도 0장이면 실제 컬럼/값 출력(예전 데이터 저장구조/버킷 확인용).
+    if (before.length + after.length === 0) {
+      const photoish: Record<string, unknown> = {};
+      Object.keys(data).forEach((k) => {
+        if (/photo|image|url|path|file|attach|thumb|preview/i.test(k)) {
+          const v = (data as any)[k];
+          photoish[k] = typeof v === "string" && v.length > 100 ? `${v.slice(0, 100)}…(len=${v.length})` : v;
+        }
+      });
+      console.log("[청소사진 디버그] 수정 조회 0장 report:", {
+        id: (data as any).id,
+        photo_count: (data as any).photo_count,
+        allColumns: Object.keys(data),
+        photoColumns: photoish,
+      });
+    }
     return { beforePhotoDataUrls: before, afterPhotoDataUrls: after };
   } catch (e) {
     console.warn("[cleaning_reports 사진 조회 예외]", (e as { message?: string })?.message || e);
