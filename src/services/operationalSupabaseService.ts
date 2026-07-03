@@ -454,15 +454,16 @@ export const extractCleaningReportPhotos = (row: any): { before: string[]; after
   const dedupe = (arr: string[]) => Array.from(new Set(arr.filter(Boolean)));
   const before = dedupe(
     [
-      ...toPhotoArray(row?.before_photo_data_urls), ...toPhotoArray(row?.before_photos),
-      ...toPhotoArray(row?.photo_urls), ...toPhotoArray(row?.photos),
-      ...toPhotoArray(row?.image_urls), ...toPhotoArray(row?.images),
+      // snake_case(DB) + camelCase(도메인/백업) 모두 지원.
+      ...toPhotoArray(row?.before_photo_data_urls), ...toPhotoArray(row?.beforePhotoDataUrls), ...toPhotoArray(row?.before_photos),
+      ...toPhotoArray(row?.photo_urls), ...toPhotoArray(row?.photoUrls), ...toPhotoArray(row?.photos),
+      ...toPhotoArray(row?.image_urls), ...toPhotoArray(row?.imageUrls), ...toPhotoArray(row?.images),
       ...toPhotoArray(row?.attachments), ...toPhotoArray(row?.files),
       ...toPhotoArray(row?.photoFiles), ...toPhotoArray(row?.uploadedPhotos), ...toPhotoArray(row?.cleaning_photos),
       ...toPhotoArray(row?.preview_url), ...toPhotoArray(row?.thumbnail_url),
     ].map(toPhotoUrl)
   );
-  const afterAll = dedupe([...toPhotoArray(row?.after_photo_data_urls), ...toPhotoArray(row?.after_photos)].map(toPhotoUrl));
+  const afterAll = dedupe([...toPhotoArray(row?.after_photo_data_urls), ...toPhotoArray(row?.afterPhotoDataUrls), ...toPhotoArray(row?.after_photos)].map(toPhotoUrl));
   const after = afterAll.filter((u) => !before.includes(u)); // before 에 이미 포함된 값은 after 에서 제외
   return { before, after };
 };

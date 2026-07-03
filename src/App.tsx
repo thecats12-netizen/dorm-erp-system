@@ -1813,6 +1813,8 @@ export default function App() {
   const cleaningPhotosMergingRef = useRef(false);
   // 사진 조회를 이미 시도한 보고서 id(반복 조회/무한 루프 방지). 사진이 정말 없는 보고서도 1회만 조회.
   const cleaningPhotosFetchedIdsRef = useRef<Set<string>>(new Set());
+  // 로컬 백업(erp-data-backups / CLEANING_REPORTS_KEY)에서 복구한 사진 lookup 캐시(1회 구성).
+  const localPhotoRecoveryRef = useRef<{ lookup: (r: any) => { before: string[]; after: string[] } | null; size: number } | null>(null);
   // 수정 모달에서 기존 사진을 실제로 불러왔는지 표시 → 저장 시 미로드 상태에서 사진이 지워지는 것 방지.
   const cleaningEditPhotosReadyRef = useRef(false);
   // 비동기 사진 조회 완료 시점에 현재 열려 있는 편집 대상이 바뀌지 않았는지 확인용.
@@ -9470,32 +9472,86 @@ export default function App() {
     }
   };
 
+  // 로컬 백업/저장에서 사진 복구용 lookup 구성(1회). DB row 가 0장인 예전 보고서를 백업 base64 로 복원.
+  // 매칭: ① id ② report_date+building+dong+room+manager 조합. 사진이 있는 항목만 등록.
+  const buildLocalCleaningPhotoRecovery = () => {
+    if (localPhotoRecoveryRef.current) return localPhotoRecoveryRef.current;
+    const byId = new Map<string, { before: string[]; after: string[] }>();
+    const byKey = new Map<string, { before: string[]; after: string[] }>();
+    const norm = (s: any) => String(s ?? "").trim().toLowerCase();
+    const keyOf = (r: any) => [norm(r.reportDate ?? r.report_date), norm(r.buildingName ?? r.building_name), norm(r.dong), norm(r.roomHo ?? r.room_ho ?? r.room), norm(r.managerName ?? r.manager_name)].join("|");
+    const photosOf = (r: any) => ({
+      before: (Array.isArray(r.beforePhotoDataUrls) ? r.beforePhotoDataUrls : Array.isArray(r.before_photo_data_urls) ? r.before_photo_data_urls : []).filter(Boolean),
+      after: (Array.isArray(r.afterPhotoDataUrls) ? r.afterPhotoDataUrls : Array.isArray(r.after_photo_data_urls) ? r.after_photo_data_urls : []).filter(Boolean),
+    });
+    const consider = (list: any[]) => {
+      (list || []).forEach((r) => {
+        const p = photosOf(r);
+        if (p.before.length + p.after.length === 0) return;
+        if (r?.id && !byId.has(r.id)) byId.set(r.id, p);
+        const k = keyOf(r);
+        if (k.replace(/\|/g, "") && !byKey.has(k)) byKey.set(k, p);
+      });
+    };
+    try { consider(loadJson<any[]>(CLEANING_REPORTS_KEY, [], tenantId)); } catch { /* noop */ }
+    try {
+      const backups = loadJson<any[]>(BACKUPS_KEY, [], tenantId);
+      (backups || []).forEach((b: any) => consider(b?.data?.cleaningReports || []));
+    } catch { /* noop */ }
+    const api = { lookup: (r: any) => byId.get(r.id) || byKey.get(keyOf(r)) || null, size: byId.size + byKey.size };
+    localPhotoRecoveryRef.current = api;
+    return api;
+  };
+
+  // 단건 사진 조회(DB) → 0장이면 로컬 백업에서 복구. 뷰어/PDF/수정 화면 공용.
+  const fetchCleaningReportPhotosWithBackup = async (report: any): Promise<{ beforePhotoDataUrls: string[]; afterPhotoDataUrls: string[] }> => {
+    let before: string[] = [];
+    let after: string[] = [];
+    if (report?.id && isSupabaseAvailable()) {
+      const full = await loadCleaningReportPhotos(report.id);
+      if (full) { before = full.beforePhotoDataUrls || []; after = full.afterPhotoDataUrls || []; }
+    }
+    if (before.length + after.length === 0) {
+      const rec = buildLocalCleaningPhotoRecovery().lookup(report);
+      if (rec && rec.before.length + rec.after.length > 0) { before = rec.before; after = rec.after; }
+    }
+    return { beforePhotoDataUrls: before, afterPhotoDataUrls: after };
+  };
+
   // 사진(base64) 백그라운드 병합 — 목록은 이미 표시된 상태. 실패/타임아웃해도 목록엔 영향 없음.
-  // ★ "표시된 보고서 id" 기준으로 조회(최신 300건 제한 아님) → 오래된/캐시로 표시된 보고서도 사진이 채워진다.
-  //   ids 미전달 시 현재 메모리 목록의 id 사용. 서버 사진 있으면 반영, 없으면 기존 유지(빈값 덮어쓰기 방지).
+  // ★ "표시된 보고서 id" 기준으로 DB 조회(최신 300건 제한 아님) → 오래된/캐시 보고서도 사진 채움.
+  //   DB row 가 0장이면 로컬 백업에서 복구. 기존 DB/메모리 사진이 있으면 절대 덮어쓰지 않음.
   const mergeCleaningPhotos = async (ids: string[]) => {
-    if (!isSupabaseAvailable()) return;
     const targetIds = (ids || []).filter(Boolean);
     if (targetIds.length === 0) return;
     setCleaningPhotosLoading(true);
     try {
-      const photos = await loadCleaningReportsPhotosByIds(targetIds);
-      if (photos === null) return; // 조회 실패 → ref에 기록하지 않음(다음 변경 시 재시도)
-      // 조회 성공(빈 결과 포함) → 시도한 id 기록(진짜 사진 없는 보고서도 1회만 조회, 무한 루프 방지)
-      targetIds.forEach((id) => cleaningPhotosFetchedIdsRef.current.add(id));
-      if (photos.length === 0) return;
-      const byId = new Map(photos.map((p) => [p.id, p]));
+      const photos = isSupabaseAvailable() ? await loadCleaningReportsPhotosByIds(targetIds) : [];
+      if (photos === null) return; // DB 조회 실패 → ref에 기록하지 않음(다음 변경 시 재시도)
+      targetIds.forEach((id) => cleaningPhotosFetchedIdsRef.current.add(id)); // 성공 → 1회만 시도
+      const dbById = new Map((photos || []).map((p) => [p.id, p]));
+      const recovery = buildLocalCleaningPhotoRecovery();
       setCleaningReports((prev) =>
         prev.map((r) => {
-          const p = byId.get(r.id);
-          if (!p) return r;
-          const before = p.before.length ? p.before : (r.beforePhotoDataUrls?.length ? r.beforePhotoDataUrls : p.before);
-          const after = p.after.length ? p.after : (r.afterPhotoDataUrls?.length ? r.afterPhotoDataUrls : p.after);
+          if (!targetIds.includes(r.id)) return r;
+          const dbP = dbById.get(r.id);
+          let before = dbP?.before?.length ? dbP.before : (r.beforePhotoDataUrls?.length ? r.beforePhotoDataUrls : []);
+          let after = dbP?.after?.length ? dbP.after : (r.afterPhotoDataUrls?.length ? r.afterPhotoDataUrls : []);
+          if (before.length + after.length === 0) {
+            const rec = recovery.lookup(r); // 백업 복구
+            if (rec && rec.before.length + rec.after.length > 0) {
+              before = rec.before; after = rec.after;
+              console.log("[청소사진 복구] 백업에서 복원:", { id: r.id, before: before.length, after: after.length });
+            } else {
+              // 디버그: DB·백업 모두 0장인 보고서 → 원인 확인용
+              console.log("[청소사진 디버그] 사진 0장(DB+백업 없음):", { id: r.id, report_date: r.reportDate, building: r.buildingName });
+            }
+          }
           return { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
         })
       );
     } catch (e) {
-      console.warn("cleaning 사진 병합 실패(썸네일 지연):", e);
+      console.warn("cleaning 사진 병합 실패:", e);
     } finally {
       setCleaningPhotosLoading(false);
     }
@@ -9918,9 +9974,9 @@ export default function App() {
   const openCleaningPhotoViewer = async (report: any) => {
     let urls = getCleaningPhotoUrls(report);
     if (urls.length === 0 && report?.id) {
-      const full = await loadCleaningReportPhotos(report.id); // 클릭 시에만 원본 조회
-      if (full) {
-        urls = [...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])];
+      const full = await fetchCleaningReportPhotosWithBackup(report); // DB → 없으면 백업 복구
+      urls = [...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])];
+      if (urls.length > 0) {
         // 조회한 원본을 메모리 상태에 반영(다음 클릭/썸네일 재사용)
         setCleaningReports((prev) => prev.map((r) => (r.id === report.id ? { ...r, beforePhotoDataUrls: full.beforePhotoDataUrls, afterPhotoDataUrls: full.afterPhotoDataUrls } : r)));
       }
@@ -10020,11 +10076,11 @@ export default function App() {
     if (savingPdf) return; // 중복 클릭 방지
     setSavingPdf(true);
     try {
-    // 목록은 사진을 지연 로딩하므로, 사진이 아직 없으면 PDF 생성 전에 원본을 조회해 포함.
+    // 목록은 사진을 지연 로딩하므로, 사진이 아직 없으면 PDF 생성 전에 원본(DB→백업)을 조회해 포함.
     let photos = getCleaningPhotos(report);
-    if (photos.length === 0 && report.id && isSupabaseAvailable()) {
-      const full = await loadCleaningReportPhotos(report.id);
-      if (full) photos = [...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])];
+    if (photos.length === 0 && report.id) {
+      const full = await fetchCleaningReportPhotosWithBackup(report);
+      photos = [...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])];
     }
     printPhotoReport({
       title: "청소보고서",
@@ -12738,11 +12794,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     // 수정 모달은 원본을 다시 조회(모든 사진 컬럼/형태 지원)해 기존 사진 미리보기를 보장한다.
     const hasPhotos = (rest.beforePhotoDataUrls?.length || 0) + (rest.afterPhotoDataUrls?.length || 0) > 0;
     cleaningEditPhotosReadyRef.current = hasPhotos; // 이미 사진이 있으면 로드 완료로 간주
-    if (!hasPhotos && isSupabaseAvailable()) {
-      setCleaningEditPhotosLoading(true); // URL/원본 생성 중 → "사진없음" 대신 로딩 표시
+    if (!hasPhotos) {
+      setCleaningEditPhotosLoading(true); // 원본 조회 중 → "사진없음" 대신 로딩 표시
       try {
-        const full = await loadCleaningReportPhotos(report.id); // 클릭(수정) 시에만 원본 조회(select * 통합)
-        if (full && editingCleaningReportIdRef.current === report.id) {
+        const full = await fetchCleaningReportPhotosWithBackup(report); // DB → 없으면 로컬 백업 복구
+        if (editingCleaningReportIdRef.current === report.id && (full.beforePhotoDataUrls.length + full.afterPhotoDataUrls.length > 0)) {
           const dedupe = (a: string[]) => Array.from(new Set((a || []).filter(Boolean)));
           // 조회된 기존 사진 + (조회 대기 중 사용자가 추가한 사진) 병합 → 기존/신규 모두 유지(덮어쓰기 금지).
           setCleaningReportForm((f) => ({
