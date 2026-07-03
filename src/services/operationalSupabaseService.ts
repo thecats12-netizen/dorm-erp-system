@@ -513,6 +513,30 @@ export const loadCleaningReportsPhotosModule = async (
   }
 };
 
+// 목록에 표시된 "정확한 보고서 id" 들의 사진만 조회(구/신 저장구조 모두). 최신 300건 제한이 아니라
+// id 기준이므로, 오래된 보고서/캐시로 표시된 보고서도 사진이 채워진다("사진없음" 근본 해결).
+// id 목록을 청크(50개)로 나눠 .in() 조회 → URL 길이 초과 방지.
+export const loadCleaningReportsPhotosByIds = async (
+  ids: string[]
+): Promise<Array<{ id: string; before: string[]; after: string[] }> | null> => {
+  if (!isSupabaseAvailable() || !ids || ids.length === 0) return null;
+  try {
+    const uniq = Array.from(new Set(ids.filter(Boolean)));
+    const out: Array<{ id: string; before: string[]; after: string[] }> = [];
+    const CHUNK = 50;
+    for (let i = 0; i < uniq.length; i += CHUNK) {
+      const part = uniq.slice(i, i + CHUNK);
+      const { data, error } = await supabase!.from("cleaning_reports").select("*").in("id", part);
+      if (error) { console.warn("[cleaning_reports 사진 id조회 실패]", error.message || error); continue; }
+      (data || []).forEach((r: any) => out.push({ id: r.id, ...extractCleaningReportPhotos(r) }));
+    }
+    return out;
+  } catch (e) {
+    console.warn("[cleaning_reports 사진 id조회 예외]", (e as { message?: string })?.message || e);
+    return null;
+  }
+};
+
 // 청소보고서 사진 상세(원본 base64) 지연 조회 — 리스트가 아닌, 사진 클릭/뷰어 열 때만 1건 조회.
 // 목록에서 원본 사진을 미리 가져오지 않기 위한 온디맨드 로더.
 export const loadCleaningReportPhotos = async (

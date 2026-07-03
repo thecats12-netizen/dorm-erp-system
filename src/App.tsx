@@ -74,6 +74,7 @@ import {
   loadOperationalModule,
   loadCleaningReportsModule,
   loadCleaningReportsPhotosModule,
+  loadCleaningReportsPhotosByIds,
   loadCleaningReportPhotos,
   loadAuditLogsModule,
   saveOperationalModule,
@@ -9457,8 +9458,8 @@ export default function App() {
       // 실제 데이터를 반영한 경우에만 캐시 시각 갱신 → 빈 응답 뒤엔 즉시 재조회 가능(60초 대기 안 함).
       if (applied) cleaningReportsFetchedAtRef.current = Date.now();
       setCleaningReportsLoaded(true);
-      // 목록(메타데이터) 표시 직후 사진(base64)만 백그라운드 병합 → 썸네일/개수 채움(모바일 지연 방지).
-      void mergeCleaningPhotos();
+      // 목록(메타데이터) 표시 직후, "표시된 보고서 id" 들의 사진을 백그라운드 병합(오래된/캐시 보고서도 포함).
+      void mergeCleaningPhotos(remote.map((r) => r.id));
     } catch (e) {
       console.warn("cleaning_reports 조회 실패(기존 목록 유지):", e);
       setCleaningReportsError("최신 청소보고서를 불러오지 못했습니다.");
@@ -9469,14 +9470,17 @@ export default function App() {
   };
 
   // 사진(base64) 백그라운드 병합 — 목록은 이미 표시된 상태. 실패/타임아웃해도 목록엔 영향 없음.
-  // 서버 사진이 있으면 반영, 서버가 비었는데 메모리에 있으면 유지(빈값 덮어쓰기 방지).
-  const mergeCleaningPhotos = async () => {
+  // ★ "표시된 보고서 id" 기준으로 조회(최신 300건 제한 아님) → 오래된/캐시로 표시된 보고서도 사진이 채워진다.
+  //   ids 미전달 시 현재 메모리 목록의 id 사용. 서버 사진 있으면 반영, 없으면 기존 유지(빈값 덮어쓰기 방지).
+  const mergeCleaningPhotos = async (ids?: string[]) => {
     if (!isSupabaseAvailable()) return;
     if (cleaningPhotosMergingRef.current) return;
     cleaningPhotosMergingRef.current = true;
     setCleaningPhotosLoading(true);
     try {
-      const photos = await loadCleaningReportsPhotosModule(300);
+      const targetIds = (ids && ids.length ? ids : cleaningReports.map((r) => r.id)).filter(Boolean);
+      if (targetIds.length === 0) return;
+      const photos = await loadCleaningReportsPhotosByIds(targetIds);
       if (!photos || photos.length === 0) return;
       const byId = new Map(photos.map((p) => [p.id, p]));
       setCleaningReports((prev) =>
