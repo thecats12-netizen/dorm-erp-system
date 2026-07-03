@@ -10084,14 +10084,33 @@ export default function App() {
       : null;
 
     if (existing) {
-      let beforeP = cleaningReportForm.beforePhotoDataUrls ?? existing.beforePhotoDataUrls ?? [];
-      let afterP = cleaningReportForm.afterPhotoDataUrls ?? existing.afterPhotoDataUrls ?? [];
-      // 사진 지연 로딩 상태에서 저장 시 기존 사진이 지워지지 않도록:
-      // 수정 모달이 아직 원본 사진을 못 불러왔고(ready=false) 폼/기존 모두 비어 있으면 원본을 재조회해 유지.
-      // (ready=true 인데 비어 있으면 사용자가 실제로 삭제한 것 → 그대로 존중)
-      if (!cleaningEditPhotosReadyRef.current && beforeP.length === 0 && afterP.length === 0 && isSupabaseAvailable()) {
-        const full = await loadCleaningReportPhotos(existing.id);
-        if (full) { beforeP = full.beforePhotoDataUrls; afterP = full.afterPhotoDataUrls; }
+      // 폼의 현재 사진(로드된 기존 + 사용자가 추가한 신규, - 사용자가 삭제한 것).
+      let beforeP = Array.isArray(cleaningReportForm.beforePhotoDataUrls) ? [...cleaningReportForm.beforePhotoDataUrls] : [];
+      let afterP = Array.isArray(cleaningReportForm.afterPhotoDataUrls) ? [...cleaningReportForm.afterPhotoDataUrls] : [];
+      // ★ 기존 사진이 폼에 로드되지 않은 상태(ready=false: 지연 로딩 미완료/실패)면, 원본을 재조회해
+      //   "기존 사진 + 폼의 신규 사진"을 컬럼별로 병합(중복 제거) → 기존 사진 유실/빈 배열 덮어쓰기 방지.
+      //   (한 컬럼만 비어 있어도 그 컬럼의 기존 사진이 지워지지 않도록 컬럼별로 처리.)
+      //   ready=true 면 폼이 곧 사용자의 최종 상태 → 명시적으로 삭제한 사진만 제거됨.
+      if (!cleaningEditPhotosReadyRef.current) {
+        const dedupe = (a: string[]) => Array.from(new Set((a || []).filter(Boolean)));
+        let exBefore = Array.isArray(existing.beforePhotoDataUrls) ? existing.beforePhotoDataUrls : [];
+        let exAfter = Array.isArray(existing.afterPhotoDataUrls) ? existing.afterPhotoDataUrls : [];
+        if (isSupabaseAvailable()) {
+          const full = await loadCleaningReportPhotos(existing.id);
+          if (full) {
+            if (full.beforePhotoDataUrls?.length) exBefore = full.beforePhotoDataUrls;
+            if (full.afterPhotoDataUrls?.length) exAfter = full.afterPhotoDataUrls;
+          }
+        }
+        beforeP = dedupe([...exBefore, ...beforeP]);
+        afterP = dedupe([...exAfter, ...afterP]);
+      }
+      // 최종 방어: 저장 결과가 비었는데 기존(메모리)에 사진이 있으면 기존 유지(undefined/null/[]로 덮어쓰기 금지).
+      if (beforeP.length === 0 && Array.isArray(existing.beforePhotoDataUrls) && existing.beforePhotoDataUrls.length > 0 && !cleaningEditPhotosReadyRef.current) {
+        beforeP = existing.beforePhotoDataUrls;
+      }
+      if (afterP.length === 0 && Array.isArray(existing.afterPhotoDataUrls) && existing.afterPhotoDataUrls.length > 0 && !cleaningEditPhotosReadyRef.current) {
+        afterP = existing.afterPhotoDataUrls;
       }
       const payload: CleaningReport = {
         id: existing.id,
