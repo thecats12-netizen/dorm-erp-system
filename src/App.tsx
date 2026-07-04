@@ -16402,17 +16402,22 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <tr>
                     {canEditData(currentUser) && (
                       <th className="px-2 py-2">
-                        <input
-                          type="checkbox"
-                          checked={visibleDormContracts.length > 0 && selectedDormContractIds.length === visibleDormContracts.length}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => {
-                            setSelectedDormContractIds(() =>
-                              e.target.checked ? dormContractPg.pagedItems.map((c) => c.id) : []
-                            );
-                          }}
-                          className="h-5 w-5"
-                        />
+                        {(() => {
+                          // 현재 페이지(필터/검색 적용) 기준 전체선택/해제 + indeterminate. checked 와 onChange 가 같은 집합을 사용.
+                          const pageIds = dormContractPg.pagedItems.map((c) => c.id);
+                          const selectedOnPage = pageIds.filter((id) => selectedDormContractIds.includes(id)).length;
+                          const allSelected = pageIds.length > 0 && selectedOnPage === pageIds.length;
+                          return (
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              ref={(el) => { if (el) el.indeterminate = selectedOnPage > 0 && selectedOnPage < pageIds.length; }}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={() => setSelectedDormContractIds(allSelected ? [] : pageIds)}
+                              className="h-5 w-5"
+                            />
+                          );
+                        })()}
                       </th>
                     )}
                     <th className="px-2 py-2 whitespace-nowrap text-xs">구분</th>
@@ -16680,17 +16685,22 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <tr>
                     {canEditData(currentUser) && (
                       <th className="px-2 py-2">
-                        <input
-                          type="checkbox"
-                          checked={visibleNewHires.length > 0 && selectedNewHireIds.length === visibleNewHires.length}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => {
-                            setSelectedNewHireIds(() =>
-                              e.target.checked ? newHirePg.pagedItems.map((h) => h.id) : []
-                            );
-                          }}
-                          className="h-5 w-5"
-                        />
+                        {(() => {
+                          // 현재 페이지(필터/검색 적용) 기준 전체선택/해제 + indeterminate. checked 와 onChange 가 같은 집합을 사용.
+                          const pageIds = newHirePg.pagedItems.map((h) => h.id);
+                          const selectedOnPage = pageIds.filter((id) => selectedNewHireIds.includes(id)).length;
+                          const allSelected = pageIds.length > 0 && selectedOnPage === pageIds.length;
+                          return (
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              ref={(el) => { if (el) el.indeterminate = selectedOnPage > 0 && selectedOnPage < pageIds.length; }}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={() => setSelectedNewHireIds(allSelected ? [] : pageIds)}
+                              className="h-5 w-5"
+                            />
+                          );
+                        })()}
                       </th>
                     )}
                     <th className="px-2 py-2 whitespace-nowrap text-xs">구분</th>
