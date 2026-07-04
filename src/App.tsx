@@ -645,6 +645,79 @@ function sanitizeDefectsForSave<T extends { requestText?: string; isPermanentDel
     .map((d) => ({ ...d, requestPhotoDataUrls: sanitizePhotoArray(d.requestPhotoDataUrls), completionPhotoDataUrls: sanitizePhotoArray(d.completionPhotoDataUrls) }));
 }
 
+// 사진 값을 <img src> 로 바로 쓸 수 있는 형태로 정규화(표시 전용, 원본 데이터는 변경하지 않음).
+// - 객체({url,src,publicUrl,signedUrl,dataUrl,value,base64,path...}) → 내부 값 추출
+// - JSON 문자열("[...]"/"{...}") → 파싱 후 재귀
+// - http/https/blob URL → 그대로
+// - data:image/... → 잘못된 MIME(image/jpg) 보정 + base64 부분 공백/개행 제거(브라우저 렌더 실패 방지)
+// - 접두어 없는 순수 base64 → data:image/jpeg;base64, 로 감쌈
+// 표시할 수 없으면 빈 문자열("") 반환.
+function normalizePhotoSrc(item: any): string {
+  if (item === null || item === undefined) return "";
+  if (typeof item === "object") {
+    const obj = item as Record<string, any>;
+    item =
+      obj.url || obj.src || obj.publicUrl || obj.public_url || obj.signedUrl || obj.signed_url ||
+      obj.previewUrl || obj.preview_url || obj.thumbnailUrl || obj.thumbnail_url ||
+      obj.dataUrl || obj.data_url || obj.value || obj.base64 || obj.path || "";
+  }
+  if (typeof item !== "string") return "";
+  const s = item.trim();
+  if (!s) return "";
+  // JSON 문자열이면 파싱해서 첫 항목/객체로 재귀
+  if (s[0] === "[" || s[0] === "{") {
+    try {
+      const parsed = JSON.parse(s);
+      return normalizePhotoSrc(Array.isArray(parsed) ? parsed[0] : parsed);
+    } catch { /* JSON 아님 — 계속 진행 */ }
+  }
+  if (/^(https?:\/\/|blob:)/i.test(s)) return s;
+  if (/^data:image\//i.test(s)) {
+    const comma = s.indexOf(",");
+    if (comma > 0) {
+      let header = s.slice(0, comma);
+      const body = s.slice(comma + 1).replace(/\s/g, ""); // base64 내 공백/개행 제거
+      header = header.replace(/^data:image\/jpg\b/i, "data:image/jpeg"); // 잘못된 MIME 보정
+      return `${header},${body}`;
+    }
+    return s;
+  }
+  // 접두어 없는 순수 base64 → data URL 로 감싼다(썸네일/미리보기 렌더 가능하게)
+  const compact = s.replace(/\s/g, "");
+  if (compact.length > 100 && /^[A-Za-z0-9+/]+={0,2}$/.test(compact)) {
+    return `data:image/jpeg;base64,${compact}`;
+  }
+  return s; // 기타 문자열은 그대로(실패 시 onError placeholder 처리)
+}
+
+// 리스트 썸네일: 후보 사진들을 순서대로 시도해, 로드 실패 시 다음 사진으로 넘어가고
+// 모두 실패하면 회색 placeholder 를 표시(개수는 별도 유지 — "사진없음"으로 바꾸지 않음).
+function CleaningThumb({ candidates, alt }: { candidates: string[]; alt: string }): React.ReactElement {
+  const [idx, setIdx] = useState(0);
+  useEffect(() => { setIdx(0); }, [candidates.join("|")]);
+  const src = candidates[idx];
+  if (!src) {
+    // 유효한 사진 소스가 없음 → 회색 placeholder(사진 개수 라벨은 셀에서 별도 표시)
+    return (
+      <div className="flex h-full w-full items-center justify-center bg-slate-100 text-[9px] font-medium text-slate-400">
+        미리보기<br />불가
+      </div>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      className="h-full w-full object-cover"
+      onError={() => {
+        if (import.meta.env.DEV) console.debug("[cleaning-thumb] 로드 실패 → 다음 후보 시도", { idx, srcHead: String(src).slice(0, 40) });
+        setIdx((i) => i + 1);
+      }}
+    />
+  );
+}
+
 // 현재 거주자(거주중/만료예정, 퇴실/과거/삭제 제외) 기준. 정원 0이면 0%(NaN 방지).
 // 공실 수 = 정원 - 현재거주자, 공실률 = 공실/정원*100, 사용률 = 거주자/정원*100.
 function computeVacancyStats(
@@ -2794,6 +2867,7 @@ export default function App() {
   // 하자 이미지 라이트박스(저장 없이 즉시 미리보기)
   const [imageLightbox, setImageLightbox] = useState<{ urls: string[]; index: number; title: string } | null>(null);
   const [lightboxZoomed, setLightboxZoomed] = useState(false);
+  const [lightboxError, setLightboxError] = useState(false); // 현재 이미지 로드 실패 → 검은 화면 대신 안내문
   const lightboxTouchStartXRef = useRef<number | null>(null);
 
   // 이미지 미리보기: 방향키 이동 / ESC 닫기 (데스크탑 키보드 편의).
@@ -2807,6 +2881,8 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [imageLightbox]);
+  // 라이트박스 현재 이미지가 바뀌면 로드 실패 상태 초기화(다음 이미지는 정상 표시 시도).
+  useEffect(() => { setLightboxError(false); }, [imageLightbox?.index, imageLightbox?.urls]);
   const [operationalSyncError, setOperationalSyncError] = useState<string | null>(null);
   // 저장 상태 표시(토스트): idle | saving | saved | error
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -5088,13 +5164,17 @@ export default function App() {
       ...parseMaybeJsonArray(report?.image_urls),
       ...parseMaybeJsonArray(report?.attachments),
     ];
-    return raw
-      .map((item: any) =>
-        typeof item === "string"
-          ? item
-          : (item?.url || item?.publicUrl || item?.public_url || item?.previewUrl || item?.preview_url || item?.signedUrl || item?.signed_url || item?.dataUrl || item?.path || "")
-      )
-      .filter(Boolean);
+    // 표시 전에 반드시 normalizePhotoSrc 를 거쳐 <img src> 로 렌더 가능한 형태로 변환.
+    // 중복 제거 + 순서 유지(빈값 제거). 원본 데이터는 변경하지 않는다(읽기 전용).
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of raw) {
+      const src = normalizePhotoSrc(item);
+      if (!src || seen.has(src)) continue;
+      seen.add(src);
+      out.push(src);
+    }
+    return out;
   };
 
   // 사진 개수: 실제 사진이 있으면 그 개수, 없으면 캐시에 저장된 개수(__photoCount) 사용.
@@ -10063,7 +10143,9 @@ export default function App() {
     let urls = getCleaningPhotoUrls(report);
     if (urls.length === 0 && report?.id) {
       const full = await fetchCleaningReportPhotosWithBackup(report); // DB → 없으면 백업 복구
-      urls = [...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])];
+      urls = [...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])]
+        .map((u) => normalizePhotoSrc(u))
+        .filter(Boolean);
       if (urls.length > 0) {
         // 조회한 원본을 메모리 상태에 반영(다음 클릭/썸네일 재사용)
         setCleaningReports((prev) => prev.map((r) => (r.id === report.id ? { ...r, beforePhotoDataUrls: full.beforePhotoDataUrls, afterPhotoDataUrls: full.afterPhotoDataUrls } : r)));
@@ -20347,7 +20429,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             if (count === 0) return cleaningPhotosLoading
                               ? <span className="text-xs text-slate-400">사진 확인중…</span>
                               : <span className="text-xs text-rose-500">사진없음</span>;
-                            const thumb = getCleaningThumbnail(report); // 실제 첫 사진 또는 캐시 썸네일
+                            // 정규화된 후보 사진들(첫 실패 시 다음 사진 시도, 모두 실패해도 회색 placeholder).
+                            const candidates = getCleaningPhotoUrls(report);
+                            const cacheThumb = normalizePhotoSrc((report as any)?.__thumb);
+                            const thumbCandidates = candidates.length > 0 ? candidates : (cacheThumb ? [cacheThumb] : []);
                             return (
                               <button
                                 type="button"
@@ -20355,15 +20440,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 className="inline-flex items-center gap-2"
                                 title="사진 크게 보기"
                               >
-                                {thumb ? (
-                                  <img
-                                    src={thumb}
-                                    alt="cleaning"
-                                    loading="lazy"
-                                    className="h-9 w-9 rounded-md object-cover ring-1 ring-slate-300"
-                                    onError={(e) => { e.currentTarget.style.display = "none"; }}
-                                  />
-                                ) : null}
+                                <span className="block h-9 w-9 overflow-hidden rounded-md ring-1 ring-slate-300">
+                                  <CleaningThumb candidates={thumbCandidates} alt="cleaning" />
+                                </span>
                                 <span className="text-xs font-medium text-blue-600">사진 {count}장</span>
                               </button>
                             );
@@ -22900,6 +22979,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     ...cleaningReportForm.afterPhotoDataUrls.map((url, i) => ({ url, field: "afterPhotoDataUrls" as const, idx: i })),
                   ];
                   const urls = merged.map((m) => m.url);
+                  // 라이트박스/표시용으로 정규화(원본 배열 순서 유지 — index 정합 보장).
+                  const lbUrls = urls.map((u) => normalizePhotoSrc(u));
                   if (merged.length === 0) {
                     // 기존 사진 조회 중이면 "사진없음" 대신 로딩 표시(URL/원본 생성 전 오표시 방지).
                     return <div className={`rounded-2xl border border-dashed p-4 text-center text-sm ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-400"}`}>{cleaningEditPhotosLoading ? "기존 사진을 불러오는 중입니다..." : "등록된 사진이 없습니다."}</div>;
@@ -22907,11 +22988,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   const base = `청소사진_${cleaningReportForm.buildingName || "기숙사"}_${reportFileDate(cleaningReportForm.reportDate)}`;
                   const renderThumb = (m: { url: string; field: "beforePhotoDataUrls" | "afterPhotoDataUrls"; idx: number }) => {
                     const gi = Math.max(0, urls.indexOf(m.url));
+                    const nsrc = normalizePhotoSrc(m.url);
                     return (
                       <div key={`${m.field}-${m.idx}`} className="relative">
-                        <img src={m.url} alt="청소사진" onClick={() => setImageLightbox({ urls, index: gi, title: "청소 사진" })} className="h-20 w-20 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200" />
+                        <span
+                          onClick={() => setImageLightbox({ urls: lbUrls, index: gi, title: "청소 사진" })}
+                          className="block h-20 w-20 cursor-zoom-in overflow-hidden rounded-xl ring-1 ring-slate-200"
+                        >
+                          <CleaningThumb candidates={nsrc ? [nsrc] : []} alt="청소사진" />
+                        </span>
                         {canDownloadFiles && (
-                          <button type="button" onClick={() => downloadImage(m.url, `${base}_${gi + 1}.${dataUrlExt(m.url)}`)} className="absolute -left-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[11px] font-bold text-white hover:bg-blue-500" title="이 사진 다운로드">↓</button>
+                          <button type="button" onClick={() => downloadImage(nsrc || m.url, `${base}_${gi + 1}.${dataUrlExt(nsrc || m.url)}`)} className="absolute -left-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[11px] font-bold text-white hover:bg-blue-500" title="이 사진 다운로드">↓</button>
                         )}
                         <button type="button" onClick={() => removeCleaningReportPhoto(m.field, m.idx)} className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white hover:bg-rose-500" title="이 사진 삭제">×</button>
                       </div>
@@ -22937,8 +23024,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         {canDownloadFiles && (
                           <>
-                            <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">전체 다운로드</button>
-                            <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
+                            <button type="button" onClick={() => downloadAllImages(lbUrls.filter(Boolean), base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">전체 다운로드</button>
+                            <button type="button" onClick={() => void downloadImagesAsZip(lbUrls.filter(Boolean), base)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
                             <button type="button" onClick={() => void printCleaningReport(cleaningReportForm as CleaningReport)} disabled={savingPdf} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50">{savingPdf ? "PDF 생성 중..." : "PDF 저장"}</button>
                           </>
                         )}
@@ -24069,6 +24156,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           const urls = imageLightbox.urls;
           const safeIndex = Math.min(Math.max(imageLightbox.index, 0), urls.length - 1);
           const current = urls[safeIndex];
+          const displaySrc = normalizePhotoSrc(current) || current; // 표시 전 정규화(bare base64/잘못된 MIME 등 보정)
           const go = (delta: number) => {
             setLightboxZoomed(false);
             setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + delta + lb.urls.length) % lb.urls.length } : lb));
@@ -24083,10 +24171,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   const base = `${imageLightbox.title.replace(/[^가-힣A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "이미지"}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
                   return (
                     <div className="flex shrink-0 flex-wrap gap-2">
-                      <button type="button" onClick={() => window.open(current, "_blank")} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">새 창</button>
+                      <button type="button" onClick={() => window.open(displaySrc, "_blank")} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">새 창</button>
                       {canDownloadFiles && (
                         <>
-                          <button type="button" onClick={() => downloadImage(current, `${base}_${safeIndex + 1}.${dataUrlExt(current)}`)} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold hover:bg-blue-500">이 이미지 저장</button>
+                          <button type="button" onClick={() => downloadImage(displaySrc, `${base}_${safeIndex + 1}.${dataUrlExt(displaySrc)}`)} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold hover:bg-blue-500">이 이미지 저장</button>
                           <button type="button" onClick={() => downloadAllImages(urls, base)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">전체 저장</button>
                           <button type="button" onClick={() => void downloadImagesAsZip(urls, base)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">ZIP</button>
                           <button type="button" onClick={() => void downloadImagesAsPdf(urls, `${base}.pdf`)} className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">PDF</button>
@@ -24112,12 +24200,24 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 {urls.length > 1 && (
                   <button type="button" onClick={() => go(-1)} className="absolute left-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/15 px-3 py-2 text-xl text-white hover:bg-white/30">‹</button>
                 )}
-                <img
-                  src={current}
-                  alt={imageLightbox.title}
-                  onClick={() => setLightboxZoomed((z) => !z)}
-                  className={lightboxZoomed ? "max-h-none max-w-none cursor-zoom-out" : "max-h-full max-w-full object-contain cursor-zoom-in"}
-                />
+                {lightboxError ? (
+                  // 로드 실패 → 검은 화면 대신 안내문 표시(다운로드/새 창/닫기 버튼은 상단에 그대로 유지).
+                  <div className="mx-6 max-w-md rounded-2xl bg-white/10 px-6 py-8 text-center text-sm leading-relaxed text-white/90">
+                    사진 미리보기를 표시할 수 없습니다.<br />다운로드하면 정상 확인 가능합니다.
+                  </div>
+                ) : (
+                  <img
+                    src={displaySrc}
+                    alt={imageLightbox.title}
+                    loading="lazy"
+                    onClick={() => setLightboxZoomed((z) => !z)}
+                    onError={() => {
+                      if (import.meta.env.DEV) console.debug("[lightbox] 이미지 로드 실패", { index: safeIndex, srcHead: String(displaySrc).slice(0, 48) });
+                      setLightboxError(true);
+                    }}
+                    className={lightboxZoomed ? "max-h-none max-w-none cursor-zoom-out" : "max-h-full max-w-full object-contain cursor-zoom-in"}
+                  />
+                )}
                 {urls.length > 1 && (
                   <button type="button" onClick={() => go(1)} className="absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/15 px-3 py-2 text-xl text-white hover:bg-white/30">›</button>
                 )}
