@@ -1818,6 +1818,8 @@ export default function App() {
   const localPhotoRecoveryRef = useRef<{ lookup: (r: any) => { before: string[]; after: string[] } | null; size: number } | null>(null);
   // 수정 모달에서 기존 사진을 실제로 불러왔는지 표시 → 저장 시 미로드 상태에서 사진이 지워지는 것 방지.
   const cleaningEditPhotosReadyRef = useRef(false);
+  // 수정 모달 오픈 시 "기존 등록 사진" URL 집합(신규 추가 사진과 구분 표시용).
+  const [cleaningEditOriginalPhotos, setCleaningEditOriginalPhotos] = useState<Set<string>>(new Set());
   // 비동기 사진 조회 완료 시점에 현재 열려 있는 편집 대상이 바뀌지 않았는지 확인용.
   const editingCleaningReportIdRef = useRef<string | null>(null);
   // 변경이력(감사로그) 지연 로딩 캐시/가드 — 휴지통관리(변경이력) 진입 시에만 조회.
@@ -9368,6 +9370,8 @@ export default function App() {
     setEditingCleaningReportId(report?.id || null);
     editingCleaningReportIdRef.current = report?.id || null;
     cleaningEditPhotosReadyRef.current = true; // 신규 또는 report 로 직접 연 경우 폼 사진이 곧 원본
+    // 등록 화면에서 폼에 이미 사진이 있으면(report 로 연 경우) 기존으로 표시, 신규 등록이면 비움.
+    setCleaningEditOriginalPhotos(new Set([...(initial.beforePhotoDataUrls || []), ...(initial.afterPhotoDataUrls || [])].filter(Boolean)));
     setShowCleaningReportForm(true);
   };
 
@@ -12847,6 +12851,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     // 수정 모달은 원본을 다시 조회(모든 사진 컬럼/형태 지원)해 기존 사진 미리보기를 보장한다.
     const hasPhotos = (rest.beforePhotoDataUrls?.length || 0) + (rest.afterPhotoDataUrls?.length || 0) > 0;
     cleaningEditPhotosReadyRef.current = hasPhotos; // 이미 사진이 있으면 로드 완료로 간주
+    // 모달 오픈 시점의 사진을 "기존 등록 사진"으로 표시(신규 추가와 구분).
+    setCleaningEditOriginalPhotos(new Set([...(rest.beforePhotoDataUrls || []), ...(rest.afterPhotoDataUrls || [])].filter(Boolean)));
     if (!hasPhotos) {
       setCleaningEditPhotosLoading(true); // 원본 조회 중 → "사진없음" 대신 로딩 표시
       try {
@@ -12860,6 +12866,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             afterPhotoDataUrls: dedupe([...(full.afterPhotoDataUrls || []), ...(f.afterPhotoDataUrls || [])]),
           }));
           setCleaningReports((prev) => prev.map((r) => (r.id === report.id ? { ...r, beforePhotoDataUrls: full.beforePhotoDataUrls, afterPhotoDataUrls: full.afterPhotoDataUrls } : r)));
+          // 조회된 원본 사진을 "기존 등록 사진" 집합에 반영.
+          setCleaningEditOriginalPhotos(new Set([...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])].filter(Boolean)));
           cleaningEditPhotosReadyRef.current = true;
         }
       } finally {
@@ -22774,7 +22782,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 />
               )}
               <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <Input label="보고일" type="date-text" value={cleaningReportForm.reportDate} onChange={(v) => setCleaningReportForm((f) => ({ ...f, reportDate: v }))} readOnly={isMaintenanceReporter} />
+                <div>
+                  <Input label="보고일" type="date-text" value={cleaningReportForm.reportDate} onChange={(v) => setCleaningReportForm((f) => ({ ...f, reportDate: v }))} readOnly={isMaintenanceReporter} />
+                  {/* 보고일 기준 해당월/주차(월요일 기준). 보고일 변경 시 즉시 갱신. */}
+                  <p className="mt-1 text-xs font-semibold text-blue-600">해당주차: {getCleaningWeekLabel(cleaningReportForm.reportDate || "")}</p>
+                </div>
                 <Input label="청소 담당자" value={isMaintenanceReporter ? (currentUser?.displayName || "") : cleaningReportForm.cleanerName} onChange={(v) => setCleaningReportForm((f) => ({ ...f, cleanerName: v }))} readOnly={isMaintenanceReporter} />
               </div>
             </div>
@@ -22797,15 +22809,35 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="space-y-3">
                 <div className="space-y-2">
                   <label className={`${theme.darkMode ? "text-sm font-semibold text-slate-300" : "text-sm font-semibold text-slate-700"}`}>사진 업로드</label>
+                  {/* 명확한 업로드 영역: 클릭/드래그로 업로드. 모바일/태블릿은 카메라·앨범 버튼 추가. */}
+                  <div
+                    onClick={() => cleaningReportBeforePhotoInputRef.current?.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => { e.preventDefault(); void handleCleaningReportPhotos(e.dataTransfer?.files || null, "beforePhotoDataUrls"); }}
+                    className={`cursor-pointer rounded-2xl border-2 border-dashed p-6 text-center transition-colors ${theme.darkMode ? "border-slate-700 hover:border-blue-500 hover:bg-slate-900" : "border-slate-300 hover:border-blue-400 hover:bg-blue-50"}`}
+                  >
+                    <div className="text-2xl">📷</div>
+                    <div className={`mt-1 text-sm font-semibold ${theme.darkMode ? "text-slate-200" : "text-slate-700"}`}>사진을 여기에 끌어오거나 클릭해서 업로드하세요</div>
+                    <div className="mt-0.5 text-xs text-slate-400">전/후 사진을 여러 장 등록할 수 있습니다</div>
+                    <div className="mt-3 flex flex-wrap justify-center gap-2">
+                      <button type="button" onClick={(e) => { e.stopPropagation(); cleaningReportBeforePhotoInputRef.current?.click(); }} className="rounded-2xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-800">사진 선택</button>
+                      {isMobileOrTablet() && (
+                        <label onClick={(e) => e.stopPropagation()} className="cursor-pointer rounded-2xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700">
+                          📸 카메라/앨범에서 사진 추가
+                          <input type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={(e) => { void handleCleaningReportPhotos(e.target.files, "beforePhotoDataUrls"); e.currentTarget.value = ""; }} />
+                        </label>
+                      )}
+                    </div>
+                  </div>
+                  {/* 실제 파일 입력(숨김) — 위 영역/버튼 클릭 시 열림. */}
                   <input
                     ref={cleaningReportBeforePhotoInputRef}
                     type="file"
                     accept="image/*"
                     multiple
-                    onChange={(e) => handleCleaningReportPhotos(e.target.files, "beforePhotoDataUrls")}
-                    className={`${theme.darkMode ? "w-full rounded-2xl border border-slate-700 bg-slate-950 px-3 py-2" : "w-full rounded-2xl border border-slate-200 bg-white px-3 py-2"}`}
+                    onChange={(e) => { void handleCleaningReportPhotos(e.target.files, "beforePhotoDataUrls"); e.currentTarget.value = ""; }}
+                    className="hidden"
                   />
-                  <p className="text-xs text-slate-400">청소 사진을 한 곳에서 관리합니다. (기존 전/후 사진도 함께 표시됩니다)</p>
                 </div>
                 {(() => {
                   const merged = [
@@ -22818,34 +22850,35 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     return <div className={`rounded-2xl border border-dashed p-4 text-center text-sm ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-400"}`}>{cleaningEditPhotosLoading ? "기존 사진을 불러오는 중입니다..." : "등록된 사진이 없습니다."}</div>;
                   }
                   const base = `청소사진_${cleaningReportForm.buildingName || "기숙사"}_${reportFileDate(cleaningReportForm.reportDate)}`;
+                  const renderThumb = (m: { url: string; field: "beforePhotoDataUrls" | "afterPhotoDataUrls"; idx: number }) => {
+                    const gi = Math.max(0, urls.indexOf(m.url));
+                    return (
+                      <div key={`${m.field}-${m.idx}`} className="relative">
+                        <img src={m.url} alt="청소사진" onClick={() => setImageLightbox({ urls, index: gi, title: "청소 사진" })} className="h-20 w-20 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200" />
+                        {canDownloadFiles && (
+                          <button type="button" onClick={() => downloadImage(m.url, `${base}_${gi + 1}.${dataUrlExt(m.url)}`)} className="absolute -left-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[11px] font-bold text-white hover:bg-blue-500" title="이 사진 다운로드">↓</button>
+                        )}
+                        <button type="button" onClick={() => removeCleaningReportPhoto(m.field, m.idx)} className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white hover:bg-rose-500" title="이 사진 삭제">×</button>
+                      </div>
+                    );
+                  };
+                  // 기존 등록 사진 / 새로 추가할 사진 구분 표시(URL 집합 기준).
+                  const original = merged.filter((m) => cleaningEditOriginalPhotos.has(m.url));
+                  const added = merged.filter((m) => !cleaningEditOriginalPhotos.has(m.url));
                   return (
                     <>
-                      <div className="flex flex-wrap gap-2">
-                        {merged.map((m, gi) => (
-                          <div key={`${m.field}-${m.idx}`} className="relative">
-                            <img
-                              src={m.url}
-                              alt={`사진-${gi + 1}`}
-                              onClick={() => setImageLightbox({ urls, index: gi, title: "청소 사진" })}
-                              className="h-20 w-20 cursor-zoom-in rounded-xl object-cover ring-1 ring-slate-200"
-                            />
-                            {canDownloadFiles && (
-                              <button
-                                type="button"
-                                onClick={() => downloadImage(m.url, `${base}_${gi + 1}.${dataUrlExt(m.url)}`)}
-                                className="absolute -left-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[11px] font-bold text-white hover:bg-blue-500"
-                                title="이 사진 다운로드"
-                              >↓</button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => removeCleaningReportPhoto(m.field, m.idx)}
-                              className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white hover:bg-rose-500"
-                              title="이 사진 삭제"
-                            >×</button>
-                          </div>
-                        ))}
-                      </div>
+                      {original.length > 0 && (
+                        <div>
+                          <div className="mb-1 text-xs font-semibold text-slate-500">기존 등록 사진 · {original.length}장</div>
+                          <div className="flex flex-wrap gap-2">{original.map(renderThumb)}</div>
+                        </div>
+                      )}
+                      {added.length > 0 && (
+                        <div className={original.length > 0 ? "mt-3" : ""}>
+                          <div className="mb-1 text-xs font-semibold text-emerald-600">새로 추가할 사진 · {added.length}장</div>
+                          <div className="flex flex-wrap gap-2">{added.map(renderThumb)}</div>
+                        </div>
+                      )}
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         {canDownloadFiles && (
                           <>
@@ -22854,7 +22887,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             <button type="button" onClick={() => void printCleaningReport(cleaningReportForm as CleaningReport)} disabled={savingPdf} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50">{savingPdf ? "PDF 생성 중..." : "PDF 저장"}</button>
                           </>
                         )}
-                        <span className="text-sm text-slate-500">총 {urls.length}장</span>
+                        <span className="text-sm text-slate-500">사진 {urls.length}장 등록됨</span>
                       </div>
                     </>
                   );
