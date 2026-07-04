@@ -20224,7 +20224,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <th className="px-3 py-3 whitespace-nowrap">기숙사</th>
                       <th className="px-3 py-3 whitespace-nowrap">상태</th>
                       <th className="px-3 py-3 whitespace-nowrap">담당 관리자</th>
-                      <th className="px-3 py-3 whitespace-nowrap">청소담당자</th>
+                      <th className="px-3 py-3 whitespace-nowrap">해당주차</th>
                       <th className="px-3 py-3 whitespace-nowrap">사진</th>
                       <th className="px-3 py-3 whitespace-nowrap">작업</th>
                     </tr>
@@ -20246,7 +20246,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           })()}
                         </td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(report.dormId)}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getUserDisplayName(report.cleanerName || "")}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getWeekLabel(report.reportDate || report.createdAt || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
                           {(() => {
                             const count = getCleaningPhotoCount(report); // base64/캐시 개수
