@@ -7329,10 +7329,26 @@ export default function App() {
   }
 
 
+  // 기숙사별 1~5주차 그리드의 기준 연/월. 필터가 "전체"면 오늘의 "청소 기준월"(월요일이 속한 월) 자동 적용,
+  // 사용자가 월을 선택하면 그 값 사용. 화면 안내(현재 표시 기준)와 상태 계산이 동일 기준을 쓰도록 공유.
+  const cleaningWeekBase = useMemo(() => {
+    const info = getCleaningWeekInfo(new Date());
+    const autoYear = info?.year ?? new Date().getFullYear();
+    const autoMonth = info?.month ?? new Date().getMonth() + 1;
+    return {
+      year: cleaningYear === "전체" ? autoYear : Number(cleaningYear),
+      month: cleaningMonth === "전체" ? autoMonth : Number(cleaningMonth),
+      isAuto: cleaningYear === "전체" || cleaningMonth === "전체",
+      currentMonth: info?.month ?? autoMonth,
+      currentWeek: info?.weekNumber ?? 0,
+    };
+  }, [cleaningYear, cleaningMonth]);
+
   const getCleaningWeeklyStatus = (dorm: Dorm, weekNo: number) => {
-    // 주차 그리드는 특정 월이 필요하므로 "전체"면 현재 연/월로 대체(목록 필터의 전체와 별개).
-    const effYear = cleaningYear === "전체" ? String(new Date().getFullYear()) : cleaningYear;
-    const effMonth = cleaningMonth === "전체" ? String(new Date().getMonth() + 1) : cleaningMonth;
+    // 연도/월 필터가 "전체"면 오늘의 "청소 기준월"(월요일이 속한 월)을 자동 적용 → 7/3 이면 6월 기준.
+    // (기존: 오늘의 달력 월(getMonth) 사용 → 7/3에 7월로 표시되어 매번 6월로 바꿔야 하던 문제 해결)
+    const effYear = String(cleaningWeekBase.year);
+    const effMonth = String(cleaningWeekBase.month);
     const range = getWeekRange(effYear, effMonth, weekNo);
     const dormKey = matchDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
     const reports = cleaningReports.filter((report) => {
@@ -20093,7 +20109,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
               );
             })()}
-            <div className="mt-6 erp-table-container">
+            {/* 현재 1~5주차 상태가 어느 기준월인지 안내(필터 전체면 오늘의 청소 기준월 자동 적용). */}
+            <div className={`mt-6 text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>
+              {cleaningWeekBase.isAuto
+                ? `전체 필터 적용 중 · 현재 진행 주차 기준: ${cleaningWeekBase.year}년 ${cleaningWeekBase.month}월 (오늘 ${cleaningWeekBase.currentMonth}월 ${cleaningWeekBase.currentWeek}주차)`
+                : `현재 표시 기준: ${cleaningWeekBase.year}년 ${cleaningWeekBase.month}월 청소주차`}
+            </div>
+            <div className="mt-2 erp-table-container">
               <table className="erp-table min-w-[1300px] text-left">
                 <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                   <tr>
