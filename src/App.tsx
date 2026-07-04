@@ -1839,6 +1839,12 @@ export default function App() {
   const [militaryCodeValues, setMilitaryCodeValues] = useState<MilitaryCodeValues>(defaultMilitaryCodeValues);
   const [militaryTrainingAutoConfig, setMilitaryTrainingAutoConfig] = useState<{ enabled: boolean; targetStatuses: string[] }>({ enabled: true, targetStatuses: ["재직"] });
   const realtimeUpdateSourceRef = useRef<Set<string>>(new Set());
+  // Realtime 단일 구독 유지용(중복 구독/반복 재연결 방지). key = tenantId|userId.
+  const realtimeChannelRef = useRef<any>(null);
+  const realtimeKeyRef = useRef<string>("");
+  const realtimeRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const realtimeTokenRef = useRef<number>(0);
+  const realtimeReconnectRef = useRef<number>(0);
   // 직전 저장 스냅샷(저장 payload의 안정 직렬화) — 동일 데이터 반복 저장 방지용
   // 최초 데이터 로딩 완료 플래그 — 로딩 중에는 자동 save effect 가 실행되어 중복 저장되지 않도록 보호.
   const isInitialLoadCompleteRef = useRef<boolean>(false);
@@ -5815,52 +5821,64 @@ export default function App() {
 
   useEffect(() => {
     if (!isSupabaseAvailable() || isLoading) return;
+    if (!currentUser?.id) {
+      // 세션 없음(로그아웃/만료): 기존 채널 정리 + 진행 중 콜백 무효화(반복 재연결 방지).
+      realtimeTokenRef.current += 1;
+      if (realtimeRetryRef.current) { clearTimeout(realtimeRetryRef.current); realtimeRetryRef.current = null; }
+      if (realtimeChannelRef.current && supabase) { try { supabase.removeChannel(realtimeChannelRef.current); } catch { /* noop */ } }
+      realtimeChannelRef.current = null;
+      realtimeKeyRef.current = "";
+      return;
+    }
+    const key = `${tenantId}|${currentUser.id}`;
+    // 이미 같은 세션/테넌트로 구독 중이면 재구독 금지(isLoading 토글 등으로 인한 중복 구독/반복 로그 방지).
+    if (realtimeKeyRef.current === key && realtimeChannelRef.current) return;
 
-    let channel: any = null;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    let cancelled = false;
-    let attempts = 0;
+    // 이 실행을 식별하는 토큰(비동기 도중 key 변경/언마운트 시 이전 실행 취소용).
+    realtimeTokenRef.current += 1;
+    const myToken = realtimeTokenRef.current;
+    const isCurrent = () => realtimeTokenRef.current === myToken;
+    const devLog = (...a: unknown[]) => { if (import.meta.env.DEV) console.log(...a); };
+    const devWarn = (...a: unknown[]) => { if (import.meta.env.DEV) console.warn(...a); };
 
-    // 같은 채널 중복 구독 방지: 기존 채널 제거 후 재구독.
-    const cleanupChannel = () => {
-      if (channel && supabase) {
-        try {
-          supabase.removeChannel(channel);
-        } catch {
-          /* 이미 제거된 경우 무시 */
-        }
+    const removeExisting = () => {
+      if (realtimeRetryRef.current) { clearTimeout(realtimeRetryRef.current); realtimeRetryRef.current = null; }
+      if (realtimeChannelRef.current && supabase) {
+        try { supabase.removeChannel(realtimeChannelRef.current); } catch { /* 이미 제거됨 */ }
       }
-      channel = null;
+      realtimeChannelRef.current = null;
+      realtimeKeyRef.current = "";
     };
 
-    // CHANNEL_ERROR / socket closed / TIMED_OUT 시 3초 후 자동 재연결(빨간 에러 대신 경고 로그).
+    // CLOSED / CHANNEL_ERROR / TIMED_OUT 시 즉시 무한 재구독하지 않고 8초 debounce 후 1회만 재시도.
+    // (대기 중 재시도가 있으면 추가 예약 금지 + 과도한 연속 실패 시 중단 — 앱/저장은 계속 정상)
     const scheduleReconnect = () => {
-      if (cancelled || retryTimer) return;
-      attempts += 1;
-      retryTimer = setTimeout(() => {
-        retryTimer = null;
-        if (cancelled) return;
-        cleanupChannel();
-        void subscribeRealtime();
-      }, 3000);
+      if (!isCurrent() || realtimeRetryRef.current) return;
+      realtimeReconnectRef.current += 1;
+      if (realtimeReconnectRef.current > 12) return; // 연속 실패 과도 시 재시도 중단(앱 사용엔 영향 없음)
+      realtimeRetryRef.current = setTimeout(() => {
+        realtimeRetryRef.current = null;
+        if (isCurrent()) void subscribeRealtime();
+      }, 8000);
     };
 
     const subscribeRealtime = async () => {
-      if (cancelled || !supabase) return;
+      if (!isCurrent() || !supabase) return;
       let session;
       try {
         session = await getCurrentSession();
       } catch (e) {
         // 세션 조회 실패 시에도 앱은 계속 동작 — 경고 로그만 남기고 재연결 예약.
-        console.warn("[Realtime] 재연결 대기 (세션 조회 실패)", e);
+        devWarn("[Realtime] 재연결 대기 (세션 조회 실패)", e);
         scheduleReconnect();
         return;
       }
-      if (cancelled || !session?.user?.id) return;
-      cleanupChannel(); // 재구독 전 기존 채널 정리(중복 구독 방지)
+      if (!isCurrent() || !session?.user?.id) return;
+      // 재구독 전 기존 채널 정리(중복 구독 방지)
+      if (realtimeChannelRef.current && supabase) { try { supabase.removeChannel(realtimeChannelRef.current); } catch { /* noop */ } realtimeChannelRef.current = null; }
 
       try {
-      channel = supabase
+      const ch = supabase
         .channel(`realtime-${tenantId}`)
         .on(
           "postgres_changes",
@@ -5934,31 +5952,43 @@ export default function App() {
           () => handleProfilesRealtime()
         )
         .subscribe((status: string, err?: Error) => {
+          if (!isCurrent()) return; // 취소된(이전) 구독의 콜백 무시
           if (status === "SUBSCRIBED") {
-            attempts = 0; // 정상 연결 시 백오프 초기화
-            console.log("[Realtime] 구독 완료:", `realtime-${tenantId}`);
+            realtimeReconnectRef.current = 0; // 정상 연결 시 재시도 카운트 초기화
+            devLog("[Realtime] 구독 완료:", `realtime-${tenantId}`);
           } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-            // 빨간 에러 대신 경고 로그만(동일 로그 반복 제한: 연결 실패 streak 첫 1회만 출력) 3초 후 재구독.
-            if (attempts === 0) console.warn("[Realtime] 재연결 대기", status, err?.message || "");
+            // 빨간 에러 대신 경고 로그만(연속 실패 streak 첫 1회만, DEV 에서만) + 8초 debounce 후 재시도.
+            if (realtimeReconnectRef.current === 0) devWarn("[Realtime] 재연결 대기", status, err?.message || "");
             scheduleReconnect();
           }
         });
+      realtimeChannelRef.current = ch;
+      realtimeKeyRef.current = key; // 구독 성공 등록(이후 동일 key 재구독 방지)
       } catch (e) {
         // 채널 생성/구독 중 예외가 나도 앱이 멈추지 않게 — 경고 로그만 남기고 재연결 예약.
-        console.warn("[Realtime] 재연결 대기 (채널 구독 실패)", e);
+        devWarn("[Realtime] 재연결 대기 (채널 구독 실패)", e);
         scheduleReconnect();
       }
     };
 
+    // key 가 바뀐 경우(로그인/테넌트 변경)에만 기존 채널 제거 후 새로 구독. 재시도 카운트 초기화.
+    if (realtimeKeyRef.current && realtimeKeyRef.current !== key) removeExisting();
+    realtimeReconnectRef.current = 0;
     void subscribeRealtime();
 
-    return () => {
-      cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
-      cleanupChannel();
-    };
-    // currentUser?.id 기준으로만 재구독 (객체 재참조로 인한 과도한 재구독 방지)
+    // ⚠️ 여기서 cleanup 을 반환하지 않는다: isLoading 토글 등 effect 재실행에도 채널을 유지(위 key 가드로 재구독 차단).
+    //    언마운트/세션 변경 시 정리는 아래 별도 effect 가 담당한다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, currentUser?.id, isLoading]);
+
+  // 언마운트 시 Realtime 채널을 1회 정리(중복/누수 방지). 앱 사용 중에는 유지.
+  useEffect(() => () => {
+    if (realtimeRetryRef.current) { clearTimeout(realtimeRetryRef.current); realtimeRetryRef.current = null; }
+    if (realtimeChannelRef.current && supabase) { try { supabase.removeChannel(realtimeChannelRef.current); } catch { /* noop */ } }
+    realtimeChannelRef.current = null;
+    realtimeKeyRef.current = "";
+    realtimeTokenRef.current += 1; // 진행 중 콜백 무효화
+  }, []);
 
   useEffect(() => {
     if (isLoading) return;
