@@ -1785,6 +1785,7 @@ export default function App() {
   const [editingPreInspectionId, setEditingPreInspectionId] = useState<string | null>(null);
   const [preInspectionForm, setPreInspectionForm] = useState<Omit<PreMoveInInspection, "id" | "createdAt" | "updatedAt">>(emptyPreMoveInInspection());
   const [preInspectionDetailId, setPreInspectionDetailId] = useState<string | null>(null);
+  const inspectionClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // 단일/더블 클릭 구분(300ms)
   const [preInspectionPhotoCategory, setPreInspectionPhotoCategory] = useState<string>(INSPECTION_PHOTO_CATEGORIES[0]);
   const [preInspectionUploading, setPreInspectionUploading] = useState(false);
   const [preInspectionSearch, setPreInspectionSearch] = useState("");
@@ -5092,18 +5093,32 @@ export default function App() {
   // 리스트 썸네일: 실제 첫 사진이 있으면 그것, 없으면 캐시에 저장된 축소 썸네일(__thumb).
   const getCleaningThumbnail = (report: any): string => getCleaningPhotoUrls(report)[0] || report?.__thumb || "";
 
+  // 동일 기숙사+주차에 보고서가 여러 개면 "가장 마지막 보고서" 1건만 상태 계산에 사용.
+  // 우선순위: created_at DESC → updated_at DESC. (1차 사진없음 → 2차 사진완료 시 최신 기준으로 O 표시)
+  const pickLatestCleaningReport = <T extends { createdAt?: string; updatedAt?: string }>(list: T[]): T | null => {
+    if (!list || list.length === 0) return null;
+    return list.slice().sort((a, b) => {
+      const c = String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+      if (c !== 0) return c;
+      return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+    })[0];
+  };
+
   // 주차별 청소보고 상태 계산
   const getCleaningWeekStatus = (
     managerUserId: string,
     weekNumber: number,
     month: string
   ): "O" | "X" | "예정" | "사진누락" => {
-    const report = cleaningReports.find(
-      (r) =>
-        !r.isDeleted &&
-        r.managerUserId === managerUserId &&
-        r.weekLabel === `${weekNumber}주차` &&
-        r.monthLabel === month
+    // 동일 조건 보고서가 여러 개면 최신 1건만 사용(이전 사진없음 보고서로 인해 사진누락 오표시 방지).
+    const report = pickLatestCleaningReport(
+      cleaningReports.filter(
+        (r) =>
+          !r.isDeleted &&
+          r.managerUserId === managerUserId &&
+          r.weekLabel === `${weekNumber}주차` &&
+          r.monthLabel === month
+      )
     );
 
     if (!report) {
@@ -7328,8 +7343,10 @@ export default function App() {
       return "예정";
     }
 
-    if (reports.some((report) => report.cleanStatus === "불량")) return "불량";
-    if (reports.some((report) => getCleaningPhotoCount(report) === 0)) return "사진누락";
+    // 동일 기숙사+주차 여러 건이면 최신 1건만 상태 계산에 사용(이전 사진없음 보고서로 인한 사진누락 오표시 방지).
+    const latest = pickLatestCleaningReport(reports)!;
+    if (latest.cleanStatus === "불량") return "불량";
+    if (getCleaningPhotoCount(latest) === 0) return "사진누락";
     return "O";
   };
 
@@ -9743,6 +9760,18 @@ export default function App() {
     setEditingPreInspectionId(row.id);
     setPreInspectionForm({ ...rest });
     setShowPreInspectionForm(true);
+  };
+  // 행 단일 클릭 → 상세보기, 더블 클릭(300ms 내) → 수정. 중복 실행 방지.
+  const handleInspectionRowClick = (row: PreMoveInInspection) => {
+    if (inspectionClickTimerRef.current) return; // 대기 중이면 무시(더블클릭 처리)
+    inspectionClickTimerRef.current = setTimeout(() => {
+      inspectionClickTimerRef.current = null;
+      setPreInspectionDetailId(row.id); // 단일 클릭 → 상세
+    }, 300);
+  };
+  const handleInspectionRowDblClick = (row: PreMoveInInspection) => {
+    if (inspectionClickTimerRef.current) { clearTimeout(inspectionClickTimerRef.current); inspectionClickTimerRef.current = null; }
+    if (canEditData(currentUser)) openPreInspectionEdit(row); // 더블 클릭 → 수정
   };
   const savePreInspection = () => {
     const now = new Date().toISOString();
@@ -12814,6 +12843,23 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       }
     } else if (!isSupabaseAvailable()) {
       cleaningEditPhotosReadyRef.current = true; // 로컬 데이터가 곧 원본
+    }
+  };
+
+  // 기숙사 카드 클릭 → 이 기숙사의 최신 청소보고서 상세/수정 열기(없으면 등록). 기존 등록/수정 버튼은 그대로 유지.
+  const openCleaningReportForDorm = (dorm: Dorm) => {
+    const dormKey = matchDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+    const latest = pickLatestCleaningReport(
+      cleaningReports.filter(
+        (r) => !r.isDeleted && !r.isPermanentDeleted && (r.dormId === dorm.id || matchDormKey(r.site, r.buildingName, r.dong, r.roomHo) === dormKey)
+      )
+    );
+    if (latest) {
+      // 수정 권한이 있으면 상세/수정 폼, 없으면 사진 뷰어로라도 확인.
+      if (canEditCleaningReport(currentUser, latest)) void openCleaningReportEdit(latest);
+      else void openCleaningPhotoViewer(latest);
+    } else if (canCreateCleaningReport(currentUser)) {
+      openCleaningReportForm(undefined, dorm); // 보고서가 없으면 등록 화면
     }
   };
 
@@ -19477,7 +19523,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </thead>
                 <tbody>
                   {visiblePreInspections.map((r) => (
-                    <tr key={r.id} className={`border-t ${theme.darkMode ? "border-slate-700" : "border-slate-100"}`}>
+                    <tr key={r.id} onClick={() => handleInspectionRowClick(r)} onDoubleClick={() => handleInspectionRowDblClick(r)} title="클릭: 상세보기 · 더블클릭: 수정" className={`cursor-pointer border-t ${theme.darkMode ? "border-slate-700 hover:bg-slate-950" : "border-slate-100 hover:bg-slate-50"}`}>
                       <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(r.inspectionDate) || "-"}</td>
                       <td className="px-3 py-3 whitespace-nowrap">{r.site || "-"}</td>
                       <td className="px-3 py-3 whitespace-nowrap">{r.gender || "-"}</td>
@@ -19494,10 +19540,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-3 py-3 whitespace-nowrap text-center">{r.photos.length}</td>
                       <td className="px-3 py-3 whitespace-nowrap">
                         <div className="flex justify-center gap-1">
-                          <button onClick={() => setPreInspectionDetailId(r.id)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">상세</button>
-                          {canEditData(currentUser) && <button onClick={() => openPreInspectionEdit(r)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">수정</button>}
-                          <button onClick={() => printPreInspection(r)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">PDF</button>
-                          {canEditData(currentUser) && <button onClick={() => deletePreInspection(r.id)} className="rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">삭제</button>}
+                          <button onClick={(e) => { e.stopPropagation(); setPreInspectionDetailId(r.id); }} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">상세</button>
+                          {canEditData(currentUser) && <button onClick={(e) => { e.stopPropagation(); openPreInspectionEdit(r); }} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">수정</button>}
+                          <button onClick={(e) => { e.stopPropagation(); printPreInspection(r); }} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">PDF</button>
+                          {canEditData(currentUser) && <button onClick={(e) => { e.stopPropagation(); deletePreInspection(r.id); }} className="rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">삭제</button>}
                         </div>
                       </td>
                     </tr>
@@ -20074,8 +20120,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     return (
                       <tr
                         key={`${dorm.id}-${idx}`}
-                        onClick={() => setSelectedCleaningDormId((prev) => (prev === dorm.id ? "" : dorm.id))}
-                        title={isSelectedDorm ? "다시 클릭하면 전체 보기" : "클릭하면 이 기숙사만 보기"}
+                        onClick={() => openCleaningReportForDorm(dorm)}
+                        title="클릭하면 이 기숙사의 최신 청소보고서 상세/수정 (없으면 등록)"
                         className={`cursor-pointer ${isSelectedDorm ? (theme.darkMode ? "bg-blue-950/40 ring-1 ring-blue-500" : "bg-blue-50 ring-1 ring-blue-300") : ""} ${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}
                       >
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{rowNo}</td>}
