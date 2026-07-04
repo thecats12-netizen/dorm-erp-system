@@ -86,6 +86,7 @@ import {
 } from "./services/preMoveInInspectionService";
 import { uploadTempFileAndSign } from "./services/pdfStorageService";
 import { savePdfSafely } from "./utils/savePdfSafely";
+import { isHeicFile, normalizeUploadImage } from "./utils/imageUtils";
 import {
   emptyPreMoveInInspection,
   INSPECTION_STATUS_OPTIONS,
@@ -1862,6 +1863,8 @@ export default function App() {
   const cleaningCardClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // 청소 기숙사 카드 단일/더블 클릭 구분(300ms)
   const [preInspectionPhotoCategory, setPreInspectionPhotoCategory] = useState<string>(INSPECTION_PHOTO_CATEGORIES[0]);
   const [preInspectionUploading, setPreInspectionUploading] = useState(false);
+  // HEIC→JPG 변환 진행 상태(청소/입주전점검/하자접수 사진 업로드 공용). 변환 중 저장 버튼 잠금/안내 표시.
+  const [heicConverting, setHeicConverting] = useState(false);
   const [preInspectionSearch, setPreInspectionSearch] = useState("");
   const [preInspectionSiteFilter, setPreInspectionSiteFilter] = useState("전체");
   const [preInspectionGenderFilter, setPreInspectionGenderFilter] = useState("전체");
@@ -9375,6 +9378,7 @@ export default function App() {
 
   const saveDefect = () => {
     if (!canFileDefect(currentUser)) return;
+    if (heicConverting) { void appAlert("사진 변환 중", "HEIC 사진을 변환하는 중입니다. 잠시 후 다시 저장해주세요."); return; }
     if (!defectForm.site.trim() || !defectForm.buildingName.trim() || !defectForm.dong.trim() || !defectForm.ho.trim() || !defectForm.requestText.trim()) {
       alert("필수 항목을 모두 입력하세요. (지역, 기숙사, 동/호, 요청 내용을 확인하세요.)");
       return;
@@ -9494,7 +9498,10 @@ export default function App() {
     });
 
   // 이미지 첨부: 개수 제한 없음. 단 5MB 초과(또는 모든 이미지) 시 최대 1600px·JPEG 품질로 자동 압축해 저장 안정화.
-  const readFileDataUrl = async (file: File): Promise<string> => {
+  const readFileDataUrl = async (inputFile: File): Promise<string> => {
+    // HEIC/HEIF(아이폰) → JPG 자동 변환 후 기존 압축/저장 로직 그대로 진행.
+    // 변환 실패 시 예외 → 호출부(readUploadedImageDataUrls)에서 안내 후 해당 사진만 건너뜀.
+    const file = await normalizeUploadImage(inputFile);
     const raw = await readFileRaw(file);
     if (!file.type.startsWith("image/")) return raw; // 이미지 아니면 원본
     const needCompress = file.size > 5 * 1024 * 1024 || true; // 모든 이미지 압축(용량 절감)
@@ -9527,12 +9534,43 @@ export default function App() {
     }
   };
 
+  // 업로드 공통 처리: FileList → dataURL[] (HEIC 자동 변환 + 병렬 처리 + 실패 안내).
+  // - HEIC 포함 시 변환 로딩 상태(heicConverting) 표시
+  // - Promise.all 병렬 처리(20~50장 대응)
+  // - 개별 파일 실패해도 앱이 죽지 않고 성공한 사진만 반환, 실패분은 안내
+  const readUploadedImageDataUrls = async (files: FileList): Promise<string[]> => {
+    const arr = Array.from(files);
+    if (arr.length === 0) return [];
+    const hasHeic = arr.some(isHeicFile);
+    if (hasHeic) setHeicConverting(true);
+    try {
+      const results = await Promise.all(
+        arr.map(async (f) => {
+          try {
+            return await readFileDataUrl(f);
+          } catch (e) {
+            console.error("[사진 업로드] 처리 실패(건너뜀):", (e as { message?: string })?.message || e);
+            return null;
+          }
+        })
+      );
+      const urls = results.filter((u): u is string => typeof u === "string" && u.length > 0);
+      if (urls.length < arr.length) {
+        await appAlert("사진 업로드", "일부 HEIC 사진을 변환하지 못했습니다.\n해당 사진을 JPG로 변환한 뒤 다시 업로드해주세요.");
+      }
+      return urls;
+    } finally {
+      if (hasHeic) setHeicConverting(false);
+    }
+  };
+
   const handleCleaningReportPhotos = async (
     files: FileList | null,
     field: "beforePhotoDataUrls" | "afterPhotoDataUrls"
   ) => {
     if (!files) return;
-    const urls = await Promise.all(Array.from(files).map((file) => readFileDataUrl(file)));
+    const urls = await readUploadedImageDataUrls(files); // HEIC 자동 변환 포함
+    if (urls.length === 0) return;
     setCleaningReportForm((prev) => ({
       ...prev,
       [field]: [...prev[field], ...urls],
@@ -9834,7 +9872,8 @@ export default function App() {
     if (!files || files.length === 0) return;
     setPreInspectionUploading(true);
     try {
-      const urls = await Promise.all(Array.from(files).map((file) => readFileDataUrl(file)));
+      const urls = await readUploadedImageDataUrls(files); // HEIC 자동 변환 포함
+      if (urls.length === 0) return;
       const added: InspectionPhoto[] = urls.map((dataUrl) => ({ category: preInspectionPhotoCategory, description: "", dataUrl }));
       setPreInspectionForm((prev) => ({ ...prev, photos: [...prev.photos, ...added] }));
     } catch (e) {
@@ -9913,6 +9952,7 @@ export default function App() {
     if (canEditData(currentUser)) openPreInspectionEdit(row); // 더블 클릭 → 수정
   };
   const savePreInspection = () => {
+    if (heicConverting) { void appAlert("사진 변환 중", "HEIC 사진을 변환하는 중입니다. 잠시 후 다시 저장해주세요."); return; }
     const now = new Date().toISOString();
     if (editingPreInspectionId) {
       setPreMoveInInspections((prev) =>
@@ -10296,6 +10336,7 @@ export default function App() {
 
   const saveCleaningReport = async () => {
     if (!canCreateCleaningReport(currentUser)) return;
+    if (heicConverting) { await appAlert("사진 변환 중", "HEIC 사진을 변환하는 중입니다. 잠시 후 다시 저장해주세요."); return; }
     if (!cleaningReportForm.buildingName.trim() || !cleaningReportForm.dong.trim() || !cleaningReportForm.roomHo.trim()) {
       alert("청소보고서 저장을 위해 기숙사 정보(건물명, 동, 호수)를 입력해주세요.");
       return;
@@ -12936,8 +12977,9 @@ const openReportPdf = (type: PdfReportType, autoPrint: boolean) => {
 
 const handleDefectRequestPhotos = async (files: FileList | null) => {
     if (!files) return;
-    // 개수 제한 없음 + 자동 압축. 기존 이미지에 병합(덮어쓰기 방지).
-    const results = await Promise.all(Array.from(files).map((file) => readFileDataUrl(file)));
+    // 개수 제한 없음 + 자동 압축 + HEIC 자동 변환. 기존 이미지에 병합(덮어쓰기 방지).
+    const results = await readUploadedImageDataUrls(files);
+    if (results.length === 0) return;
     setDefectForm((prev) => ({
       ...prev,
       requestPhotoDataUrls: [...prev.requestPhotoDataUrls, ...results],
@@ -12946,7 +12988,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const handleDefectCompletionPhotos = async (files: FileList | null) => {
     if (!files) return;
-    const results = await Promise.all(Array.from(files).map((file) => readFileDataUrl(file)));
+    const results = await readUploadedImageDataUrls(files); // HEIC 자동 변환 포함
+    if (results.length === 0) return;
     setDefectForm((prev) => ({
       ...prev,
       completionPhotoDataUrls: [...prev.completionPhotoDataUrls, ...results],
@@ -19810,15 +19853,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </div>
                   <label className="cursor-pointer rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">
                     사진 선택
-                    <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => { handlePreInspectionPhotos(e.target.files); e.currentTarget.value = ""; }} />
+                    <input type="file" accept="image/*,.heic,.heif" multiple className="hidden" onChange={(e) => { handlePreInspectionPhotos(e.target.files); e.currentTarget.value = ""; }} />
                   </label>
                   <label className="cursor-pointer rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
                     📷 카메라 촬영
-                    <input type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={(e) => { handlePreInspectionPhotos(e.target.files); e.currentTarget.value = ""; }} />
+                    <input type="file" accept="image/*,.heic,.heif" capture="environment" multiple className="hidden" onChange={(e) => { handlePreInspectionPhotos(e.target.files); e.currentTarget.value = ""; }} />
                   </label>
                   {preInspectionUploading && <span className="text-sm text-slate-500">업로드 중…</span>}
+                  {heicConverting && <span className="text-sm font-semibold text-blue-500">HEIC 사진을 변환하는 중입니다...</span>}
                   <span className="text-sm text-slate-500">총 {preInspectionForm.photos.length}장</span>
                 </div>
+                <div className="mb-2 text-xs text-slate-400">JPG, PNG, HEIC 사진을 업로드할 수 있습니다. 아이폰 HEIC 사진은 자동으로 JPG로 변환됩니다.</div>
                 {preInspectionForm.photos.length > 0 && (
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                     {preInspectionForm.photos.map((p, idx) => (
@@ -22953,12 +22998,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <div className="text-2xl">📷</div>
                     <div className={`mt-1 text-sm font-semibold ${theme.darkMode ? "text-slate-200" : "text-slate-700"}`}>사진을 여기에 끌어오거나 클릭해서 업로드하세요</div>
                     <div className="mt-0.5 text-xs text-slate-400">전/후 사진을 여러 장 등록할 수 있습니다</div>
+                    <div className="mt-1 text-xs text-slate-400">JPG, PNG, HEIC 사진을 업로드할 수 있습니다. 아이폰 HEIC 사진은 자동으로 JPG로 변환됩니다.</div>
+                    {heicConverting && <div className="mt-1 text-xs font-semibold text-blue-500">HEIC 사진을 변환하는 중입니다...</div>}
                     <div className="mt-3 flex flex-wrap justify-center gap-2">
                       <button type="button" onClick={(e) => { e.stopPropagation(); cleaningReportBeforePhotoInputRef.current?.click(); }} className="rounded-2xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-800">사진 선택</button>
                       {isMobileOrTablet() && (
                         <label onClick={(e) => e.stopPropagation()} className="cursor-pointer rounded-2xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700">
                           📸 카메라/앨범에서 사진 추가
-                          <input type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={(e) => { void handleCleaningReportPhotos(e.target.files, "beforePhotoDataUrls"); e.currentTarget.value = ""; }} />
+                          <input type="file" accept="image/*,.heic,.heif" capture="environment" multiple className="hidden" onChange={(e) => { void handleCleaningReportPhotos(e.target.files, "beforePhotoDataUrls"); e.currentTarget.value = ""; }} />
                         </label>
                       )}
                     </div>
@@ -22967,7 +23014,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <input
                     ref={cleaningReportBeforePhotoInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/*,.heic,.heif"
                     multiple
                     onChange={(e) => { void handleCleaningReportPhotos(e.target.files, "beforePhotoDataUrls"); e.currentTarget.value = ""; }}
                     className="hidden"
@@ -23730,7 +23777,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4 shadow-sm" : "rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"}`}>
                 <div className={`${theme.darkMode ? "mb-2 flex items-center gap-2 text-sm font-medium text-slate-300" : "mb-2 flex items-center gap-2 text-sm font-medium text-slate-700"}`}>
                   <Camera className="h-4 w-4" /> 접수 이미지
+                  {heicConverting && <span className="text-xs font-semibold text-blue-500">HEIC 사진을 변환하는 중입니다...</span>}
                 </div>
+                <div className="mb-2 text-xs text-slate-400">JPG, PNG, HEIC 사진을 업로드할 수 있습니다. 아이폰 HEIC 사진은 자동으로 JPG로 변환됩니다.</div>
                 <div className="flex flex-wrap gap-3">
                   {defectForm.requestPhotoDataUrls.map((src, idx) => (
                     <div key={idx} className="relative">
@@ -23781,14 +23830,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <button type="button" onClick={() => printDefectReport(defectForm as DefectRequest)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">PDF 저장</button>
                   </div>
                 )}
-                <input ref={defectRequestPhotoInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => handleDefectRequestPhotos(e.target.files)} />
+                <input ref={defectRequestPhotoInputRef} type="file" accept="image/*,.heic,.heif" multiple className="hidden" onChange={(e) => handleDefectRequestPhotos(e.target.files)} />
               </div>
 
               {currentUser?.role !== "maintenance_reporter" && (
                 <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4 shadow-sm" : "rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"}`}>
                   <div className={`${theme.darkMode ? "mb-2 flex items-center gap-2 text-sm font-medium text-slate-300" : "mb-2 flex items-center gap-2 text-sm font-medium text-slate-700"}`}>
                     <Camera className="h-4 w-4" /> 완료 이미지
+                    {heicConverting && <span className="text-xs font-semibold text-blue-500">HEIC 사진을 변환하는 중입니다...</span>}
                   </div>
+                  <div className="mb-2 text-xs text-slate-400">JPG, PNG, HEIC 사진을 업로드할 수 있습니다. 아이폰 HEIC 사진은 자동으로 JPG로 변환됩니다.</div>
                   <div className="flex flex-wrap gap-3">
                     {defectForm.completionPhotoDataUrls.map((src, idx) => (
                       <div key={idx} className="relative">
@@ -23832,7 +23883,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <button type="button" onClick={() => void downloadImagesAsZip(defectForm.completionPhotoDataUrls, `완료사진_${defectForm.buildingName || "기숙사"}_${reportFileDate(defectForm.receiptDate)}`)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ZIP</button>
                     </div>
                   )}
-                  <input ref={defectCompletionPhotoInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => handleDefectCompletionPhotos(e.target.files)} />
+                  <input ref={defectCompletionPhotoInputRef} type="file" accept="image/*,.heic,.heif" multiple className="hidden" onChange={(e) => handleDefectCompletionPhotos(e.target.files)} />
                 </div>
               )}
             </div>
