@@ -1786,6 +1786,7 @@ export default function App() {
   const [preInspectionForm, setPreInspectionForm] = useState<Omit<PreMoveInInspection, "id" | "createdAt" | "updatedAt">>(emptyPreMoveInInspection());
   const [preInspectionDetailId, setPreInspectionDetailId] = useState<string | null>(null);
   const inspectionClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // 단일/더블 클릭 구분(300ms)
+  const cleaningCardClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // 청소 기숙사 카드 단일/더블 클릭 구분(300ms)
   const [preInspectionPhotoCategory, setPreInspectionPhotoCategory] = useState<string>(INSPECTION_PHOTO_CATEGORIES[0]);
   const [preInspectionUploading, setPreInspectionUploading] = useState(false);
   const [preInspectionSearch, setPreInspectionSearch] = useState("");
@@ -12895,6 +12896,19 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     }
   };
 
+  // 기숙사 카드: 단일 클릭(300ms 후) → 선택/해제, 더블 클릭 → 최신 청소보고서 등록/수정. 중복 실행 방지.
+  const handleCleaningCardClick = (dorm: Dorm) => {
+    if (cleaningCardClickTimerRef.current) return; // 대기 중이면 무시(더블클릭 처리)
+    cleaningCardClickTimerRef.current = setTimeout(() => {
+      cleaningCardClickTimerRef.current = null;
+      setSelectedCleaningDormId((prev) => (prev === dorm.id ? "" : dorm.id)); // 선택/해제 토글
+    }, 300);
+  };
+  const handleCleaningCardDblClick = (dorm: Dorm) => {
+    if (cleaningCardClickTimerRef.current) { clearTimeout(cleaningCardClickTimerRef.current); cleaningCardClickTimerRef.current = null; }
+    openCleaningReportForDorm(dorm); // 더블 클릭 → 최신 보고서 등록/수정
+  };
+
   const openDormContractEdit = (c: DormContract) => {
     const { id: _id, ...rest } = c;
     // 저장된 계약상태/유형을 그대로 로드(자동선택으로 강제 초기화하지 않음) → 폼 값이 테이블/Excel 표시값과 일치.
@@ -20158,8 +20172,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     return (
                       <tr
                         key={`${dorm.id}-${idx}`}
-                        onClick={() => openCleaningReportForDorm(dorm)}
-                        title="클릭하면 이 기숙사의 최신 청소보고서 상세/수정 (없으면 등록)"
+                        onClick={() => handleCleaningCardClick(dorm)}
+                        onDoubleClick={() => handleCleaningCardDblClick(dorm)}
+                        title="클릭: 선택/해제 · 더블클릭: 최신 청소보고서 등록/수정"
                         className={`cursor-pointer ${isSelectedDorm ? (theme.darkMode ? "bg-blue-950/40 ring-1 ring-blue-500" : "bg-blue-50 ring-1 ring-blue-300") : ""} ${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}
                       >
                         {!isMaintenanceReporter && <td className="px-3 py-3 whitespace-nowrap">{rowNo}</td>}
