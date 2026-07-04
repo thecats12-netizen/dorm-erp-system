@@ -4703,6 +4703,14 @@ export default function App() {
     return `${week}주차`;
   };
 
+  // 화면/PDF 표시 전용: "몇월 몇주차"(예: 6월 5주차). 월요일이 속한 월 + 주차(getCleaningWeekInfo 재사용).
+  // ※ DB 저장용 getWeekLabel("5주차")은 그대로 두고, 표시에서만 월을 앞에 붙인다.
+  const getCleaningWeekLabel = (date: string): string => {
+    const info = getCleaningWeekInfo(date);
+    if (!info) return "주차외";
+    return `${info.month}월 ${info.weekNumber}주차`;
+  };
+
   // ============================================
   // 4. 감점 계산 함수 (계산형, DB 저장 안함)
   // X 1건당 -5점, 담당자 기준 자동 합산
@@ -10119,7 +10127,7 @@ export default function App() {
         { label: "기숙사", value: `${report.buildingName} ${report.dong}-${report.roomHo}` },
         { label: "상태", value: report.cleanStatus },
         { label: "담당 관리자", value: getDormManagerDisplayName(report.dormId) },
-        { label: "청소담당자", value: getUserDisplayName(report.cleanerName || "") },
+        { label: "해당주차", value: getCleaningWeekLabel(report.reportDate || report.createdAt || "") },
         { label: "메모", value: report.memo || "-", full: true },
       ],
       sections: [{ heading: "사진", urls: photos }],
@@ -20246,7 +20254,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           })()}
                         </td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(report.dormId)}</td>
-                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getWeekLabel(report.reportDate || report.createdAt || "")}</td>
+                        <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getCleaningWeekLabel(report.reportDate || report.createdAt || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
                           {(() => {
                             const count = getCleaningPhotoCount(report); // base64/캐시 개수
