@@ -1865,6 +1865,8 @@ export default function App() {
   const [preInspectionUploading, setPreInspectionUploading] = useState(false);
   // HEIC→JPG 변환 진행 상태(청소/입주전점검/하자접수 사진 업로드 공용). 변환 중 저장 버튼 잠금/안내 표시.
   const [heicConverting, setHeicConverting] = useState(false);
+  // 입주전 점검 폼 저장(UI) 중복 방지(Ctrl+S 반복/버튼 중복 → 중복 등록 방지). Supabase 지속 가드와 별개. 폼 열 때 초기화.
+  const preInspectionUiSaveRef = useRef(false);
   const [preInspectionSearch, setPreInspectionSearch] = useState("");
   const [preInspectionSiteFilter, setPreInspectionSiteFilter] = useState("전체");
   const [preInspectionGenderFilter, setPreInspectionGenderFilter] = useState("전체");
@@ -2880,6 +2882,15 @@ export default function App() {
       if (e.key === "Escape") { setImageLightbox(null); }
       else if (e.key === "ArrowLeft") { setLightboxZoomed(false); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index - 1 + lb.urls.length) % lb.urls.length } : lb)); }
       else if (e.key === "ArrowRight") { setLightboxZoomed(false); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + 1) % lb.urls.length } : lb)); }
+      else if (e.key === " " || e.code === "Space") { e.preventDefault(); setLightboxZoomed(false); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + 1) % lb.urls.length } : lb)); } // Space=다음
+      else if (e.key === "Enter") { // Enter=현재 사진 다운로드
+        if (!canDownloadFiles) return;
+        e.preventDefault();
+        const i = Math.min(Math.max(imageLightbox.index, 0), imageLightbox.urls.length - 1);
+        const src = normalizePhotoSrc(imageLightbox.urls[i]) || imageLightbox.urls[i];
+        const base = `${imageLightbox.title.replace(/[^가-힣A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "이미지"}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+        downloadImage(src, `${base}_${i + 1}.${dataUrlExt(src)}`);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -9888,6 +9899,19 @@ export default function App() {
   const updatePreInspectionPhoto = (idx: number, patch: Partial<InspectionPhoto>) =>
     setPreInspectionForm((prev) => ({ ...prev, photos: prev.photos.map((p, i) => (i === idx ? { ...p, ...patch } : p)) }));
 
+  // 입주전 점검 사진 공통 추출: 상세/수정/Viewer 가 동일 함수로 표시용 URL 목록을 얻는다.
+  // dataUrl(base64)/blob/http/객체 어떤 형태든 normalizePhotoSrc 로 정규화(HEIC 는 업로드 시 이미 JPG 변환됨).
+  const getPreInspectionPhotoUrls = (photos: InspectionPhoto[] | undefined | null): string[] => {
+    if (!Array.isArray(photos)) return [];
+    return photos.map((p) => normalizePhotoSrc(p?.dataUrl ?? p)).filter(Boolean);
+  };
+  // 입주전 점검 사진 뷰어 열기(상세/수정 공용). 정규화된 전체 사진을 넘겨 좌우 이동/다운로드/PDF 지원.
+  const openPreInspectionPhotoViewer = (photos: InspectionPhoto[] | undefined | null, index: number, title: string) => {
+    const urls = getPreInspectionPhotoUrls(photos);
+    if (urls.length === 0) return;
+    setImageLightbox({ urls, index: Math.min(Math.max(index, 0), urls.length - 1), title });
+  };
+
   // 계약 선택 → 지역/성별/주소/건물/동/호수/계약일/임대인 자동입력 + 매칭 기숙사 dormId.
   const applyContractToInspection = (contractId: string) => {
     const c = dormContracts.find((x) => x.id === contractId);
@@ -9928,12 +9952,14 @@ export default function App() {
   };
 
   const openPreInspectionCreate = () => {
+    preInspectionUiSaveRef.current = false; // 저장 가드 초기화
     setEditingPreInspectionId(null);
     setPreInspectionForm(emptyPreMoveInInspection());
     setPreInspectionPhotoCategory(INSPECTION_PHOTO_CATEGORIES[0]);
     setShowPreInspectionForm(true);
   };
   const openPreInspectionEdit = (row: PreMoveInInspection) => {
+    preInspectionUiSaveRef.current = false; // 저장 가드 초기화
     const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = row;
     setEditingPreInspectionId(row.id);
     setPreInspectionForm({ ...rest });
@@ -9953,6 +9979,8 @@ export default function App() {
   };
   const savePreInspection = () => {
     if (heicConverting) { void appAlert("사진 변환 중", "HEIC 사진을 변환하는 중입니다. 잠시 후 다시 저장해주세요."); return; }
+    if (preInspectionUiSaveRef.current) return; // 중복 저장 방지
+    preInspectionUiSaveRef.current = true;
     const now = new Date().toISOString();
     if (editingPreInspectionId) {
       setPreMoveInInspections((prev) =>
@@ -9974,6 +10002,46 @@ export default function App() {
     setShowPreInspectionForm(false);
     setEditingPreInspectionId(null);
   };
+
+  // 입주전 점검 상세 키보드: ESC=닫기, Enter=사진 있으면 첫 사진 미리보기(Viewer 열려 있으면 Viewer 우선).
+  useEffect(() => {
+    if (!preInspectionDetailId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (imageLightbox) return; // Viewer 가 열려 있으면 Viewer 핸들러가 처리
+      const r = preMoveInInspections.find((x) => x.id === preInspectionDetailId);
+      if (e.key === "Escape") { setPreInspectionDetailId(null); }
+      else if (e.key === "Enter") {
+        if (r && Array.isArray(r.photos) && r.photos.length > 0) {
+          e.preventDefault();
+          openPreInspectionPhotoViewer(r.photos, 0, `입주전 점검 · ${r.buildingName || ""}`);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preInspectionDetailId, imageLightbox]);
+
+  // 입주전 점검 수정 키보드: Ctrl/Cmd+S=저장, ESC=닫기(Viewer 열려 있으면 Viewer 우선),
+  // Enter=입력 필드가 아닐 때만 저장(입력 중에는 기본 동작 유지).
+  useEffect(() => {
+    if (!showPreInspectionForm) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (imageLightbox) return; // Viewer 가 열려 있으면 Viewer 핸들러(ESC 등)가 우선
+      if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) { e.preventDefault(); savePreInspection(); return; }
+      if (e.key === "Escape") { setShowPreInspectionForm(false); return; }
+      if (e.key === "Enter") {
+        const el = e.target as HTMLElement | null;
+        const tag = el?.tagName?.toLowerCase();
+        const isField = tag === "input" || tag === "textarea" || tag === "select" || tag === "button" || tag === "a" || !!el?.isContentEditable;
+        if (!isField) { e.preventDefault(); savePreInspection(); }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPreInspectionForm, imageLightbox]);
+
   const deletePreInspection = async (id: string) => {
     const ok = await appConfirm("입주전 점검", "이 점검 기록을 삭제하시겠습니까?", { confirmText: "삭제" });
     if (!ok) return;
@@ -19866,18 +19934,34 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="mb-2 text-xs text-slate-400">JPG, PNG, HEIC 사진을 업로드할 수 있습니다. 아이폰 HEIC 사진은 자동으로 JPG로 변환됩니다.</div>
                 {preInspectionForm.photos.length > 0 && (
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                    {preInspectionForm.photos.map((p, idx) => (
-                      <div key={idx} className="rounded-xl border border-slate-200 bg-white p-2">
-                        <img src={p.dataUrl} alt="점검사진" className="h-28 w-full rounded-lg object-cover" />
-                        <div className="mt-1">
-                          <select value={p.category} onChange={(e) => updatePreInspectionPhoto(idx, { category: e.target.value })} className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs">
-                            {INSPECTION_PHOTO_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-                          </select>
-                          <input value={p.description} onChange={(e) => updatePreInspectionPhoto(idx, { description: e.target.value })} placeholder="설명" className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1 text-xs" />
-                          <button onClick={() => removePreInspectionPhoto(idx)} className="mt-1 w-full rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">삭제</button>
+                    {preInspectionForm.photos.map((p, idx) => {
+                      const editBase = `입주전점검_${preInspectionForm.buildingName || "기숙사"}_${reportFileDate(preInspectionForm.inspectionDate)}`;
+                      const nsrc = normalizePhotoSrc(p?.dataUrl);
+                      return (
+                        <div key={idx} className="rounded-xl border border-slate-200 bg-white p-2">
+                          <button
+                            type="button"
+                            onClick={() => openPreInspectionPhotoViewer(preInspectionForm.photos, idx, `입주전 점검 · ${preInspectionForm.buildingName || ""}`)}
+                            className="block min-h-[44px] w-full overflow-hidden rounded-lg ring-1 ring-slate-200"
+                            title="크게 보기"
+                          >
+                            <span className="block h-28 w-full">
+                              <CleaningThumb candidates={nsrc ? [nsrc] : []} alt="점검사진" />
+                            </span>
+                          </button>
+                          <div className="mt-1">
+                            <select value={p.category} onChange={(e) => updatePreInspectionPhoto(idx, { category: e.target.value })} className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs">
+                              {INSPECTION_PHOTO_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                            <input value={p.description} onChange={(e) => updatePreInspectionPhoto(idx, { description: e.target.value })} placeholder="설명" className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1 text-xs" />
+                            {canDownloadFiles && (
+                              <button type="button" onClick={() => downloadImage(nsrc || p.dataUrl, `${editBase}_${idx + 1}.${dataUrlExt(nsrc || p.dataUrl)}`)} className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">↓ 다운로드</button>
+                            )}
+                            <button onClick={() => removePreInspectionPhoto(idx)} className="mt-1 w-full rounded-lg border border-rose-300 px-2 py-1.5 text-xs text-rose-600 hover:bg-rose-50">삭제</button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -19926,19 +20010,50 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <CompactField label="조치필요사항" value={r.actionRequired || "-"} className="col-span-2 md:col-span-3" />
                   <CompactField label="비고" value={r.memo || "-"} className="col-span-2 md:col-span-3" />
                 </div>
-                {r.photos.length > 0 && (
-                  <div className="mt-4">
-                    <h4 className="mb-2 text-sm font-semibold">사진 ({r.photos.length}장)</h4>
-                    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                      {r.photos.map((p, idx) => (
-                        <div key={idx} className="rounded-xl border border-slate-200 bg-white p-2">
-                          <img src={p.dataUrl} alt="점검사진" className="h-28 w-full rounded-lg object-cover" />
-                          <div className="mt-1 text-xs text-slate-500">{p.category}{p.description ? ` · ${p.description}` : ""}</div>
-                        </div>
-                      ))}
+                {r.photos.length > 0 && (() => {
+                  const detailUrls = getPreInspectionPhotoUrls(r.photos);
+                  const detailBase = `입주전점검_${r.buildingName || "기숙사"}_${reportFileDate(r.inspectionDate)}`;
+                  return (
+                    <div className="mt-4">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <h4 className="text-sm font-semibold">사진 ({r.photos.length}장)</h4>
+                        {canDownloadFiles && detailUrls.length > 0 && (
+                          <div className="flex flex-wrap gap-2">
+                            <button type="button" onClick={() => downloadAllImages(detailUrls, detailBase)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold hover:bg-slate-100">전체 다운로드</button>
+                            <button type="button" onClick={() => void downloadImagesAsZip(detailUrls, detailBase)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold hover:bg-slate-100">ZIP</button>
+                            <button type="button" onClick={() => printPreInspection(r)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold hover:bg-slate-100">PDF</button>
+                          </div>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+                        {r.photos.map((p, idx) => (
+                          <div key={idx} className="rounded-xl border border-slate-200 bg-white p-2">
+                            <button
+                              type="button"
+                              onClick={() => openPreInspectionPhotoViewer(r.photos, idx, `입주전 점검 · ${r.buildingName || ""}`)}
+                              className="block min-h-[44px] w-full overflow-hidden rounded-lg ring-1 ring-slate-200"
+                              title="크게 보기"
+                            >
+                              <span className="block h-28 w-full">
+                                <CleaningThumb candidates={normalizePhotoSrc(p?.dataUrl) ? [normalizePhotoSrc(p?.dataUrl)] : []} alt="점검사진" />
+                              </span>
+                            </button>
+                            <div className="mt-1 text-xs text-slate-500">{p.category}{p.description ? ` · ${p.description}` : ""}</div>
+                            {canDownloadFiles && (
+                              <button
+                                type="button"
+                                onClick={() => downloadImage(normalizePhotoSrc(p?.dataUrl) || p.dataUrl, `${detailBase}_${idx + 1}.${dataUrlExt(normalizePhotoSrc(p?.dataUrl) || p.dataUrl)}`)}
+                                className="mt-1 block min-h-[36px] w-full rounded-lg border border-slate-300 px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                              >
+                                ↓ 다운로드
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             </div>
           );
