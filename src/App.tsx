@@ -2911,7 +2911,13 @@ export default function App() {
   const [dataReloadKey, setDataReloadKey] = useState(0);
   // 하자 이미지 라이트박스(저장 없이 즉시 미리보기)
   const [imageLightbox, setImageLightbox] = useState<{ urls: string[]; index: number; title: string } | null>(null);
-  const [lightboxZoomed, setLightboxZoomed] = useState(false);
+  const [lightboxZoom, setLightboxZoom] = useState(1); // 확대 배율(1=100%)
+  const [lightboxPan, setLightboxPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 }); // 확대 상태 이동 위치(px)
+  const lightboxPanRef = useRef<{ dragging: boolean; startX: number; startY: number; baseX: number; baseY: number }>({ dragging: false, startX: 0, startY: 0, baseX: 0, baseY: 0 });
+  const lightboxPinchRef = useRef<{ startDist: number; startZoom: number } | null>(null); // 모바일 핀치 줌
+  // 사진 변경/닫기 시 확대·이동 초기화.
+  const resetLightboxView = () => { setLightboxZoom(1); setLightboxPan({ x: 0, y: 0 }); };
+  const clampZoom = (z: number) => Math.min(5, Math.max(1, z));
   const [lightboxError, setLightboxError] = useState(false); // 현재 이미지 로드 실패 → 검은 화면 대신 안내문
   const [lightboxResolvedSrc, setLightboxResolvedSrc] = useState<string>(""); // HEIC 변환 등 표시용 최종 src
   const [lightboxResolving, setLightboxResolving] = useState(false); // HEIC 변환 진행 중
@@ -2923,9 +2929,9 @@ export default function App() {
     if (!imageLightbox || imageLightbox.urls.length === 0) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") { setImageLightbox(null); }
-      else if (e.key === "ArrowLeft") { setLightboxZoomed(false); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index - 1 + lb.urls.length) % lb.urls.length } : lb)); }
-      else if (e.key === "ArrowRight") { setLightboxZoomed(false); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + 1) % lb.urls.length } : lb)); }
-      else if (e.key === " " || e.code === "Space") { e.preventDefault(); setLightboxZoomed(false); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + 1) % lb.urls.length } : lb)); } // Space=다음
+      else if (e.key === "ArrowLeft") { resetLightboxView(); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index - 1 + lb.urls.length) % lb.urls.length } : lb)); }
+      else if (e.key === "ArrowRight") { resetLightboxView(); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + 1) % lb.urls.length } : lb)); }
+      else if (e.key === " " || e.code === "Space") { e.preventDefault(); resetLightboxView(); setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + 1) % lb.urls.length } : lb)); } // Space=다음
       else if (e.key === "Enter") { // Enter=현재 사진 다운로드
         if (!canDownloadFiles) return;
         e.preventDefault();
@@ -2942,6 +2948,7 @@ export default function App() {
   // 라이트박스 현재 이미지 변경 시: 로드실패 상태 초기화 + HEIC 면 JPEG 로 변환해 표시(검은화면/안내문 대신).
   useEffect(() => {
     setLightboxError(false);
+    setLightboxZoom(1); setLightboxPan({ x: 0, y: 0 }); // 사진 변경/열기/닫기 시 확대·이동 초기화
     if (!imageLightbox || imageLightbox.urls.length === 0) { setLightboxResolvedSrc(""); setLightboxResolving(false); return; }
     const i = Math.min(Math.max(imageLightbox.index, 0), imageLightbox.urls.length - 1);
     const norm = normalizePhotoSrc(imageLightbox.urls[i]) || imageLightbox.urls[i];
@@ -24400,9 +24407,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           // 표시용 src: HEIC 변환 결과(lightboxResolvedSrc) 우선, 없으면 정규화값. (bare base64/잘못된 MIME 보정 포함)
           const displaySrc = lightboxResolvedSrc || normalizePhotoSrc(current) || current;
           const go = (delta: number) => {
-            setLightboxZoomed(false);
+            resetLightboxView();
             setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + delta + lb.urls.length) % lb.urls.length } : lb));
           };
+          // 확대 배율 적용(1 이면 이동 초기화).
+          const applyZoom = (nz: number) => { const z = clampZoom(nz); setLightboxZoom(z); if (z === 1) setLightboxPan({ x: 0, y: 0 }); };
           return (
             <div className="fixed inset-0 z-[110] flex flex-col bg-black/85 backdrop-blur-sm" onClick={() => setImageLightbox(null)}>
               <div className="flex items-center justify-between gap-2 p-3 text-white" onClick={(e) => e.stopPropagation()}>
@@ -24428,10 +24437,48 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 })()}
               </div>
               <div
-                className="relative flex flex-1 items-center justify-center overflow-auto p-4"
+                className="relative flex flex-1 items-center justify-center overflow-hidden p-4"
+                style={{ touchAction: "none" }}
                 onClick={(e) => e.stopPropagation()}
-                onTouchStart={(e) => { lightboxTouchStartXRef.current = e.touches[0]?.clientX ?? null; }}
+                onWheel={(e) => { applyZoom(lightboxZoom + (e.deltaY < 0 ? 0.25 : -0.25)); }}
+                onMouseMove={(e) => {
+                  const p = lightboxPanRef.current;
+                  if (!p.dragging) return;
+                  setLightboxPan({ x: p.baseX + (e.clientX - p.startX), y: p.baseY + (e.clientY - p.startY) });
+                }}
+                onMouseUp={() => { lightboxPanRef.current.dragging = false; }}
+                onMouseLeave={() => { lightboxPanRef.current.dragging = false; }}
+                onTouchStart={(e) => {
+                  if (e.touches.length === 2) {
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    lightboxPinchRef.current = { startDist: Math.hypot(dx, dy) || 1, startZoom: lightboxZoom };
+                    lightboxTouchStartXRef.current = null;
+                  } else if (e.touches.length === 1) {
+                    if (lightboxZoom > 1) {
+                      const t = e.touches[0];
+                      lightboxPanRef.current = { dragging: true, startX: t.clientX, startY: t.clientY, baseX: lightboxPan.x, baseY: lightboxPan.y };
+                      lightboxTouchStartXRef.current = null;
+                    } else {
+                      lightboxTouchStartXRef.current = e.touches[0]?.clientX ?? null; // 스와이프 시작
+                    }
+                  }
+                }}
+                onTouchMove={(e) => {
+                  if (lightboxPinchRef.current && e.touches.length === 2) {
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    const dist = Math.hypot(dx, dy);
+                    applyZoom(lightboxPinchRef.current.startZoom * (dist / lightboxPinchRef.current.startDist));
+                  } else if (lightboxPanRef.current.dragging && e.touches.length === 1) {
+                    const t = e.touches[0];
+                    const p = lightboxPanRef.current;
+                    setLightboxPan({ x: p.baseX + (t.clientX - p.startX), y: p.baseY + (t.clientY - p.startY) });
+                  }
+                }}
                 onTouchEnd={(e) => {
+                  if (lightboxPinchRef.current) { lightboxPinchRef.current = null; if (lightboxZoom <= 1) setLightboxPan({ x: 0, y: 0 }); return; }
+                  if (lightboxPanRef.current.dragging) { lightboxPanRef.current.dragging = false; return; }
                   const startX = lightboxTouchStartXRef.current;
                   lightboxTouchStartXRef.current = null;
                   if (startX == null || urls.length <= 1) return;
@@ -24456,8 +24503,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <img
                     src={displaySrc}
                     alt={imageLightbox.title}
-                    loading="lazy"
-                    onClick={() => setLightboxZoomed((z) => !z)}
+                    draggable={false}
                     onError={() => {
                       if (import.meta.env.DEV) console.debug("[lightbox] 이미지 로드 실패", { index: safeIndex, srcHead: String(displaySrc).slice(0, 48) });
                       // 첫 사진 실패 시 다음 사진 시도(한 바퀴 돌면 안내문 표시).
@@ -24465,14 +24511,36 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       if (urls.length > 1 && lightboxErrorCountRef.current < urls.length) { go(1); }
                       else { setLightboxError(true); }
                     }}
-                    className={lightboxZoomed ? "max-h-none max-w-none cursor-zoom-out" : "max-h-full max-w-full object-contain cursor-zoom-in"}
+                    onDoubleClick={() => applyZoom(lightboxZoom > 1 ? 1 : 2)} // 더블클릭 100%↔200%
+                    onMouseDown={(e) => {
+                      if (lightboxZoom <= 1) return;
+                      e.preventDefault();
+                      lightboxPanRef.current = { dragging: true, startX: e.clientX, startY: e.clientY, baseX: lightboxPan.x, baseY: lightboxPan.y };
+                    }}
+                    className="select-none object-contain"
+                    style={{
+                      maxWidth: "90vw",
+                      maxHeight: "85vh",
+                      transform: `translate(${lightboxPan.x}px, ${lightboxPan.y}px) scale(${lightboxZoom})`,
+                      transformOrigin: "center center",
+                      transition: lightboxPanRef.current.dragging ? "none" : "transform 0.12s ease-out",
+                      cursor: lightboxZoom > 1 ? (lightboxPanRef.current.dragging ? "grabbing" : "grab") : "zoom-in",
+                    }}
                   />
                 )}
                 {urls.length > 1 && (
                   <button type="button" onClick={() => go(1)} className="absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/15 px-3 py-2 text-xl text-white hover:bg-white/30">›</button>
                 )}
               </div>
-              <div className="pb-3 text-center text-xs text-white/50">클릭=확대/축소 · ←/→ 또는 스와이프=이동 · ESC/바깥=닫기</div>
+              {/* 확대/축소 컨트롤(＋ / 배율 / －) + 안내문 */}
+              <div className="pb-3" onClick={(e) => e.stopPropagation()}>
+                <div className="mb-1.5 flex items-center justify-center gap-2">
+                  <button type="button" onClick={() => applyZoom(lightboxZoom - 0.25)} className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-lg font-bold text-white hover:bg-white/20" title="축소">－</button>
+                  <button type="button" onClick={() => resetLightboxView()} className="min-w-[64px] rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/20" title="100%">{Math.round(lightboxZoom * 100)}%</button>
+                  <button type="button" onClick={() => applyZoom(lightboxZoom + 0.25)} className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-lg font-bold text-white hover:bg-white/20" title="확대">＋</button>
+                </div>
+                <div className="text-center text-xs text-white/50">휠/＋－=확대·축소 · 더블클릭=100%↔200% · 확대 후 드래그=이동 · ←/→·스와이프=이동 · ESC=닫기</div>
+              </div>
             </div>
           );
         })()}
