@@ -1924,8 +1924,20 @@ export default function App() {
   const [cleaningReportsLoading, setCleaningReportsLoading] = useState(false);
   const [cleaningReportsLoaded, setCleaningReportsLoaded] = useState(false);
   const [cleaningReportsError, setCleaningReportsError] = useState<string | null>(null);
+  // 조회 실패 자동 재시도(3초 후 1회) 타이머 — 중복 예약 방지.
+  const cleaningRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 네트워크 경고 토스트(문자열 있으면 표시, 일정 시간 후 자동 숨김).
+  const [networkToast, setNetworkToast] = useState<string | null>(null);
+  const networkToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showNetworkToast = (msg: string) => {
+    setNetworkToast(msg);
+    if (networkToastTimerRef.current) clearTimeout(networkToastTimerRef.current);
+    networkToastTimerRef.current = setTimeout(() => setNetworkToast(null), 4000);
+  };
   // 사진은 목록(메타데이터) 표시 후 백그라운드로 병합 → 병합 중엔 "사진 확인중" 표시(사진없음 오표시 방지).
   const [cleaningPhotosLoading, setCleaningPhotosLoading] = useState(false);
+  // 사진 조회가 네트워크/DB 오류로 실패 → 0장이어도 "사진없음" 확정 대신 "로딩 실패" 표시(데이터 삭제 아님).
+  const [cleaningPhotosError, setCleaningPhotosError] = useState(false);
   // PDF 생성/저장 중 버튼 로딩(중복 클릭 방지) — 전체 화면 로딩 아님.
   const [savingPdf, setSavingPdf] = useState(false);
   // 수정 모달에서 기존 사진(원본) 조회 중 표시 — URL 생성 전 "사진없음" 오표시 방지.
@@ -9703,9 +9715,24 @@ export default function App() {
 
   // 청소보고서 지연 로딩: 초기 로딩에서 제외되므로 청소 데이터가 필요한 메뉴 진입 시 조회.
   // 60초 캐시 + 백그라운드 새로고침(화면 유지) + 실패 시 기존 목록 유지(빈 배열 덮어쓰기 금지).
+  // 조회 실패 시 3초 후 1회 자동 재시도 예약(중복 예약 방지).
+  const scheduleCleaningRetry = () => {
+    if (cleaningRetryTimerRef.current) return;
+    cleaningRetryTimerRef.current = setTimeout(() => {
+      cleaningRetryTimerRef.current = null;
+      void loadCleaningReports(true);
+    }, 3000);
+  };
+
   const loadCleaningReports = async (force = false) => {
     if (!isSupabaseAvailable() || !currentUser?.id) return;
     if (cleaningReportsLoadingRef.current) return;
+    // 오프라인이면 요청을 보내지 않고 기존 목록/사진 캐시를 그대로 유지(0건 덮어쓰기 방지).
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      setCleaningReportsError("오프라인 상태입니다. 기존 데이터를 표시합니다.");
+      showNetworkToast("인터넷 연결이 끊겼습니다. 기존 데이터를 표시합니다.");
+      return;
+    }
     const fresh = Date.now() - cleaningReportsFetchedAtRef.current < 60 * 1000;
     if (!force && fresh && cleaningReports.length > 0) return; // 60초 캐시(있으면 재조회 생략)
     cleaningReportsLoadingRef.current = true;
@@ -9715,7 +9742,13 @@ export default function App() {
       const session = await getCurrentSession();
       if (!session?.user?.id) return;
       const remote = await loadCleaningReportsModule(tenantId);
-      if (!remote) { setCleaningReportsError("최신 청소보고서를 불러오지 못했습니다."); return; } // 조회 실패(null) → 기존 목록 유지
+      if (!remote) {
+        // 조회 실패(null) → 기존 목록/사진 절대 덮어쓰지 않음 + 토스트 + 3초 후 1회 자동 재시도.
+        setCleaningReportsError("최신 청소보고서를 불러오지 못했습니다.");
+        showNetworkToast("네트워크가 불안정합니다. 기존 데이터를 표시합니다.");
+        scheduleCleaningRetry();
+        return;
+      }
       let applied = false;
       // 사진 보존 병합(로드 결과 사진이 비었는데 메모리에 있으면 유지) — 기존 초기 로드와 동일 패턴.
       setCleaningReports((prev) => {
@@ -9739,8 +9772,11 @@ export default function App() {
       // 사진 병합은 아래 별도 effect가 "표시된 모든 보고서(사진 미로드분)"에 대해 처리한다.
       // (여기서 호출하면 60초 캐시로 loadCleaningReports 가 skip될 때 병합이 안 되는 문제가 있어 분리)
     } catch (e) {
+      // 네트워크/예외 → 기존 목록·사진 유지 + 토스트 + 3초 후 1회 자동 재시도.
       console.warn("cleaning_reports 조회 실패(기존 목록 유지):", e);
       setCleaningReportsError("최신 청소보고서를 불러오지 못했습니다.");
+      showNetworkToast("네트워크가 불안정합니다. 기존 데이터를 표시합니다.");
+      scheduleCleaningRetry();
     } finally {
       cleaningReportsLoadingRef.current = false;
       setCleaningReportsLoading(false);
@@ -9799,10 +9835,13 @@ export default function App() {
   const mergeCleaningPhotos = async (ids: string[]) => {
     const targetIds = (ids || []).filter(Boolean);
     if (targetIds.length === 0) return;
+    // 오프라인이면 사진 조회 생략(기존 사진/캐시 유지). "로딩 실패"로만 표시.
+    if (typeof navigator !== "undefined" && navigator.onLine === false) { setCleaningPhotosError(true); return; }
     setCleaningPhotosLoading(true);
     try {
       const photos = isSupabaseAvailable() ? await loadCleaningReportsPhotosByIds(targetIds) : [];
-      if (photos === null) return; // DB 조회 실패 → ref에 기록하지 않음(다음 변경 시 재시도)
+      if (photos === null) { setCleaningPhotosError(true); return; } // DB 조회 실패 → "로딩 실패" 표시, ref 미기록(재시도)
+      setCleaningPhotosError(false); // 조회 성공
       targetIds.forEach((id) => cleaningPhotosFetchedIdsRef.current.add(id)); // 성공 → 1회만 시도
       const dbById = new Map((photos || []).map((p) => [p.id, p]));
       const recovery = buildLocalCleaningPhotoRecovery();
@@ -9827,6 +9866,7 @@ export default function App() {
       );
     } catch (e) {
       console.warn("cleaning 사진 병합 실패:", e);
+      setCleaningPhotosError(true); // 실패 → "로딩 실패"(사진없음 확정 아님, 데이터 삭제 아님)
     } finally {
       setCleaningPhotosLoading(false);
     }
@@ -9860,6 +9900,24 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, currentUser?.id]);
+
+  // 온라인/오프라인 이벤트: 복구되면 자동 재조회, 끊기면 안내(기존 데이터/사진은 유지 — 삭제 아님).
+  useEffect(() => {
+    const onOnline = () => {
+      showNetworkToast("인터넷 연결이 복구되었습니다. 최신 데이터를 다시 불러옵니다.");
+      cleaningPhotosFetchedIdsRef.current.clear(); // 실패했던 사진도 재조회 대상으로
+      setCleaningPhotosError(false);
+      void loadCleaningReports(true);
+    };
+    const onOffline = () => showNetworkToast("인터넷 연결이 끊겼습니다. 기존 데이터를 표시합니다.");
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id, tenantId]);
 
   // 청소보고서 state 변경 시 경량 캐시(+썸네일) 자동 갱신(등록/수정/삭제/실시간/조회 모두 커버).
   // 디바운스 저장. 빈 배열이면 저장하지 않아 캐시가 지워지지 않는다.
@@ -20631,7 +20689,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
               </div>
               {cleaningReportsError && cleaningReports.length > 0 && (
-                <div className="mb-2 text-xs text-amber-600">최신 데이터를 불러오지 못해 기존 목록을 표시 중입니다. (자동으로 다시 시도됩니다)</div>
+                <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-amber-600">
+                  <span>최신 데이터를 불러오지 못해 기존 목록을 표시 중입니다. (자동으로 다시 시도됩니다)</span>
+                  <button type="button" onClick={() => void loadCleaningReports(true)} className="rounded-lg border border-amber-400 px-2 py-1 font-semibold text-amber-700 hover:bg-amber-50">다시 불러오기</button>
+                </div>
               )}
               <div className="erp-table-container">
                 <table className="erp-table min-w-[900px] w-full text-left">
@@ -20667,10 +20728,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">
                           {(() => {
                             const count = getCleaningPhotoCount(report); // base64/캐시 개수
-                            // 사진 병합 중(메타데이터만 로드된 상태)이면 "사진없음" 대신 "확인중" 표시.
-                            if (count === 0) return cleaningPhotosLoading
-                              ? <span className="text-xs text-slate-400">사진 확인중…</span>
-                              : <span className="text-xs text-rose-500">사진없음</span>;
+                            // 사진 0장일 때: 로딩 중/조회 실패/오프라인이면 "사진없음"으로 확정하지 않는다.
+                            if (count === 0) {
+                              if (cleaningPhotosLoading) return <span className="text-xs text-slate-400">사진 확인중…</span>;
+                              if (cleaningPhotosError || cleaningReportsError || (typeof navigator !== "undefined" && navigator.onLine === false))
+                                return <span className="text-xs text-amber-500">사진 확인 중(로딩 실패)</span>;
+                              return <span className="text-xs text-rose-500">사진없음</span>;
+                            }
                             // 정규화된 후보 사진들(첫 실패 시 다음 사진 시도, 모두 실패해도 회색 placeholder).
                             const candidates = getCleaningPhotoUrls(report);
                             const cacheThumb = normalizePhotoSrc((report as any)?.__thumb);
@@ -20719,7 +20783,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             : cleaningReports.length > 0
                               ? "필터 조건에 맞는 청소보고서가 없습니다."
                               : cleaningReportsError
-                                ? "청소보고서를 불러오지 못했습니다. 잠시 후 다시 시도해주세요."
+                                ? (
+                                  <div className="flex flex-col items-center gap-2">
+                                    <span>청소보고서를 불러오지 못했습니다. 기존 데이터가 있으면 그대로 표시됩니다.</span>
+                                    <button type="button" onClick={() => void loadCleaningReports(true)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">다시 불러오기</button>
+                                  </div>
+                                )
                                 : "등록된 청소보고서가 없습니다."}
                         </td>
                       </tr>
@@ -24544,6 +24613,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
           );
         })()}
+
+        {/* 네트워크 경고 토스트(조회 실패/오프라인/복구) — 기존 데이터는 유지된 채 안내만 표시 */}
+        {networkToast && (
+          <div className="fixed bottom-4 left-1/2 z-[120] -translate-x-1/2 px-4">
+            <div className="flex items-center gap-3 rounded-2xl bg-slate-900/95 px-4 py-3 text-sm text-white shadow-xl ring-1 ring-white/10">
+              <span className="text-amber-300">⚠</span>
+              <span>{networkToast}</span>
+              <button type="button" onClick={() => void loadCleaningReports(true)} className="rounded-lg bg-white/10 px-2.5 py-1 text-xs font-semibold hover:bg-white/20">다시 불러오기</button>
+              <button type="button" onClick={() => setNetworkToast(null)} className="rounded-lg px-2 py-1 text-xs text-white/60 hover:text-white">✕</button>
+            </div>
+          </div>
+        )}
 
         {/* 보안: 비활성 자동 로그아웃 1분 전 경고 모달 */}
         {showInactivityWarning && (
