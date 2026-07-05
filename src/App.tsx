@@ -86,7 +86,7 @@ import {
 } from "./services/preMoveInInspectionService";
 import { uploadTempFileAndSign } from "./services/pdfStorageService";
 import { savePdfSafely } from "./utils/savePdfSafely";
-import { isHeicFile, normalizeUploadImage } from "./utils/imageUtils";
+import { isHeicFile, normalizeUploadImage, isHeicDataUrl, convertHeicSrcToJpegDataUrl } from "./utils/imageUtils";
 import {
   emptyPreMoveInInspection,
   INSPECTION_STATUS_OPTIONS,
@@ -638,6 +638,24 @@ function sanitizeCleaningReportsForSave<T extends { isPermanentDeleted?: boolean
     .filter((r) => !r.isPermanentDeleted)
     .map((r) => ({ ...r, beforePhotoDataUrls: sanitizePhotoArray(r.beforePhotoDataUrls), afterPhotoDataUrls: sanitizePhotoArray(r.afterPhotoDataUrls) }));
 }
+// 하자접수 완료 상태 판별(대소문자/공백 무시, 한글/영문 모두). 완료건은 목록 맨 아래로 정렬.
+function isDefectCompleted(status: unknown): boolean {
+  const value = String(status || "").trim().toLowerCase();
+  return ["완료", "처리완료", "resolved", "done", "closed"].includes(value);
+}
+// 하자접수 화면 표시 정렬(DB 변경 없음, 필터/검색 결과 안에서만 적용):
+// 1) 미완료 먼저 → 2) 접수일 최신 → 3) 생성일 최신 → 4) id 안정 정렬.
+function sortDefectRequests<T extends { defectStatus?: string; receiptDate?: string; createdAt?: string; id?: string }>(rows: T[]): T[] {
+  return [...rows].sort((a, b) => {
+    const aDone = isDefectCompleted(a.defectStatus);
+    const bDone = isDefectCompleted(b.defectStatus);
+    if (aDone !== bDone) return aDone ? 1 : -1;
+    const aDate = new Date(a.receiptDate || a.createdAt || 0).getTime();
+    const bDate = new Date(b.receiptDate || b.createdAt || 0).getTime();
+    if (aDate !== bDate) return bDate - aDate;
+    return String(a.id || "").localeCompare(String(b.id || ""));
+  });
+}
 // 하자접수 저장 sanitize: 영구삭제 제외 + 내용 필수 + 사진 배열 정상화.
 function sanitizeDefectsForSave<T extends { requestText?: string; isPermanentDeleted?: boolean; requestPhotoDataUrls?: unknown; completionPhotoDataUrls?: unknown }>(arr: T[]): T[] {
   if (!Array.isArray(arr)) return [];
@@ -691,13 +709,31 @@ function normalizePhotoSrc(item: any): string {
   return s; // 기타 문자열은 그대로(실패 시 onError placeholder 처리)
 }
 
+// 저장된 HEIC 사진(dataURL/base64) → JPEG dataURL 변환 결과 캐시(원본 문자열 → 변환 결과).
+// 썸네일/미리보기/PDF 가 같은 캐시를 사용해 중복 변환을 피한다.
+const heicResolveCache = new Map<string, string>();
+
 // 리스트 썸네일: 후보 사진들을 순서대로 시도해, 로드 실패 시 다음 사진으로 넘어가고
 // 모두 실패하면 회색 placeholder 를 표시(개수는 별도 유지 — "사진없음"으로 바꾸지 않음).
+// HEIC/HEIF 로 저장된 사진은 표시 전에 JPEG dataURL 로 변환한다.
 function CleaningThumb({ candidates, alt }: { candidates: string[]; alt: string }): React.ReactElement {
   const [idx, setIdx] = useState(0);
+  const [resolved, setResolved] = useState<string>("");
   useEffect(() => { setIdx(0); }, [candidates.join("|")]);
-  const src = candidates[idx];
-  if (!src) {
+  const raw = candidates[idx] || "";
+  useEffect(() => {
+    let cancelled = false;
+    if (!raw) { setResolved(""); return; }
+    if (!isHeicDataUrl(raw)) { setResolved(raw); return; } // 일반 이미지 → 그대로
+    const cached = heicResolveCache.get(raw);
+    if (cached) { setResolved(cached); return; }
+    setResolved(""); // 변환 중(로딩 표시)
+    convertHeicSrcToJpegDataUrl(raw)
+      .then((jpg) => { if (cancelled) return; heicResolveCache.set(raw, jpg); setResolved(jpg); })
+      .catch(() => { if (!cancelled) setIdx((i) => i + 1); }); // 변환 실패 → 다음 후보
+    return () => { cancelled = true; };
+  }, [raw]);
+  if (!raw) {
     // 유효한 사진 소스가 없음 → 회색 placeholder(사진 개수 라벨은 셀에서 별도 표시)
     return (
       <div className="flex h-full w-full items-center justify-center bg-slate-100 text-[9px] font-medium text-slate-400">
@@ -705,14 +741,18 @@ function CleaningThumb({ candidates, alt }: { candidates: string[]; alt: string 
       </div>
     );
   }
+  if (!resolved) {
+    // HEIC 변환 대기 중 — 회색 배경(로딩). 사진 개수/데이터는 그대로 유지.
+    return <div className="flex h-full w-full items-center justify-center bg-slate-100 text-[9px] text-slate-300">…</div>;
+  }
   return (
     <img
-      src={src}
+      src={resolved}
       alt={alt}
       loading="lazy"
       className="h-full w-full object-cover"
       onError={() => {
-        if (import.meta.env.DEV) console.debug("[cleaning-thumb] 로드 실패 → 다음 후보 시도", { idx, srcHead: String(src).slice(0, 40) });
+        if (import.meta.env.DEV) console.debug("[cleaning-thumb] 로드 실패 → 다음 후보 시도", { idx, srcHead: String(raw).slice(0, 40) });
         setIdx((i) => i + 1);
       }}
     />
@@ -2873,7 +2913,10 @@ export default function App() {
   const [imageLightbox, setImageLightbox] = useState<{ urls: string[]; index: number; title: string } | null>(null);
   const [lightboxZoomed, setLightboxZoomed] = useState(false);
   const [lightboxError, setLightboxError] = useState(false); // 현재 이미지 로드 실패 → 검은 화면 대신 안내문
+  const [lightboxResolvedSrc, setLightboxResolvedSrc] = useState<string>(""); // HEIC 변환 등 표시용 최종 src
+  const [lightboxResolving, setLightboxResolving] = useState(false); // HEIC 변환 진행 중
   const lightboxTouchStartXRef = useRef<number | null>(null);
+  const lightboxErrorCountRef = useRef(0); // 연속 로드 실패 횟수(한 바퀴 돌면 안내문)
 
   // 이미지 미리보기: 방향키 이동 / ESC 닫기 (데스크탑 키보드 편의).
   useEffect(() => {
@@ -2896,7 +2939,26 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [imageLightbox]);
   // 라이트박스 현재 이미지가 바뀌면 로드 실패 상태 초기화(다음 이미지는 정상 표시 시도).
-  useEffect(() => { setLightboxError(false); }, [imageLightbox?.index, imageLightbox?.urls]);
+  // 라이트박스 현재 이미지 변경 시: 로드실패 상태 초기화 + HEIC 면 JPEG 로 변환해 표시(검은화면/안내문 대신).
+  useEffect(() => {
+    setLightboxError(false);
+    if (!imageLightbox || imageLightbox.urls.length === 0) { setLightboxResolvedSrc(""); setLightboxResolving(false); return; }
+    const i = Math.min(Math.max(imageLightbox.index, 0), imageLightbox.urls.length - 1);
+    const norm = normalizePhotoSrc(imageLightbox.urls[i]) || imageLightbox.urls[i];
+    let cancelled = false;
+    if (!norm) { setLightboxResolvedSrc(""); setLightboxResolving(false); return; }
+    if (!isHeicDataUrl(norm)) { setLightboxResolvedSrc(norm); setLightboxResolving(false); return; }
+    const cached = heicResolveCache.get(norm);
+    if (cached) { setLightboxResolvedSrc(cached); setLightboxResolving(false); return; }
+    setLightboxResolvedSrc(""); setLightboxResolving(true);
+    convertHeicSrcToJpegDataUrl(norm)
+      .then((jpg) => { if (cancelled) return; heicResolveCache.set(norm, jpg); setLightboxResolvedSrc(jpg); setLightboxResolving(false); })
+      .catch(() => { if (cancelled) return; setLightboxResolving(false); setLightboxError(true); }); // 변환 실패 시에만 안내문
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageLightbox?.index, imageLightbox?.urls]);
+  // 라이트박스가 새로 열리거나 사진 목록이 바뀌면 실패 카운터 초기화.
+  useEffect(() => { lightboxErrorCountRef.current = 0; }, [imageLightbox?.urls]);
   const [operationalSyncError, setOperationalSyncError] = useState<string | null>(null);
   // 저장 상태 표시(토스트): idle | saving | saved | error
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -7308,10 +7370,11 @@ export default function App() {
       return matchesStatus && matchesMonth && (!defectSearch || text.includes(defectSearch.toLowerCase()));
     };
 
+    // 필터/검색 결과 안에서만 정렬(미완료 먼저 → 접수일 최신 → 생성일 최신 → id).
     if (currentUser?.role === "maintenance_reporter") {
-      return defects.filter((d) => d.reporterUserId === currentUser.id && filterDefects(d));
+      return sortDefectRequests(defects.filter((d) => d.reporterUserId === currentUser.id && filterDefects(d)));
     }
-    return defects.filter(filterDefects);
+    return sortDefectRequests(defects.filter(filterDefects));
   }, [defects, currentUser, defectSearch, defectStatusFilter, defectReceiptMonthFilter]);
 
   // Settlement Management Calculations
@@ -10350,6 +10413,17 @@ export default function App() {
     String(raw || "").replace(/\D/g, "").slice(0, 8) || new Date().toISOString().slice(0, 10).replace(/-/g, "");
 
   // 청소보고서 PDF — 공통 helper 사용.
+  // 표시/PDF 용 사진 정규화: HEIC 는 JPEG dataURL 로 변환(캐시), 그 외는 그대로. 변환 실패 시 원본 유지.
+  const resolveHeicPhotos = async (urls: string[]): Promise<string[]> =>
+    Promise.all((urls || []).map(async (u) => {
+      const norm = normalizePhotoSrc(u) || u;
+      if (!norm || !isHeicDataUrl(norm)) return norm;
+      const cached = heicResolveCache.get(norm);
+      if (cached) return cached;
+      try { const jpg = await convertHeicSrcToJpegDataUrl(norm); heicResolveCache.set(norm, jpg); return jpg; }
+      catch { return norm; }
+    }));
+
   const printCleaningReport = async (report: CleaningReport) => {
     if (savingPdf) return; // 중복 클릭 방지
     setSavingPdf(true);
@@ -10360,6 +10434,7 @@ export default function App() {
       const full = await fetchCleaningReportPhotosWithBackup(report);
       photos = [...(full.beforePhotoDataUrls || []), ...(full.afterPhotoDataUrls || [])];
     }
+    photos = await resolveHeicPhotos(photos); // HEIC → JPEG(브라우저/PDF 표시 가능하게)
     printPhotoReport({
       title: "청소보고서",
       fileBase: `청소보고서_${report.buildingName || "기숙사"}_${reportFileDate(report.reportDate)}`,
@@ -24322,7 +24397,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           const urls = imageLightbox.urls;
           const safeIndex = Math.min(Math.max(imageLightbox.index, 0), urls.length - 1);
           const current = urls[safeIndex];
-          const displaySrc = normalizePhotoSrc(current) || current; // 표시 전 정규화(bare base64/잘못된 MIME 등 보정)
+          // 표시용 src: HEIC 변환 결과(lightboxResolvedSrc) 우선, 없으면 정규화값. (bare base64/잘못된 MIME 보정 포함)
+          const displaySrc = lightboxResolvedSrc || normalizePhotoSrc(current) || current;
           const go = (delta: number) => {
             setLightboxZoomed(false);
             setImageLightbox((lb) => (lb ? { ...lb, index: (lb.index + delta + lb.urls.length) % lb.urls.length } : lb));
@@ -24366,8 +24442,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 {urls.length > 1 && (
                   <button type="button" onClick={() => go(-1)} className="absolute left-2 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/15 px-3 py-2 text-xl text-white hover:bg-white/30">‹</button>
                 )}
-                {lightboxError ? (
-                  // 로드 실패 → 검은 화면 대신 안내문 표시(다운로드/새 창/닫기 버튼은 상단에 그대로 유지).
+                {lightboxResolving ? (
+                  // HEIC → JPEG 변환 중(검은 화면/안내문 대신 로딩 표시).
+                  <div className="mx-6 max-w-md rounded-2xl bg-white/10 px-6 py-8 text-center text-sm leading-relaxed text-white/90">
+                    HEIC 사진을 변환하는 중입니다...
+                  </div>
+                ) : lightboxError ? (
+                  // 로드/변환 실패 → 검은 화면 대신 안내문 표시(다운로드/새 창/닫기 버튼은 상단에 그대로 유지).
                   <div className="mx-6 max-w-md rounded-2xl bg-white/10 px-6 py-8 text-center text-sm leading-relaxed text-white/90">
                     사진 미리보기를 표시할 수 없습니다.<br />다운로드하면 정상 확인 가능합니다.
                   </div>
@@ -24379,7 +24460,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     onClick={() => setLightboxZoomed((z) => !z)}
                     onError={() => {
                       if (import.meta.env.DEV) console.debug("[lightbox] 이미지 로드 실패", { index: safeIndex, srcHead: String(displaySrc).slice(0, 48) });
-                      setLightboxError(true);
+                      // 첫 사진 실패 시 다음 사진 시도(한 바퀴 돌면 안내문 표시).
+                      lightboxErrorCountRef.current += 1;
+                      if (urls.length > 1 && lightboxErrorCountRef.current < urls.length) { go(1); }
+                      else { setLightboxError(true); }
                     }}
                     className={lightboxZoomed ? "max-h-none max-w-none cursor-zoom-out" : "max-h-full max-w-full object-contain cursor-zoom-in"}
                   />

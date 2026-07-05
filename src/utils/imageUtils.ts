@@ -35,3 +35,56 @@ export async function normalizeUploadImage(file: File): Promise<File> {
   if (!isHeicFile(file)) return file;
   return convertHeicToJpeg(file);
 }
+
+// 이미 저장된 사진 문자열(dataURL/순수 base64)이 실제로 HEIC/HEIF 인지 "매직 바이트"로 판별.
+// ※ 과거에 접두어 없이 저장된 HEIC 는 normalizePhotoSrc 가 data:image/jpeg 로 잘못 라벨하므로
+//   mime 문자열이 아닌 실제 바이트(ISO-BMFF 'ftyp' 박스 + heic/heif 브랜드)로 확인해야 한다.
+export function isHeicDataUrl(src: string): boolean {
+  if (typeof src !== "string" || !src) return false;
+  const s = src.trim();
+  if (/^data:image\/(heic|heif)/i.test(s)) return true;
+  let b64 = "";
+  if (s.startsWith("data:")) {
+    const comma = s.indexOf(",");
+    if (comma < 0) return false;
+    b64 = s.slice(comma + 1);
+  } else if (/^[A-Za-z0-9+/=\s]+$/.test(s) && s.length > 32) {
+    b64 = s; // 접두어 없는 순수 base64
+  } else {
+    return false; // http/blob 등은 바이트 판별 불가
+  }
+  try {
+    const clean = b64.replace(/\s/g, "").slice(0, 64); // 64 base64 chars → 48 bytes(ftyp 박스 확인에 충분)
+    const head = atob(clean);
+    if (head.length < 12 || head.slice(4, 8) !== "ftyp") return false;
+    const brand = head.slice(8, 12).toLowerCase();
+    return ["heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs", "mif1", "msf1", "heif"].includes(brand);
+  } catch {
+    return false;
+  }
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ""));
+    fr.onerror = reject;
+    fr.readAsDataURL(blob);
+  });
+}
+
+// 저장된 HEIC 사진 문자열(dataURL/base64/blob/http) → JPEG dataURL 로 변환(미리보기/썸네일/PDF 표시용).
+// 변환 실패 시 예외를 던진다(호출부에서 원본 유지 또는 안내 처리).
+export async function convertHeicSrcToJpegDataUrl(src: string): Promise<string> {
+  const s = src.trim();
+  const dataUrl = s.startsWith("data:")
+    ? s
+    : (/^[A-Za-z0-9+/=\s]+$/.test(s) ? `data:image/heic;base64,${s.replace(/\s/g, "")}` : s);
+  const res = await fetch(dataUrl); // dataURL/http/blob 모두 fetch 로 Blob 획득 가능
+  const blob = await res.blob();
+  const mod = await import("heic2any");
+  const heic2any = (mod as { default: (opts: { blob: Blob; toType?: string; quality?: number }) => Promise<Blob | Blob[]> }).default;
+  const converted = await heic2any({ blob, toType: "image/jpeg", quality: 0.85 });
+  const outBlob = Array.isArray(converted) ? converted[0] : converted;
+  return blobToDataUrl(outBlob);
+}
