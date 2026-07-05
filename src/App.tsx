@@ -11303,6 +11303,24 @@ export default function App() {
     });
     setEditingMilitaryPersonnelId(null);
     setShowMilitaryPersonnelForm(false);
+
+    // ★ 신규 등록 시: 활성 필터/검색 때문에 방금 등록한 인원이 목록에서 숨겨져 "사라진 것처럼" 보이는 문제 방지.
+    //   (데이터는 정상 저장되며, 상태/부서/구분/훈련/연도/검색 필터가 전체가 아니면 새 인원이 조건에 안 맞아 안 보임)
+    //   → 신규 등록일 때만 인사관리 필터를 전체로 초기화해 등록 인원이 바로 보이게 한다. (수정 시에는 유지)
+    if (!existing) {
+      const filtersActive =
+        militaryPersonnelStatusFilter !== "전체" || personnelDeptFilter !== "전체" ||
+        personnelCategoryFilter !== "전체" || personnelTrainingFilter !== "전체" ||
+        personnelYearFilter !== "전체" || !!militaryPersonnelSearch.trim();
+      if (filtersActive) {
+        setMilitaryPersonnelStatusFilter("전체");
+        setPersonnelDeptFilter("전체");
+        setPersonnelCategoryFilter("전체");
+        setPersonnelTrainingFilter("전체");
+        setPersonnelYearFilter("전체");
+        setMilitaryPersonnelSearch("");
+      }
+    }
   };
 
   // 연차 계산(getMilitaryCategory/getReserveAnnualLeave/getCivilDefenseAnnualLeave) 기준으로
@@ -15654,8 +15672,25 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <tbody>
                   {(() => {
                     if (filteredPersonnelRows.length === 0) {
+                      // 등록된 인원은 있으나 필터/검색으로 전부 숨겨진 경우와, 실제 0명인 경우를 구분해 안내.
+                      const hasAny = militaryPersonnel.length > 0;
+                      const filtersActive =
+                        militaryPersonnelStatusFilter !== "전체" || personnelDeptFilter !== "전체" ||
+                        personnelCategoryFilter !== "전체" || personnelTrainingFilter !== "전체" ||
+                        personnelYearFilter !== "전체" || !!militaryPersonnelSearch.trim();
                       return (
-                        <tr><td colSpan={canEditData(currentUser) ? 13 : 12} className="px-3 py-12 text-center text-slate-400">인원 데이터가 없습니다.</td></tr>
+                        <tr><td colSpan={canEditData(currentUser) ? 13 : 12} className="px-3 py-12 text-center text-slate-400">
+                          {hasAny && filtersActive ? (
+                            <div className="flex flex-col items-center gap-2">
+                              <span>필터/검색 조건에 맞는 인원이 없습니다. (등록된 인원 {militaryPersonnel.length}명)</span>
+                              <button
+                                type="button"
+                                onClick={() => { setMilitaryPersonnelStatusFilter("전체"); setPersonnelDeptFilter("전체"); setPersonnelCategoryFilter("전체"); setPersonnelTrainingFilter("전체"); setPersonnelYearFilter("전체"); setMilitaryPersonnelSearch(""); }}
+                                className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                              >필터 전체 해제</button>
+                            </div>
+                          ) : "인원 데이터가 없습니다."}
+                        </td></tr>
                       );
                     }
                     return personnelPg.pagedItems.map((p) => (
