@@ -5961,14 +5961,18 @@ export default function App() {
         lastOperationalAlertRef.current = ""; // 성공 시 알림 dedup 초기화
         flashSaveStatus("saved");
       } catch (error) {
-        const err = error as { status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown };
+        const err = error as { name?: unknown; status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown; response?: unknown };
         // 어떤 테이블/정책에서 실패했는지 추적할 수 있도록 상세 로그 출력
+        // (회사망 CORS / Failed to fetch / "No API key found" 진단용: name·code·response 포함)
         console.error("Supabase operational module sync failed:", {
           role,
+          name: err?.name ?? "(unknown)",
           status: err?.status ?? err?.code ?? "(unknown)",
+          code: err?.code ?? "(unknown)",
           message: err?.message ?? String(error),
           details: err?.details,
           hint: err?.hint,
+          response: err?.response,
           payloadSizes: {
             cleaningReports: cleaningReports.length,
             defects: defects.length,
