@@ -1,4 +1,4 @@
-import { supabase, isSupabaseAvailable, translateSupabaseError } from "./supabaseService";
+import { supabase, isSupabaseAvailable } from "./supabaseService";
 import type {
   CleaningReport,
   DefectRequest,
@@ -616,39 +616,68 @@ export const loadAuditLogsModule = async (tenantId: string, limit = 50): Promise
   }
 };
 
-export const saveOperationalModule = async (payload: OperationalModuleState, userId: string): Promise<void> => {
+// 운영 모듈 저장 결과 — 테이블별로 성공/실패를 분리해 반환.
+// (회사망에서 청소는 되는데 하자만 실패하는 등, 한 테이블 실패가 다른 테이블 저장/커밋을 막지 않도록)
+export type OperationalSaveResult = {
+  savedTables: string[];                              // 저장 성공한 테이블
+  failed: Array<{ table: string; error: any }>;       // 저장 실패한 테이블 + 원인
+};
+
+export const saveOperationalModule = async (payload: OperationalModuleState, userId: string): Promise<OperationalSaveResult> => {
   if (!isSupabaseAvailable()) {
     console.warn("Supabase environment variables are not configured. Skipping operational module save.");
-    return;
+    return { savedTables: [], failed: [] };
   }
 
-  try {
-    // 변경 행이 있는 테이블만 upsert(빈 배열은 네트워크 요청 생략 → 속도 개선). 하나라도 실패하면 throw.
-    const ops: any[] = [];
-    if (payload.cleaningReports.length) ops.push(supabase!.from("cleaning_reports").upsert(payload.cleaningReports.map((r) => toDbCleaningReport(r, payload.tenantId, userId)), { onConflict: "id" }));
-    if (payload.defects.length) ops.push(supabase!.from("defect_requests").upsert(payload.defects.map((d) => toDbDefectRequest(d, payload.tenantId, userId)), { onConflict: "id" }));
-    if (payload.inventory.length) ops.push(supabase!.from("inventory_items").upsert(payload.inventory.map((i) => toDbInventoryItem(i, payload.tenantId, userId)), { onConflict: "id" }));
-    if (payload.settlementRecords.length) ops.push(supabase!.from("settlement_records").upsert(payload.settlementRecords.map((r) => toDbSettlementRecord(r, payload.tenantId, userId)), { onConflict: "id" }));
-    if (payload.settlementItems.length) ops.push(supabase!.from("settlement_items").upsert(payload.settlementItems.map((i) => toDbSettlementItem(i, payload.tenantId, userId)), { onConflict: "id" }));
+  // 공통 Supabase 클라이언트(supabase)만 사용. 직접 fetch/axios/REST 없음. 각 테이블은 독립 upsert.
+  // 변경 행이 있는 테이블만 전송(빈 배열은 네트워크 요청 생략).
+  const jobs: Array<{ table: string; rows: any[] }> = [
+    { table: "cleaning_reports", rows: payload.cleaningReports.map((r) => toDbCleaningReport(r, payload.tenantId, userId)) },
+    { table: "defect_requests", rows: payload.defects.map((d) => toDbDefectRequest(d, payload.tenantId, userId)) },
+    { table: "inventory_items", rows: payload.inventory.map((i) => toDbInventoryItem(i, payload.tenantId, userId)) },
+    { table: "settlement_records", rows: payload.settlementRecords.map((r) => toDbSettlementRecord(r, payload.tenantId, userId)) },
+    { table: "settlement_items", rows: payload.settlementItems.map((i) => toDbSettlementItem(i, payload.tenantId, userId)) },
+  ].filter((j) => j.rows.length > 0);
 
-    if (ops.length > 0) {
-      const results = await Promise.all(ops);
-      const firstErr = (results as Array<{ error: any }>).find((r) => r.error)?.error;
-      if (firstErr) {
-        if (/permission|row level security|RLS/i.test(JSON.stringify(firstErr))) {
-          console.error("Supabase permission/RLS error detected:", firstErr);
-        }
-        throw new Error(translateSupabaseError((firstErr as any)?.message || String(firstErr)));
+  // 각 테이블 upsert 를 독립 실행 — 네트워크 거부(Failed to fetch)나 한 테이블 오류가 다른 테이블을 실패시키지 않게 격리.
+  const settled = await Promise.all(
+    jobs.map(async (j) => {
+      try {
+        const { error } = await supabase!.from(j.table).upsert(j.rows, { onConflict: "id" });
+        return { table: j.table, error: error ?? null };
+      } catch (e) {
+        return { table: j.table, error: e }; // 네트워크 예외(Failed to fetch 등)도 테이블별 결과로 수집
       }
-    }
+    })
+  );
 
-    // 부가기능: 변경이력(audit_logs)은 실패해도 전체 저장을 실패로 처리하지 않음(경고만).
-    // upsert(on_conflict=id) 대신 plain insert 사용 — id unique/PK 미설정 환경의 500 회피.
-    await insertAuditLogsScoped(payload.auditLogs, payload.tenantId, userId);
-  } catch (error) {
-    console.error("Supabase operational module save error:", error);
-    throw new Error(translateSupabaseError((error as any)?.message || String(error)));
+  const savedTables: string[] = [];
+  const failed: Array<{ table: string; error: any }> = [];
+  for (const s of settled) {
+    if (s.error) {
+      failed.push({ table: s.table, error: s.error });
+      const err = s.error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown; name?: unknown };
+      const count = jobs.find((j) => j.table === s.table)?.rows.length ?? 0;
+      // 요구사항: error.code, message, details, table, payload(건수)를 console.error 로 출력.
+      console.error("[operational save] 테이블 저장 실패:", {
+        table: s.table,
+        code: err?.code ?? "(unknown)",
+        status: err?.status ?? "(unknown)",
+        name: err?.name ?? "(unknown)",
+        message: err?.message ?? String(s.error),
+        details: err?.details,
+        hint: err?.hint,
+        payloadRows: count,
+      });
+    } else {
+      savedTables.push(s.table);
+    }
   }
+
+  // 부가기능: 변경이력(audit_logs)은 실패해도 본 저장을 실패로 처리하지 않음(내부에서 warn 만, throw 없음).
+  await insertAuditLogsScoped(payload.auditLogs, payload.tenantId, userId);
+
+  return { savedTables, failed };
 };
 
 /**

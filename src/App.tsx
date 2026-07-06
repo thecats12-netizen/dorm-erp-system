@@ -5940,26 +5940,40 @@ export default function App() {
           auditLogs: isAdmin ? auditLogs.length : "(skip)",
         });
         setOperationalSyncError(null);
-        await saveOperationalModule(operationalPayload, session.user.id);
-        // 비admin 작업 감사로그도 신규 건만 별도 저장(upsert ignoreDuplicates + 타임아웃 → 실패해도 warn 1회)
+        // 테이블별 성공/실패 분리 저장(청소↔하자 등 한 테이블 실패가 다른 테이블을 실패시키지 않음).
+        const { savedTables, failed } = await saveOperationalModule(operationalPayload, session.user.id);
+        const failedSet = new Set(failed.map((f) => f.table));
+        // 비admin 작업 감사로그도 신규 건만 별도 저장(부가기능 — 실패해도 본 저장에 영향 없음)
         if (!isAdmin) {
           await insertAuditLogsScoped(unsyncedAuditLogs, tenantId, session.user.id);
         }
         // 전송 완료한 감사로그 id 기록 → 다음 저장에서 재전송하지 않음
         unsyncedAuditLogs.forEach((l) => { if (l.id) syncedAuditIdsRef.current.add(l.id); });
-        // 성공한 행만 해시 기록 → 다음 저장에서 재전송하지 않음
-        commitRowHashes("cleaning_reports", changedCleaning, opSeen);
-        commitRowHashes("defect_requests", changedDefects, opSeen);
-        commitRowHashes("inventory_items", changedInventory, opSeen);
-        commitRowHashes("settlement_records", changedSettleRec, opSeen);
-        commitRowHashes("settlement_items", changedSettleItem, opSeen);
-        lastOperationalSnapshotRef.current = snapshot;
-        lastSavedOpTickRef.current = tick; // 이 저장으로 반영된 사용자 액션 시점 기록
-        operationalFailRef.current = { snap: "", count: 0 }; // 성공 → 실패 카운트 초기화
-        // clear any previous error on success
-        setOperationalSyncError(null);
-        lastOperationalAlertRef.current = ""; // 성공 시 알림 dedup 초기화
-        flashSaveStatus("saved");
+        // ★ DB 저장에 성공한 테이블의 행만 해시 커밋(실패 테이블은 다음 저장에서 재시도되도록 커밋하지 않음).
+        if (!failedSet.has("cleaning_reports")) commitRowHashes("cleaning_reports", changedCleaning, opSeen);
+        if (!failedSet.has("defect_requests")) commitRowHashes("defect_requests", changedDefects, opSeen);
+        if (!failedSet.has("inventory_items")) commitRowHashes("inventory_items", changedInventory, opSeen);
+        if (!failedSet.has("settlement_records")) commitRowHashes("settlement_records", changedSettleRec, opSeen);
+        if (!failedSet.has("settlement_items")) commitRowHashes("settlement_items", changedSettleItem, opSeen);
+
+        if (failed.length === 0) {
+          // 전체 성공: 스냅샷/틱 갱신 + 실패 카운트 초기화 + 저장완료 표시.
+          lastOperationalSnapshotRef.current = snapshot;
+          lastSavedOpTickRef.current = tick; // 이 저장으로 반영된 사용자 액션 시점 기록
+          operationalFailRef.current = { snap: "", count: 0 };
+          setOperationalSyncError(null);
+          lastOperationalAlertRef.current = "";
+          flashSaveStatus("saved");
+        } else {
+          // 일부/전체 실패: 성공분은 커밋되었으니 유지, 실패 테이블만 다음에 재시도.
+          // 스냅샷은 갱신하지 않아(실패분 재전송 가능) + 사용자에겐 일반 안내만 표시(팝업 없음).
+          console.error("[operational save] 일부 테이블 저장 실패:", { savedTables, failedTables: failed.map((f) => f.table) });
+          operationalFailRef.current = operationalFailRef.current.snap === snapshot
+            ? { snap: snapshot, count: operationalFailRef.current.count + 1 }
+            : { snap: snapshot, count: 1 };
+          setOperationalSyncError(classifySaveError(failed[0].error));
+          flashSaveStatus("error");
+        }
       } catch (error) {
         const err = error as { name?: unknown; status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown; response?: unknown };
         // 어떤 테이블/정책에서 실패했는지 추적할 수 있도록 상세 로그 출력
