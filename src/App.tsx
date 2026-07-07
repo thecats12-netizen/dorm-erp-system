@@ -3583,39 +3583,49 @@ export default function App() {
       const remote = await loadMilitaryModule(tenantId);
       if (remote) {
         militarySyncSnapshotRef.current = true; // 로드 반영분은 dirty 로 잡지 않음
-        // 진단 로그: 실제로 어떤 JSON/인원이 로드되는지 확인(요청사항).
-        console.log("Military JSON", remote);
-        console.log("Loaded Personnel", remote.militaryPersonnel);
-        console.log("Personnel Count", Array.isArray(remote.militaryPersonnel) ? remote.militaryPersonnel.length : 0);
-        // [인사관리] 원격이 비어 있는데(저장 지연/일시 빈 응답/이전 빈 blob) 로컬에 데이터가 있으면
-        // 빈 배열로 덮어쓰지 않는다 → 등록/수정 후 새로고침·재접속 시 인원이 사라지던 문제 방지.
-        const remotePersonnel = Array.isArray(remote.militaryPersonnel) ? remote.militaryPersonnel : [];
-        setMilitaryPersonnel((prev) => (remotePersonnel.length > 0 ? remotePersonnel : (prev.length > 0 ? prev : remotePersonnel)));
-        setMilitaryTrainingRecords(remote.militaryTrainingRecords || []);
-        setMilitaryNotices(remote.militaryNotices || []);
-        setMilitaryReports(remote.militaryReports || []);
-        setMilitarySettings(remote.militarySettings || {});
-        setMilitaryTrainingRules(remote.militaryTrainingRules || []);
+        console.log("Military JSON", remote); // 진단 로그(요청): 실제 로드된 blob 확인
+        // ★ DB blob 의 key 가 영문(militaryPersonnel 등) 또는 한글(군인/군사공지/"군사 훈련 기록" 등) 어느 쪽이든
+        //   읽을 수 있도록 fallback 매핑. (기존 key 는 저장 시 병합 보존하므로 삭제되지 않음)
+        const r = remote as any;
+        const firstArray = (...cands: any[]) => { for (const c of cands) if (Array.isArray(c)) return c; return []; };
+        const firstObject = (...cands: any[]) => { for (const c of cands) if (c && typeof c === "object" && !Array.isArray(c)) return c; return {}; };
+        const rPersonnel = firstArray(r.militaryPersonnel, r.군인, r.personnel, r.personnelList);
+        const rTraining = firstArray(r.militaryTrainingRecords, r.trainingRecords, r.군사훈련기록, r["군사 훈련 기록"]);
+        const rNotices = firstArray(r.militaryNotices, r.군사공지, r.notices);
+        const rReports = firstArray(r.militaryReports, r.군사보고서, r.reports);
+        const rSettings = firstObject(r.militarySettings, r.군사설정);
+        const rRules = firstArray(r.militaryTrainingRules, r.군사훈련규칙);
+        const rCodeValues = firstObject(r.militaryCodeValues, r.군사코드값);
+        const rAutoConfig = firstObject(r.militaryTrainingAutoConfig, r.군사훈련자료구성, r.군사훈련자동생성);
+        // 로드가 비어 있는데 로컬(현재 상태)에 데이터가 있으면 덮어쓰지 않음(로드 경합/빈 blob 로 인한 사라짐 방지).
+        const keepIfEmpty = <T,>(next: T[]) => (prev: T[]) => (next.length > 0 ? next : (prev.length > 0 ? prev : next));
+        setMilitaryPersonnel(keepIfEmpty(rPersonnel));
+        setMilitaryTrainingRecords(keepIfEmpty(rTraining));
+        setMilitaryNotices(keepIfEmpty(rNotices));
+        setMilitaryReports(keepIfEmpty(rReports));
+        setMilitarySettings(rSettings);
+        setMilitaryTrainingRules(keepIfEmpty(rRules));
         setMilitaryCodeValues({
-          ...remote.militaryCodeValues,
-          departments: normalizeMilitaryDepartments(remote.militaryCodeValues?.departments || []),
+          ...rCodeValues,
+          departments: normalizeMilitaryDepartments((rCodeValues as any)?.departments || []),
         });
-        setMilitaryTrainingAutoConfig(remote.militaryTrainingAutoConfig || { enabled: true, targetStatuses: ["재직"] });
+        setMilitaryTrainingAutoConfig((rAutoConfig && (rAutoConfig as any).targetStatuses) ? (rAutoConfig as any) : { enabled: true, targetStatuses: ["재직"] });
+        // 진단 로그(요청): 실제 로드된 인원/훈련/공지 건수.
+        console.log("Personnel Count", rPersonnel.length, "| Training", rTraining.length, "| Notices", rNotices.length);
         // Supabase 군대 모듈 로드는 isLoading 전환 이후 완료될 수 있으므로, 로드 값으로 스냅샷 재시드.
-        // (getMilitaryModuleState() 와 동일한 형태·순서로 구성 → 첫 수동 저장 시 불필요한 재저장 방지)
         lastMilitarySnapshotRef.current = JSON.stringify({
           tenantId,
-          militaryPersonnel: remote.militaryPersonnel || [],
-          militaryTrainingRecords: remote.militaryTrainingRecords || [],
-          militaryNotices: remote.militaryNotices || [],
-          militaryReports: remote.militaryReports || [],
-          militarySettings: remote.militarySettings || {},
-          militaryTrainingRules: remote.militaryTrainingRules || [],
+          militaryPersonnel: rPersonnel,
+          militaryTrainingRecords: rTraining,
+          militaryNotices: rNotices,
+          militaryReports: rReports,
+          militarySettings: rSettings,
+          militaryTrainingRules: rRules,
           militaryCodeValues: {
-            ...remote.militaryCodeValues,
-            departments: normalizeMilitaryDepartments(remote.militaryCodeValues?.departments || []),
+            ...rCodeValues,
+            departments: normalizeMilitaryDepartments((rCodeValues as any)?.departments || []),
           },
-          militaryTrainingAutoConfig: remote.militaryTrainingAutoConfig || { enabled: true, targetStatuses: ["재직"] },
+          militaryTrainingAutoConfig: (rAutoConfig && (rAutoConfig as any).targetStatuses) ? (rAutoConfig as any) : { enabled: true, targetStatuses: ["재직"] },
         });
         setSupabaseSyncStatus("Supabase 불러오기가 완료되었습니다.");
       } else {
@@ -19061,7 +19071,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold">정산 관리</h2>
-                <p className="text-sm text-slate-500">기숙사별 수입과 비용을 통합 관리하고 정산을 완료합니다.</p>
+                <p className="text-sm text-slate-500">기숙사별 입금액과 비용을 통합 관리하고 정산을 완료합니다.</p>
               </div>
             </div>
 
@@ -19197,15 +19207,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               </div>
                               <div className="grid grid-cols-5 gap-2 text-center text-xs">
                                 <div className={`${theme.darkMode ? "rounded-lg bg-slate-950 p-2" : "rounded-lg bg-white p-2"}`}>
-                                  <div className="text-slate-500">수입</div>
+                                  <div className="text-slate-500">입금액</div>
                                   <div className={`${theme.darkMode ? "font-semibold text-slate-100" : "font-semibold text-slate-900"}`}>{formatNumber(revenue)}원</div>
                                 </div>
                                 <div className={`${theme.darkMode ? "rounded-lg bg-slate-950 p-2" : "rounded-lg bg-white p-2"}`}>
                                   <div className="text-slate-500">비품</div>
                                   <div className={`${theme.darkMode ? "font-semibold text-slate-100" : "font-semibold text-slate-900"}`}>{formatNumber(inventoryCost)}원</div>
                                 </div>
-                                <div className={`${theme.darkMode ? "rounded-lg bg-slate-950 p-2" : "rounded-lg bg-white p-2"}`}>
-                                  <div className="text-slate-500">하자</div>
+                                <div className={`${theme.darkMode ? "rounded-lg bg-slate-950 p-2" : "rounded-lg bg-white p-2"}`} title="하자접수 또는 수리비 항목 중 정산에 반영할 금액입니다. 입주자 부담 또는 회사 부담 여부에 따라 정산 항목에 반영할 수 있습니다.">
+                                  <div className="text-slate-500">하자/수리비</div>
                                   <div className={`${theme.darkMode ? "font-semibold text-slate-100" : "font-semibold text-slate-900"}`}>{formatNumber(defectCost)}원</div>
                                 </div>
                                 <div className={`${theme.darkMode ? "rounded-lg bg-slate-950 p-2" : "rounded-lg bg-white p-2"}`}>
@@ -19265,9 +19275,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 <th className="px-3 py-2 text-left font-semibold">기숙사명</th>
                                 <th className="px-3 py-2 text-left font-semibold">지역</th>
                                 <th className="px-3 py-2 text-left font-semibold">성별</th>
-                                <th className="px-3 py-2 text-right font-semibold">수입</th>
+                                <th className="px-3 py-2 text-right font-semibold">입금액</th>
                                 <th className="px-3 py-2 text-right font-semibold">비품</th>
-                                <th className="px-3 py-2 text-right font-semibold">하자</th>
+                                <th className="px-3 py-2 text-right font-semibold" title="하자접수 또는 수리비 항목 중 정산에 반영할 금액입니다. 입주자 부담 또는 회사 부담 여부에 따라 정산 항목에 반영할 수 있습니다.">하자/수리비</th>
                                 <th className="px-3 py-2 text-right font-semibold">기타</th>
                                 <th className="px-3 py-2 text-right font-semibold">정산액</th>
                                 <th className="px-3 py-2 text-right font-semibold">거주인</th>
@@ -19441,9 +19451,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <th className="px-3 py-2 text-left font-semibold">기숙사명</th>
                         <th className="px-3 py-2 text-left font-semibold">지역</th>
                         <th className="px-3 py-2 text-left font-semibold">성별</th>
-                        <th className="px-3 py-2 text-right font-semibold">수입</th>
+                        <th className="px-3 py-2 text-right font-semibold">입금액</th>
                         <th className="px-3 py-2 text-right font-semibold">비품</th>
-                        <th className="px-3 py-2 text-right font-semibold">하자</th>
+                        <th className="px-3 py-2 text-right font-semibold" title="하자접수 또는 수리비 항목 중 정산에 반영할 금액입니다. 입주자 부담 또는 회사 부담 여부에 따라 정산 항목에 반영할 수 있습니다.">하자/수리비</th>
                         <th className="px-3 py-2 text-right font-semibold">기타</th>
                         <th className="px-3 py-2 text-right font-semibold">정산액</th>
                         <th className="px-3 py-2 text-right font-semibold">거주인</th>
