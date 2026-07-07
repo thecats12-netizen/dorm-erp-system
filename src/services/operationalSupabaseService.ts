@@ -639,36 +639,53 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
     { table: "settlement_items", rows: payload.settlementItems.map((i) => toDbSettlementItem(i, payload.tenantId, userId)) },
   ].filter((j) => j.rows.length > 0);
 
-  // 각 테이블 upsert 를 독립 실행 — 네트워크 거부(Failed to fetch)나 한 테이블 오류가 다른 테이블을 실패시키지 않게 격리.
-  const settled = await Promise.all(
-    jobs.map(async (j) => {
-      try {
-        const { error } = await supabase!.from(j.table).upsert(j.rows, { onConflict: "id" });
-        return { table: j.table, error: error ?? null };
-      } catch (e) {
-        return { table: j.table, error: e }; // 네트워크 예외(Failed to fetch 등)도 테이블별 결과로 수집
-      }
-    })
-  );
+  // 한 테이블(그룹) 독립 upsert — 네트워크 거부(Failed to fetch)나 한 테이블 오류가 다른 테이블을 실패시키지 않게 격리.
+  const upsertOne = async (j: { table: string; rows: any[] }): Promise<{ table: string; error: any }> => {
+    try {
+      const { error } = await supabase!.from(j.table).upsert(j.rows, { onConflict: "id" });
+      return { table: j.table, error: error ?? null };
+    } catch (e) {
+      return { table: j.table, error: e }; // 네트워크 예외(Failed to fetch 등)도 테이블별 결과로 수집
+    }
+  };
+
+  const logFailure = (action: "upsert" | "retry-upsert", s: { table: string; error: any }) => {
+    const err = s.error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown; name?: unknown };
+    const count = jobs.find((j) => j.table === s.table)?.rows.length ?? 0;
+    // 요구사항: table, action, error.code, error.message, error.details, payload(건수)를 console.error 로 출력.
+    console.error("[operational save] 테이블 저장 실패:", {
+      table: s.table,
+      action,
+      code: err?.code ?? "(unknown)",
+      status: err?.status ?? "(unknown)",
+      name: err?.name ?? "(unknown)",
+      message: err?.message ?? String(s.error),
+      details: err?.details,
+      hint: err?.hint,
+      payloadRows: count,
+    });
+  };
+
+  let settled = await Promise.all(jobs.map(upsertOne));
+
+  // [3] 회사망 대비: 실패 테이블이 있으면 1.5초 후 1회만 자동 재시도(중복 저장 방지 — 실패분만 재전송).
+  let firstFailed = settled.filter((s) => s.error);
+  if (firstFailed.length > 0) {
+    firstFailed.forEach((s) => logFailure("upsert", s));
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const retryJobs = jobs.filter((j) => firstFailed.some((f) => f.table === j.table));
+    const retried = await Promise.all(retryJobs.map(upsertOne));
+    // 재시도 결과로 해당 테이블 결과를 교체(성공하면 실패 목록에서 빠짐).
+    const retriedByTable = new Map(retried.map((r) => [r.table, r]));
+    settled = settled.map((s) => retriedByTable.get(s.table) ?? s);
+  }
 
   const savedTables: string[] = [];
   const failed: Array<{ table: string; error: any }> = [];
   for (const s of settled) {
     if (s.error) {
       failed.push({ table: s.table, error: s.error });
-      const err = s.error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown; name?: unknown };
-      const count = jobs.find((j) => j.table === s.table)?.rows.length ?? 0;
-      // 요구사항: error.code, message, details, table, payload(건수)를 console.error 로 출력.
-      console.error("[operational save] 테이블 저장 실패:", {
-        table: s.table,
-        code: err?.code ?? "(unknown)",
-        status: err?.status ?? "(unknown)",
-        name: err?.name ?? "(unknown)",
-        message: err?.message ?? String(s.error),
-        details: err?.details,
-        hint: err?.hint,
-        payloadRows: count,
-      });
+      logFailure("retry-upsert", s); // 재시도 후에도 실패 → 최종 실패 로그
     } else {
       savedTables.push(s.table);
     }

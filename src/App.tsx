@@ -626,6 +626,27 @@ function classifySaveError(error: unknown): string {
   return "저장 중 문제가 발생했습니다. 잠시 후 다시 시도해주세요.";
 }
 
+// 운영관리(청소/하자/비품/정산) 저장 전용 오류 메시지 — 회사망 차단 안내를 명확히 구분.
+// (기존 공통 classifySaveError 는 다른 모듈이 사용하므로 건드리지 않고 운영 저장에만 이 함수 사용)
+function classifyOperationalSaveError(error: unknown): string {
+  const e = error as { code?: string | number; status?: number; message?: string; details?: string; hint?: string; name?: string };
+  const msg = `${e?.name ?? ""} ${e?.message ?? ""} ${e?.details ?? ""} ${e?.hint ?? ""} ${e?.code ?? ""}`.toLowerCase();
+  const status = Number(e?.status ?? e?.code);
+  // 네트워크(회사망 차단/Failed to fetch/CORS/타임아웃/No API key)
+  if (/failed to fetch|networkerror|network request failed|timeout|econn|net::|load failed|aborted|cors|no api key/.test(msg)) {
+    return "회사 네트워크에서 저장 요청이 차단되었을 수 있습니다. 다시 시도하거나 관리자에게 문의해주세요.";
+  }
+  // 권한(RLS/401/403/JWT)
+  if (/permission|rls|row level security|forbidden|not authorized|jwt|권한/.test(msg) || status === 401 || status === 403) {
+    return "저장 권한이 없습니다.";
+  }
+  // DB 스키마 불일치(컬럼/관계/형식/400)
+  if (/does not exist|schema cache|column|relation|pgrst|invalid input|violates|null value|not-null/.test(msg) || status === 400) {
+    return "저장 항목과 데이터베이스 구조가 맞지 않습니다.";
+  }
+  return "회사 네트워크에서 저장 요청이 차단되었을 수 있습니다. 다시 시도하거나 관리자에게 문의해주세요.";
+}
+
 // 사진 배열 정상화: 배열이 아니거나 문자열이 아닌 항목/빈값을 제거(잘못된 image 배열로 인한 Supabase 500 방지).
 function sanitizePhotoArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
@@ -5971,7 +5992,7 @@ export default function App() {
           operationalFailRef.current = operationalFailRef.current.snap === snapshot
             ? { snap: snapshot, count: operationalFailRef.current.count + 1 }
             : { snap: snapshot, count: 1 };
-          setOperationalSyncError(classifySaveError(failed[0].error));
+          setOperationalSyncError(classifyOperationalSaveError(failed[0].error));
           flashSaveStatus("error");
         }
       } catch (error) {
@@ -19389,7 +19410,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <MiniStat label="선택 성별" value={settlementGenderFilter} />
                   <MiniStat label="등록 항목" value={`${settlementManagementStats.filteredSettlementItems.length}건`} />
                 </div>
-                <div className={`${theme.darkMode ? "overflow-x-auto rounded-3xl border border-slate-700 bg-slate-950 p-4" : "overflow-x-auto rounded-3xl border border-slate-200 bg-white p-4"}`}>
+                <div className={`${theme.darkMode ? "overflow-x-auto rounded-3xl border border-slate-700 bg-slate-950 p-4 md:p-6" : "overflow-x-auto rounded-3xl border border-slate-200 bg-white p-4 md:p-6"}`}>
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div>
                       <h3 className={`${theme.darkMode ? "text-sm font-semibold text-slate-100" : "text-sm font-semibold text-slate-900"}`}>기숙사별 보고서</h3>
@@ -19431,9 +19452,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </tbody>
                   </table>
                 </div>
-                <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-white p-4"}`}>
+                <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4 md:p-6" : "rounded-3xl border border-slate-200 bg-white p-4 md:p-6"}`}>
                   <h3 className={`${theme.darkMode ? "text-sm font-semibold text-slate-100" : "text-sm font-semibold text-slate-900"}`}>기숙사별 정산 항목</h3>
                   <p className="text-xs text-slate-500 mb-3">선택한 연도/월에 입력된 정산 항목을 확인할 수 있습니다.</p>
+                  <div className="erp-table-container">
                   <table className={`erp-table text-left ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>
                     <thead className={`${theme.darkMode ? "bg-slate-900 border-b border-slate-700" : "bg-slate-100 border-b border-slate-200"}`}>
                       <tr>
@@ -19467,20 +19489,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       )}
                     </tbody>
                   </table>
+                  </div>
                 </div>
               </div>
             )}
 
             {settlementSubTab === "itemEntry" && (
               <div className="space-y-6">
-                <div className={`rounded-3xl border p-4 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-950 ring-slate-700 border-slate-700" : "bg-white ring-slate-200 border-slate-200"}`}>
+                <div className={`rounded-3xl border p-4 md:p-6 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-950 ring-slate-700 border-slate-700" : "bg-white ring-slate-200 border-slate-200"}`}>
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <div>
                       <h3 className={`${theme.darkMode ? "text-sm font-semibold text-slate-100" : "text-sm font-semibold text-slate-900"}`}>정산 항목 입력</h3>
                       <p className="text-xs text-slate-500">선택한 연도/월에 대한 정산 항목을 등록하고 관리합니다.</p>
                     </div>
                   </div>
-                  <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-4">
                       <FilteredDormSelector
                         value={settlementItemForm.dormId}
