@@ -3415,7 +3415,10 @@ export default function App() {
         }
         
         // Step 4: Always load settings and military data from localStorage
-        setMilitaryPersonnel(loadJson<any[]>(MILITARY_PERSONNEL_KEY, [], tenantId));
+        // [인사관리] localStorage 로드는 "폴백"이다. Supabase 로드(loadSupabaseMilitaryModule)가 먼저
+        // 실제 데이터를 채운 경우, 비어 있을 수 있는 localStorage 값으로 덮어쓰지 않는다(로드 경합으로 0건 표시 방지).
+        const localMilitaryPersonnel = loadJson<any[]>(MILITARY_PERSONNEL_KEY, [], tenantId);
+        setMilitaryPersonnel((prev) => (prev.length > 0 ? prev : localMilitaryPersonnel));
         setMilitaryTrainingRecords(loadJson<any[]>(MILITARY_TRAINING_KEY, [], tenantId));
         setMilitaryNotices(loadJson<any[]>(MILITARY_NOTICES_KEY, [], tenantId));
         setMilitaryReports(loadJson<any[]>(MILITARY_REPORTS_KEY, [], tenantId));
@@ -3580,6 +3583,10 @@ export default function App() {
       const remote = await loadMilitaryModule(tenantId);
       if (remote) {
         militarySyncSnapshotRef.current = true; // 로드 반영분은 dirty 로 잡지 않음
+        // 진단 로그: 실제로 어떤 JSON/인원이 로드되는지 확인(요청사항).
+        console.log("Military JSON", remote);
+        console.log("Loaded Personnel", remote.militaryPersonnel);
+        console.log("Personnel Count", Array.isArray(remote.militaryPersonnel) ? remote.militaryPersonnel.length : 0);
         // [인사관리] 원격이 비어 있는데(저장 지연/일시 빈 응답/이전 빈 blob) 로컬에 데이터가 있으면
         // 빈 배열로 덮어쓰지 않는다 → 등록/수정 후 새로고침·재접속 시 인원이 사라지던 문제 방지.
         const remotePersonnel = Array.isArray(remote.militaryPersonnel) ? remote.militaryPersonnel : [];
