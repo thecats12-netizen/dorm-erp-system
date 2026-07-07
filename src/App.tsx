@@ -6675,8 +6675,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operationalDorms, dorms, occupants, settlementSiteFilter, settlementGenderFilter, settlementSearch]);
 
-  // 정산 거주자 = 대시보드 현 거주자 동일 helper(isCurrentResidentStatus) + 미배정/매칭/중복 정리.
+  // 정산 거주자 = 입주자 메뉴와 동일한 현 거주자 기준(occupantDisplayStatus) + 미배정/매칭/중복 정리.
   // KPI·카드·상세·합계·Excel 공통 출처. (선택월 거주기간은 별도 컬럼에서 getSettlementStayMonths 로 계산)
+  // ※ occupantDisplayStatus: 실제퇴실일/퇴실 → "과거거주"(제외), 미배정 → "배정대기"(제외),
+  //   거주중/연장(실제퇴실일 없음) → "거주중"(포함), 만료예정 → 포함. 신입사원/입주자/기숙사 상세와 동일 함수.
   const settlementResidents = useMemo(() => {
     const scopedDormIds = new Set(settlementScopeDorms.map((d) => d.id));
     const seen = new Set<string>();
@@ -6684,7 +6686,9 @@ export default function App() {
     const excluded = { 삭제: 0, 상태제외: 0, 미배정: 0, 기숙사매칭실패: 0, 중복제외: 0 };
     occupants.forEach((o) => {
       if (o.isDeleted) { excluded.삭제++; return; }
-      if (!isCurrentResidentStatus(o)) { excluded.상태제외++; return; } // 대시보드와 동일 기준
+      // 현재 거주인 판단을 입주자 메뉴 공통 함수(occupantDisplayStatus)로 통일: 거주중/만료예정만 포함(연장 포함, 실제퇴실일/미배정 제외).
+      const dispStatus = occupantDisplayStatus(o);
+      if (dispStatus !== "거주중" && dispStatus !== "만료예정") { excluded.상태제외++; return; }
       if (!o.dormId || !o.dormId.trim()) { excluded.미배정++; return; }
       // 매칭 실패는 "오류"가 아니라 "미매칭 데이터"(운영목록 외 기숙사) — 반복 console.warn 도배 금지(아래 dev 요약 1회만).
       if (!scopedDormIds.has(o.dormId)) { excluded.기숙사매칭실패++; return; }
