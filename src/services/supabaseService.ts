@@ -108,19 +108,11 @@ export const loadMilitaryModule = async (tenantId: string): Promise<MilitaryModu
   return (data as { data?: MilitaryModuleState } | null)?.data ?? null;
 };
 
-export const saveMilitaryModule = async (payload: MilitaryModuleState): Promise<void> => {
+export const saveMilitaryModule = async (payload: MilitaryModuleState, userId?: string | null): Promise<void> => {
   if (!isSupabaseAvailable()) {
     console.warn("Supabase environment variables are not configured. Skipping Supabase save.");
     return;
   }
-  const row = {
-    tenant_id: payload.tenantId,
-    data: payload,
-    updated_at: new Date().toISOString(),
-  };
-  // military_module_data 는 테넌트당 1행 구조이지만 tenant_id 에 unique 제약이 없을 수 있어
-  // onConflict:"tenant_id" upsert 가 400(no unique constraint)을 유발한다.
-  // → 제약 유무와 무관하게 동작하도록 "존재 여부 확인 후 update/insert"로 처리.
   const payloadBytes = (() => { try { return JSON.stringify(payload).length; } catch { return -1; } })();
   const logErr = (operation: string, error: unknown) => {
     const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
@@ -136,18 +128,36 @@ export const saveMilitaryModule = async (payload: MilitaryModuleState): Promise<
     });
   };
 
+  // military_module_data 는 테넌트당 1행 구조이지만 tenant_id 에 unique 제약이 없을 수 있어
+  // onConflict:"tenant_id" upsert 가 400(no unique constraint)을 유발한다.
+  // → 제약 유무와 무관하게 동작하도록 "최신 행 조회 후 update/insert"로 처리.
+  // ★ 기존 data JSON 을 병합(보존)해서 저장 → 인사관리(militaryPersonnel) 등 현재 상태로 갱신하되,
+  //   data 안의 다른 키(공지/훈련/설정 등)는 절대 삭제하지 않는다.
   const { data: existing, error: selErr } = await supabase!
     .from(MILITARY_MODULE_TABLE)
-    .select("tenant_id")
+    .select("id, data")
     .eq("tenant_id", payload.tenantId)
+    .order("updated_at", { ascending: false })
     .limit(1);
   if (selErr) {
     logErr("select", selErr);
     throw selErr;
   }
 
-  if (existing && existing.length > 0) {
-    const { error } = await supabase!.from(MILITARY_MODULE_TABLE).update(row).eq("tenant_id", payload.tenantId);
+  const existingRow = existing && existing.length > 0 ? (existing[0] as { id?: string; data?: Record<string, any> }) : null;
+  const mergedData = { ...(existingRow?.data || {}), ...payload }; // 기존 data 보존 + 현재 군대 모듈 상태 반영
+  const row = {
+    tenant_id: payload.tenantId,
+    data: mergedData,
+    updated_at: new Date().toISOString(),
+    updated_by: userId ?? null,
+  };
+
+  if (existingRow) {
+    // 최신 1행을 id 로 정확히 갱신(중복 행/경합 상황에서도 안전).
+    const { error } = existingRow.id
+      ? await supabase!.from(MILITARY_MODULE_TABLE).update(row).eq("id", existingRow.id)
+      : await supabase!.from(MILITARY_MODULE_TABLE).update(row).eq("tenant_id", payload.tenantId);
     if (error) { logErr("update", error); throw error; }
   } else {
     // created_at default 가 없는 배포 스키마에서도 안전하도록 명시(있으면 무시됨)

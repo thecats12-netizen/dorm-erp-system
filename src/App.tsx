@@ -3647,7 +3647,7 @@ export default function App() {
     setSupabaseSyncStatus("Supabase에 군대 모듈 데이터를 저장 중입니다...");
 
     try {
-      await saveMilitaryModule(getMilitaryModuleState());
+      await saveMilitaryModule(getMilitaryModuleState(), currentUser?.id ?? null);
       lastMilitarySnapshotRef.current = snapshot;
       const savedAt = new Date().toLocaleString();
       setMilitaryLastSavedAt(savedAt);   // 마지막 저장 시간
