@@ -3580,7 +3580,10 @@ export default function App() {
       const remote = await loadMilitaryModule(tenantId);
       if (remote) {
         militarySyncSnapshotRef.current = true; // 로드 반영분은 dirty 로 잡지 않음
-        setMilitaryPersonnel(remote.militaryPersonnel || []);
+        // [인사관리] 원격이 비어 있는데(저장 지연/일시 빈 응답/이전 빈 blob) 로컬에 데이터가 있으면
+        // 빈 배열로 덮어쓰지 않는다 → 등록/수정 후 새로고침·재접속 시 인원이 사라지던 문제 방지.
+        const remotePersonnel = Array.isArray(remote.militaryPersonnel) ? remote.militaryPersonnel : [];
+        setMilitaryPersonnel((prev) => (remotePersonnel.length > 0 ? remotePersonnel : (prev.length > 0 ? prev : remotePersonnel)));
         setMilitaryTrainingRecords(remote.militaryTrainingRecords || []);
         setMilitaryNotices(remote.militaryNotices || []);
         setMilitaryReports(remote.militaryReports || []);
