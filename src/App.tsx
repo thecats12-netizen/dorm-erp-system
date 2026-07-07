@@ -19503,8 +19503,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <p className="text-xs text-slate-500">선택한 연도/월에 대한 정산 항목을 등록하고 관리합니다.</p>
                     </div>
                   </div>
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="space-y-4">
+                  {/* 폼 래퍼: 모바일 1열 / 태블릿 이상 2열. min-w-0 로 긴 select 가 그리드를 밀어 가로 넘침 방지 */}
+                  <div className="grid w-full max-w-full gap-4 md:grid-cols-2">
+                    <div className="min-w-0 max-w-full space-y-4">
                       <FilteredDormSelector
                         value={settlementItemForm.dormId}
                         onChange={(dormId) => setSettlementItemForm((prev) => ({ ...prev, dormId }))}
@@ -19518,12 +19519,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <SelectInput label="부담형태" value={settlementItemForm.burdenType} onChange={(v) => setSettlementItemForm((prev) => ({ ...prev, burdenType: v as SettlementBurdenType }))} options={settlementBurdenTypes} />
                       <Input label="대상" value={settlementItemForm.targetName} onChange={(v) => setSettlementItemForm((prev) => ({ ...prev, targetName: v }))} placeholder="예: 김철수" />
                       <Input label="메모" value={settlementItemForm.memo} onChange={(v) => setSettlementItemForm((prev) => ({ ...prev, memo: v }))} placeholder="비고" />
-                      <div className="flex flex-wrap gap-2">
-                        <button type="button" onClick={saveSettlementItem} className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500">{selectedSettlementItemId ? "수정" : "등록"}</button>
-                        <button type="button" onClick={resetSettlementItemForm} className="rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">초기화</button>
+                      <div className="flex flex-col flex-wrap gap-2 md:flex-row">
+                        <button type="button" onClick={saveSettlementItem} className="w-full rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 md:w-auto">{selectedSettlementItemId ? "수정" : "등록"}</button>
+                        <button type="button" onClick={resetSettlementItemForm} className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 md:w-auto">초기화</button>
                       </div>
                     </div>
-                    <div className="space-y-4">
+                    <div className="min-w-0 max-w-full space-y-4">
                       <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                         <h4 className="text-sm font-semibold text-slate-900">선택된 연월</h4>
                         <p className="text-sm text-slate-500">{settlementYear}년 {settlementMonth}월</p>
