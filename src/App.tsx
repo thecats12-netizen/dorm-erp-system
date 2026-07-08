@@ -812,6 +812,31 @@ function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string 
   return "거주중";
 }
 
+// [1] 공지 "내용" 표시 정규화: 저장값이 JSON 문자열/객체/HTML/escape 여도 실제 내용만 자연스럽게 표시.
+// (content/body/text/message 중 실제 값만 추출, 태그 제거, \n 복원, undefined/null 노출 방지)
+function getNoticeDisplayContent(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") {
+    const s = value.trim();
+    // 객체/배열 형태의 JSON 문자열일 때만 파싱(숫자/평문 문자열이 ""로 사라지지 않게 접두어로 판별).
+    if (s.startsWith("{") || s.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(s);
+        if (parsed && typeof parsed === "object") {
+          const o = parsed as Record<string, any>;
+          return String(o.content || o.body || o.text || o.message || "");
+        }
+      } catch { /* JSON 아님 — 평문 처리 */ }
+    }
+    return s.replace(/<[^>]*>/g, "").replace(/\\n/g, "\n").trim(); // HTML 태그 제거 + \n 복원
+  }
+  if (typeof value === "object") {
+    const o = value as Record<string, any>;
+    return String(o.content || o.body || o.text || o.message || "");
+  }
+  return String(value);
+}
+
 const SETTLEMENT_ITEMS_KEY = "settlementItems";
 // 정산 "정산완료" 표시(기숙사+연월 단위) — DB/Supabase 변경 없이 localStorage 로만 관리(복구 가능: 다시 눌러 해제).
 const SETTLEMENT_COMPLETED_KEY = "settlementCompleted-v1";
@@ -11244,7 +11269,8 @@ export default function App() {
   };
 
   const openMilitaryNoticeEdit = (notice: MilitaryNotice) => {
-    setMilitaryNoticeForm(notice);
+    // 수정 폼 초기값도 정규화 → JSON/객체/HTML 코드형식이 "내용" 입력칸에 보이지 않게.
+    setMilitaryNoticeForm({ ...notice, content: getNoticeDisplayContent(notice.content) });
     setEditingMilitaryNoticeId(notice.id);
     setShowMilitaryNoticeForm(true);
   };
@@ -11774,7 +11800,7 @@ export default function App() {
   const openNoticePrintWindow = (notice: MilitaryNotice) => {
     const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
     // content 의 "라벨: 값" 줄을 표로 렌더(추적 마커/대괄호 제목 줄 제외) → 코드가 아닌 실제값(한글) 표시
-    const rows = (notice.content || "")
+    const rows = getNoticeDisplayContent(notice.content)
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line && !line.startsWith("[") && line.includes(":"))
@@ -16195,7 +16221,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           {notice.personnelIds?.map((id) => militaryPersonnel.find((person) => person.id === id)?.name || id).join(", ")}
                         </td>
                         <td className="px-3 py-3 erp-col-status">{publishStatus}</td>
-                        <td className="px-3 py-3 erp-col-memo" title={notice.content}>{notice.content}</td>
+                        <td className="px-3 py-3 erp-col-memo" title={getNoticeDisplayContent(notice.content)}>{getNoticeDisplayContent(notice.content)}</td>
                         {canEditData(currentUser) && (
                           <td className="px-3 py-3 space-x-2 erp-col-action">
                             <button
@@ -19374,7 +19400,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                       {completed && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">정산완료</span>}
                                       {leaseStatus && <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${contractEnded ? "bg-rose-100 text-rose-700" : "bg-slate-200 text-slate-600"}`}>{leaseStatus}</span>}
                                     </div>
-                                    <div className="text-xs text-slate-500">{dorm.dong} | {dorm.address}</div>
+                                    {(dorm.dong || dorm.roomHo) && (
+                                      <div className="text-xs text-slate-500">
+                                        {dorm.dong ? `${stripDongHoSuffix(dorm.dong)}동` : ""}
+                                        {dorm.dong && dorm.roomHo ? " · " : ""}
+                                        {dorm.roomHo ? `${stripDongHoSuffix(dorm.roomHo)}호` : ""}
+                                      </div>
+                                    )}
+                                    {dorm.address && <div className="text-[11px] text-slate-400">{dorm.address}</div>}
                                     <div className="text-[11px] text-slate-400">계약종료: {getDormContractEndLabel(dorm.id) || "-"} · 현재거주 {dormOccupants.length}명</div>
                                   </div>
                                 </div>
@@ -24941,8 +24974,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           <tr key={o.id} className={theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}>
                             <td className="px-3 py-2">{o.employeeName || "-"}</td>
                             <td className="px-3 py-2"><span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusBadge(st)}`}>{st}</span></td>
-                            <td className="px-3 py-2">{o.moveInDate || "-"}</td>
-                            <td className="px-3 py-2">{o.actualMoveOutDate || "-"}</td>
+                            <td className="px-3 py-2">{formatDateOnly(o.moveInDate) || "-"}</td>
+                            <td className="px-3 py-2">{o.actualMoveOutDate ? (formatDateOnly(o.actualMoveOutDate) || "-") : "-"}</td>
                           </tr>
                         );
                       }) : (
