@@ -619,63 +619,105 @@ export const loadAuditLogsModule = async (tenantId: string, limit = 50): Promise
 // 운영 모듈 저장 결과 — 테이블별로 성공/실패를 분리해 반환.
 // (회사망에서 청소는 되는데 하자만 실패하는 등, 한 테이블 실패가 다른 테이블 저장/커밋을 막지 않도록)
 export type OperationalSaveResult = {
-  savedTables: string[];                              // 저장 성공한 테이블
-  failed: Array<{ table: string; error: any }>;       // 저장 실패한 테이블 + 원인
+  savedTables: string[];                              // 본문 저장 성공한 테이블
+  failed: Array<{ table: string; error: any }>;       // 본문 저장 실패한 테이블 + 원인
+  photoFailedTables: string[];                        // 본문은 저장됐으나 "사진 저장"만 실패한 테이블(재업로드 안내용)
+};
+
+// 대용량 사진(base64) 컬럼 — 본문(텍스트) 저장 payload 에서 제외하고 별도 update 로 저장한다.
+// (회사망 보안 프록시가 대용량 base64 요청을 차단해 No API key/CORS/Failed to fetch 가 나는 문제 회피)
+const CLEANING_PHOTO_KEYS = ["before_photo_data_urls", "after_photo_data_urls"];
+const DEFECT_PHOTO_KEYS = ["request_photo_data_urls", "completion_photo_data_urls"];
+const stripKeys = (obj: Record<string, any>, keys: string[]) => { const c = { ...obj }; keys.forEach((k) => delete c[k]); return c; };
+const base64Len = (arr?: string[]) => (Array.isArray(arr) ? arr.reduce((s, x) => s + (typeof x === "string" ? x.length : 0), 0) : 0);
+
+// ── [9] 장기 개선: 현재는 DB base64 저장 유지. 추후 Supabase Storage 업로드로 전환할 수 있도록
+//        "본문 저장(saveBodyRows)"과 "사진 저장(savePhotosOptional)"을 함수로 분리해 둔다. ──
+type PhotoJob = { table: string; id: string; data: Record<string, string[]>; imageCount: number; base64Size: number };
+
+// 사진만 별도 update(본문 저장 성공 후 호출). 실패해도 본문 저장은 유지 — 실패 테이블 목록만 반환.
+const savePhotosOptional = async (photoJobs: PhotoJob[]): Promise<string[]> => {
+  if (photoJobs.length === 0) return [];
+  const run = async (pj: PhotoJob): Promise<{ pj: PhotoJob; error: any }> => {
+    try {
+      const { error } = await supabase!.from(pj.table).update(pj.data).eq("id", pj.id);
+      return { pj, error: error ?? null };
+    } catch (e) {
+      return { pj, error: e };
+    }
+  };
+  let results = await Promise.all(photoJobs.map(run));
+  // [7] 사진 저장 실패 시 1회 자동 재시도(1.5초 후).
+  const failedOnce = results.filter((r) => r.error);
+  if (failedOnce.length > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const retried = await Promise.all(failedOnce.map((r) => run(r.pj)));
+    const byId = new Map(retried.map((r) => [`${r.pj.table}|${r.pj.id}`, r]));
+    results = results.map((r) => byId.get(`${r.pj.table}|${r.pj.id}`) ?? r);
+  }
+  const failedTables = new Set<string>();
+  for (const r of results) {
+    if (!r.error) continue;
+    failedTables.add(r.pj.table);
+    const err = r.error as { code?: unknown; message?: string; name?: unknown };
+    // [8] 오류 로그: table/action/message/code + 이미지 수/총 base64 크기.
+    console.error("[photo save] 사진 저장 실패(본문은 저장됨):", {
+      table: r.pj.table,
+      action: "photo-update",
+      id: r.pj.id,
+      code: err?.code ?? "(unknown)",
+      name: err?.name ?? "(unknown)",
+      message: err?.message ?? String(r.error),
+      imageCount: r.pj.imageCount,
+      totalBase64Size: r.pj.base64Size,
+    });
+  }
+  return Array.from(failedTables);
 };
 
 export const saveOperationalModule = async (payload: OperationalModuleState, userId: string): Promise<OperationalSaveResult> => {
   if (!isSupabaseAvailable()) {
     console.warn("Supabase environment variables are not configured. Skipping operational module save.");
-    return { savedTables: [], failed: [] };
+    return { savedTables: [], failed: [], photoFailedTables: [] };
   }
 
-  // 공통 Supabase 클라이언트(supabase)만 사용. 직접 fetch/axios/REST 없음. 각 테이블은 독립 upsert.
-  // 변경 행이 있는 테이블만 전송(빈 배열은 네트워크 요청 생략).
+  // [1][2] 본문(텍스트) 저장 payload — 청소/하자는 대용량 사진 컬럼을 제외하고 저장한다.
   const jobs: Array<{ table: string; rows: any[] }> = [
-    { table: "cleaning_reports", rows: payload.cleaningReports.map((r) => toDbCleaningReport(r, payload.tenantId, userId)) },
-    { table: "defect_requests", rows: payload.defects.map((d) => toDbDefectRequest(d, payload.tenantId, userId)) },
+    { table: "cleaning_reports", rows: payload.cleaningReports.map((r) => stripKeys(toDbCleaningReport(r, payload.tenantId, userId), CLEANING_PHOTO_KEYS)) },
+    { table: "defect_requests", rows: payload.defects.map((d) => stripKeys(toDbDefectRequest(d, payload.tenantId, userId), DEFECT_PHOTO_KEYS)) },
     { table: "inventory_items", rows: payload.inventory.map((i) => toDbInventoryItem(i, payload.tenantId, userId)) },
     { table: "settlement_records", rows: payload.settlementRecords.map((r) => toDbSettlementRecord(r, payload.tenantId, userId)) },
     { table: "settlement_items", rows: payload.settlementItems.map((i) => toDbSettlementItem(i, payload.tenantId, userId)) },
   ].filter((j) => j.rows.length > 0);
 
-  // 한 테이블(그룹) 독립 upsert — 네트워크 거부(Failed to fetch)나 한 테이블 오류가 다른 테이블을 실패시키지 않게 격리.
   const upsertOne = async (j: { table: string; rows: any[] }): Promise<{ table: string; error: any }> => {
     try {
       const { error } = await supabase!.from(j.table).upsert(j.rows, { onConflict: "id" });
       return { table: j.table, error: error ?? null };
     } catch (e) {
-      return { table: j.table, error: e }; // 네트워크 예외(Failed to fetch 등)도 테이블별 결과로 수집
+      return { table: j.table, error: e };
     }
   };
 
   const logFailure = (action: "upsert" | "retry-upsert", s: { table: string; error: any }) => {
     const err = s.error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown; name?: unknown };
     const count = jobs.find((j) => j.table === s.table)?.rows.length ?? 0;
-    // 요구사항: table, action, error.code, error.message, error.details, payload(건수)를 console.error 로 출력.
-    console.error("[operational save] 테이블 저장 실패:", {
-      table: s.table,
-      action,
-      code: err?.code ?? "(unknown)",
-      status: err?.status ?? "(unknown)",
-      name: err?.name ?? "(unknown)",
-      message: err?.message ?? String(s.error),
-      details: err?.details,
-      hint: err?.hint,
-      payloadRows: count,
+    console.error("[operational save] 본문 저장 실패:", {
+      table: s.table, action,
+      code: err?.code ?? "(unknown)", status: err?.status ?? "(unknown)", name: err?.name ?? "(unknown)",
+      message: err?.message ?? String(s.error), details: err?.details, hint: err?.hint, payloadRows: count,
     });
   };
 
   let settled = await Promise.all(jobs.map(upsertOne));
 
-  // [3] 회사망 대비: 실패 테이블이 있으면 1.5초 후 1회만 자동 재시도(중복 저장 방지 — 실패분만 재전송).
-  let firstFailed = settled.filter((s) => s.error);
+  // 실패 테이블 1.5초 후 1회 자동 재시도.
+  const firstFailed = settled.filter((s) => s.error);
   if (firstFailed.length > 0) {
     firstFailed.forEach((s) => logFailure("upsert", s));
     await new Promise((resolve) => setTimeout(resolve, 1500));
     const retryJobs = jobs.filter((j) => firstFailed.some((f) => f.table === j.table));
     const retried = await Promise.all(retryJobs.map(upsertOne));
-    // 재시도 결과로 해당 테이블 결과를 교체(성공하면 실패 목록에서 빠짐).
     const retriedByTable = new Map(retried.map((r) => [r.table, r]));
     settled = settled.map((s) => retriedByTable.get(s.table) ?? s);
   }
@@ -683,18 +725,40 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
   const savedTables: string[] = [];
   const failed: Array<{ table: string; error: any }> = [];
   for (const s of settled) {
-    if (s.error) {
-      failed.push({ table: s.table, error: s.error });
-      logFailure("retry-upsert", s); // 재시도 후에도 실패 → 최종 실패 로그
-    } else {
-      savedTables.push(s.table);
-    }
+    if (s.error) { failed.push({ table: s.table, error: s.error }); logFailure("retry-upsert", s); }
+    else savedTables.push(s.table);
   }
+
+  // [4][5][6] 본문 저장 성공한 테이블만 사진을 별도 update. 사진 컬럼은 "비어있지 않을 때만" 전송
+  //  → 글만 수정(사진 미변경) 시 기존 사진을 [] 로 덮어쓰지 않음. 삭제로 줄어든 배열은 그대로 반영.
+  const savedSet = new Set(savedTables);
+  const photoJobs: PhotoJob[] = [];
+  if (savedSet.has("cleaning_reports")) {
+    payload.cleaningReports.forEach((r) => {
+      const data: Record<string, string[]> = {};
+      if (Array.isArray(r.beforePhotoDataUrls) && r.beforePhotoDataUrls.length) data.before_photo_data_urls = r.beforePhotoDataUrls;
+      if (Array.isArray(r.afterPhotoDataUrls) && r.afterPhotoDataUrls.length) data.after_photo_data_urls = r.afterPhotoDataUrls;
+      if (Object.keys(data).length && r.id) {
+        photoJobs.push({ table: "cleaning_reports", id: r.id, data, imageCount: (r.beforePhotoDataUrls?.length || 0) + (r.afterPhotoDataUrls?.length || 0), base64Size: base64Len(r.beforePhotoDataUrls) + base64Len(r.afterPhotoDataUrls) });
+      }
+    });
+  }
+  if (savedSet.has("defect_requests")) {
+    payload.defects.forEach((d) => {
+      const data: Record<string, string[]> = {};
+      if (Array.isArray(d.requestPhotoDataUrls) && d.requestPhotoDataUrls.length) data.request_photo_data_urls = d.requestPhotoDataUrls;
+      if (Array.isArray(d.completionPhotoDataUrls) && d.completionPhotoDataUrls.length) data.completion_photo_data_urls = d.completionPhotoDataUrls;
+      if (Object.keys(data).length && d.id) {
+        photoJobs.push({ table: "defect_requests", id: d.id, data, imageCount: (d.requestPhotoDataUrls?.length || 0) + (d.completionPhotoDataUrls?.length || 0), base64Size: base64Len(d.requestPhotoDataUrls) + base64Len(d.completionPhotoDataUrls) });
+      }
+    });
+  }
+  const photoFailedTables = await savePhotosOptional(photoJobs);
 
   // 부가기능: 변경이력(audit_logs)은 실패해도 본 저장을 실패로 처리하지 않음(내부에서 warn 만, throw 없음).
   await insertAuditLogsScoped(payload.auditLogs, payload.tenantId, userId);
 
-  return { savedTables, failed };
+  return { savedTables, failed, photoFailedTables };
 };
 
 /**

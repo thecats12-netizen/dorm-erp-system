@@ -5993,21 +5993,29 @@ export default function App() {
           auditLogs: isAdmin ? auditLogs.length : "(skip)",
         });
         setOperationalSyncError(null);
-        // 테이블별 성공/실패 분리 저장(청소↔하자 등 한 테이블 실패가 다른 테이블을 실패시키지 않음).
-        const { savedTables, failed } = await saveOperationalModule(operationalPayload, session.user.id);
+        // 본문/사진 분리 저장 — 본문(텍스트) 먼저 저장, 사진은 별도 update(실패해도 본문은 유지).
+        const { savedTables, failed, photoFailedTables } = await saveOperationalModule(operationalPayload, session.user.id);
         const failedSet = new Set(failed.map((f) => f.table));
+        // 사진 저장만 실패한 테이블은 본문 저장이 재시도되며 사진도 다시 시도되도록 커밋에서 제외 취급.
+        const photoFailedSet = new Set(photoFailedTables);
+        const notCommittable = (t: string) => failedSet.has(t) || photoFailedSet.has(t);
         // 비admin 작업 감사로그도 신규 건만 별도 저장(부가기능 — 실패해도 본 저장에 영향 없음)
         if (!isAdmin) {
           await insertAuditLogsScoped(unsyncedAuditLogs, tenantId, session.user.id);
         }
         // 전송 완료한 감사로그 id 기록 → 다음 저장에서 재전송하지 않음
         unsyncedAuditLogs.forEach((l) => { if (l.id) syncedAuditIdsRef.current.add(l.id); });
-        // ★ DB 저장에 성공한 테이블의 행만 해시 커밋(실패 테이블은 다음 저장에서 재시도되도록 커밋하지 않음).
-        if (!failedSet.has("cleaning_reports")) commitRowHashes("cleaning_reports", changedCleaning, opSeen);
-        if (!failedSet.has("defect_requests")) commitRowHashes("defect_requests", changedDefects, opSeen);
+        // ★ 본문+사진 모두 성공한 테이블의 행만 해시 커밋(실패/사진실패 테이블은 다음 저장에서 재시도).
+        if (!notCommittable("cleaning_reports")) commitRowHashes("cleaning_reports", changedCleaning, opSeen);
+        if (!notCommittable("defect_requests")) commitRowHashes("defect_requests", changedDefects, opSeen);
         if (!failedSet.has("inventory_items")) commitRowHashes("inventory_items", changedInventory, opSeen);
         if (!failedSet.has("settlement_records")) commitRowHashes("settlement_records", changedSettleRec, opSeen);
         if (!failedSet.has("settlement_items")) commitRowHashes("settlement_items", changedSettleItem, opSeen);
+
+        // 본문은 저장됐지만 사진만 실패 → 전체 실패로 처리하지 않고 재업로드 안내만 표시.
+        if (failed.length === 0 && photoFailedTables.length > 0) {
+          showNetworkToast("본문은 저장되었습니다. 사진은 네트워크 문제로 저장되지 않았습니다. 사진만 다시 업로드해주세요.");
+        }
 
         if (failed.length === 0) {
           // 전체 성공: 스냅샷/틱 갱신 + 실패 카운트 초기화 + 저장완료 표시.
@@ -9752,7 +9760,8 @@ export default function App() {
         el.onerror = reject;
         el.src = raw;
       });
-      const MAX = 1600;
+      // [3] 회사망 대용량 차단 회피: 최대 1280px + JPEG 0.7 로 압축(사진 1장 base64 크기 축소).
+      const MAX = 1280;
       let { width, height } = img;
       if (width > MAX || height > MAX) {
         const scale = Math.min(MAX / width, MAX / height);
@@ -9765,7 +9774,15 @@ export default function App() {
       const ctx = canvas.getContext("2d");
       if (!ctx) return raw;
       ctx.drawImage(img, 0, 0, width, height);
-      const compressed = canvas.toDataURL("image/jpeg", 0.7);
+      let compressed = canvas.toDataURL("image/jpeg", 0.7);
+      // 여전히 크면(≈>900KB) 품질을 한 단계 더 낮춰 재압축(회사망 요청 크기 최소화).
+      if (compressed.length > 1_200_000) {
+        const lower = canvas.toDataURL("image/jpeg", 0.55);
+        if (lower.length < compressed.length) compressed = lower;
+      }
+      if (import.meta.env.DEV && compressed.length > 1_400_000) {
+        console.warn("[사진 압축] base64 크기가 큽니다(회사망 차단 가능):", { base64Length: compressed.length });
+      }
       // 압축 결과가 원본보다 크면 원본 유지
       return compressed.length < raw.length ? compressed : raw;
     } catch {
