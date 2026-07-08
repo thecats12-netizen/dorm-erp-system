@@ -2492,6 +2492,10 @@ export default function App() {
   const [settlementCardFilter, setSettlementCardFilter] = useState<"정산대상" | "전체" | "정산완료" | "계약종료" | "현재거주있음" | "현재거주없음">("정산대상");
   // 정산완료 표시(기숙사+연월 키) — localStorage 로만 저장(DB 무변경, 다시 눌러 해제 가능).
   const [settlementCompletedKeys, setSettlementCompletedKeys] = useState<string[]>([]);
+  // 정산 카드 선택(1클릭 토글) + 상세보기 모달(더블클릭) 대상.
+  const [selectedSettlementDormId, setSelectedSettlementDormId] = useState<string | null>(null);
+  const [settlementDetailDorm, setSettlementDetailDorm] = useState<OperationalDorm | null>(null);
+  const settlementCardClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [inventorySubTab, setInventorySubTab] = useState<"status" | "manage" | "history">("status");
 
   // 저장된 로그인 아이디 복원(이메일/아이디만, 비밀번호는 저장하지 않음). tenant 는 항상 "default".
@@ -6759,6 +6763,49 @@ export default function App() {
       saveJson(SETTLEMENT_COMPLETED_KEY, next, tenantId); // 복구 가능: 다시 눌러 해제 시 목록 재노출
       return next;
     });
+  };
+
+  // ── [3] 기숙사-입주자 매칭 공통 함수(동/호 표기차 흡수) + 현재 거주 판정 ──
+  // normalizeDong/normalizeRoom: "102"·"102동", "1301"·"1301호" 등 표기 차이를 동일하게 비교.
+  const normalizeDong = (v: string) => normDong(v || "");
+  const normalizeRoom = (v: string) => normRoomHo(v || "");
+  // 입주자의 기숙사 키: dorm_id 로 기숙사를 찾아 site+건물명+동+호 조합 키 생성(접미사 표기차 흡수).
+  // (동일 기숙사인데 dorm_id 가 다른 중복 레코드도 같은 키로 매칭 → 거주인 누락 방지)
+  const getOccupantDormKey = (o: Occupant): string => {
+    const byDorm = o.dormId ? (operationalDormById.get(o.dormId) || dorms.find((d) => d.id === o.dormId)) : undefined;
+    return byDorm ? getDormKey(byDorm.site, byDorm.buildingName, byDorm.dong, byDorm.roomHo) : "";
+  };
+  // 특정 기숙사에 "한 번이라도 배정된" 입주자 전체(현재+퇴실+과거) — 영구삭제만 제외. (Excel/상세보기용)
+  const getDormAllOccupants = (dorm: OperationalDorm): Occupant[] => {
+    const dKey = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+    return occupants.filter((o) => {
+      if (o.isPermanentDeleted) return false;
+      if (o.dormId && o.dormId === dorm.id) return true;
+      return getOccupantDormKey(o) === dKey;
+    });
+  };
+  // 입주자 정산 상태 라벨: 거주중/연장/만료예정/퇴실/과거거주 (실제퇴실일 우선).
+  const getOccupantSettlementStatus = (o: Occupant): string => {
+    if (o.actualMoveOutDate) return "퇴실";
+    if (o.status === "퇴실") return "과거거주";
+    const today = new Date().toISOString().slice(0, 10);
+    if (o.moveOutDueDate && o.moveOutDueDate < today) return "연장";
+    if (o.status === "만료예정") return "만료예정";
+    if (o.status === "미배정") return "배정대기";
+    return "거주중";
+  };
+
+  // ── [1] 정산 카드 클릭(선택 토글)/더블클릭(상세보기) — 300ms 디바운스로 단일/더블 구분 ──
+  const handleSettlementCardClick = (dorm: OperationalDorm) => {
+    if (settlementCardClickTimerRef.current) return; // 더블클릭 대기 중이면 무시
+    settlementCardClickTimerRef.current = setTimeout(() => {
+      settlementCardClickTimerRef.current = null;
+      setSelectedSettlementDormId((prev) => (prev === dorm.id ? null : dorm.id)); // 토글: 선택/해제
+    }, 250);
+  };
+  const handleSettlementCardDblClick = (dorm: OperationalDorm) => {
+    if (settlementCardClickTimerRef.current) { clearTimeout(settlementCardClickTimerRef.current); settlementCardClickTimerRef.current = null; }
+    setSettlementDetailDorm(dorm); // 상세보기 모달 열기
   };
 
   const reportPeriod = `${reportYear}-${reportMonth}`;
@@ -12779,11 +12826,9 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
   const periodStart = validSettlementYear && validSettlementMonth ? new Date(settlementYearNum, settlementMonthNum - 1, 1) : null;
   const periodEnd = validSettlementYear && validSettlementMonth ? getMonthEnd(settlementYearNum, settlementMonthNum) : null;
 
-  const dormOccupants = occupants.filter((o) => {
-    if (o.dormId !== dorm.id) return false;
-    if (!periodStart || !periodEnd) return !o.isDeleted;
-    return isSettlementResident(o, periodStart, periodEnd); // 화면 정산과 동일 기준
-  });
+  // [2] Excel 은 현재 거주자뿐 아니라 이 기숙사에 "한 번이라도 배정된" 사람(퇴실/과거거주 포함)을 모두 포함.
+  //     (화면 카드의 현재 거주인 수는 별도 기준이라 영향 없음)
+  const dormOccupants = getDormAllOccupants(dorm);
 
   const dormKey = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
   const contract = dormContracts.find((c) => getDormKey(c.site, c.buildingName, c.dong, c.roomHo) === dormKey);
@@ -12848,7 +12893,9 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
       동: dorm.dong,
       호수: dorm.roomHo,
       거주자명: o.employeeName,
+      상태: getOccupantSettlementStatus(o),
       입실일: o.moveInDate,
+      실제퇴실일: o.actualMoveOutDate || "",
       퇴실일: o.actualMoveOutDate || o.moveOutDueDate || "",
       거주기간_개월수: stayMonths,
       "월세/관리비": monthlyRentOrMaintenance,
@@ -19181,11 +19228,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 const filteredDorms = settlementScopeDorms
                   .map((dorm) => {
                     const dormOccupants = settlementResidentsByDorm.get(dorm.id) || []; // KPI와 동일 출처(중복 제거 포함)
+                    const invDormKey = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
 
                     const revenue = dormOccupants.length * 2000000;
+                    // [4] 비품 비용: 자산관리 비품현황 등록 금액(purchaseAmount) 기준. dorm_id 우선, 없으면 건물+동+호 매칭.
+                    //     삭제/영구삭제/폐기 비품은 제외. (해당 월 구매분 합계 — 기존 계산 의미 유지)
                     const inventoryCost = inventory
                       .filter((i) => {
-                        if (i.dormId !== dorm.id || i.isDeleted) return false;
+                        if (i.isDeleted || i.isPermanentDeleted) return false;
+                        if (String((i as any).status || "").includes("폐기")) return false;
+                        const matches = (i.dormId && i.dormId === dorm.id) ||
+                          getDormKey((i as any).site || "", i.buildingName || "", i.dong || "", i.roomHo || "") === invDormKey;
+                        if (!matches) return false;
                         if (!periodStart || !periodEnd) return true;
                         const purchaseDate = parseSafeDate(i.purchaseDate);
                         return purchaseDate ? isSameMonth(purchaseDate, settlementYearNum, settlementMonthNum) : false;
@@ -19255,7 +19309,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <>
                         <div className="grid gap-3 md:grid-cols-4 mb-6">
                           {filteredDorms.map(({ dorm, dormOccupants, revenue, inventoryCost, defectCost, manualCost, settlementAmount, leaseStatus, contractEnded, completed }) => (
-                            <div key={dorm.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4 hover:bg-slate-900 transition" : "rounded-2xl border border-slate-200 bg-slate-50 p-4 hover:bg-slate-100 transition"} ${completed ? "opacity-70 ring-1 ring-emerald-400" : ""}`}>
+                            <div
+                              key={dorm.id}
+                              onClick={() => handleSettlementCardClick(dorm)}
+                              onDoubleClick={() => handleSettlementCardDblClick(dorm)}
+                              title="클릭: 선택/해제 · 더블클릭: 기숙사 상세보기"
+                              className={`cursor-pointer ${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4 hover:bg-slate-900 transition" : "rounded-2xl border border-slate-200 bg-slate-50 p-4 hover:bg-slate-100 transition"} ${completed ? "opacity-70 ring-1 ring-emerald-400" : ""} ${selectedSettlementDormId === dorm.id ? (theme.darkMode ? "ring-2 ring-blue-500" : "ring-2 ring-blue-400") : ""}`}
+                            >
                               <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
                                 <div className="flex items-center gap-3">
                                   <div className="w-2 h-8 rounded-full" style={{ backgroundColor: genderColor(dorm.gender) }} title={`성별: ${normalizeGenderLabel(dorm.gender)}`}></div>
@@ -19299,7 +19359,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               <div className="mt-4 grid gap-2 sm:grid-cols-2">
                                 <button
                                   type="button"
-                                  onClick={() => exportDormSettlementExcel(dorm)}
+                                  onClick={(e) => { e.stopPropagation(); exportDormSettlementExcel(dorm); }}
                                   className="w-full rounded-2xl bg-slate-700 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-600"
                                 >
                                   <Download className="inline-block h-4 w-4 align-middle" />
@@ -19308,7 +19368,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 {canEditData(currentUser) && (
                                   <button
                                     type="button"
-                                    onClick={() => {
+                                    onClick={(e) => {
+                                      e.stopPropagation();
                                       const value = window.prompt("기타 비용(원)을 입력하세요.", String(manualCost || 0));
                                       if (value === null) return;
                                       const amount = Number(value.replace(/,/g, ""));
@@ -19326,7 +19387,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 {canEditData(currentUser) && (
                                   <button
                                     type="button"
-                                    onClick={() => toggleSettlementCompleted(dorm.id)}
+                                    onClick={(e) => { e.stopPropagation(); toggleSettlementCompleted(dorm.id); }}
                                     className={`w-full rounded-2xl px-3 py-2 text-xs font-semibold text-white sm:col-span-2 ${completed ? "bg-slate-500 hover:bg-slate-400" : "bg-emerald-600 hover:bg-emerald-500"}`}
                                     title={completed ? "정산완료를 해제하면 기본 목록에 다시 표시됩니다." : "이 기숙사를 이번 달 정산완료로 표시합니다(기본 목록에서 숨김, 복구 가능)."}
                                   >
@@ -24789,6 +24850,58 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <button type="button" onClick={() => applyZoom(lightboxZoom + 0.25)} className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-lg font-bold text-white hover:bg-white/20" title="확대">＋</button>
                 </div>
                 <div className="text-center text-xs text-white/50">휠/＋－=확대·축소 · 더블클릭=100%↔200% · 확대 후 드래그=이동 · ←/→·스와이프=이동 · ESC=닫기</div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* [1] 정산 기숙사 상세보기 모달(카드 더블클릭) — 현재/퇴실 포함 거주 이력 표시 */}
+        {settlementDetailDorm && (() => {
+          const d = settlementDetailDorm;
+          const list = getDormAllOccupants(d).slice().sort((a, b) => String(b.moveInDate || "").localeCompare(String(a.moveInDate || "")));
+          const currentCount = list.filter((o) => isCurrentResident(o)).length;
+          const statusBadge = (s: string) =>
+            s === "퇴실" || s === "과거거주" ? "bg-rose-100 text-rose-700" :
+            s === "연장" ? "bg-amber-100 text-amber-700" :
+            s === "배정대기" ? "bg-slate-200 text-slate-600" : "bg-emerald-100 text-emerald-700";
+          return (
+            <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={() => setSettlementDetailDorm(null)}>
+              <div className={`my-8 w-full max-w-2xl rounded-3xl p-6 shadow-xl ${theme.darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-semibold">{d.buildingName} 기숙사 상세</h3>
+                    <p className="text-sm text-slate-500">{d.site} · {d.dong} · {d.address}</p>
+                    <p className="mt-1 text-xs text-slate-400">계약종료: {getDormContractEndLabel(d.id) || "-"} · 현재 거주인 {currentCount}명 · 거주 이력 {list.length}명</p>
+                  </div>
+                  <button onClick={() => setSettlementDetailDorm(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">✕</button>
+                </div>
+                <div className="erp-table-container">
+                  <table className="erp-table w-full text-left text-sm">
+                    <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                      <tr>
+                        <th className="px-3 py-2">거주자명</th>
+                        <th className="px-3 py-2">상태</th>
+                        <th className="px-3 py-2">입실일</th>
+                        <th className="px-3 py-2">실제퇴실일</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {list.length > 0 ? list.map((o) => {
+                        const st = getOccupantSettlementStatus(o);
+                        return (
+                          <tr key={o.id} className={theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}>
+                            <td className="px-3 py-2">{o.employeeName || "-"}</td>
+                            <td className="px-3 py-2"><span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusBadge(st)}`}>{st}</span></td>
+                            <td className="px-3 py-2">{o.moveInDate || "-"}</td>
+                            <td className="px-3 py-2">{o.actualMoveOutDate || "-"}</td>
+                          </tr>
+                        );
+                      }) : (
+                        <tr><td colSpan={4} className="px-3 py-6 text-center text-slate-500">거주 이력이 없습니다.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           );
