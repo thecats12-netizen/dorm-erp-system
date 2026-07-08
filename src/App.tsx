@@ -2451,14 +2451,27 @@ export default function App() {
     // 자기 기기 저장분의 재저장/깜빡임 방지(저장 effect 가 이 플래그를 보고 재저장 생략)
     realtimeUpdateSourceRef.current.add("military_module");
     militarySyncSnapshotRef.current = true; // Realtime 반영분은 dirty 로 잡지 않음
-    if (Array.isArray(data.militaryPersonnel)) setMilitaryPersonnel(data.militaryPersonnel);
-    if (Array.isArray(data.militaryTrainingRecords)) setMilitaryTrainingRecords(data.militaryTrainingRecords);
-    if (Array.isArray(data.militaryNotices)) setMilitaryNotices(data.militaryNotices);
-    if (Array.isArray(data.militaryReports)) setMilitaryReports(data.militaryReports);
-    if (data.militarySettings && typeof data.militarySettings === "object") setMilitarySettings(data.militarySettings);
-    if (Array.isArray(data.militaryTrainingRules)) setMilitaryTrainingRules(data.militaryTrainingRules);
-    if (data.militaryCodeValues && typeof data.militaryCodeValues === "object") setMilitaryCodeValues(data.militaryCodeValues);
-    if (data.militaryTrainingAutoConfig && typeof data.militaryTrainingAutoConfig === "object") setMilitaryTrainingAutoConfig(data.militaryTrainingAutoConfig);
+    // ★ DB blob key 가 영문(militaryPersonnel) 또는 한글(군인/군사공지/"군사 훈련 기록") 어느 쪽이든 반영(로드 로직과 동일).
+    const r = data as any;
+    const firstArr = (...cands: any[]) => { for (const c of cands) if (Array.isArray(c)) return c; return undefined; };
+    const firstObj = (...cands: any[]) => { for (const c of cands) if (c && typeof c === "object" && !Array.isArray(c)) return c; return undefined; };
+    const rPersonnel = firstArr(r.militaryPersonnel, r.군인, r.personnel, r.personnelList);
+    const rTraining = firstArr(r.militaryTrainingRecords, r.trainingRecords, r.군사훈련기록, r["군사 훈련 기록"]);
+    const rNotices = firstArr(r.militaryNotices, r.군사공지, r.notices);
+    const rReports = firstArr(r.militaryReports, r.군사보고서, r.reports);
+    const rSettings = firstObj(r.militarySettings, r.군사설정);
+    const rRules = firstArr(r.militaryTrainingRules, r.군사훈련규칙);
+    const rCodeValues = firstObj(r.militaryCodeValues, r.군사코드값);
+    const rAutoConfig = firstObj(r.militaryTrainingAutoConfig, r.군사훈련자료구성, r.군사훈련자동생성);
+    // 비어있는 배열로 기존 데이터를 지우지 않도록 "값이 있을 때만" 반영(다른 key 도 절대 삭제/덮어쓰기 안 함).
+    if (Array.isArray(rPersonnel)) setMilitaryPersonnel((prev) => (rPersonnel.length > 0 ? rPersonnel : (prev.length > 0 ? prev : rPersonnel)));
+    if (Array.isArray(rTraining)) setMilitaryTrainingRecords((prev) => (rTraining.length > 0 ? rTraining : (prev.length > 0 ? prev : rTraining)));
+    if (Array.isArray(rNotices)) setMilitaryNotices((prev) => (rNotices.length > 0 ? rNotices : (prev.length > 0 ? prev : rNotices)));
+    if (Array.isArray(rReports)) setMilitaryReports((prev) => (rReports.length > 0 ? rReports : (prev.length > 0 ? prev : rReports)));
+    if (rSettings) setMilitarySettings(rSettings);
+    if (Array.isArray(rRules) && rRules.length > 0) setMilitaryTrainingRules(rRules);
+    if (rCodeValues) setMilitaryCodeValues(rCodeValues);
+    if (rAutoConfig && (rAutoConfig as any).targetStatuses) setMilitaryTrainingAutoConfig(rAutoConfig);
   };
 
   // 운영 설정 Realtime: 관리자가 운영시뮬레이션 설정을 바꾸면 모든 기기에서 즉시 반영.
@@ -3608,13 +3621,13 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", handler);
   }, [militaryDirty]);
 
-  const loadSupabaseMilitaryModule = async () => {
+  const loadSupabaseMilitaryModule = async (silent = false) => {
     if (!isSupabaseAvailable()) {
-      setSupabaseSyncStatus("Supabase 환경변수 미설정");
+      if (!silent) setSupabaseSyncStatus("Supabase 환경변수 미설정");
       return;
     }
-    setIsSupabaseSyncing(true);
-    setSupabaseSyncStatus("Supabase에서 군대 모듈 데이터를 불러오는 중입니다...");
+    // silent=true(주기적 fallback 재조회)일 때는 상태 텍스트/로딩 표시를 바꾸지 않아 화면 깜빡임 없음.
+    if (!silent) { setIsSupabaseSyncing(true); setSupabaseSyncStatus("Supabase에서 군대 모듈 데이터를 불러오는 중입니다..."); }
 
     try {
       const remote = await loadMilitaryModule(tenantId);
@@ -3664,9 +3677,9 @@ export default function App() {
           },
           militaryTrainingAutoConfig: (rAutoConfig && (rAutoConfig as any).targetStatuses) ? (rAutoConfig as any) : { enabled: true, targetStatuses: ["재직"] },
         });
-        setSupabaseSyncStatus("Supabase 불러오기가 완료되었습니다.");
+        if (!silent) setSupabaseSyncStatus("Supabase 불러오기가 완료되었습니다.");
       } else {
-        setSupabaseSyncStatus("Supabase에 저장된 군대 모듈 데이터가 없습니다.");
+        if (!silent) setSupabaseSyncStatus("Supabase에 저장된 군대 모듈 데이터가 없습니다.");
       }
     } catch (error) {
       const err = error as { status?: unknown; code?: unknown; message?: string; details?: unknown; hint?: unknown };
@@ -3679,9 +3692,9 @@ export default function App() {
         raw: error,
       });
       const friendly = translateSupabaseError((err && err.message) || String(error));
-      setSupabaseSyncStatus(`Supabase 불러오기에 실패했습니다. ${friendly}`);
+      if (!silent) setSupabaseSyncStatus(`Supabase 불러오기에 실패했습니다. ${friendly}`);
     } finally {
-      setIsSupabaseSyncing(false);
+      if (!silent) setIsSupabaseSyncing(false);
     }
   };
 
@@ -3730,6 +3743,18 @@ export default function App() {
       setSupabaseSyncStatus("Supabase 환경변수 미설정");
     }
   }, [tenantId]);
+
+  // [5] Realtime 실패/끊김 대비 fallback: 군대 메뉴에 있을 때 진입 시 1회 + 45초 간격으로 조용히 재조회.
+  //     (다른 기기 저장분을 realtime 이 놓쳐도 최대 45초 내 자동 반영. 상태 텍스트/로딩 표시 없음 → 화면 깜빡임 없음)
+  useEffect(() => {
+    const MILITARY_TABS = ["personnelManagement", "militaryTraining", "militaryNotices", "militaryReports", "militarySettings"];
+    if (!MILITARY_TABS.includes(activeTab)) return;
+    if (!isSupabaseAvailable() || !currentUser?.id) return;
+    void loadSupabaseMilitaryModule(true);
+    const timer = setInterval(() => { void loadSupabaseMilitaryModule(true); }, 45000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, currentUser?.id, tenantId]);
 
   // 군대 모듈 자동저장 (Dorm/Operational 모듈과 동일: 500ms 디바운스 + 스냅샷 비교 + Realtime 루프 방지).
   // 저장 자체는 기존 saveSupabaseMilitaryModule 재사용(동일 데이터 skip·상태표시·오류처리·dirty 갱신 포함).
@@ -16655,7 +16680,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </button>
                     <button
                       type="button"
-                      onClick={loadSupabaseMilitaryModule}
+                      onClick={() => { void loadSupabaseMilitaryModule(); }}
                       disabled={!isSupabaseAvailable() || isSupabaseSyncing}
                       className="rounded-2xl bg-slate-600 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >
