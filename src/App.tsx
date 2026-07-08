@@ -6567,6 +6567,13 @@ export default function App() {
     return m;
   }, [operationalDorms]);
 
+  // 입주자의 기숙사 키: dorm_id 로 기숙사를 찾아 site+건물명+동+호 조합 키(makeDormMatchKey, 동/호 접미사 표기차 흡수).
+  // 동일 기숙사인데 dorm_id 가 다른 중복 레코드도 같은 키로 묶여 거주인 수 누락(예: 5명→3명)이 방지된다.
+  const getOccupantDormKey = (o: Occupant): string => {
+    const byDorm = o.dormId ? (operationalDormById.get(o.dormId) || dorms.find((d) => d.id === o.dormId)) : undefined;
+    return byDorm ? getDormKey(byDorm.site, byDorm.buildingName, byDorm.dong, byDorm.roomHo) : "";
+  };
+
   // 현재 거주자 단일 목록: 통합 입주자 중 "현재 사용중 기숙사"에 속하고 현재 거주 상태인 사람만.
   const unifiedCurrentResidents = useMemo(
     () => normalizedOccupants.filter((o) => isCurrentResidentOccupant(o) && operationalDormById.has(o.dormId)),
@@ -6696,14 +6703,20 @@ export default function App() {
   // 정산 대상 기숙사: operationalDorms ∪ "거주자가 있는 기숙사"(종료/해지 계약이라 운영목록에서 빠졌어도 포함).
   // → 거주인 누락(예: 121 vs 123) 방지. 미배정(dormId 없음)은 제외, 기숙사 매칭 가능한 입주자만.
   const settlementScopeDorms = useMemo(() => {
-    const byId = new Map<string, Dorm | OperationalDorm>();
-    operationalDorms.filter(settlementDormPassesFilter).forEach((d) => byId.set(d.id, d));
+    // 건물+동+호 키로 dedup → 동일 기숙사가 dorm_id 여러 개여도 카드는 1개만(거주인 수 5→3 오표시/중복카드 방지).
+    const byKey = new Map<string, Dorm | OperationalDorm>();
+    const add = (d: Dorm | OperationalDorm) => {
+      if (!d || d.isDeleted || !settlementDormPassesFilter(d)) return;
+      const k = getDormKey(d.site, d.buildingName, d.dong, d.roomHo);
+      if (!byKey.has(k)) byKey.set(k, d);
+    };
+    operationalDorms.forEach(add);
     occupants.forEach((o) => {
-      if (!o.dormId || o.isDeleted || byId.has(o.dormId)) return;
+      if (!o.dormId || o.isDeleted) return;
       const d = operationalDorms.find((x) => x.id === o.dormId) || dorms.find((x) => x.id === o.dormId);
-      if (d && !d.isDeleted && settlementDormPassesFilter(d) && !byId.has(d.id)) byId.set(d.id, d);
+      if (d) add(d);
     });
-    return Array.from(byId.values());
+    return Array.from(byKey.values());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operationalDorms, dorms, occupants, settlementSiteFilter, settlementGenderFilter, settlementSearch]);
 
@@ -6712,7 +6725,8 @@ export default function App() {
   // ※ occupantDisplayStatus: 실제퇴실일/퇴실 → "과거거주"(제외), 미배정 → "배정대기"(제외),
   //   거주중/연장(실제퇴실일 없음) → "거주중"(포함), 만료예정 → 포함. 신입사원/입주자/기숙사 상세와 동일 함수.
   const settlementResidents = useMemo(() => {
-    const scopedDormIds = new Set(settlementScopeDorms.map((d) => d.id));
+    // 스코프를 "기숙사 키(건물+동+호)" 집합으로 → dorm_id 가 중복이어도 동일 건물이면 매칭(거주인 누락 방지).
+    const scopedDormKeys = new Set(settlementScopeDorms.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo)));
     const seen = new Set<string>();
     const result: Occupant[] = [];
     const excluded = { 삭제: 0, 상태제외: 0, 미배정: 0, 기숙사매칭실패: 0, 중복제외: 0 };
@@ -6722,9 +6736,10 @@ export default function App() {
       //   (실제퇴실일/퇴실/천안이동/미배정 제외, 거주중/만료예정/연장 포함 → 기숙사별 거주인 수와 정확히 일치)
       if (!isCurrentResidentOccupant(o)) { excluded.상태제외++; return; }
       if (!o.dormId || !o.dormId.trim()) { excluded.미배정++; return; }
-      // 매칭 실패는 "오류"가 아니라 "미매칭 데이터"(운영목록 외 기숙사) — 반복 console.warn 도배 금지(아래 dev 요약 1회만).
-      if (!scopedDormIds.has(o.dormId)) { excluded.기숙사매칭실패++; return; }
-      const key = `${o.dormId}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`; // 동일 인원/기숙사 중복 1명
+      // 기숙사 키로 스코프 매칭(중복 dorm_id 흡수).
+      if (!scopedDormKeys.has(getOccupantDormKey(o))) { excluded.기숙사매칭실패++; return; }
+      // 중복 제거를 "기숙사 키(건물+동+호)|이름|연락처" 기준으로 → 동일 기숙사가 dorm_id 여러 개여도 1명으로 집계.
+      const key = `${getOccupantDormKey(o)}|${(o.employeeName || "").trim()}|${(o.phone || "").replace(/\D/g, "")}`;
       if (seen.has(key)) { excluded.중복제외++; return; }
       seen.add(key);
       result.push(o);
@@ -6736,15 +6751,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settlementScopeDorms, occupants]);
 
-  // 기숙사별 정산 거주자 묶음(상세/합계가 KPI와 동일하도록 동일 출처에서 그룹화).
+  // 기숙사별 정산 거주자 묶음 — "기숙사 키(건물+동+호)" 기준 그룹화(중복 dorm_id 합산 → 카드 거주인 수 정확).
   const settlementResidentsByDorm = useMemo(() => {
     const map = new Map<string, Occupant[]>();
     settlementResidents.forEach((o) => {
-      const arr = map.get(o.dormId) || [];
+      const k = getOccupantDormKey(o);
+      const arr = map.get(k) || [];
       arr.push(o);
-      map.set(o.dormId, arr);
+      map.set(k, arr);
     });
     return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settlementResidents]);
 
   const settlementResidentCount = settlementResidents.length;
@@ -6769,12 +6786,7 @@ export default function App() {
   // normalizeDong/normalizeRoom: "102"·"102동", "1301"·"1301호" 등 표기 차이를 동일하게 비교.
   const normalizeDong = (v: string) => normDong(v || "");
   const normalizeRoom = (v: string) => normRoomHo(v || "");
-  // 입주자의 기숙사 키: dorm_id 로 기숙사를 찾아 site+건물명+동+호 조합 키 생성(접미사 표기차 흡수).
-  // (동일 기숙사인데 dorm_id 가 다른 중복 레코드도 같은 키로 매칭 → 거주인 누락 방지)
-  const getOccupantDormKey = (o: Occupant): string => {
-    const byDorm = o.dormId ? (operationalDormById.get(o.dormId) || dorms.find((d) => d.id === o.dormId)) : undefined;
-    return byDorm ? getDormKey(byDorm.site, byDorm.buildingName, byDorm.dong, byDorm.roomHo) : "";
-  };
+  // getOccupantDormKey 는 위(현재 거주자 계산 앞)에서 이미 정의됨 — 여기서 재선언하지 않는다.
   // 특정 기숙사에 "한 번이라도 배정된" 입주자 전체(현재+퇴실+과거) — 영구삭제만 제외. (Excel/상세보기용)
   const getDormAllOccupants = (dorm: OperationalDorm): Occupant[] => {
     const dKey = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
@@ -12508,7 +12520,7 @@ const exportExcel = () => {
     rows = settlementScopeDorms
       .map((dorm) => {
         // 화면 정산 KPI/상세와 동일 출처(중복 제거 포함).
-        const currentResidents = (settlementResidentsByDorm.get(dorm.id) || []).length;
+        const currentResidents = (settlementResidentsByDorm.get(getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo)) || []).length;
 
         const revenue = currentResidents * 2000000;
         const inventoryCost = inventory
@@ -12845,22 +12857,27 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
       return receiptDate ? isSameMonth(receiptDate, settlementYearNum, settlementMonthNum) : false;
     })
     .reduce((sum) => sum + 500000, 0);
-  const cleaningCost = cleaningReports
-    .filter((r) => {
-      if (r.isDeleted) return false;
-      const reportDorm = findOperationalDormForCleaningReport(r);
-      if (reportDorm?.id !== dorm.id) return false;
-      const reportDate = parseSafeDate(r.reportDate);
-      return reportDate ? isSameMonth(reportDate, settlementYearNum, settlementMonthNum) : false;
-    })
-    .length * 100000;
-  const inventoryPurchaseCost = inventory
-    .filter((i) => {
-      if (i.dormId !== dorm.id || i.isDeleted) return false;
-      const purchaseDate = parseSafeDate(i.purchaseDate);
-      return purchaseDate ? isSameMonth(purchaseDate, settlementYearNum, settlementMonthNum) : false;
-    })
-    .reduce((sum, i) => sum + (i.purchaseAmount || 0), 0);
+  // [3] 청소비용은 자동 기본값(100000) 금지 — 실제 정산 항목(홈클린/청소 카테고리)에 입력된 금액만 반영, 없으면 0원.
+  const cleaningCost = settlementItems
+    .filter((item) =>
+      item.dormId === dorm.id &&
+      item.settlementYear === safeSettlementYear &&
+      item.settlementMonth === safeSettlementMonth &&
+      /청소|홈클린/.test(String(item.category || ""))
+    )
+    .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  // [4] 비품비용: 자산관리 비품현황 등록 금액. dorm_id 우선, 없으면 건물+동+호 매칭. 폐기/삭제/영구삭제/매각 제외. 없으면 0원.
+  const invDormKeyX = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+  const inventoryMatchesDorm = (i: InventoryItem) => {
+    if (i.isDeleted || i.isPermanentDeleted) return false;
+    const st = String((i as any).status || "");
+    if (/폐기|매각|disposed|sold/i.test(st) || (i as any).disposalDate || (i as any).soldDate) return false;
+    if (i.dormId && i.dormId === dorm.id) return true;
+    return getDormKey((i as any).site || "", i.buildingName || "", i.dong || "", i.roomHo || "") === invDormKeyX;
+  };
+  const inventoryAmountOf = (i: InventoryItem) =>
+    Number((i as any).purchaseAmount ?? (i as any).amount ?? (i as any).price ?? (i as any).cost ?? (i as any).purchase_price ?? (i as any).total_amount ?? (i as any).item_price ?? (i as any)["금액"] ?? 0) || 0;
+  const inventoryPurchaseCost = inventory.filter(inventoryMatchesDorm).reduce((sum, i) => sum + inventoryAmountOf(i), 0);
   const inventorySaleCost = inventory
     .filter((i) => {
       if (i.dormId !== dorm.id || i.isDeleted) return false;
@@ -12898,12 +12915,14 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
       실제퇴실일: o.actualMoveOutDate || "",
       퇴실일: o.actualMoveOutDate || o.moveOutDueDate || "",
       거주기간_개월수: stayMonths,
+      정산대상여부: isCurrentResident(o) ? "정산대상" : "정산제외",
       "월세/관리비": monthlyRentOrMaintenance,
       장충금: prepaymentDeposit,
       회사_지급금: companyPayment,
       회사_환급금: companyRefund,
-      하자_비용: defectCost,
-      청소_비용: cleaningCost,
+      "하자/수리비": defectCost,
+      청소비용: cleaningCost,
+      비품비용: inventoryPurchaseCost,
       "비품_구매_매각_폐기": `구매:${inventoryPurchaseCost} / 매각:${inventorySaleCost} / 폐기:${inventoryDisposalCost}`,
       비고: manualCost ? `기타 비용 ${manualCost}원` : "",
     };
@@ -12916,15 +12935,19 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
       동: dorm.dong,
       호수: dorm.roomHo,
       거주자명: "-",
+      상태: "-",
       입실일: "-",
+      실제퇴실일: "-",
       퇴실일: "-",
       거주기간_개월수: 0,
+      정산대상여부: "-",
       "월세/관리비": monthlyRentOrMaintenance,
       장충금: prepaymentDeposit,
       회사_지급금: companyPayment,
       회사_환급금: companyRefund,
-      하자_비용: defectCost,
-      청소_비용: cleaningCost,
+      "하자/수리비": defectCost,
+      청소비용: cleaningCost,
+      비품비용: inventoryPurchaseCost,
       "비품_구매_매각_폐기": `구매:${inventoryPurchaseCost} / 매각:${inventorySaleCost} / 폐기:${inventoryDisposalCost}`,
       비고: manualCost ? `기타 비용 ${manualCost}원` : "",
     },
@@ -19227,7 +19250,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
                 const filteredDorms = settlementScopeDorms
                   .map((dorm) => {
-                    const dormOccupants = settlementResidentsByDorm.get(dorm.id) || []; // KPI와 동일 출처(중복 제거 포함)
+                    const dormOccupants = settlementResidentsByDorm.get(getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo)) || []; // KPI와 동일 출처(중복 제거 포함)
                     const invDormKey = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
 
                     const revenue = dormOccupants.length * 2000000;
