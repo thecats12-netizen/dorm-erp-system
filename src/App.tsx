@@ -6719,14 +6719,15 @@ export default function App() {
       if (!byKey.has(k)) byKey.set(k, d);
     };
     operationalDorms.forEach(add);
-    occupants.forEach((o) => {
+    // 거주자(배정 신입사원 포함 normalizedOccupants)가 있는 기숙사도 스코프에 포함 → 카드 누락/거주인 과소집계 방지.
+    normalizedOccupants.forEach((o) => {
       if (!o.dormId || o.isDeleted) return;
       const d = operationalDorms.find((x) => x.id === o.dormId) || dorms.find((x) => x.id === o.dormId);
       if (d) add(d);
     });
     return Array.from(byKey.values());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operationalDorms, dorms, occupants, settlementSiteFilter, settlementGenderFilter, settlementSearch]);
+  }, [operationalDorms, dorms, normalizedOccupants, settlementSiteFilter, settlementGenderFilter, settlementSearch]);
 
   // 정산 거주자 = 입주자 메뉴와 동일한 현 거주자 기준(occupantDisplayStatus) + 미배정/매칭/중복 정리.
   // KPI·카드·상세·합계·Excel 공통 출처. (선택월 거주기간은 별도 컬럼에서 getSettlementStayMonths 로 계산)
@@ -6738,7 +6739,9 @@ export default function App() {
     const seen = new Set<string>();
     const result: Occupant[] = [];
     const excluded = { 삭제: 0, 상태제외: 0, 미배정: 0, 기숙사매칭실패: 0, 중복제외: 0 };
-    occupants.forEach((o) => {
+    // ★ 신입사원/입주자 메뉴와 동일하게 normalizedOccupants(입주자 + 배정 신입사원 보완, canonical dorm_id) 사용.
+    //   raw occupants 만 쓰면 "배정된 신입사원(입주자 레코드 미생성)"이 빠져 105 처럼 과소집계됨 → 126 과 불일치.
+    normalizedOccupants.forEach((o) => {
       if (o.isDeleted) { excluded.삭제++; return; }
       // ★ 현재 거주인 판단을 기숙사 카드/상세와 "동일한 공통 함수" isCurrentResidentOccupant 로 통일.
       //   (실제퇴실일/퇴실/천안이동/미배정 제외, 거주중/만료예정/연장 포함 → 기숙사별 거주인 수와 정확히 일치)
@@ -6757,7 +6760,7 @@ export default function App() {
     }
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settlementScopeDorms, occupants]);
+  }, [settlementScopeDorms, normalizedOccupants]);
 
   // 기숙사별 정산 거주자 묶음 — "기숙사 키(건물+동+호)" 기준 그룹화(중복 dorm_id 합산 → 카드 거주인 수 정확).
   const settlementResidentsByDorm = useMemo(() => {
@@ -6790,10 +6793,16 @@ export default function App() {
     });
   };
 
-  // ── [3] 기숙사-입주자 매칭 공통 함수(동/호 표기차 흡수) + 현재 거주 판정 ──
+  // ── [2] 기숙사-입주자 매칭 공통 함수(동/호/건물명 표기차 흡수) + 현재 거주 판정 ──
   // normalizeDong/normalizeRoom: "102"·"102동", "1301"·"1301호" 등 표기 차이를 동일하게 비교.
   const normalizeDong = (v: string) => normDong(v || "");
   const normalizeRoom = (v: string) => normRoomHo(v || "");
+  const normalizeBuildingName = (v: string) => normBuilding(v || "");
+  // 기숙사↔입주자 동일 기숙사 판정: 1순위 dorm_id, 2·3순위 건물명+동+호 정규화 키(getOccupantDormKey/getDormKey).
+  const isSameDorm = (dorm: { id?: string; site?: string; buildingName?: string; dong?: string; roomHo?: string }, o: Occupant): boolean => {
+    if (dorm.id && o.dormId && dorm.id === o.dormId) return true;
+    return getOccupantDormKey(o) === getDormKey(dorm.site || "", dorm.buildingName || "", dorm.dong || "", dorm.roomHo || "");
+  };
   // getOccupantDormKey 는 위(현재 거주자 계산 앞)에서 이미 정의됨 — 여기서 재선언하지 않는다.
   // 특정 기숙사에 "한 번이라도 배정된" 입주자 전체(현재+퇴실+과거) — 영구삭제만 제외. (Excel/상세보기용)
   const getDormAllOccupants = (dorm: OperationalDorm): Occupant[] => {
@@ -12932,7 +12941,7 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
       실제퇴실일: o.actualMoveOutDate || "",
       퇴실일: o.actualMoveOutDate || o.moveOutDueDate || "",
       거주기간_개월수: stayMonths,
-      정산대상여부: isCurrentResident(o) ? "정산대상" : "정산제외",
+      정산대상여부: isCurrentResident(o) ? "정산대상" : (o.actualMoveOutDate ? "퇴실(과거거주)" : "과거거주"),
       "월세/관리비": monthlyRentOrMaintenance,
       장충금: prepaymentDeposit,
       회사_지급금: companyPayment,
