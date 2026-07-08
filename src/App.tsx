@@ -813,6 +813,8 @@ function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string 
 }
 
 const SETTLEMENT_ITEMS_KEY = "settlementItems";
+// 정산 "정산완료" 표시(기숙사+연월 단위) — DB/Supabase 변경 없이 localStorage 로만 관리(복구 가능: 다시 눌러 해제).
+const SETTLEMENT_COMPLETED_KEY = "settlementCompleted-v1";
 const PRE_MOVE_IN_INSPECTIONS_KEY = "preMoveInInspections";
 
 // 사진 데이터가 배열/JSON문자열/단일 URL·dataURL 등 여러 형태로 저장돼 있어도 안전하게 배열로 변환.
@@ -2486,6 +2488,10 @@ export default function App() {
   const [selectedSettlementItemId, setSelectedSettlementItemId] = useState<string | null>(null);
   const [settlementItemForm, setSettlementItemForm] = useState<SettlementItemFormState>(settlementItemTemplate());
   const [settlementShowUnpaid, setSettlementShowUnpaid] = useState(false);
+  // 정산 카드 실무 필터(전체/정산대상/정산완료/계약종료/현재거주 있음·없음). 기본=정산대상(정산완료 숨김).
+  const [settlementCardFilter, setSettlementCardFilter] = useState<"정산대상" | "전체" | "정산완료" | "계약종료" | "현재거주있음" | "현재거주없음">("정산대상");
+  // 정산완료 표시(기숙사+연월 키) — localStorage 로만 저장(DB 무변경, 다시 눌러 해제 가능).
+  const [settlementCompletedKeys, setSettlementCompletedKeys] = useState<string[]>([]);
   const [inventorySubTab, setInventorySubTab] = useState<"status" | "manage" | "history">("status");
 
   // 저장된 로그인 아이디 복원(이메일/아이디만, 비밀번호는 저장하지 않음). tenant 는 항상 "default".
@@ -3417,11 +3423,13 @@ export default function App() {
         // Step 4: Always load settings and military data from localStorage
         // [인사관리] localStorage 로드는 "폴백"이다. Supabase 로드(loadSupabaseMilitaryModule)가 먼저
         // 실제 데이터를 채운 경우, 비어 있을 수 있는 localStorage 값으로 덮어쓰지 않는다(로드 경합으로 0건 표시 방지).
-        const localMilitaryPersonnel = loadJson<any[]>(MILITARY_PERSONNEL_KEY, [], tenantId);
-        setMilitaryPersonnel((prev) => (prev.length > 0 ? prev : localMilitaryPersonnel));
-        setMilitaryTrainingRecords(loadJson<any[]>(MILITARY_TRAINING_KEY, [], tenantId));
-        setMilitaryNotices(loadJson<any[]>(MILITARY_NOTICES_KEY, [], tenantId));
-        setMilitaryReports(loadJson<any[]>(MILITARY_REPORTS_KEY, [], tenantId));
+        // localStorage 로드는 "폴백"이다. Supabase 로드가 먼저 실제 데이터를 채운 경우,
+        // 비어 있을 수 있는 localStorage 값으로 덮어쓰지 않는다(로드 경합으로 인사/훈련/공지 0건 표시 방지).
+        const keepLocalIfEmpty = (arr: any[]) => (prev: any[]) => (prev.length > 0 ? prev : arr);
+        setMilitaryPersonnel(keepLocalIfEmpty(loadJson<any[]>(MILITARY_PERSONNEL_KEY, [], tenantId)));
+        setMilitaryTrainingRecords(keepLocalIfEmpty(loadJson<any[]>(MILITARY_TRAINING_KEY, [], tenantId)));
+        setMilitaryNotices(keepLocalIfEmpty(loadJson<any[]>(MILITARY_NOTICES_KEY, [], tenantId)));
+        setMilitaryReports(keepLocalIfEmpty(loadJson<any[]>(MILITARY_REPORTS_KEY, [], tenantId)));
         setMilitarySettings(loadJson<any>(MILITARY_SETTINGS_KEY, {}, tenantId));
         const loadedRules = loadJson<MilitaryTrainingRule[]>(MILITARY_TRAINING_RULES_KEY, [], tenantId);
         setMilitaryTrainingRules(loadedRules.length ? loadedRules : defaultMilitaryTrainingRules);
@@ -6706,9 +6714,9 @@ export default function App() {
     const excluded = { 삭제: 0, 상태제외: 0, 미배정: 0, 기숙사매칭실패: 0, 중복제외: 0 };
     occupants.forEach((o) => {
       if (o.isDeleted) { excluded.삭제++; return; }
-      // 현재 거주인 판단을 입주자 메뉴 공통 함수(occupantDisplayStatus)로 통일: 거주중/만료예정만 포함(연장 포함, 실제퇴실일/미배정 제외).
-      const dispStatus = occupantDisplayStatus(o);
-      if (dispStatus !== "거주중" && dispStatus !== "만료예정") { excluded.상태제외++; return; }
+      // ★ 현재 거주인 판단을 기숙사 카드/상세와 "동일한 공통 함수" isCurrentResidentOccupant 로 통일.
+      //   (실제퇴실일/퇴실/천안이동/미배정 제외, 거주중/만료예정/연장 포함 → 기숙사별 거주인 수와 정확히 일치)
+      if (!isCurrentResidentOccupant(o)) { excluded.상태제외++; return; }
       if (!o.dormId || !o.dormId.trim()) { excluded.미배정++; return; }
       // 매칭 실패는 "오류"가 아니라 "미매칭 데이터"(운영목록 외 기숙사) — 반복 console.warn 도배 금지(아래 dev 요약 1회만).
       if (!scopedDormIds.has(o.dormId)) { excluded.기숙사매칭실패++; return; }
@@ -6736,6 +6744,22 @@ export default function App() {
   }, [settlementResidents]);
 
   const settlementResidentCount = settlementResidents.length;
+
+  // 정산완료 표시 로드(테넌트별 localStorage). DB/Supabase 미사용.
+  useEffect(() => {
+    setSettlementCompletedKeys(loadJson<string[]>(SETTLEMENT_COMPLETED_KEY, [], tenantId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId]);
+  const settlementPeriodKey = (dormId: string) => `${dormId}|${safeSettlementYear}|${safeSettlementMonth}`;
+  const isSettlementCompleted = (dormId: string) => settlementCompletedKeys.includes(settlementPeriodKey(dormId));
+  const toggleSettlementCompleted = (dormId: string) => {
+    const k = settlementPeriodKey(dormId);
+    setSettlementCompletedKeys((prev) => {
+      const next = prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k];
+      saveJson(SETTLEMENT_COMPLETED_KEY, next, tenantId); // 복구 가능: 다시 눌러 해제 시 목록 재노출
+      return next;
+    });
+  };
 
   const reportPeriod = `${reportYear}-${reportMonth}`;
 
@@ -19125,6 +19149,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               ))}
             </div>
             <div className={settlementSubTab === "monthly" ? "" : "hidden"}>
+              {/* 실무 필터: 정산대상(기본)/전체/정산완료/계약종료/현재거주 유무 + 초기화 */}
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                {(["정산대상", "전체", "정산완료", "계약종료", "현재거주있음", "현재거주없음"] as const).map((f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setSettlementCardFilter(f)}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${settlementCardFilter === f ? "bg-blue-600 text-white" : theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}
+                  >
+                    {f === "현재거주있음" ? "현재거주 있음" : f === "현재거주없음" ? "현재거주 없음" : f}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => { setSettlementCardFilter("정산대상"); setSettlementSiteFilter("전체"); setSettlementGenderFilter("전체"); setSettlementSearch(""); setSettlementShowUnpaid(false); }}
+                  className="rounded-full border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                >
+                  필터 초기화
+                </button>
+              </div>
               <div className="space-y-4">
               {(() => {
                 const periodYear = safeSettlementYear;
@@ -19172,6 +19216,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     const totalCost = inventoryCost + defectCost + manualCost;
                     const settlementAmount = revenue - totalCost;
 
+                    // 계약 종료/만료 여부(계약상태 표시·필터용) + 정산완료 여부(localStorage).
+                    const leaseStatus = (dorm as any).leaseStatus || "";
+                    const contractEnded = /종료|만료|해지/.test(String(leaseStatus));
+                    const completed = isSettlementCompleted(dorm.id);
+
                     return {
                       dorm,
                       dormOccupants,
@@ -19181,23 +19230,43 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       manualCost,
                       totalCost,
                       settlementAmount,
+                      leaseStatus,
+                      contractEnded,
+                      completed,
                     };
                   })
-                  .filter((row) => !settlementShowUnpaid || row.settlementAmount < 0);
+                  .filter((row) => !settlementShowUnpaid || row.settlementAmount < 0)
+                  // 실무 필터 적용(기본 정산대상은 정산완료 숨김 → 정산완료/전체 필터로 재확인 가능)
+                  .filter((row) => {
+                    switch (settlementCardFilter) {
+                      case "정산완료": return row.completed;
+                      case "전체": return true;
+                      case "계약종료": return row.contractEnded;
+                      case "현재거주있음": return row.dormOccupants.length > 0;
+                      case "현재거주없음": return row.dormOccupants.length === 0;
+                      case "정산대상":
+                      default: return !row.completed; // 정산완료 항목은 기본 목록에서 숨김
+                    }
+                  });
 
                 return (
                   <>
                     {filteredDorms.length > 0 ? (
                       <>
                         <div className="grid gap-3 md:grid-cols-4 mb-6">
-                          {filteredDorms.map(({ dorm, dormOccupants, revenue, inventoryCost, defectCost, manualCost, settlementAmount }) => (
-                            <div key={dorm.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4 hover:bg-slate-900 transition" : "rounded-2xl border border-slate-200 bg-slate-50 p-4 hover:bg-slate-100 transition"}`}>
+                          {filteredDorms.map(({ dorm, dormOccupants, revenue, inventoryCost, defectCost, manualCost, settlementAmount, leaseStatus, contractEnded, completed }) => (
+                            <div key={dorm.id} className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4 hover:bg-slate-900 transition" : "rounded-2xl border border-slate-200 bg-slate-50 p-4 hover:bg-slate-100 transition"} ${completed ? "opacity-70 ring-1 ring-emerald-400" : ""}`}>
                               <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
                                 <div className="flex items-center gap-3">
                                   <div className="w-2 h-8 rounded-full" style={{ backgroundColor: genderColor(dorm.gender) }} title={`성별: ${normalizeGenderLabel(dorm.gender)}`}></div>
                                   <div>
-                                    <div className={`${theme.darkMode ? "font-semibold text-slate-100" : "font-semibold text-slate-900"}`}>{dorm.buildingName}</div>
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className={`${theme.darkMode ? "font-semibold text-slate-100" : "font-semibold text-slate-900"}`}>{dorm.buildingName}</span>
+                                      {completed && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">정산완료</span>}
+                                      {leaseStatus && <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${contractEnded ? "bg-rose-100 text-rose-700" : "bg-slate-200 text-slate-600"}`}>{leaseStatus}</span>}
+                                    </div>
                                     <div className="text-xs text-slate-500">{dorm.dong} | {dorm.address}</div>
+                                    <div className="text-[11px] text-slate-400">계약종료: {getDormContractEndLabel(dorm.id) || "-"} · 현재거주 {dormOccupants.length}명</div>
                                   </div>
                                 </div>
                                 <div className="text-right">
@@ -19252,6 +19321,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                     className="w-full rounded-2xl bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500"
                                   >
                                     기타비용 입력
+                                  </button>
+                                )}
+                                {canEditData(currentUser) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleSettlementCompleted(dorm.id)}
+                                    className={`w-full rounded-2xl px-3 py-2 text-xs font-semibold text-white sm:col-span-2 ${completed ? "bg-slate-500 hover:bg-slate-400" : "bg-emerald-600 hover:bg-emerald-500"}`}
+                                    title={completed ? "정산완료를 해제하면 기본 목록에 다시 표시됩니다." : "이 기숙사를 이번 달 정산완료로 표시합니다(기본 목록에서 숨김, 복구 가능)."}
+                                  >
+                                    {completed ? "정산완료 취소" : "정산 처리(정산완료)"}
                                   </button>
                                 )}
                               </div>
