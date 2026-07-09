@@ -840,6 +840,38 @@ const CHEONAN_MOVE_KEYS = ["cheonanMoveDate", "cheonan_move_date", "transferMove
 function getActualMoveOutDate(row: any): string { return toDateOnly(firstField(row, ACTUAL_MOVE_OUT_KEYS)); }
 function getExpectedMoveOutDate(row: any): string { return toDateOnly(firstField(row, EXPECTED_MOVE_OUT_KEYS)); }
 function getCheonanMoveDate(row: any): string { return toDateOnly(firstField(row, CHEONAN_MOVE_KEYS)); }
+// [7] 월 경계(YYYY-MM-DD 문자열) + 문자열 날짜 비교 공통 함수(timezone 밀림 없음).
+function monthStartStr(year: number | string, month: number | string): string { return `${year}-${String(Number(month)).padStart(2, "0")}-01`; }
+function monthEndStr(year: number | string, month: number | string): string {
+  const y = Number(year), m = Number(month);
+  const last = new Date(y, m, 0).getDate(); // 해당 월 마지막 일
+  return `${y}-${String(m).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+}
+function isBeforeOrEqual(a: unknown, b: unknown): boolean { const x = toDateOnly(a), y = toDateOnly(b); return !!x && !!y && x <= y; }
+function isAfterOrEqual(a: unknown, b: unknown): boolean { const x = toDateOnly(a), y = toDateOnly(b); return !!x && !!y && x >= y; }
+function isDateInMonth(value: unknown, year: number | string, month: number | string): boolean { return isDateInYearMonth(value, year, month); }
+// 선택 월에 "운영 중인 기숙사": 계약시작 <= monthEnd, (종료일 없음 또는 종료일 >= monthStart), 종료/해지+종료일<monthStart 제외, 삭제 제외.
+function isDormActiveInMonth(dorm: any, year: number | string, month: number | string): boolean {
+  if (!dorm || dorm.isDeleted || dorm.isPermanentDeleted) return false;
+  const mStart = monthStartStr(year, month), mEnd = monthEndStr(year, month);
+  const start = toDateOnly(dorm.contractStart);
+  if (!start || start > mEnd) return false;               // 계약시작일 <= monthEnd
+  const end = toDateOnly(dorm.contractEnd);
+  if (end && end < mStart) return false;                  // 계약종료일이 선택월 이전 → 그 달엔 운영 안 함
+  if (["종료", "해지"].includes(dorm.contractStatus || "") && (!end || end < mStart)) return false; // 종료/해지+종료일 부재/이전 제외
+  return true;
+}
+// 선택 월에 "실제 거주 중이던 사람": 입실 <= monthEnd, (실제퇴실 없음 또는 실제퇴실 >= monthStart), 배정 있음, 삭제 제외.
+function isOccupantActiveInMonth(o: any, year: number | string, month: number | string): boolean {
+  if (!o || o.isDeleted || o.isPermanentDeleted) return false;
+  if (!o.dormId) return false;                            // 기숙사 배정 있음
+  const mStart = monthStartStr(year, month), mEnd = monthEndStr(year, month);
+  const moveIn = toDateOnly(o.moveInDate);
+  if (!moveIn || moveIn > mEnd) return false;             // 입실일 <= monthEnd (선택월 이후 입실 제외)
+  const actual = getActualMoveOutDate(o);
+  if (actual && actual < mStart) return false;            // 실제퇴실일이 선택월 이전이면 제외(그 달엔 이미 퇴실)
+  return true;
+}
 // 중도퇴거: 실제퇴실일이 (계약종료일/예정퇴실일)보다 빠름. 비교 대상(예정일)이 있어야 하며 실제 < 예정.
 function isEarlyMoveOut(row: any): boolean {
   const actual = getActualMoveOutDate(row);
@@ -8146,16 +8178,8 @@ export default function App() {
     const uniqueDorms = Array.from(uniqueDormMap.values());
 
     const calculateForGroupAndMonth = (site: Site, gender: "남" | "여", month: number) => {
-      // 1. 기숙사수: 계약시작일이 해당 월 말일 이전, 계약종료일/해지일이 없거나 해당 월 이후, 계약상태가 종료/해지 제외
-      const activeDorms = uniqueDorms.filter((d) => {
-        if (d.site !== site || d.gender !== gender) return false;
-        if (["종료", "해지"].includes(d.contractStatus)) return false;
-        const startDate = parseDateValue(d.contractStart);
-        if (!startDate || !isBeforeOrSameMonthEnd(startDate, year, month)) return false;
-        const endDate = parseDateValue(d.contractEnd);
-        if (endDate && isBeforeMonthEnd(endDate, year, month)) return false;
-        return true;
-      });
+      // 1. 기숙사수: 선택 월(year/month)에 실제 운영 중이던 기숙사만(문자열 날짜 기준, 공통 함수 isDormActiveInMonth).
+      const activeDorms = uniqueDorms.filter((d) => d.site === site && d.gender === gender && isDormActiveInMonth(d, year, month));
 
       // 2. 거주자 TO: 기숙사수 × 6, capacity 우선
       const residentTo = activeDorms.reduce((sum, d) => {
@@ -8194,11 +8218,9 @@ export default function App() {
         return occupantDorm && occupantDorm.site === site && occupantDorm.gender === gender;
       });
 
-      // 3. 현 거주자: 실제퇴실일 없음 + 상태 거주중/연장/재입주 + 기숙사 배정 있음(groupOccupants 에서 이미 배정 매칭).
-      const currentResidents = groupOccupants.filter((o) => {
-        if (getActualMoveOutDate(o)) return false; // 실제퇴실일 있으면 제외
-        return ["거주중", "연장", "재입주"].includes(o.status || "");
-      }).length;
+      // 3. 현 거주자: 선택 월에 실제 거주 중이던 사람(입실<=monthEnd, 실제퇴실 없음/monthStart 이후, 배정 있음).
+      //    현재 상태가 아니라 입실/퇴실 날짜 기준 월별 재계산(공통 함수 isOccupantActiveInMonth).
+      const currentResidents = groupOccupants.filter((o) => isOccupantActiveInMonth(o, year, month)).length;
 
       console.debug("[KPI] currentOccupants source/count", {
         site,
@@ -8234,26 +8256,18 @@ export default function App() {
       // 8. 과부족: 거주자 TO - 현 거주자
       const shortage = residentTo - currentResidents;
 
-      // 9. 임차만기: 계약종료일이 해당 월인 고유 기숙사 수
-      const expireBuildings = activeDorms.filter((d) => {
-        const endDate = parseDateValue(d.contractEnd);
-        return endDate && isSameMonth(endDate, year, month);
-      }).length;
+      // 9. 임차만기: 선택 월에 계약종료일이 있는 기숙사(문자열 날짜 기준).
+      const expireBuildings = uniqueDorms.filter((d) => d.site === site && d.gender === gender && isDateInMonth(d.contractEnd, year, month)).length;
 
-      // 10. 해지: 계약상태가 해지 또는 종료이고, 계약종료일이 해당 월인 고유 기숙사 수
-      const terminated = uniqueDorms.filter((d) => {
-        if (d.site !== site || d.gender !== gender) return false;
-        if (!["종료", "해지"].includes(d.contractStatus)) return false;
-        const endDate = parseDateValue(d.contractEnd);
-        return endDate && isSameMonth(endDate, year, month);
-      }).length;
+      // 10. 해지: 계약상태가 해지/종료이고 계약종료일이 선택 월인 기숙사.
+      const terminated = uniqueDorms.filter((d) =>
+        d.site === site && d.gender === gender &&
+        ["종료", "해지"].includes(d.contractStatus) &&
+        isDateInMonth(d.contractEnd, year, month)
+      ).length;
 
-      // 11. 추가임차: 계약시작일이 해당 월인 고유 기숙사 수
-      const addLease = uniqueDorms.filter((d) => {
-        if (d.site !== site || d.gender !== gender) return false;
-        const startDate = parseDateValue(d.contractStart);
-        return startDate && isSameMonth(startDate, year, month);
-      }).length;
+      // 11. 추가임차: 계약시작일이 선택 월인 기숙사(신규 등록/신규 계약 시작).
+      const addLease = uniqueDorms.filter((d) => d.site === site && d.gender === gender && isDateInMonth(d.contractStart, year, month)).length;
 
       return {
         site,
@@ -8304,10 +8318,18 @@ export default function App() {
     return results;
   }, [dormContracts, dorms, occupants, newHires, simulationYear]);
 
-  // [5] 개발용 디버그 로그: 선택 월 기준 중도퇴거 후보/판정 확인(운영 빌드에는 출력 없음).
+  // [9] 개발용 디버그 로그: 선택 월 기준 월별 통계/중도퇴거 후보 확인(운영 빌드에는 출력 없음).
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     const y = Number(simulationYear), m = Number(simulationMonth);
+    const total = simulationMonthlyStats.find((s) => s.month === m && s.site === "전체");
+    console.log("[운영시뮬레이션 월별 통계]", {
+      selectedYear: y, selectedMonth: m,
+      monthStart: monthStartStr(y, m), monthEnd: monthEndStr(y, m),
+      activeDormsCount: total?.dormCount, totalTO: total?.residentTo,
+      activeOccupantsCount: total?.currentResidents, expiredCount: total?.expiredResidents,
+      earlyMoveOutCount: total?.earlyDepartures, newMoveInCount: total?.newMoveIn,
+    });
     console.log("[운영시뮬레이션 중도퇴거 후보]", {
       selectedYear: y, selectedMonth: m,
       candidates: occupants
@@ -8321,7 +8343,7 @@ export default function App() {
           early: isEarlyMoveOut(row),
         })),
     });
-  }, [simulationYear, simulationMonth, occupants]);
+  }, [simulationYear, simulationMonth, occupants, simulationMonthlyStats]);
 
   const simulationRows = useMemo(() => {
     const month = Number(simulationMonth);
