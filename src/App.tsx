@@ -8876,8 +8876,14 @@ export default function App() {
   // ============================================
   // 현재 열려 있는 최상위 오버레이를 닫는다(우선순위: 미리보기 > 폼/모달 > 모바일 메뉴). 닫았으면 true.
   const closeTopOverlay = (): boolean => {
+    // [8] 저장/변환 중에는 닫기 금지(데이터 유실 방지). 완료 후 정상 동작.
+    if (heicConverting || savingPdf) return false;
     if (imageLightbox) { setImageLightbox(null); return true; }
     if (excelPreview) { setExcelPreview(null); return true; }
+    // 상세보기(팝업) 모달 — 폼보다 위(또는 단독)로 열리므로 우선 닫는다.
+    if (settlementDetailDorm) { setSettlementDetailDorm(null); return true; }
+    if (selectedDormDetailId) { setSelectedDormDetailId(""); return true; }
+    if (preInspectionDetailId) { setPreInspectionDetailId(null); return true; }
     if (showDefectForm) { setShowDefectForm(false); return true; }
     if (showCleaningReportForm) { setShowCleaningReportForm(false); return true; }
     if (showNewHireForm) { setShowNewHireForm(false); return true; }
@@ -8901,7 +8907,8 @@ export default function App() {
     return false;
   };
   const hasOpenOverlay = !!(
-    imageLightbox || excelPreview || showDefectForm || showCleaningReportForm || showNewHireForm ||
+    imageLightbox || excelPreview || settlementDetailDorm || selectedDormDetailId || preInspectionDetailId ||
+    showDefectForm || showCleaningReportForm || showNewHireForm ||
     showOccupantForm || showDormForm || showDormContractForm || showInventoryForm || showLeaseForm ||
     showSaleForm || showUserForm || showMilitaryPersonnelForm || showMilitaryTrainingForm ||
     showMilitaryNoticeForm || showMilitaryReportForm || showAssignDormForNewHire ||
@@ -8911,14 +8918,25 @@ export default function App() {
   // 최신 closeTopOverlay 를 ref 로 보관(이벤트 리스너에서 항상 최신 상태 사용).
   const closeTopOverlayRef = useRef(closeTopOverlay);
   closeTopOverlayRef.current = closeTopOverlay;
+  // [6] 모달 열기 직전 포커스했던 요소(카드/버튼) — 닫을 때 복원.
+  const lastFocusedBeforeOverlayRef = useRef<HTMLElement | null>(null);
 
   // 모바일/태블릿 뒤로가기: 오버레이가 열려 있으면 종료 대신 최상위 오버레이만 닫기.
+  // (+ [6] 포커스 복원, [7] preventScroll 로 스크롤 점프 방지)
   useEffect(() => {
     if (!hasOpenOverlay) return;
+    lastFocusedBeforeOverlayRef.current = (document.activeElement as HTMLElement) || null; // 열기 전 포커스 저장
     window.history.pushState({ appOverlay: Date.now() }, "");
     const onPop = () => { closeTopOverlayRef.current(); };
     window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      // 모든 오버레이가 닫힌 뒤 포커스 복원(스크롤 위치는 유지 — preventScroll).
+      const el = lastFocusedBeforeOverlayRef.current;
+      if (el && typeof el.focus === "function" && document.contains(el)) {
+        try { el.focus({ preventScroll: true }); } catch { el.focus(); }
+      }
+    };
   }, [hasOpenOverlay]);
 
   // 데스크탑 키보드 단축키: Esc 닫기 / Ctrl(⌘)+S 저장 / Ctrl(⌘)+F·"/" 검색 포커스.
@@ -18056,8 +18074,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
 
             {selectedDetailDorm && (
-              <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4 backdrop-blur-sm">
-                <div className={`${theme.darkMode ? "mx-auto max-w-5xl rounded-3xl bg-slate-950 p-6 shadow-2xl ring-1 ring-slate-200" : "mx-auto max-w-5xl rounded-3xl bg-white p-6 shadow-2xl ring-1 ring-slate-200"}`}>
+              <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4 backdrop-blur-sm" onClick={closeDormDetailModal}>
+                <div onClick={(e) => e.stopPropagation()} className={`${theme.darkMode ? "mx-auto max-w-5xl rounded-3xl bg-slate-950 p-6 shadow-2xl ring-1 ring-slate-200" : "mx-auto max-w-5xl rounded-3xl bg-white p-6 shadow-2xl ring-1 ring-slate-200"}`}>
                   <div className="mb-5 flex items-center justify-between gap-3">
                     <div>
                       <h3 className="text-xl font-semibold">기숙사 상세보기</h3>
