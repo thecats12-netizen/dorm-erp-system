@@ -8244,40 +8244,49 @@ export default function App() {
         return occupantDorm && occupantDorm.site === site && occupantDorm.gender === gender;
       });
 
-      // 3. 현 거주자: 선택 월에 실제 거주 중이던 사람(입실<=monthEnd, 실제퇴실 없음/monthStart 이후, 배정 있음).
-      //    현재 상태가 아니라 입실/퇴실 날짜 기준 월별 재계산(공통 함수 isOccupantActiveInMonth).
-      const currentResidents = groupOccupants.filter((o) => isOccupantActiveInMonth(o, year, month)).length;
+      // 통계 숫자와 상세 리스트가 "동일한 배열"을 쓰도록: 후보를 먼저 걸러 rows 로 만들고, 개수는 rows.length 로 산출.
+      // → 숫자용 필터와 모달용 필터를 따로 만들지 않는다(불일치 방지).
+      const toMemberRow = (o: any) => {
+        const d = operationalDorms.find((dm) => dm.id === o.dormId) || dorms.find((dm) => dm.id === o.dormId);
+        return {
+          name: (o as any).employeeName || (o as any).name || "-",
+          dorm: d ? `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}` : "-",
+          moveIn: getMoveInDate(o) || "-",
+          contractEnd: getExpectedMoveOutDate(o) || "-",
+          actualMoveOut: getActualMoveOutDate(o) || "-",
+          cheonanMove: getCheonanMoveDate(o) || "-",
+        };
+      };
 
-      console.debug("[KPI] currentOccupants source/count", {
-        site,
-        gender,
-        occupants: occupants.length,
-        newHires: newHires.length,
-        groupOccupants: groupOccupants.length,
-        currentResidents,
-      });
+      // 3. 현 거주자: 선택 월에 실제 거주 중이던 사람(입실<=monthEnd, 실제퇴실 없음/monthStart 이후, 배정 있음).
+      const currentRows = groupOccupants.filter((o) => isOccupantActiveInMonth(o, year, month)).map(toMemberRow);
+      const currentResidents = currentRows.length;
 
       // 4. 만료자: 계약종료일/예정퇴실일이 선택 월 안 + (실제퇴실일 없음 OR 실제퇴실일 == 계약종료일).
       //    실제퇴실일이 계약종료일보다 빠르면 만료자가 아니라 중도퇴거로 분류(중복 방지).
-      const expiredResidents = groupOccupants.filter((o) => {
+      const expiredRows = groupOccupants.filter((o) => {
         const expected = getExpectedMoveOutDate(o);
         if (!isDateInYearMonth(expected, year, month)) return false;
         const actual = getActualMoveOutDate(o);
         return !actual || actual === expected;
-      }).length;
+      }).map(toMemberRow);
+      const expiredResidents = expiredRows.length;
 
-      // 5. 중도퇴거: 실제퇴실일이 선택 월 안 + 실제퇴실일 < 계약종료일/예정퇴실일.
-      const earlyDepartures = groupOccupants.filter((o) => {
+      // 5. 중도퇴거: 실제퇴실일이 선택 월 안 + 실제퇴실일 < 계약종료일/예정퇴실일(상태 무관).
+      const earlyRows = groupOccupants.filter((o) => {
         const actual = getActualMoveOutDate(o);
         if (!actual || !isDateInYearMonth(actual, year, month)) return false;
         return isEarlyMoveOut(o);
-      }).length;
+      }).map(toMemberRow);
+      const earlyDepartures = earlyRows.length;
 
       // 6. 천안이동: 천안이동일/전환이동일이 선택 월 안인 인원(문자열 앞 10자리 기준).
-      const cheonanMove = groupOccupants.filter((o) => isDateInYearMonth(getCheonanMoveDate(o), year, month)).length;
+      const cheonanRows = groupOccupants.filter((o) => isDateInYearMonth(getCheonanMoveDate(o), year, month)).map(toMemberRow);
+      const cheonanMove = cheonanRows.length;
 
       // 7. 신규입주: 입실일이 선택 월에 포함되는 인원(문자열 앞 10자리 기준 — timezone 밀림 방지).
-      const newMoveIn = groupOccupants.filter((o) => isDateInYearMonth(o.moveInDate, year, month)).length;
+      const newInRows = groupOccupants.filter((o) => isDateInYearMonth(getMoveInDate(o), year, month)).map(toMemberRow);
+      const newMoveIn = newInRows.length;
 
       // 8. 과부족: 거주자 TO - 현 거주자
       const shortage = residentTo - currentResidents;
@@ -8310,6 +8319,12 @@ export default function App() {
         expireBuildings,
         terminated,
         addLease,
+        // [10] 통계 클릭 상세 리스트 — 위 숫자와 "완전히 동일한" 후보 배열을 그대로 전달.
+        currentRows,
+        expiredRows,
+        earlyRows,
+        cheonanRows,
+        newInRows,
       };
     };
 
@@ -8338,6 +8353,12 @@ export default function App() {
         expireBuildings: monthData.reduce((sum, r) => sum + r.expireBuildings, 0),
         terminated: monthData.reduce((sum, r) => sum + r.terminated, 0),
         addLease: monthData.reduce((sum, r) => sum + r.addLease, 0),
+        // 전체 합계 상세 = 각 그룹 후보 배열을 그대로 합침(전체 통계 클릭 시 전체 대상 표시).
+        currentRows: monthData.flatMap((r) => r.currentRows),
+        expiredRows: monthData.flatMap((r) => r.expiredRows),
+        earlyRows: monthData.flatMap((r) => r.earlyRows),
+        cheonanRows: monthData.flatMap((r) => r.cheonanRows),
+        newInRows: monthData.flatMap((r) => r.newInRows),
       });
     }
 
@@ -8473,37 +8494,19 @@ export default function App() {
 
   // [10] 운영시뮬레이션 통계 클릭 시: 해당 카테고리(현거주자/만료자/중도퇴거/신규입주/천안이동)의 인원 목록을
   //      선택 연/월 + 지역/성별 기준으로 산출(통계와 동일한 소스·판정 함수 재사용 → 숫자와 목록이 정확히 일치).
+  // 상세 리스트는 통계 계산(simulationMonthlyStats)이 만든 후보 배열을 "그대로" 재사용 → 숫자와 항상 일치.
   const getSimMembers = (category: "current" | "expired" | "early" | "newIn" | "cheonan", site: Site, gender: "남" | "여") => {
-    const y = Number(simulationYear), m = Number(simulationMonth);
-    const all = [
-      ...occupants.filter((o) => !o.isDeleted),
-      ...newHires
-        .filter((h) => !h.isDeleted && h.dormId && !occupants.some((o) => o.sourceNewHireId === h.id))
-        .map((h) => ({ ...h, status: h.residenceStatus, moveInDate: h.moveInDate, moveOutDueDate: h.moveOutDate, actualMoveOutDate: h.actualMoveOutDate, expectedMoveOutDate: h.expectedMoveOutDate, cheonanMoveDate: h.cheonanMoveDate } as any)),
-    ];
-    const dormOf = (o: any) => operationalDorms.find((d) => d.id === o.dormId) || dorms.find((d) => d.id === o.dormId);
-    const inGroup = (o: any) => { const d = dormOf(o); return !!d && d.site === site && d.gender === gender; };
-    const pred = (o: any): boolean => {
-      switch (category) {
-        case "current": return isOccupantActiveInMonth(o, y, m);
-        case "expired": { const e = getExpectedMoveOutDate(o); if (!isDateInMonth(e, y, m)) return false; const a = getActualMoveOutDate(o); return !a || a === e; }
-        case "early": { const a = getActualMoveOutDate(o); return !!a && isDateInMonth(a, y, m) && isEarlyMoveOut(o); }
-        case "newIn": return isDateInMonth(getMoveInDate(o), y, m);
-        case "cheonan": return isDateInMonth(getCheonanMoveDate(o), y, m);
-        default: return false;
-      }
-    };
-    return all.filter((o) => inGroup(o) && pred(o)).map((o) => {
-      const d = dormOf(o);
-      return {
-        name: (o as any).employeeName || (o as any).name || "-",
-        dorm: d ? `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}` : "-",
-        moveIn: getMoveInDate(o) || "-",
-        contractEnd: getExpectedMoveOutDate(o) || "-",
-        actualMoveOut: getActualMoveOutDate(o) || "-",
-        cheonanMove: getCheonanMoveDate(o) || "-",
-      };
-    });
+    const m = Number(simulationMonth);
+    const row = simulationMonthlyStats.find((s) => s.month === m && s.site === site && s.gender === gender);
+    if (!row) return [];
+    switch (category) {
+      case "current": return row.currentRows;
+      case "expired": return row.expiredRows;
+      case "early": return row.earlyRows;
+      case "newIn": return row.newInRows;
+      case "cheonan": return row.cheonanRows;
+      default: return [];
+    }
   };
   const openSimDetail = (category: "current" | "expired" | "early" | "newIn" | "cheonan", label: string, site: Site, gender: "남" | "여") => {
     setSimDetailModal({ title: `${label} · ${site} ${gender} (${simulationYear}-${String(simulationMonth).padStart(2, "0")})`, rows: getSimMembers(category, site, gender) });
@@ -21362,7 +21365,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </thead>
                   <tbody>
                     {cleaningReportPg.pagedItems.map((report) => (
-                      <tr key={report.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
+                      <tr key={report.id} onClick={() => void openCleaningReportEdit(report)} className={`cursor-pointer ${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(report.reportDate) || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{`${report.buildingName} ${report.dong}-${report.roomHo}`}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
@@ -21395,7 +21398,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             return (
                               <button
                                 type="button"
-                                onClick={() => void openCleaningPhotoViewer(report)}
+                                onClick={(e) => { e.stopPropagation(); void openCleaningPhotoViewer(report); }}
                                 className="inline-flex items-center gap-2"
                                 title="사진 크게 보기"
                               >
@@ -21410,17 +21413,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">
                           <div className="flex flex-nowrap gap-2">
                             {canDownloadFiles && (
-                              <button onClick={() => void printCleaningReport(report)} disabled={savingPdf} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"} disabled:cursor-not-allowed disabled:opacity-50`} title="청소보고서 PDF 저장">
+                              <button onClick={(e) => { e.stopPropagation(); void printCleaningReport(report); }} disabled={savingPdf} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"} disabled:cursor-not-allowed disabled:opacity-50`} title="청소보고서 PDF 저장">
                                 {savingPdf ? "PDF 생성 중..." : "PDF"}
                               </button>
                             )}
                             {shouldShowMaintenanceControls(currentUser) && (
-                              <button onClick={() => void openCleaningReportEdit(report)} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}>
+                              <button onClick={(e) => { e.stopPropagation(); void openCleaningReportEdit(report); }} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}>
                                 수정
                               </button>
                             )}
                             {canModifyPermission(currentUser) && (
-                              <button onClick={() => deleteCleaningReport(report.id)} className="rounded-xl border border-rose-300 px-3 py-2 text-xs text-rose-600 hover:bg-rose-50">
+                              <button onClick={(e) => { e.stopPropagation(); deleteCleaningReport(report.id); }} className="rounded-xl border border-rose-300 px-3 py-2 text-xs text-rose-600 hover:bg-rose-50">
                                 삭제
                               </button>
                             )}
