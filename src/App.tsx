@@ -836,14 +836,16 @@ function firstField(row: any, keys: string[]): string {
   for (const k of keys) { const v = row?.[k]; if (v !== undefined && v !== null && String(v).trim() !== "") return String(v); }
   return "";
 }
+const CHEONAN_MOVE_KEYS = ["cheonanMoveDate", "cheonan_move_date", "transferMoveDate", "transfer_move_date", "천안이동일", "전환이동일"];
 function getActualMoveOutDate(row: any): string { return toDateOnly(firstField(row, ACTUAL_MOVE_OUT_KEYS)); }
 function getExpectedMoveOutDate(row: any): string { return toDateOnly(firstField(row, EXPECTED_MOVE_OUT_KEYS)); }
-// 중도퇴거: 실제퇴실일 존재 + (예정퇴실일/계약종료일보다 빠름). 예정일 없어도 실제퇴실이면 중도퇴거 후보(true).
+function getCheonanMoveDate(row: any): string { return toDateOnly(firstField(row, CHEONAN_MOVE_KEYS)); }
+// 중도퇴거: 실제퇴실일이 (계약종료일/예정퇴실일)보다 빠름. 비교 대상(예정일)이 있어야 하며 실제 < 예정.
 function isEarlyMoveOut(row: any): boolean {
   const actual = getActualMoveOutDate(row);
-  if (!actual) return false;
   const expected = getExpectedMoveOutDate(row);
-  return expected ? actual < expected : true;
+  if (!actual || !expected) return false;
+  return actual < expected;
 }
 
 // [1] 공지 "내용" 표시 정규화: 저장값이 JSON 문자열/객체/HTML/escape 여도 실제 내용만 자연스럽게 표시.
@@ -8192,15 +8194,10 @@ export default function App() {
         return occupantDorm && occupantDorm.site === site && occupantDorm.gender === gender;
       });
 
-      // 3. 현 거주자: 입실일이 해당 월 말일 이전 + 실제퇴실일 없음/해당 월 이후 + 현재 거주상태.
-      //    상태는 "거주중/연장/재입주 등 포함, 퇴실/과거거주/미배정/천안이동만 제외"(연장자 포함 → 입주자/신입사원 현 거주자와 일치).
+      // 3. 현 거주자: 실제퇴실일 없음 + 상태 거주중/연장/재입주 + 기숙사 배정 있음(groupOccupants 에서 이미 배정 매칭).
       const currentResidents = groupOccupants.filter((o) => {
-        if (["퇴실", "과거거주", "미배정", "천안이동"].includes(o.status || "")) return false;
-        const moveInDate = parseDateValue(o.moveInDate);
-        if (!moveInDate || !isBeforeOrSameMonthEnd(moveInDate, year, month)) return false;
-        const actualOutDate = parseDateValue(o.actualMoveOutDate || "");
-        if (actualOutDate && isBeforeMonthEnd(actualOutDate, year, month)) return false;
-        return true;
+        if (getActualMoveOutDate(o)) return false; // 실제퇴실일 있으면 제외
+        return ["거주중", "연장", "재입주"].includes(o.status || "");
       }).length;
 
       console.debug("[KPI] currentOccupants source/count", {
@@ -8212,26 +8209,24 @@ export default function App() {
         currentResidents,
       });
 
-      // 4. 만료자: 예정퇴실일/계약종료일이 선택 월 안인 인원. 단, 이미 실제퇴실 완료자는 제외(중도퇴거와 중복 카운트 방지).
+      // 4. 만료자: 계약종료일/예정퇴실일이 선택 월 안 + (실제퇴실일 없음 OR 실제퇴실일 == 계약종료일).
+      //    실제퇴실일이 계약종료일보다 빠르면 만료자가 아니라 중도퇴거로 분류(중복 방지).
       const expiredResidents = groupOccupants.filter((o) => {
-        if (toDateOnly(o.actualMoveOutDate || "")) return false; // 실제퇴실 완료자는 만료자에서 제외
-        const due = o.moveOutDueDate || (o as any).expectedMoveOutDate || "";
-        return isDateInYearMonth(due, year, month);
+        const expected = getExpectedMoveOutDate(o);
+        if (!isDateInYearMonth(expected, year, month)) return false;
+        const actual = getActualMoveOutDate(o);
+        return !actual || actual === expected;
       }).length;
 
-      // 5. 중도퇴거: 실제퇴실일이 선택 월 안 + 예정퇴실일/계약종료일보다 빠름(예정일 없으면 후보). 공통 함수 사용.
+      // 5. 중도퇴거: 실제퇴실일이 선택 월 안 + 실제퇴실일 < 계약종료일/예정퇴실일.
       const earlyDepartures = groupOccupants.filter((o) => {
         const actual = getActualMoveOutDate(o);
         if (!actual || !isDateInYearMonth(actual, year, month)) return false;
         return isEarlyMoveOut(o);
       }).length;
 
-      // 6. 천안이동: 천안이동일이 해당 월인 인원 또는 상태가 천안이동인 인원
-      const cheonanMove = groupOccupants.filter((o) => {
-        if (o.status === "천안이동") return true;
-        const moveDate = parseDateValue(o.actualMoveOutDate || o.moveOutDueDate);
-        return moveDate && isSameMonth(moveDate, year, month);
-      }).length;
+      // 6. 천안이동: 천안이동일/전환이동일이 선택 월 안인 인원(문자열 앞 10자리 기준).
+      const cheonanMove = groupOccupants.filter((o) => isDateInYearMonth(getCheonanMoveDate(o), year, month)).length;
 
       // 7. 신규입주: 입실일이 선택 월에 포함되는 인원(문자열 앞 10자리 기준 — timezone 밀림 방지).
       const newMoveIn = groupOccupants.filter((o) => isDateInYearMonth(o.moveInDate, year, month)).length;
