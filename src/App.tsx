@@ -2615,6 +2615,8 @@ export default function App() {
   const [selectedSettlementDormId, setSelectedSettlementDormId] = useState<string | null>(null);
   const [settlementDetailDorm, setSettlementDetailDorm] = useState<OperationalDorm | null>(null);
   const settlementCardClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // [10] 운영시뮬레이션 통계 클릭 → 해당 인원 목록 모달.
+  const [simDetailModal, setSimDetailModal] = useState<{ title: string; rows: Array<{ name: string; dorm: string; moveIn: string; contractEnd: string; actualMoveOut: string; cheonanMove: string }> } | null>(null);
   const [inventorySubTab, setInventorySubTab] = useState<"status" | "manage" | "history">("status");
 
   // 저장된 로그인 아이디 복원(이메일/아이디만, 비밀번호는 저장하지 않음). tenant 는 항상 "default".
@@ -8334,30 +8336,24 @@ export default function App() {
       activeOccupantsCount: total?.currentResidents, expiredCount: total?.expiredResidents,
       earlyMoveOutCount: total?.earlyDepartures, newMoveInCount: total?.newMoveIn,
     });
-    console.log("[운영시뮬레이션 월별 통계 디버그]", {
+    // [11] 카테고리별 후보 로그(이름/기숙사/입실일/계약종료일/실제퇴실일/천안이동일/포함여부)
+    const info = (o: any, included: boolean) => ({
+      name: (o as any).employeeName || (o as any).name,
+      status: o.status,
+      기숙사: getOccupantDormKey(o) || "-",
+      입실일: getMoveInDate(o) || "-",
+      계약종료일: getExpectedMoveOutDate(o) || "-",
+      실제퇴실일: getActualMoveOutDate(o) || "-",
+      천안이동일: getCheonanMoveDate(o) || "-",
+      포함: included,
+    });
+    console.log("[운영시뮬레이션 후보]", {
       selectedYear: y, selectedMonth: m,
-      // 선택월 현 거주자(occupant 기준) — 왜 127/125 인지 확인용
-      activeOccupants: occupants
-        .filter((o) => isOccupantActiveInMonth(o, y, m))
-        .map((o) => ({
-          name: (o as any).employeeName || (o as any).name,
-          status: o.status,
-          moveIn: getMoveInDate(o),
-          actualMoveOut: getActualMoveOutDate(o),
-          expectedMoveOut: getExpectedMoveOutDate(o),
-          dormKey: getOccupantDormKey(o),
-        })),
-      // 실제퇴실일 있는 사람 전체(퇴실/상태 무관) — 중도퇴거 판정 확인용
-      earlyMoveOutCandidates: occupants
-        .filter((o) => getActualMoveOutDate(o))
-        .map((o) => ({
-          name: (o as any).employeeName || (o as any).name,
-          status: o.status,
-          actualMoveOut: getActualMoveOutDate(o),
-          expectedMoveOut: getExpectedMoveOutDate(o),
-          inMonth: isDateInMonth(getActualMoveOutDate(o), y, m),
-          isEarly: isEarlyMoveOut(o),
-        })),
+      현거주자후보: occupants.map((o) => info(o, isOccupantActiveInMonth(o, y, m))).filter((x) => x.포함),
+      만료자후보: occupants.filter((o) => isDateInMonth(getExpectedMoveOutDate(o), y, m)).map((o) => { const a = getActualMoveOutDate(o), e = getExpectedMoveOutDate(o); return info(o, !a || a === e); }),
+      중도퇴거후보: occupants.filter((o) => getActualMoveOutDate(o)).map((o) => info(o, isDateInMonth(getActualMoveOutDate(o), y, m) && isEarlyMoveOut(o))),
+      천안이동후보: occupants.filter((o) => getCheonanMoveDate(o)).map((o) => info(o, isDateInMonth(getCheonanMoveDate(o), y, m))),
+      신규입주후보: occupants.filter((o) => getMoveInDate(o)).map((o) => info(o, isDateInMonth(getMoveInDate(o), y, m))).filter((x) => x.포함),
     });
   }, [simulationYear, simulationMonth, occupants, simulationMonthlyStats]);
 
@@ -8425,11 +8421,49 @@ export default function App() {
       usageRate, 
       vacancyRate,
       siteShortage,
-      totalOperatingCost, 
-      totalVacancyLoss, 
+      totalOperatingCost,
+      totalVacancyLoss,
       totalExpireRisk,
     };
   }, [simulationMonthlyStats, simulationYear, simulationMonth]);
+
+  // [10] 운영시뮬레이션 통계 클릭 시: 해당 카테고리(현거주자/만료자/중도퇴거/신규입주/천안이동)의 인원 목록을
+  //      선택 연/월 + 지역/성별 기준으로 산출(통계와 동일한 소스·판정 함수 재사용 → 숫자와 목록이 정확히 일치).
+  const getSimMembers = (category: "current" | "expired" | "early" | "newIn" | "cheonan", site: Site, gender: "남" | "여") => {
+    const y = Number(simulationYear), m = Number(simulationMonth);
+    const all = [
+      ...occupants.filter((o) => !o.isDeleted),
+      ...newHires
+        .filter((h) => !h.isDeleted && h.dormId && !occupants.some((o) => o.sourceNewHireId === h.id))
+        .map((h) => ({ ...h, status: h.residenceStatus, moveInDate: h.moveInDate, moveOutDueDate: h.moveOutDate, actualMoveOutDate: h.actualMoveOutDate, expectedMoveOutDate: h.expectedMoveOutDate, cheonanMoveDate: h.cheonanMoveDate } as any)),
+    ];
+    const dormOf = (o: any) => operationalDorms.find((d) => d.id === o.dormId) || dorms.find((d) => d.id === o.dormId);
+    const inGroup = (o: any) => { const d = dormOf(o); return !!d && d.site === site && d.gender === gender; };
+    const pred = (o: any): boolean => {
+      switch (category) {
+        case "current": return isOccupantActiveInMonth(o, y, m);
+        case "expired": { const e = getExpectedMoveOutDate(o); if (!isDateInMonth(e, y, m)) return false; const a = getActualMoveOutDate(o); return !a || a === e; }
+        case "early": { const a = getActualMoveOutDate(o); return !!a && isDateInMonth(a, y, m) && isEarlyMoveOut(o); }
+        case "newIn": return isDateInMonth(getMoveInDate(o), y, m);
+        case "cheonan": return isDateInMonth(getCheonanMoveDate(o), y, m);
+        default: return false;
+      }
+    };
+    return all.filter((o) => inGroup(o) && pred(o)).map((o) => {
+      const d = dormOf(o);
+      return {
+        name: (o as any).employeeName || (o as any).name || "-",
+        dorm: d ? `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}` : "-",
+        moveIn: getMoveInDate(o) || "-",
+        contractEnd: getExpectedMoveOutDate(o) || "-",
+        actualMoveOut: getActualMoveOutDate(o) || "-",
+        cheonanMove: getCheonanMoveDate(o) || "-",
+      };
+    });
+  };
+  const openSimDetail = (category: "current" | "expired" | "early" | "newIn" | "cheonan", label: string, site: Site, gender: "남" | "여") => {
+    setSimDetailModal({ title: `${label} · ${site} ${gender} (${simulationYear}-${String(simulationMonth).padStart(2, "0")})`, rows: getSimMembers(category, site, gender) });
+  };
 
   // 운영시뮬레이션: 월 예상 운영비/공실 손실 실무형 추정(지역/성별/월 필터 반영).
   const simulationCost = useMemo(() => {
@@ -8914,6 +8948,7 @@ export default function App() {
     if (imageLightbox) { setImageLightbox(null); return true; }
     if (excelPreview) { setExcelPreview(null); return true; }
     // 상세보기(팝업) 모달 — 폼보다 위(또는 단독)로 열리므로 우선 닫는다.
+    if (simDetailModal) { setSimDetailModal(null); return true; }
     if (settlementDetailDorm) { setSettlementDetailDorm(null); return true; }
     if (selectedDormDetailId) { setSelectedDormDetailId(""); return true; }
     if (preInspectionDetailId) { setPreInspectionDetailId(null); return true; }
@@ -8940,7 +8975,7 @@ export default function App() {
     return false;
   };
   const hasOpenOverlay = !!(
-    imageLightbox || excelPreview || settlementDetailDorm || selectedDormDetailId || preInspectionDetailId ||
+    imageLightbox || excelPreview || simDetailModal || settlementDetailDorm || selectedDormDetailId || preInspectionDetailId ||
     showDefectForm || showCleaningReportForm || showNewHireForm ||
     showOccupantForm || showDormForm || showDormContractForm || showInventoryForm || showLeaseForm ||
     showSaleForm || showUserForm || showMilitaryPersonnelForm || showMilitaryTrainingForm ||
@@ -18966,11 +19001,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <td className="px-3 py-3 font-medium">{r.site} ({r.gender})</td>
                       <td className="px-3 py-3">{r.dormCount}</td>
                       <td className="px-3 py-3">{r.residentTo}</td>
-                      <td className="px-3 py-3">{r.currentResidents}</td>
-                      <td className="px-3 py-3">{r.expiredResidents}</td>
-                      <td className="px-3 py-3">{r.earlyDepartures}</td>
-                      <td className="px-3 py-3">{r.cheonanMove}</td>
-                      <td className="px-3 py-3">{r.newMoveIn}</td>
+                      <td className="px-3 py-3"><button type="button" onClick={() => openSimDetail("current", "현 거주자", r.site, r.gender)} className="font-semibold text-blue-600 underline-offset-2 hover:underline">{r.currentResidents}</button></td>
+                      <td className="px-3 py-3"><button type="button" onClick={() => openSimDetail("expired", "만료자", r.site, r.gender)} className="font-semibold text-blue-600 underline-offset-2 hover:underline">{r.expiredResidents}</button></td>
+                      <td className="px-3 py-3"><button type="button" onClick={() => openSimDetail("early", "중도퇴거", r.site, r.gender)} className="font-semibold text-blue-600 underline-offset-2 hover:underline">{r.earlyDepartures}</button></td>
+                      <td className="px-3 py-3"><button type="button" onClick={() => openSimDetail("cheonan", "천안이동", r.site, r.gender)} className="font-semibold text-blue-600 underline-offset-2 hover:underline">{r.cheonanMove}</button></td>
+                      <td className="px-3 py-3"><button type="button" onClick={() => openSimDetail("newIn", "신규입주", r.site, r.gender)} className="font-semibold text-blue-600 underline-offset-2 hover:underline">{r.newMoveIn}</button></td>
                       <td className="px-3 py-3">{r.shortage}</td>
                       <td className="px-3 py-3">{r.expireBuildings}</td>
                       <td className="px-3 py-3">{r.terminated}</td>
@@ -25247,6 +25282,49 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
           );
         })()}
+
+        {/* [10] 운영시뮬레이션 통계 인원 목록 모달(통계 숫자 클릭 시) */}
+        {simDetailModal && (
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={() => setSimDetailModal(null)}>
+            <div className={`my-8 w-full max-w-2xl rounded-3xl p-6 shadow-xl ${theme.darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-lg font-semibold">{simDetailModal.title}</h3>
+                  <p className="text-sm text-slate-500">{simDetailModal.rows.length}명</p>
+                </div>
+                <button onClick={() => setSimDetailModal(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">✕</button>
+              </div>
+              <div className="erp-table-container">
+                <table className="erp-table w-full text-left text-sm">
+                  <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                    <tr>
+                      <th className="px-3 py-2">이름</th>
+                      <th className="px-3 py-2">기숙사</th>
+                      <th className="px-3 py-2">입실일</th>
+                      <th className="px-3 py-2">계약종료일</th>
+                      <th className="px-3 py-2">실제퇴실일</th>
+                      <th className="px-3 py-2">천안이동일</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {simDetailModal.rows.length > 0 ? simDetailModal.rows.map((m, i) => (
+                      <tr key={i} className={theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}>
+                        <td className="px-3 py-2">{m.name}</td>
+                        <td className="px-3 py-2">{m.dorm}</td>
+                        <td className="px-3 py-2">{m.moveIn}</td>
+                        <td className="px-3 py-2">{m.contractEnd}</td>
+                        <td className="px-3 py-2">{m.actualMoveOut}</td>
+                        <td className="px-3 py-2">{m.cheonanMove}</td>
+                      </tr>
+                    )) : (
+                      <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-500">해당 인원이 없습니다.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* [1] 정산 기숙사 상세보기 모달(카드 더블클릭) — 현재/퇴실 포함 거주 이력 표시 */}
         {settlementDetailDorm && (() => {
