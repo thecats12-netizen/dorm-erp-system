@@ -829,9 +829,10 @@ function isDateInYearMonth(value: unknown, year: number | string, month: number 
   if (!dateOnly) return false;
   return dateOnly.startsWith(`${year}-${String(month).padStart(2, "0")}`);
 }
-// 실제/예정 퇴실일 필드는 소스별로 이름이 달라(카멜/스네이크/한글) 후보를 모두 확인해 첫 값 사용.
-const ACTUAL_MOVE_OUT_KEYS = ["actualMoveOutDate", "actual_move_out_date", "real_move_out_date", "actual_leave_date", "move_out_actual_date", "실제퇴실일"];
-const EXPECTED_MOVE_OUT_KEYS = ["expectedMoveOutDate", "expected_move_out_date", "contractEndDate", "contract_end_date", "scheduledMoveOutDate", "scheduled_move_out_date", "moveOutDueDate", "moveOutDate", "move_out_date", "퇴실일", "계약종료일", "예정퇴실일"];
+// 실제/예정 퇴실일·입실일 필드는 소스별로 이름이 달라(카멜/스네이크/한글) 후보를 모두 확인해 첫 값 사용.
+const ACTUAL_MOVE_OUT_KEYS = ["actualMoveOutDate", "actual_move_out_date", "real_move_out_date", "actual_leave_date", "move_out_actual_date", "actual_checkout_date", "실제퇴실일"];
+const EXPECTED_MOVE_OUT_KEYS = ["expectedMoveOutDate", "expected_move_out_date", "contractEndDate", "contract_end_date", "scheduledMoveOutDate", "scheduled_move_out_date", "moveOutDueDate", "moveOutDate", "move_out_date", "end_date", "퇴실일", "계약종료일", "예정퇴실일"];
+const MOVE_IN_KEYS = ["moveInDate", "move_in_date", "checkInDate", "check_in_date", "입실일"];
 function firstField(row: any, keys: string[]): string {
   for (const k of keys) { const v = row?.[k]; if (v !== undefined && v !== null && String(v).trim() !== "") return String(v); }
   return "";
@@ -840,6 +841,7 @@ const CHEONAN_MOVE_KEYS = ["cheonanMoveDate", "cheonan_move_date", "transferMove
 function getActualMoveOutDate(row: any): string { return toDateOnly(firstField(row, ACTUAL_MOVE_OUT_KEYS)); }
 function getExpectedMoveOutDate(row: any): string { return toDateOnly(firstField(row, EXPECTED_MOVE_OUT_KEYS)); }
 function getCheonanMoveDate(row: any): string { return toDateOnly(firstField(row, CHEONAN_MOVE_KEYS)); }
+function getMoveInDate(row: any): string { return toDateOnly(firstField(row, MOVE_IN_KEYS)); }
 // [7] 월 경계(YYYY-MM-DD 문자열) + 문자열 날짜 비교 공통 함수(timezone 밀림 없음).
 function monthStartStr(year: number | string, month: number | string): string { return `${year}-${String(Number(month)).padStart(2, "0")}-01`; }
 function monthEndStr(year: number | string, month: number | string): string {
@@ -861,22 +863,24 @@ function isDormActiveInMonth(dorm: any, year: number | string, month: number | s
   if (["종료", "해지"].includes(dorm.contractStatus || "") && (!end || end < mStart)) return false; // 종료/해지+종료일 부재/이전 제외
   return true;
 }
-// 선택 월에 "실제 거주 중이던 사람": 입실 <= monthEnd, (실제퇴실 없음 또는 실제퇴실 >= monthStart), 배정 있음, 삭제 제외.
+// 선택 월에 "실제 거주 중이던 사람": 입실 <= monthEnd, (실제퇴실 없음 또는 실제퇴실 > monthEnd), 배정 있음, 삭제 제외.
+// ※ 실제퇴실일이 선택월 안(또는 이전)이면 그 달 현 거주자에서 제외 → 7월 중 퇴실자는 7월 현거주자에서 빠진다.
 function isOccupantActiveInMonth(o: any, year: number | string, month: number | string): boolean {
   if (!o || o.isDeleted || o.isPermanentDeleted) return false;
   if (!o.dormId) return false;                            // 기숙사 배정 있음
-  const mStart = monthStartStr(year, month), mEnd = monthEndStr(year, month);
-  const moveIn = toDateOnly(o.moveInDate);
+  const mEnd = monthEndStr(year, month);
+  const moveIn = getMoveInDate(o);
   if (!moveIn || moveIn > mEnd) return false;             // 입실일 <= monthEnd (선택월 이후 입실 제외)
   const actual = getActualMoveOutDate(o);
-  if (actual && actual < mStart) return false;            // 실제퇴실일이 선택월 이전이면 제외(그 달엔 이미 퇴실)
+  if (actual && actual <= mEnd) return false;             // 실제퇴실일이 선택월 안 또는 이전이면 제외
   return true;
 }
-// 중도퇴거: 실제퇴실일이 (계약종료일/예정퇴실일)보다 빠름. 비교 대상(예정일)이 있어야 하며 실제 < 예정.
+// 중도퇴거: 실제퇴실일이 (계약종료일/예정퇴실일)보다 빠름. 예정일이 없으면(계약종료일/예정 미기재) 실제퇴실만으로 후보(중도퇴거).
 function isEarlyMoveOut(row: any): boolean {
   const actual = getActualMoveOutDate(row);
+  if (!actual) return false;
   const expected = getExpectedMoveOutDate(row);
-  if (!actual || !expected) return false;
+  if (!expected) return true;         // 예정/계약종료일 없음 + 실제퇴실 있음 → 중도퇴거로 간주
   return actual < expected;
 }
 
@@ -8330,17 +8334,29 @@ export default function App() {
       activeOccupantsCount: total?.currentResidents, expiredCount: total?.expiredResidents,
       earlyMoveOutCount: total?.earlyDepartures, newMoveInCount: total?.newMoveIn,
     });
-    console.log("[운영시뮬레이션 중도퇴거 후보]", {
+    console.log("[운영시뮬레이션 월별 통계 디버그]", {
       selectedYear: y, selectedMonth: m,
-      candidates: occupants
-        .filter((row) => !row.isDeleted && getActualMoveOutDate(row))
-        .map((row) => ({
-          name: (row as any).employeeName || (row as any).name,
-          status: row.status,
-          actualMoveOutDate: getActualMoveOutDate(row),
-          expectedMoveOutDate: getExpectedMoveOutDate(row),
-          inSelectedMonth: isDateInYearMonth(getActualMoveOutDate(row), y, m),
-          early: isEarlyMoveOut(row),
+      // 선택월 현 거주자(occupant 기준) — 왜 127/125 인지 확인용
+      activeOccupants: occupants
+        .filter((o) => isOccupantActiveInMonth(o, y, m))
+        .map((o) => ({
+          name: (o as any).employeeName || (o as any).name,
+          status: o.status,
+          moveIn: getMoveInDate(o),
+          actualMoveOut: getActualMoveOutDate(o),
+          expectedMoveOut: getExpectedMoveOutDate(o),
+          dormKey: getOccupantDormKey(o),
+        })),
+      // 실제퇴실일 있는 사람 전체(퇴실/상태 무관) — 중도퇴거 판정 확인용
+      earlyMoveOutCandidates: occupants
+        .filter((o) => getActualMoveOutDate(o))
+        .map((o) => ({
+          name: (o as any).employeeName || (o as any).name,
+          status: o.status,
+          actualMoveOut: getActualMoveOutDate(o),
+          expectedMoveOut: getExpectedMoveOutDate(o),
+          inMonth: isDateInMonth(getActualMoveOutDate(o), y, m),
+          isEarly: isEarlyMoveOut(o),
         })),
     });
   }, [simulationYear, simulationMonth, occupants, simulationMonthlyStats]);
