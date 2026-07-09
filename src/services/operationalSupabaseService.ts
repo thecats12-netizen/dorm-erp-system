@@ -197,12 +197,14 @@ const toDbInventoryItem = (item: InventoryItem, tenantId: string, userId: string
   installation_location: item.installationLocation,
   purchase_date: item.purchaseDate,
   purchase_amount: item.purchaseAmount,
+  purchase_vendor: item.purchaseVendor ?? null, // 구매업체(신규 컬럼 — 아래 SQL 실행 필요)
   issued_date: item.issuedDate,
   proof_file: item.proofFile,
   sold_date: item.soldDate,
   sold_amount: item.soldAmount,
   disposal_date: item.disposalDate,
   disposal_reason: item.disposalReason,
+  disposal_vendor: item.disposalVendor ?? null, // 매각/폐기 업체(신규 컬럼)
   notes: item.notes,
   created_by: userId,
   updated_by: userId,
@@ -234,12 +236,14 @@ const toDomainInventoryItem = (row: any): InventoryItem => ({
   installationLocation: row.installation_location || "",
   purchaseDate: row.purchase_date || "",
   purchaseAmount: row.purchase_amount ?? 0,
+  purchaseVendor: row.purchase_vendor || "",
   issuedDate: row.issued_date || "",
   proofFile: row.proof_file || "",
   soldDate: row.sold_date || "",
   soldAmount: row.sold_amount ?? 0,
   disposalDate: row.disposal_date || "",
   disposalReason: row.disposal_reason || "",
+  disposalVendor: row.disposal_vendor || "",
   notes: row.notes || "",
   createdAt: row.created_at || "",
   updatedAt: row.updated_at || row.created_at || new Date().toISOString(),
@@ -633,7 +637,7 @@ const base64Len = (arr?: string[]) => (Array.isArray(arr) ? arr.reduce((s, x) =>
 
 // ── [9] 장기 개선: 현재는 DB base64 저장 유지. 추후 Supabase Storage 업로드로 전환할 수 있도록
 //        "본문 저장(saveBodyRows)"과 "사진 저장(savePhotosOptional)"을 함수로 분리해 둔다. ──
-type PhotoJob = { table: string; id: string; data: Record<string, string[]>; imageCount: number; base64Size: number };
+type PhotoJob = { table: string; id: string; data: Record<string, any>; imageCount: number; base64Size: number };
 
 // 사진만 별도 update(본문 저장 성공 후 호출). 실패해도 본문 저장은 유지 — 실패 테이블 목록만 반환.
 const savePhotosOptional = async (photoJobs: PhotoJob[]): Promise<string[]> => {
@@ -685,7 +689,12 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
   const jobs: Array<{ table: string; rows: any[] }> = [
     { table: "cleaning_reports", rows: payload.cleaningReports.map((r) => stripKeys(toDbCleaningReport(r, payload.tenantId, userId), CLEANING_PHOTO_KEYS)) },
     { table: "defect_requests", rows: payload.defects.map((d) => stripKeys(toDbDefectRequest(d, payload.tenantId, userId), DEFECT_PHOTO_KEYS)) },
-    { table: "inventory_items", rows: payload.inventory.map((i) => toDbInventoryItem(i, payload.tenantId, userId)) },
+    // [4] 비품 증빙파일: 큰 base64면 본문에서 제외(별도 저장). 비었으면(삭제/없음) 본문에 그대로 둬서 "삭제"가 반영되게 한다.
+    { table: "inventory_items", rows: payload.inventory.map((i) => {
+      const db = toDbInventoryItem(i, payload.tenantId, userId) as Record<string, any>;
+      if (typeof db.proof_file === "string" && db.proof_file.length > 0) delete db.proof_file;
+      return db;
+    }) },
     { table: "settlement_records", rows: payload.settlementRecords.map((r) => toDbSettlementRecord(r, payload.tenantId, userId)) },
     { table: "settlement_items", rows: payload.settlementItems.map((i) => toDbSettlementItem(i, payload.tenantId, userId)) },
   ].filter((j) => j.rows.length > 0);
@@ -750,6 +759,14 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
       if (Array.isArray(d.completionPhotoDataUrls) && d.completionPhotoDataUrls.length) data.completion_photo_data_urls = d.completionPhotoDataUrls;
       if (Object.keys(data).length && d.id) {
         photoJobs.push({ table: "defect_requests", id: d.id, data, imageCount: (d.requestPhotoDataUrls?.length || 0) + (d.completionPhotoDataUrls?.length || 0), base64Size: base64Len(d.requestPhotoDataUrls) + base64Len(d.completionPhotoDataUrls) });
+      }
+    });
+  }
+  // [4] 비품 증빙파일(proof_file)도 본문 저장 성공 후 별도 update. "값이 있을 때만" → 새 파일 없으면 기존 파일 유지(빈값 덮어쓰기 금지).
+  if (savedSet.has("inventory_items")) {
+    payload.inventory.forEach((i) => {
+      if (i.id && typeof i.proofFile === "string" && i.proofFile.length > 0) {
+        photoJobs.push({ table: "inventory_items", id: i.id, data: { proof_file: i.proofFile }, imageCount: 1, base64Size: i.proofFile.length });
       }
     });
   }

@@ -1104,12 +1104,14 @@ function inventoryTemplate(): Omit<InventoryItem, "id" | "createdAt"> {
     installationLocation: "",
     purchaseDate: "",
     purchaseAmount: 0,
+    purchaseVendor: "",
     issuedDate: "",
     proofFile: "",
     soldDate: "",
     soldAmount: 0,
     disposalDate: "",
     disposalReason: "",
+    disposalVendor: "",
     notes: "",
     updatedAt: "",
   };
@@ -6058,7 +6060,7 @@ export default function App() {
         // ★ 본문+사진 모두 성공한 테이블의 행만 해시 커밋(실패/사진실패 테이블은 다음 저장에서 재시도).
         if (!notCommittable("cleaning_reports")) commitRowHashes("cleaning_reports", changedCleaning, opSeen);
         if (!notCommittable("defect_requests")) commitRowHashes("defect_requests", changedDefects, opSeen);
-        if (!failedSet.has("inventory_items")) commitRowHashes("inventory_items", changedInventory, opSeen);
+        if (!notCommittable("inventory_items")) commitRowHashes("inventory_items", changedInventory, opSeen);
         if (!failedSet.has("settlement_records")) commitRowHashes("settlement_records", changedSettleRec, opSeen);
         if (!failedSet.has("settlement_items")) commitRowHashes("settlement_items", changedSettleItem, opSeen);
 
@@ -9069,14 +9071,25 @@ export default function App() {
   };
 
   // 로그인 버튼 핸들러: 아이디 저장 처리 후 기존 login() 호출 (login 로직 자체는 변경 없음)
+  const loggingInRef = useRef(false); // 중복 로그인 방지(엔터+버튼 동시/연속)
   const handleLoginClick = async () => {
-    const id = loginForm.username.trim();
-    if (rememberId && id) {
-      saveJson(SAVED_LOGIN_ID_KEY, id, tenantId);
-    } else {
-      removeJson(SAVED_LOGIN_ID_KEY, tenantId);
+    if (loggingInRef.current) return; // 진행 중이면 무시
+    loggingInRef.current = true;
+    try {
+      const id = loginForm.username.trim();
+      if (rememberId && id) {
+        saveJson(SAVED_LOGIN_ID_KEY, id, tenantId);
+      } else {
+        removeJson(SAVED_LOGIN_ID_KEY, tenantId);
+      }
+      await login();
+    } finally {
+      loggingInRef.current = false;
     }
-    await login();
+  };
+  // 아이디/비밀번호 input 에서 Enter → 로그인 버튼과 동일 동작.
+  const handleLoginKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") { e.preventDefault(); void handleLoginClick(); }
   };
 
   const toggleRememberId = (checked: boolean) => {
@@ -13151,6 +13164,8 @@ const downloadInventoryReport = () => {
       수량: i.quantity,
       "구매금액": i.purchaseAmount,
       "구매일": i.purchaseDate,
+      "구매업체": i.purchaseVendor || "-",
+      "매각/폐기 업체": i.disposalVendor || "-",
     };
   });
   const ws = XLSX.utils.json_to_sheet(rows.map(sanitizeExcelRow));
@@ -14592,8 +14607,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <p className="mt-2 text-sm text-slate-500">관리자, 조회전용, 기숙사관리자, 하자접수 전용 계정 지원</p>
           </div>
           <div className="space-y-4">
-            <Input label="아이디" value={loginForm.username} onChange={(v) => setLoginForm((f) => ({ ...f, username: v }))} placeholder="아이디를 입력하세요" />
-            <Input label="비밀번호" type="password" value={loginForm.password} onChange={(v) => setLoginForm((f) => ({ ...f, password: v }))} placeholder="비밀번호를 입력하세요" />
+            <Input label="아이디" value={loginForm.username} onChange={(v) => setLoginForm((f) => ({ ...f, username: v }))} onKeyDown={handleLoginKeyDown} placeholder="아이디를 입력하세요" />
+            <Input label="비밀번호" type="password" value={loginForm.password} onChange={(v) => setLoginForm((f) => ({ ...f, password: v }))} onKeyDown={handleLoginKeyDown} placeholder="비밀번호를 입력하세요" />
             <label className="flex items-center gap-2 text-sm text-slate-600 select-none">
               <input type="checkbox" checked={rememberId} onChange={(e) => toggleRememberId(e.target.checked)} className="h-4 w-4 rounded border-slate-300" />
               아이디 저장 <span className="text-xs text-slate-400">(비밀번호는 저장되지 않습니다)</span>
@@ -24187,6 +24202,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input label="구매일" type="date-text" value={inventoryForm.purchaseDate} onChange={(v) => setInventoryForm((f) => ({ ...f, purchaseDate: v }))} />
                 <Input label="구매금액" type="number" value={String(inventoryForm.purchaseAmount)} onChange={(v) => setInventoryForm((f) => ({ ...f, purchaseAmount: Number(v || 0) }))} />
+                <Input label="구매업체" value={inventoryForm.purchaseVendor || ""} onChange={(v) => setInventoryForm((f) => ({ ...f, purchaseVendor: v }))} placeholder="구매처/업체명" />
                 <Input label="지급일" type="date-text" value={inventoryForm.issuedDate} onChange={(v) => setInventoryForm((f) => ({ ...f, issuedDate: v }))} />
                 {/* [2] 증빙파일: 실제 파일 업로드(이미지/PDF). 기존 proof_file 컬럼(문자열) 재사용 — DB 변경 없음.
                     저장 형식 {name,data}(JSON). 과거 문자열 값도 하위호환. 삭제 버튼 클릭 시에만 제거(수정 시 기존 유지). */}
@@ -24198,32 +24214,45 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   };
                   const proof = parseProof(inventoryForm.proofFile);
                   const isImg = proof.data.startsWith("data:image/");
+                  const isPdf = proof.data.startsWith("data:application/pdf") || /\.pdf$/i.test(proof.name);
                   return (
-                    <div>
+                    <div className="md:col-span-2 xl:col-span-2">
                       <label className={`mb-2 block text-sm font-medium ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>증빙파일 (이미지/PDF)</label>
-                      <input
-                        type="file"
-                        accept="image/*,.pdf,application/pdf"
-                        onChange={async (e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
-                          try {
-                            const dataUrl = await readFileDataUrl(file); // 이미지는 압축(1280px), PDF 등은 원본 base64
-                            setInventoryForm((f) => ({ ...f, proofFile: JSON.stringify({ name: file.name, data: dataUrl }) }));
-                          } catch { alert("파일을 불러오지 못했습니다."); }
-                          e.currentTarget.value = "";
-                        }}
-                        className="w-full text-sm"
-                      />
-                      {proof.data && (
-                        <div className="mt-2 flex items-center gap-2">
-                          {isImg && <img src={proof.data} alt="증빙" className="h-14 w-14 rounded-lg object-cover ring-1 ring-slate-200" />}
-                          <div className="min-w-0 flex-1 truncate text-xs text-slate-600">{proof.name || "첨부파일"}</div>
-                          <button type="button" onClick={() => window.open(proof.data, "_blank")} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100">열기</button>
-                          <button type="button" onClick={() => { if (window.confirm("증빙파일을 삭제할까요?")) setInventoryForm((f) => ({ ...f, proofFile: "" })); }} className="rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">삭제</button>
+                      {/* 명확한 파일선택 버튼(숨김 input + 라벨 버튼). 지원: jpg/jpeg/png/webp/pdf */}
+                      <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+                        📎 이미지/PDF 첨부
+                        <input
+                          type="file"
+                          accept=".jpg,.jpeg,.png,.webp,image/*,.pdf,application/pdf"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            try {
+                              const dataUrl = await readFileDataUrl(file); // 이미지는 압축(1280px), PDF 등은 원본 base64
+                              setInventoryForm((f) => ({ ...f, proofFile: JSON.stringify({ name: file.name, data: dataUrl }) }));
+                            } catch { alert("파일을 불러오지 못했습니다."); }
+                            e.currentTarget.value = "";
+                          }}
+                          className="hidden"
+                        />
+                      </label>
+                      <span className="ml-2 text-xs text-slate-400">jpg, png, webp, pdf</span>
+                      {proof.data ? (
+                        <div className="mt-2 flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 p-2">
+                          {isImg ? (
+                            <img src={proof.data} alt="증빙 미리보기" className="h-14 w-14 rounded-lg object-cover ring-1 ring-slate-200" />
+                          ) : (
+                            <span className="flex h-14 w-14 items-center justify-center rounded-lg bg-rose-100 text-[10px] font-bold text-rose-600">{isPdf ? "PDF" : "파일"}</span>
+                          )}
+                          <div className="min-w-0 flex-1 truncate text-xs font-medium text-slate-700">{proof.name || (isPdf ? "PDF 파일" : "첨부파일")}</div>
+                          <button type="button" onClick={() => window.open(proof.data, "_blank")} className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold hover:bg-slate-100">열기</button>
+                          <button type="button" onClick={() => { if (window.confirm("증빙파일을 삭제할까요?")) setInventoryForm((f) => ({ ...f, proofFile: "" })); }} className="rounded-lg border border-rose-300 px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50">삭제</button>
                         </div>
+                      ) : proof.name ? (
+                        <div className="mt-2 truncate text-xs text-slate-500">기존 파일: {proof.name}</div>
+                      ) : (
+                        <div className="mt-2 text-xs text-slate-400">선택된 파일 없음</div>
                       )}
-                      {proof.name && !proof.data && <div className="mt-1 truncate text-xs text-slate-400">기존 값: {proof.name}</div>}
                     </div>
                   );
                 })()}
@@ -24237,6 +24266,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <Input label="매각금액" type="number" value={String(inventoryForm.soldAmount)} onChange={(v) => setInventoryForm((f) => ({ ...f, soldAmount: Number(v || 0) }))} />
                 <Input label="폐기일" type="date-text" value={inventoryForm.disposalDate} onChange={(v) => setInventoryForm((f) => ({ ...f, disposalDate: v }))} />
                 <Input label="처리사유" value={inventoryForm.disposalReason} onChange={(v) => setInventoryForm((f) => ({ ...f, disposalReason: v }))} />
+                <Input label="매각/폐기 업체" value={inventoryForm.disposalVendor || ""} onChange={(v) => setInventoryForm((f) => ({ ...f, disposalVendor: v }))} placeholder="매각/폐기 처리 업체명" />
               </div>
             </div>
 

@@ -107,12 +107,14 @@ export type InventoryItem = {
   installationLocation: string;
   purchaseDate: string;
   purchaseAmount: number;
+  purchaseVendor?: string;   // 구매업체
   issuedDate: string;
   proofFile: string;
   soldDate: string;
   soldAmount: number;
   disposalDate: string;
   disposalReason: string;
+  disposalVendor?: string;   // 매각/폐기 업체
   notes: string;
   createdAt: string;
   updatedAt: string;
