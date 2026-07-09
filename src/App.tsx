@@ -839,7 +839,15 @@ function firstField(row: any, keys: string[]): string {
 }
 const CHEONAN_MOVE_KEYS = ["cheonanMoveDate", "cheonan_move_date", "transferMoveDate", "transfer_move_date", "천안이동일", "전환이동일"];
 function getActualMoveOutDate(row: any): string { return toDateOnly(firstField(row, ACTUAL_MOVE_OUT_KEYS)); }
-function getExpectedMoveOutDate(row: any): string { return toDateOnly(firstField(row, EXPECTED_MOVE_OUT_KEYS)); }
+// 예정/계약종료일: 후보 중 "가장 늦은 날짜"(계약기간이 가장 긴 기준) → 실제퇴실 < 계약종료일이면 중도퇴거로 판정됨.
+function getExpectedMoveOutDate(row: any): string {
+  let best = "";
+  for (const k of EXPECTED_MOVE_OUT_KEYS) {
+    const v = toDateOnly(row?.[k]);
+    if (v && v > best) best = v;
+  }
+  return best;
+}
 function getCheonanMoveDate(row: any): string { return toDateOnly(firstField(row, CHEONAN_MOVE_KEYS)); }
 function getMoveInDate(row: any): string { return toDateOnly(firstField(row, MOVE_IN_KEYS)); }
 // [7] 월 경계(YYYY-MM-DD 문자열) + 문자열 날짜 비교 공통 함수(timezone 밀림 없음).
@@ -8194,8 +8202,20 @@ export default function App() {
       }, 0);
 
       // 입주자 데이터: occupants + newHires(occupants에 아직 반영되지 않은 배정된 신입사원)
+      // ★ 신입사원 화면에서 실제퇴실일/예정퇴실일을 입력했지만 동기화된 occupant 에 아직 반영되지 않은 경우,
+      //   중도퇴거가 누락되므로 연결된 신입사원(sourceNewHireId)의 날짜로 보완(occupant 값이 비어있을 때만).
+      const nhById = new Map(newHires.map((h) => [h.id, h]));
       const allOccupants = [
-        ...occupants.filter((o) => !o.isDeleted),
+        ...occupants.filter((o) => !o.isDeleted).map((o) => {
+          const h = o.sourceNewHireId ? nhById.get(o.sourceNewHireId) : undefined;
+          if (!h) return o;
+          return {
+            ...o,
+            actualMoveOutDate: getActualMoveOutDate(o) || h.actualMoveOutDate,
+            expectedMoveOutDate: (o as any).expectedMoveOutDate || h.expectedMoveOutDate,
+            moveOutDueDate: (o as any).moveOutDueDate || h.moveOutDate,
+          } as Occupant;
+        }),
         ...newHires
           .filter(
             (h) =>
@@ -8336,6 +8356,17 @@ export default function App() {
       activeOccupantsCount: total?.currentResidents, expiredCount: total?.expiredResidents,
       earlyMoveOutCount: total?.earlyDepartures, newMoveInCount: total?.newMoveIn,
     });
+    // 통계와 동일하게 신입사원(sourceNewHireId) 실제/예정 퇴실일을 보완한 목록으로 로그(occupant 값이 비어있을 때만).
+    const nhById = new Map(newHires.map((h) => [h.id, h]));
+    const enriched = [
+      ...occupants.filter((o) => !o.isDeleted).map((o) => {
+        const h = o.sourceNewHireId ? nhById.get(o.sourceNewHireId) : undefined;
+        if (!h) return o as any;
+        return { ...o, actualMoveOutDate: getActualMoveOutDate(o) || h.actualMoveOutDate, expectedMoveOutDate: (o as any).expectedMoveOutDate || h.expectedMoveOutDate, moveOutDueDate: (o as any).moveOutDueDate || h.moveOutDate } as any;
+      }),
+      ...newHires.filter((h) => !h.isDeleted && h.dormId && !occupants.some((o) => o.sourceNewHireId === h.id))
+        .map((h) => ({ ...h, name: (h as any).employeeName || (h as any).name, status: h.residenceStatus, moveInDate: h.moveInDate, moveOutDueDate: h.moveOutDate, actualMoveOutDate: h.actualMoveOutDate, expectedMoveOutDate: h.expectedMoveOutDate } as any)),
+    ];
     // [11] 카테고리별 후보 로그(이름/기숙사/입실일/계약종료일/실제퇴실일/천안이동일/포함여부)
     const info = (o: any, included: boolean) => ({
       name: (o as any).employeeName || (o as any).name,
@@ -8349,13 +8380,26 @@ export default function App() {
     });
     console.log("[운영시뮬레이션 후보]", {
       selectedYear: y, selectedMonth: m,
-      현거주자후보: occupants.map((o) => info(o, isOccupantActiveInMonth(o, y, m))).filter((x) => x.포함),
-      만료자후보: occupants.filter((o) => isDateInMonth(getExpectedMoveOutDate(o), y, m)).map((o) => { const a = getActualMoveOutDate(o), e = getExpectedMoveOutDate(o); return info(o, !a || a === e); }),
-      중도퇴거후보: occupants.filter((o) => getActualMoveOutDate(o)).map((o) => info(o, isDateInMonth(getActualMoveOutDate(o), y, m) && isEarlyMoveOut(o))),
-      천안이동후보: occupants.filter((o) => getCheonanMoveDate(o)).map((o) => info(o, isDateInMonth(getCheonanMoveDate(o), y, m))),
-      신규입주후보: occupants.filter((o) => getMoveInDate(o)).map((o) => info(o, isDateInMonth(getMoveInDate(o), y, m))).filter((x) => x.포함),
+      현거주자후보: enriched.map((o) => info(o, isOccupantActiveInMonth(o, y, m))).filter((x) => x.포함),
+      만료자후보: enriched.filter((o) => isDateInMonth(getExpectedMoveOutDate(o), y, m)).map((o) => { const a = getActualMoveOutDate(o), e = getExpectedMoveOutDate(o); return info(o, !a || a === e); }),
+      중도퇴거후보: enriched.filter((o) => getActualMoveOutDate(o)).map((o) => info(o, isDateInMonth(getActualMoveOutDate(o), y, m) && isEarlyMoveOut(o))),
+      천안이동후보: enriched.filter((o) => getCheonanMoveDate(o)).map((o) => info(o, isDateInMonth(getCheonanMoveDate(o), y, m))),
+      신규입주후보: enriched.filter((o) => getMoveInDate(o)).map((o) => info(o, isDateInMonth(getMoveInDate(o), y, m))).filter((x) => x.포함),
     });
-  }, [simulationYear, simulationMonth, occupants, simulationMonthlyStats]);
+    // [요청] 중도퇴거 판정 상세 테이블(실제퇴실일 보유자 전체)
+    console.table(
+      enriched
+        .filter((o) => getActualMoveOutDate(o))
+        .map((o) => ({
+          name: (o as any).employeeName || (o as any).name,
+          status: o.status,
+          actual: getActualMoveOutDate(o),
+          expected: getExpectedMoveOutDate(o),
+          inMonth: isDateInMonth(getActualMoveOutDate(o), y, m),
+          early: isEarlyMoveOut(o),
+        }))
+    );
+  }, [simulationYear, simulationMonth, occupants, newHires, simulationMonthlyStats]);
 
   const simulationRows = useMemo(() => {
     const month = Number(simulationMonth);
