@@ -829,6 +829,22 @@ function isDateInYearMonth(value: unknown, year: number | string, month: number 
   if (!dateOnly) return false;
   return dateOnly.startsWith(`${year}-${String(month).padStart(2, "0")}`);
 }
+// 실제/예정 퇴실일 필드는 소스별로 이름이 달라(카멜/스네이크/한글) 후보를 모두 확인해 첫 값 사용.
+const ACTUAL_MOVE_OUT_KEYS = ["actualMoveOutDate", "actual_move_out_date", "real_move_out_date", "actual_leave_date", "move_out_actual_date", "실제퇴실일"];
+const EXPECTED_MOVE_OUT_KEYS = ["expectedMoveOutDate", "expected_move_out_date", "contractEndDate", "contract_end_date", "scheduledMoveOutDate", "scheduled_move_out_date", "moveOutDueDate", "moveOutDate", "move_out_date", "퇴실일", "계약종료일", "예정퇴실일"];
+function firstField(row: any, keys: string[]): string {
+  for (const k of keys) { const v = row?.[k]; if (v !== undefined && v !== null && String(v).trim() !== "") return String(v); }
+  return "";
+}
+function getActualMoveOutDate(row: any): string { return toDateOnly(firstField(row, ACTUAL_MOVE_OUT_KEYS)); }
+function getExpectedMoveOutDate(row: any): string { return toDateOnly(firstField(row, EXPECTED_MOVE_OUT_KEYS)); }
+// 중도퇴거: 실제퇴실일 존재 + (예정퇴실일/계약종료일보다 빠름). 예정일 없어도 실제퇴실이면 중도퇴거 후보(true).
+function isEarlyMoveOut(row: any): boolean {
+  const actual = getActualMoveOutDate(row);
+  if (!actual) return false;
+  const expected = getExpectedMoveOutDate(row);
+  return expected ? actual < expected : true;
+}
 
 // [1] 공지 "내용" 표시 정규화: 저장값이 JSON 문자열/객체/HTML/escape 여도 실제 내용만 자연스럽게 표시.
 // (content/body/text/message 중 실제 값만 추출, 태그 제거, \n 복원, undefined/null 노출 방지)
@@ -8203,14 +8219,11 @@ export default function App() {
         return isDateInYearMonth(due, year, month);
       }).length;
 
-      // 5. 중도퇴거: 실제퇴실일이 선택 월 안에 있고, (예정퇴실일/계약종료일보다 빠름). 예정일이 없으면 중도퇴거로 간주.
-      //    문자열(앞 10자리) 비교로 timezone 하루 밀림 방지. 예정일 없어도 오늘 실제퇴실이면 1명 반영.
+      // 5. 중도퇴거: 실제퇴실일이 선택 월 안 + 예정퇴실일/계약종료일보다 빠름(예정일 없으면 후보). 공통 함수 사용.
       const earlyDepartures = groupOccupants.filter((o) => {
-        const actual = toDateOnly(o.actualMoveOutDate || "");
-        if (!actual) return false;
-        if (!isDateInYearMonth(actual, year, month)) return false;
-        const expected = toDateOnly(o.moveOutDueDate || (o as any).expectedMoveOutDate || "");
-        return expected ? actual < expected : true; // 예정퇴실일 있으면 그보다 빠를 때만, 없으면 true
+        const actual = getActualMoveOutDate(o);
+        if (!actual || !isDateInYearMonth(actual, year, month)) return false;
+        return isEarlyMoveOut(o);
       }).length;
 
       // 6. 천안이동: 천안이동일이 해당 월인 인원 또는 상태가 천안이동인 인원
@@ -8300,21 +8313,18 @@ export default function App() {
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     const y = Number(simulationYear), m = Number(simulationMonth);
-    console.log("[운영시뮬레이션 중도퇴거]", {
+    console.log("[운영시뮬레이션 중도퇴거 후보]", {
       selectedYear: y, selectedMonth: m,
       candidates: occupants
-        .filter((row) => !row.isDeleted && toDateOnly(row.actualMoveOutDate || ""))
-        .map((row) => {
-          const actual = toDateOnly(row.actualMoveOutDate || "");
-          const expected = toDateOnly(row.moveOutDueDate || (row as any).expectedMoveOutDate || "");
-          return {
-            name: (row as any).employeeName || (row as any).name,
-            actualMoveOutDate: actual,
-            expectedMoveOutDate: expected,
-            isInPeriod: isDateInYearMonth(actual, y, m),
-            isEarly: expected ? actual < expected : true,
-          };
-        }),
+        .filter((row) => !row.isDeleted && getActualMoveOutDate(row))
+        .map((row) => ({
+          name: (row as any).employeeName || (row as any).name,
+          status: row.status,
+          actualMoveOutDate: getActualMoveOutDate(row),
+          expectedMoveOutDate: getExpectedMoveOutDate(row),
+          inSelectedMonth: isDateInYearMonth(getActualMoveOutDate(row), y, m),
+          early: isEarlyMoveOut(row),
+        })),
     });
   }, [simulationYear, simulationMonth, occupants]);
 
@@ -10837,6 +10847,17 @@ export default function App() {
     if (!cleaningReportForm.managerUserId.trim()) {
       alert("청소보고서 저장을 위해 담당 관리자 정보를 확인해주세요.");
       return;
+    }
+
+    // [2] 하자접수 계정(maintenance_reporter)은 "금주차" 청소보고서만 등록/수정 가능(지난/미래 주차 금지).
+    //     공통 주차 계산(getCleaningWeekInfo)의 weekKey 로 보고일과 오늘의 주차를 비교. 관리자 등은 기존 권한 유지.
+    if (currentUser?.role === "maintenance_reporter") {
+      const reportWeek = getCleaningWeekInfo(cleaningReportForm.reportDate || "");
+      const thisWeek = getCleaningWeekInfo(new Date());
+      if (!reportWeek || !thisWeek || reportWeek.weekKey !== thisWeek.weekKey) {
+        await appAlert("청소보고서", "하자접수 계정은 금주차 청소보고서만 등록할 수 있습니다.");
+        return;
+      }
     }
 
     const existing = editingCleaningReportId
@@ -23733,6 +23754,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <Input label="보고일" type="date-text" value={cleaningReportForm.reportDate} onChange={(v) => setCleaningReportForm((f) => ({ ...f, reportDate: v }))} readOnly={isMaintenanceReporter} />
                   {/* 보고일 기준 해당월/주차(월요일 기준). 보고일 변경 시 즉시 갱신. */}
                   <p className="mt-1 text-xs font-semibold text-blue-600">해당주차: {getCleaningWeekLabel(cleaningReportForm.reportDate || "")}</p>
+                  {/* [2] 하자접수 계정: 금주차가 아니면 저장 불가 경고 */}
+                  {currentUser?.role === "maintenance_reporter" && (() => {
+                    const rw = getCleaningWeekInfo(cleaningReportForm.reportDate || "");
+                    const tw = getCleaningWeekInfo(new Date());
+                    if (rw && tw && rw.weekKey === tw.weekKey) return null;
+                    return <p className="mt-1 text-xs font-semibold text-rose-600">하자접수 계정은 금주차 청소보고서만 등록할 수 있습니다.</p>;
+                  })()}
                 </div>
                 <Input label="청소 담당자" value={isMaintenanceReporter ? (currentUser?.displayName || "") : cleaningReportForm.cleanerName} onChange={(v) => setCleaningReportForm((f) => ({ ...f, cleanerName: v }))} readOnly={isMaintenanceReporter} />
               </div>
