@@ -837,6 +837,13 @@ function getNoticeDisplayContent(value: unknown): string {
   return String(value);
 }
 
+// 비품 증빙파일(proof_file) 은 {name,data} JSON 또는 과거 문자열(파일명/URL/dataURL). 표시용 "파일명"만 추출.
+function parseProofFileName(v?: string): string {
+  if (!v) return "";
+  if (v.startsWith("{")) { try { const p = JSON.parse(v); return String(p.name || ""); } catch { /* legacy */ } }
+  return v.startsWith("data:") ? "증빙파일" : v; // dataURL 만 있으면 이름 없음 표시, 그 외 문자열은 그대로(파일명)
+}
+
 const SETTLEMENT_ITEMS_KEY = "settlementItems";
 // 정산 "정산완료" 표시(기숙사+연월 단위) — DB/Supabase 변경 없이 localStorage 로만 관리(복구 가능: 다시 눌러 해제).
 const SETTLEMENT_COMPLETED_KEY = "settlementCompleted-v1";
@@ -8144,14 +8151,17 @@ export default function App() {
           } as unknown as Occupant)),
       ];
 
+      // 기숙사 매칭: operationalDorms 우선, 없으면 dorms 로도 조회 → operationalDorms 에 없는 기숙사의
+      // 거주자가 누락되어 현 거주자가 실제보다 적게 나오던 문제 방지(신입사원/입주자 현재 거주자와 일치).
       const groupOccupants = allOccupants.filter((o) => {
-        const occupantDorm = operationalDorms.find((d) => d.id === o.dormId);
+        const occupantDorm = operationalDorms.find((d) => d.id === o.dormId) || dorms.find((d) => d.id === o.dormId);
         return occupantDorm && occupantDorm.site === site && occupantDorm.gender === gender;
       });
 
-      // 3. 현 거주자: 입실일이 해당 월 말일 이전, 실제퇴실일/퇴실일이 없거나 해당 월 이후, 상태가 거주중/만료예정인 사람
+      // 3. 현 거주자: 입실일이 해당 월 말일 이전 + 실제퇴실일 없음/해당 월 이후 + 현재 거주상태.
+      //    상태는 "거주중/연장/재입주 등 포함, 퇴실/과거거주/미배정/천안이동만 제외"(연장자 포함 → 입주자/신입사원 현 거주자와 일치).
       const currentResidents = groupOccupants.filter((o) => {
-        if (!["거주중", "만료예정"].includes(o.status)) return false;
+        if (["퇴실", "과거거주", "미배정", "천안이동"].includes(o.status || "")) return false;
         const moveInDate = parseDateValue(o.moveInDate);
         if (!moveInDate || !isBeforeOrSameMonthEnd(moveInDate, year, month)) return false;
         const actualOutDate = parseDateValue(o.actualMoveOutDate || "");
@@ -12386,10 +12396,89 @@ export default function App() {
     await uploadExcel(file);
   };
 
+  // [1] 비품현황 Excel 등록 — 최신 컬럼(구매업체/매각·폐기 업체/금액/증빙파일명) + 컬럼명 자동매핑 + 검증 + 중복방지.
+  const uploadInventoryExcel = async (file: File) => {
+    if (!canEditData(currentUser)) return;
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, { defval: "" });
+    // 컬럼명 자동매핑(후보 중 첫 값). "구매 업체"=구매업체, "매각업체"=매각/폐기 업체 등.
+    const pick = (r: Record<string, any>, ...keys: string[]) => { for (const k of keys) { const v = r[k]; if (v !== undefined && String(v).trim() !== "") return v; } return ""; };
+    const num = (v: any) => Number(String(v ?? "").replace(/[,\s원]/g, "")) || 0; // 금액: 쉼표 제거 후 Number
+    const validStatus = ["사용중", "보관", "수리중", "교체예정", "매각", "폐기", "정상", "고장", "노후"];
+    const errors: string[] = [];
+    const parsed = rows.map((r, idx) => {
+      const itemName = normText(pick(r, "비품명", "품목", "품목명", "itemName"));
+      const buildingName = normBuilding(pick(r, "건물명", "기숙사", "기숙사명", "buildingName"));
+      const dong = normDong(pick(r, "동", "dong"));
+      const roomHo = normRoomHo(pick(r, "호수", "호", "roomHo"));
+      const purchaseRaw = pick(r, "구매일", "purchaseDate");
+      const purchaseDate = parseExcelDate(purchaseRaw) || String(purchaseRaw || "");
+      if (!itemName) { errors.push(`${idx + 2}행: 비품명(필수) 누락`); return null; }
+      let status = String(pick(r, "상태", "status") || "정상").trim();
+      if (!validStatus.includes(status)) { errors.push(`${idx + 2}행: 알 수 없는 상태값 "${status}" → 정상 처리`); status = "정상"; }
+      const site = (normSite(pick(r, "지역", "site")) || "평택") as Site;
+      const matchKey = buildingName ? makeDormMatchKey(site, buildingName, dong, roomHo) : "";
+      const matched = matchKey
+        ? (operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === matchKey) ||
+           dorms.find((d) => !d.isDeleted && makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === matchKey))
+        : undefined;
+      const item: InventoryItem = {
+        id: crypto.randomUUID(),
+        dormId: matched?.id || "",
+        site: (matched?.site || site) as Site,
+        dormAddress: matched?.address || normText(pick(r, "기숙사주소", "주소")),
+        buildingName: matched?.buildingName || buildingName || "",
+        dong: matched?.dong || dong || "",
+        roomHo: matched?.roomHo || roomHo || "",
+        managerName: normText(pick(r, "담당자", "담당관리자", "managerName")),
+        managerPhone: normText(pick(r, "담당자연락처", "연락처", "managerPhone")),
+        itemName,
+        quantity: num(pick(r, "수량", "quantity")) || 1,
+        modelName: normText(pick(r, "모델명", "모델", "modelName")),
+        maker: normText(pick(r, "메이커", "제조사", "maker")),
+        status: status as InventoryItem["status"],
+        installationLocation: normText(pick(r, "설치위치", "installationLocation")),
+        purchaseDate,
+        purchaseAmount: num(pick(r, "구매금액", "구매액", "purchaseAmount")),
+        purchaseVendor: normText(pick(r, "구매업체", "구매 업체", "purchaseVendor")),
+        issuedDate: parseExcelDate(pick(r, "지급일", "issuedDate")) || "",
+        proofFile: normText(pick(r, "증빙파일명", "증빙파일", "proofFile")), // 파일명만 참고(실제 파일은 등록/수정 화면에서)
+        soldDate: parseExcelDate(pick(r, "매각일", "soldDate")) || "",
+        soldAmount: num(pick(r, "매각금액", "soldAmount")),
+        disposalDate: parseExcelDate(pick(r, "폐기일", "disposalDate")) || "",
+        disposalReason: normText(pick(r, "폐기사유", "처리사유", "disposalReason")),
+        disposalVendor: normText(pick(r, "매각/폐기 업체", "매각업체", "매각/폐기업체", "폐기업체", "disposalVendor")),
+        notes: normText(pick(r, "비고", "메모", "notes")),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      return item;
+    }).filter((x): x is InventoryItem => x !== null);
+    // 필수값 누락은 업로드 전 오류 표시(상태 경고는 진행). 필수 누락이 하나라도 있으면 중단.
+    const criticalErrors = errors.filter((e) => e.includes("필수"));
+    if (criticalErrors.length > 0) { alert("업로드 취소 — 필수값 누락:\n" + criticalErrors.slice(0, 20).join("\n")); return; }
+    // 중복 방지: 비품명+건물명+동+호수+구매일 기준(기존 데이터 덮어쓰기 금지, 신규만 추가).
+    const keyOf = (i: InventoryItem) => `${i.itemName}|${i.buildingName}|${stripDongHoSuffix(i.dong)}|${stripDongHoSuffix(i.roomHo)}|${i.purchaseDate}`.toLowerCase();
+    const existingKeys = new Set(inventory.filter((x) => !x.isDeleted).map(keyOf));
+    const seen = new Set<string>();
+    const toAdd = parsed.filter((i) => { const k = keyOf(i); if (existingKeys.has(k) || seen.has(k)) return false; seen.add(k); return true; });
+    const skipped = parsed.length - toAdd.length;
+    if (toAdd.length === 0) { alert(`추가할 신규 비품이 없습니다. (중복 ${skipped}건)`); return; }
+    userMutationTickRef.current += 1;
+    setInventory((prev) => [...toAdd, ...prev]);
+    alert(`비품 ${toAdd.length}건 등록 완료${skipped > 0 ? ` · 중복 ${skipped}건 제외` : ""}${errors.some((e) => e.includes("상태")) ? "\n※ 일부 상태값이 인식되지 않아 '정상'으로 처리했습니다." : ""}`);
+  };
+
   const uploadExcel = async (file: File) => {
     if (!canEditData(currentUser)) return;
     // 엑셀 업로드는 사용자 액션 → 저장 트리거 카운터 증가(자동 저장 useEffect 가 저장하도록).
     userMutationTickRef.current += 1;
+    if (activeTab === "inventory") {
+      await uploadInventoryExcel(file);
+      return;
+    }
     if (activeTab === "dormContracts") {
       await uploadDormContractsExcel(file);
       return;
@@ -12542,14 +12631,22 @@ const exportExcel = () => {
           계약만료일: getDormContractEndLabel(i.dormId),
           남은일수: getDormContractRemainLabel(i.dormId),
           비품명: i.itemName,
+          상태: i.status,
           수량: i.quantity,
           모델명: i.modelName,
           메이커: i.maker,
-          구매액: formatWon(i.purchaseAmount),
           구매일: formatDateOnly(i.purchaseDate || ""),
+          구매업체: i.purchaseVendor || "",
+          구매액: formatWon(i.purchaseAmount),
           지급일: formatDateOnly(i.issuedDate || ""),
           매각일: formatDateOnly(i.soldDate || ""),
+          "매각/폐기 업체": i.disposalVendor || "",
+          매각금액: formatWon(i.soldAmount),
+          폐기일: formatDateOnly(i.disposalDate || ""),
+          증빙파일명: parseProofFileName(i.proofFile),
           비고: i.notes,
+          등록일: formatDateOnly(i.createdAt || ""),
+          수정일: formatDateOnly(i.updatedAt || ""),
         };
       });
     fileName = "비품현황.xlsx";
