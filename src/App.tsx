@@ -812,6 +812,24 @@ function occupantDisplayStatus(o: { status?: string; actualMoveOutDate?: string 
   return "거주중";
 }
 
+// [3] 날짜 비교 공통 함수 — timezone 으로 하루 밀리지 않도록 "문자열 앞 10자리(YYYY-MM-DD)" 기준 비교.
+function toDateOnly(value: unknown): string {
+  if (!value) return "";
+  const text = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10); // ISO/타임존 포함 값은 앞 10자리만
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return "";
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+function isDateInYearMonth(value: unknown, year: number | string, month: number | string): boolean {
+  const dateOnly = toDateOnly(value);
+  if (!dateOnly) return false;
+  return dateOnly.startsWith(`${year}-${String(month).padStart(2, "0")}`);
+}
+
 // [1] 공지 "내용" 표시 정규화: 저장값이 JSON 문자열/객체/HTML/escape 여도 실제 내용만 자연스럽게 표시.
 // (content/body/text/message 중 실제 값만 추출, 태그 제거, \n 복원, undefined/null 노출 방지)
 function getNoticeDisplayContent(value: unknown): string {
@@ -8178,18 +8196,21 @@ export default function App() {
         currentResidents,
       });
 
-      // 4. 만료자: 예상퇴실일 또는 퇴실예정일이 해당 월인 인원
+      // 4. 만료자: 예정퇴실일/계약종료일이 선택 월 안인 인원. 단, 이미 실제퇴실 완료자는 제외(중도퇴거와 중복 카운트 방지).
       const expiredResidents = groupOccupants.filter((o) => {
-        const dueDate = parseDateValue(o.moveOutDueDate);
-        return dueDate && isSameMonth(dueDate, year, month);
+        if (toDateOnly(o.actualMoveOutDate || "")) return false; // 실제퇴실 완료자는 만료자에서 제외
+        const due = o.moveOutDueDate || (o as any).expectedMoveOutDate || "";
+        return isDateInYearMonth(due, year, month);
       }).length;
 
-      // 5. 중도퇴거: 실제퇴실일이 있고, 실제퇴실일 < 예상퇴실일, 실제퇴실일이 해당 월인 인원
+      // 5. 중도퇴거: 실제퇴실일이 선택 월 안에 있고, (예정퇴실일/계약종료일보다 빠름). 예정일이 없으면 중도퇴거로 간주.
+      //    문자열(앞 10자리) 비교로 timezone 하루 밀림 방지. 예정일 없어도 오늘 실제퇴실이면 1명 반영.
       const earlyDepartures = groupOccupants.filter((o) => {
-        const actualOutDate = parseDateValue(o.actualMoveOutDate || "");
-        if (!actualOutDate || !isSameMonth(actualOutDate, year, month)) return false;
-        const dueDate = parseDateValue(o.moveOutDueDate);
-        return dueDate && actualOutDate < dueDate;
+        const actual = toDateOnly(o.actualMoveOutDate || "");
+        if (!actual) return false;
+        if (!isDateInYearMonth(actual, year, month)) return false;
+        const expected = toDateOnly(o.moveOutDueDate || (o as any).expectedMoveOutDate || "");
+        return expected ? actual < expected : true; // 예정퇴실일 있으면 그보다 빠를 때만, 없으면 true
       }).length;
 
       // 6. 천안이동: 천안이동일이 해당 월인 인원 또는 상태가 천안이동인 인원
@@ -8199,11 +8220,8 @@ export default function App() {
         return moveDate && isSameMonth(moveDate, year, month);
       }).length;
 
-      // 7. 신규입주: 입실일이 해당 월에 포함되는 인원
-      const newMoveIn = groupOccupants.filter((o) => {
-        const moveInDate = parseDateValue(o.moveInDate);
-        return moveInDate && isSameMonth(moveInDate, year, month);
-      }).length;
+      // 7. 신규입주: 입실일이 선택 월에 포함되는 인원(문자열 앞 10자리 기준 — timezone 밀림 방지).
+      const newMoveIn = groupOccupants.filter((o) => isDateInYearMonth(o.moveInDate, year, month)).length;
 
       // 8. 과부족: 거주자 TO - 현 거주자
       const shortage = residentTo - currentResidents;
@@ -8277,6 +8295,28 @@ export default function App() {
 
     return results;
   }, [dormContracts, dorms, occupants, newHires, simulationYear]);
+
+  // [5] 개발용 디버그 로그: 선택 월 기준 중도퇴거 후보/판정 확인(운영 빌드에는 출력 없음).
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const y = Number(simulationYear), m = Number(simulationMonth);
+    console.log("[운영시뮬레이션 중도퇴거]", {
+      selectedYear: y, selectedMonth: m,
+      candidates: occupants
+        .filter((row) => !row.isDeleted && toDateOnly(row.actualMoveOutDate || ""))
+        .map((row) => {
+          const actual = toDateOnly(row.actualMoveOutDate || "");
+          const expected = toDateOnly(row.moveOutDueDate || (row as any).expectedMoveOutDate || "");
+          return {
+            name: (row as any).employeeName || (row as any).name,
+            actualMoveOutDate: actual,
+            expectedMoveOutDate: expected,
+            isInPeriod: isDateInYearMonth(actual, y, m),
+            isEarly: expected ? actual < expected : true,
+          };
+        }),
+    });
+  }, [simulationYear, simulationMonth, occupants]);
 
   const simulationRows = useMemo(() => {
     const month = Number(simulationMonth);
