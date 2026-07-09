@@ -104,7 +104,37 @@ export const loadPreMoveInInspections = async (_tenantId: string): Promise<PreMo
   }
 };
 
-// 변경분(또는 전체) upsert. 빈 배열이면 요청 생략. 오류는 상위에서 처리하도록 throw.
+// [7] 본문 저장 성공 후 사진(photos, base64)만 별도 update. 실패해도 throw 하지 않고 1회 재시도 + warn(본문 저장 유지).
+//     사진 배열이 "비어있지 않을 때만" 전송 → 사진 미변경/미로드 시 기존 photos 를 []로 덮어쓰지 않음.
+const savePreInspectionPhotosOptional = async (rows: PreMoveInInspection[]): Promise<void> => {
+  const jobs = rows.filter((r) => r.id && Array.isArray(r.photos) && r.photos.length > 0);
+  if (jobs.length === 0) return;
+  const run = async (r: PreMoveInInspection): Promise<{ r: PreMoveInInspection; error: any }> => {
+    try {
+      const { error } = await supabase!.from("pre_move_in_inspections").update({ photos: r.photos }).eq("id", r.id);
+      return { r, error: error ?? null };
+    } catch (e) {
+      return { r, error: e };
+    }
+  };
+  let results = await Promise.all(jobs.map(run));
+  const failed = results.filter((x) => x.error);
+  if (failed.length > 0) {
+    await new Promise((res) => setTimeout(res, 1500)); // 1회 자동 재시도
+    const retried = await Promise.all(failed.map((x) => run(x.r)));
+    const byId = new Map(retried.map((x) => [x.r.id, x]));
+    results = results.map((x) => byId.get(x.r.id) ?? x);
+  }
+  results.filter((x) => x.error).forEach((x) => {
+    const err = x.error as { code?: unknown; message?: string };
+    console.error("[입주전점검 사진 저장 실패 - 본문은 저장됨]", {
+      table: "pre_move_in_inspections", action: "photo-update", id: x.r.id,
+      code: err?.code ?? "(unknown)", message: err?.message ?? String(x.error), imageCount: x.r.photos?.length ?? 0,
+    });
+  });
+};
+
+// 변경분(또는 전체) upsert. 빈 배열이면 요청 생략. 본문 오류는 상위에서 처리하도록 throw(사진 실패는 본문 실패로 보지 않음).
 export const savePreMoveInInspections = async (
   rows: PreMoveInInspection[],
   tenantId: string,
@@ -112,10 +142,14 @@ export const savePreMoveInInspections = async (
 ): Promise<void> => {
   if (!isSupabaseAvailable()) return;
   if (!rows || rows.length === 0) return;
+  // [7] 본문(텍스트) 먼저 upsert — 대용량 base64 사진(photos)을 제외해 회사망 보안 프록시 차단 회피. 공통 supabase client 사용.
+  const bodyRows = rows.map((r) => { const db = toDb(r, tenantId, userId) as Record<string, any>; delete db.photos; return db; });
   const { error } = await supabase!
     .from("pre_move_in_inspections")
-    .upsert(rows.map((r) => toDb(r, tenantId, userId)), { onConflict: "id" });
+    .upsert(bodyRows, { onConflict: "id" });
   if (error) {
     throw new Error(translateSupabaseError((error as { message?: string })?.message || String(error)));
   }
+  // 본문 저장 성공 후 사진만 별도 저장(실패해도 본문 유지).
+  await savePreInspectionPhotosOptional(rows);
 };

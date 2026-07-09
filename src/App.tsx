@@ -14478,22 +14478,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         return siteMatch && genderMatch && searchMatch;
       })
       .map((dorm) => {
-        const dormOccupants = occupants.filter((o) => {
-          if (o.dormId !== dorm.id || o.isDeleted) return false;
-          if (!periodStart || !periodEnd) return true;
-          const moveInDate = parseSafeDate(o.moveInDate);
-          if (!moveInDate || moveInDate > periodEnd) return false;
-          const actualOutDate = parseSafeDate(o.actualMoveOutDate || "");
-          if (actualOutDate && actualOutDate < periodStart) return false;
-          const dueOutDate = parseSafeDate(o.moveOutDueDate);
-          if (dueOutDate && dueOutDate < periodStart) return false;
-          return true;
-        });
+        // [6] 카드/상세와 동일 기준: 현재 거주자(퇴실 제외)만 count(settlementResidentsByDorm, 키 기준).
+        const dKey = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
+        const dormOccupants = settlementResidentsByDorm.get(dKey) || [];
 
         const revenue = dormOccupants.length * 2000000;
+        // [6] 비품비용: 카드와 동일하게 dorm_id 또는 건물+동+호 키 매칭 + 폐기/삭제/매각 제외(자산관리 비품현황 기준).
         const inventoryCost = inventory
           .filter((i) => {
-            if (i.dormId !== dorm.id || i.isDeleted) return false;
+            if (i.isDeleted || i.isPermanentDeleted) return false;
+            if (/폐기|매각|disposed|sold/i.test(String((i as any).status || "")) || (i as any).disposalDate || (i as any).soldDate) return false;
+            const match = (i.dormId && i.dormId === dorm.id) || getDormKey((i as any).site || "", i.buildingName || "", i.dong || "", i.roomHo || "") === dKey;
+            if (!match) return false;
             if (!periodStart || !periodEnd) return true;
             const purchaseDate = parseSafeDate(i.purchaseDate);
             return purchaseDate ? isSameMonth(purchaseDate, settlementYearNum, settlementMonthNum) : false;
@@ -14544,7 +14540,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     );
 
     return { filteredDorms, filteredSettlementItems };
-  }, [operationalDorms, settlementSiteFilter, settlementGenderFilter, settlementSearch, settlementShowUnpaid, settlementYear, settlementMonth, occupants, inventory, defects, settlementRecords, settlementItems]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalDorms, settlementSiteFilter, settlementGenderFilter, settlementSearch, settlementShowUnpaid, settlementYear, settlementMonth, occupants, inventory, defects, settlementRecords, settlementItems, settlementResidentsByDorm]);
 
   React.useEffect(() => {
     if (activeTab !== "dashboard") {
@@ -14969,7 +14966,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="text-sm font-medium text-slate-500">하자 미완료</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.openDefects}</div>
               </button>
-              <button type="button" onClick={() => { setInventoryStatusFilter("교체예정"); setInventorySearch(""); setActiveTab("inventory"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
+              <button type="button" onClick={() => { setInventoryStatusFilter("전체"); setInventorySearch(""); setInventoryYearFilter("전체"); setInventoryMonthFilter("전체"); setInventoryDayFilter("전체"); setSelectedInventoryDormId(""); setActiveTab("inventory"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">비품 품목</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.inventoryCount}</div>
               </button>
@@ -19403,6 +19400,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     }
                   });
 
+                // [4] 카드 1회 클릭 선택 시 → 하단 상세/정산 내역만 선택 기숙사로 필터(카드 그리드는 전체 유지). 재클릭 해제 시 전체.
+                const detailDorms = selectedSettlementDormId
+                  ? filteredDorms.filter((row) => row.dorm.id === selectedSettlementDormId)
+                  : filteredDorms;
+
                 return (
                   <>
                     {filteredDorms.length > 0 ? (
@@ -19512,8 +19514,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               <p className="text-xs text-slate-500">선택한 연도/월 기준</p>
                             </div>
                             <div className="text-right">
-                              <div className={`${theme.darkMode ? "text-sm font-semibold text-slate-100" : "text-sm font-semibold text-slate-900"}`}>총 정산액: {formatNumber(filteredDorms.reduce((sum, row) => sum + row.settlementAmount, 0))}원</div>
-                              <div className="text-xs text-slate-500">기숙사 {filteredDorms.length}개</div>
+                              <div className={`${theme.darkMode ? "text-sm font-semibold text-slate-100" : "text-sm font-semibold text-slate-900"}`}>총 정산액: {formatNumber(detailDorms.reduce((sum, row) => sum + row.settlementAmount, 0))}원</div>
+                              <div className="text-xs text-slate-500">기숙사 {detailDorms.length}개{selectedSettlementDormId ? " · 선택 필터 적용" : ""}</div>
                             </div>
                           </div>
                           <table className={`erp-table text-left ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>
@@ -19531,7 +19533,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               </tr>
                             </thead>
                             <tbody>
-                              {filteredDorms.map(({ dorm, revenue, inventoryCost, defectCost, manualCost, settlementAmount, dormOccupants }, idx) => (
+                              {detailDorms.map(({ dorm, revenue, inventoryCost, defectCost, manualCost, settlementAmount, dormOccupants }, idx) => (
                                 <tr key={dorm.id} className={idx % 2 === 0 ? "bg-white" : "bg-slate-50"}>
                                   <td className={`${theme.darkMode ? "px-3 py-2 font-medium text-slate-100" : "px-3 py-2 font-medium text-slate-900"}`}>{dorm.buildingName}</td>
                                   <td className="px-3 py-2">{dorm.site}</td>
@@ -19544,15 +19546,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                   <td className="px-3 py-2 text-right">{dormOccupants.length}</td>
                                 </tr>
                               ))}
-                              {filteredDorms.length > 0 && (
+                              {detailDorms.length > 0 && (
                                 <tr className={`${theme.darkMode ? "bg-slate-200 border-t-2 border-slate-600" : "bg-slate-200 border-t-2 border-slate-300"}`}>
                                   <td className={`${theme.darkMode ? "px-3 py-3 font-bold text-slate-100" : "px-3 py-3 font-bold text-slate-900"}`} colSpan={3}>합계</td>
-                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(filteredDorms.reduce((sum, row) => sum + row.revenue, 0))}원</td>
-                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(filteredDorms.reduce((sum, row) => sum + row.inventoryCost, 0))}원</td>
-                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(filteredDorms.reduce((sum, row) => sum + row.defectCost, 0))}원</td>
-                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(filteredDorms.reduce((sum, row) => sum + row.manualCost, 0))}원</td>
-                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(filteredDorms.reduce((sum, row) => sum + row.settlementAmount, 0))}원</td>
-                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{filteredDorms.reduce((sum, row) => sum + row.dormOccupants.length, 0)}</td>
+                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(detailDorms.reduce((sum, row) => sum + row.revenue, 0))}원</td>
+                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(detailDorms.reduce((sum, row) => sum + row.inventoryCost, 0))}원</td>
+                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(detailDorms.reduce((sum, row) => sum + row.defectCost, 0))}원</td>
+                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(detailDorms.reduce((sum, row) => sum + row.manualCost, 0))}원</td>
+                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{formatNumber(detailDorms.reduce((sum, row) => sum + row.settlementAmount, 0))}원</td>
+                                  <td className={`${theme.darkMode ? "px-3 py-3 text-right font-bold text-slate-100" : "px-3 py-3 text-right font-bold text-slate-900"}`}>{detailDorms.reduce((sum, row) => sum + row.dormOccupants.length, 0)}</td>
                                 </tr>
                               )}
                             </tbody>
@@ -19589,7 +19591,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               </tr>
                             </thead>
                             <tbody>
-                              {filteredDorms.flatMap(({ dorm, dormOccupants }) => {
+                              {detailDorms.flatMap(({ dorm, dormOccupants }) => {
                                 const dormKey = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
                                 const contract = dormContracts.find((c) => getDormKey(c.site, c.buildingName, c.dong, c.roomHo) === dormKey);
                                 const monthlyRentOrMaintenance = contract?.monthlyRentOrMaintenance || "";
@@ -24186,7 +24188,45 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <Input label="구매일" type="date-text" value={inventoryForm.purchaseDate} onChange={(v) => setInventoryForm((f) => ({ ...f, purchaseDate: v }))} />
                 <Input label="구매금액" type="number" value={String(inventoryForm.purchaseAmount)} onChange={(v) => setInventoryForm((f) => ({ ...f, purchaseAmount: Number(v || 0) }))} />
                 <Input label="지급일" type="date-text" value={inventoryForm.issuedDate} onChange={(v) => setInventoryForm((f) => ({ ...f, issuedDate: v }))} />
-                <Input label="증빙파일" value={inventoryForm.proofFile} onChange={(v) => setInventoryForm((f) => ({ ...f, proofFile: v }))} />
+                {/* [2] 증빙파일: 실제 파일 업로드(이미지/PDF). 기존 proof_file 컬럼(문자열) 재사용 — DB 변경 없음.
+                    저장 형식 {name,data}(JSON). 과거 문자열 값도 하위호환. 삭제 버튼 클릭 시에만 제거(수정 시 기존 유지). */}
+                {(() => {
+                  const parseProof = (v: string) => {
+                    if (!v) return { name: "", data: "" };
+                    if (v.startsWith("{")) { try { const p = JSON.parse(v); return { name: p.name || "", data: p.data || "" }; } catch { /* legacy */ } }
+                    return v.startsWith("data:") ? { name: "증빙파일", data: v } : { name: v, data: "" };
+                  };
+                  const proof = parseProof(inventoryForm.proofFile);
+                  const isImg = proof.data.startsWith("data:image/");
+                  return (
+                    <div>
+                      <label className={`mb-2 block text-sm font-medium ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>증빙파일 (이미지/PDF)</label>
+                      <input
+                        type="file"
+                        accept="image/*,.pdf,application/pdf"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          try {
+                            const dataUrl = await readFileDataUrl(file); // 이미지는 압축(1280px), PDF 등은 원본 base64
+                            setInventoryForm((f) => ({ ...f, proofFile: JSON.stringify({ name: file.name, data: dataUrl }) }));
+                          } catch { alert("파일을 불러오지 못했습니다."); }
+                          e.currentTarget.value = "";
+                        }}
+                        className="w-full text-sm"
+                      />
+                      {proof.data && (
+                        <div className="mt-2 flex items-center gap-2">
+                          {isImg && <img src={proof.data} alt="증빙" className="h-14 w-14 rounded-lg object-cover ring-1 ring-slate-200" />}
+                          <div className="min-w-0 flex-1 truncate text-xs text-slate-600">{proof.name || "첨부파일"}</div>
+                          <button type="button" onClick={() => window.open(proof.data, "_blank")} className="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100">열기</button>
+                          <button type="button" onClick={() => { if (window.confirm("증빙파일을 삭제할까요?")) setInventoryForm((f) => ({ ...f, proofFile: "" })); }} className="rounded-lg border border-rose-300 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">삭제</button>
+                        </div>
+                      )}
+                      {proof.name && !proof.data && <div className="mt-1 truncate text-xs text-slate-400">기존 값: {proof.name}</div>}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
@@ -24966,7 +25006,31 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         {settlementDetailDorm && (() => {
           const d = settlementDetailDorm;
           const list = getDormAllOccupants(d).slice().sort((a, b) => String(b.moveInDate || "").localeCompare(String(a.moveInDate || "")));
-          const currentCount = list.filter((o) => isCurrentResident(o)).length;
+          const dKey = getDormKey(d.site, d.buildingName, d.dong, d.roomHo);
+          // [5][6] 현재 거주자 수는 카드/보고서와 동일한 출처(settlementResidentsByDorm) 사용 → 퇴실자 미포함.
+          const curList = list.filter((o) => isCurrentResident(o));
+          const pastList = list.filter((o) => !isCurrentResident(o));
+          const currentCount = (settlementResidentsByDorm.get(dKey) || []).length;
+          // [5][6] 정산 요약(선택 연월) — 카드와 동일한 계산식(하드코딩 금지, 실데이터 기준).
+          const yNum = Number(safeSettlementYear), mNum = Number(safeSettlementMonth);
+          const sumRevenue = currentCount * 2000000;
+          const sumInventory = inventory.filter((i) => {
+            if (i.isDeleted || i.isPermanentDeleted) return false;
+            if (/폐기|매각|disposed|sold/i.test(String((i as any).status || "")) || (i as any).disposalDate || (i as any).soldDate) return false;
+            const match = (i.dormId && i.dormId === d.id) || getDormKey((i as any).site || "", i.buildingName || "", i.dong || "", i.roomHo || "") === dKey;
+            if (!match) return false;
+            const pd = parseSafeDate(i.purchaseDate);
+            return pd ? isSameMonth(pd, yNum, mNum) : false;
+          }).reduce((s, i) => s + (i.purchaseAmount || 0), 0);
+          const sumDefect = defects.filter((x) => {
+            if (x.dormId !== d.id || x.isDeleted || x.defectStatus === "완료") return false;
+            const rd = parseSafeDate(x.receiptDate);
+            return rd ? isSameMonth(rd, yNum, mNum) : false;
+          }).reduce((s) => s + 500000, 0);
+          const sumItems = settlementItems.filter((it) => it.dormId === d.id && it.settlementYear === safeSettlementYear && it.settlementMonth === safeSettlementMonth);
+          const sumCleaning = sumItems.filter((it) => /청소|홈클린/.test(String(it.category || ""))).reduce((s, it) => s + (Number(it.amount) || 0), 0);
+          const sumMisc = (settlementRecords.find((r) => r.dormId === d.id && r.settlementYear === safeSettlementYear && r.settlementMonth === safeSettlementMonth)?.miscCost || 0) + sumItems.reduce((s, it) => s + (Number(it.amount) || 0), 0);
+          const sumAmount = sumRevenue - (sumInventory + sumDefect + sumMisc);
           const statusBadge = (s: string) =>
             s === "퇴실" || s === "과거거주" ? "bg-rose-100 text-rose-700" :
             s === "연장" ? "bg-amber-100 text-amber-700" :
@@ -24977,11 +25041,33 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="mb-4 flex items-start justify-between gap-3">
                   <div>
                     <h3 className="text-lg font-semibold">{d.buildingName} 기숙사 상세</h3>
-                    <p className="text-sm text-slate-500">{d.site} · {d.dong} · {d.address}</p>
-                    <p className="mt-1 text-xs text-slate-400">계약종료: {getDormContractEndLabel(d.id) || "-"} · 현재 거주인 {currentCount}명 · 거주 이력 {list.length}명</p>
+                    <p className="text-sm text-slate-500">현재 거주인 {currentCount}명 · 거주 이력 {list.length}명</p>
                   </div>
                   <button onClick={() => setSettlementDetailDorm(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">✕</button>
                 </div>
+
+                {/* [5] 기본정보 / 계약정보 */}
+                <div className="mb-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+                  <div className="rounded-lg bg-slate-50 p-2"><div className="text-slate-400">지역</div><div className="font-medium text-slate-700">{d.site || "-"}</div></div>
+                  <div className="rounded-lg bg-slate-50 p-2"><div className="text-slate-400">동/호수</div><div className="font-medium text-slate-700">{d.dong ? `${stripDongHoSuffix(d.dong)}동` : "-"} {d.roomHo ? `${stripDongHoSuffix(d.roomHo)}호` : ""}</div></div>
+                  <div className="rounded-lg bg-slate-50 p-2 sm:col-span-1 col-span-2"><div className="text-slate-400">주소</div><div className="font-medium text-slate-700">{d.address || "-"}</div></div>
+                  <div className="rounded-lg bg-slate-50 p-2"><div className="text-slate-400">계약상태</div><div className="font-medium text-slate-700">{(d as any).leaseStatus || "-"}</div></div>
+                  <div className="rounded-lg bg-slate-50 p-2"><div className="text-slate-400">계약시작일</div><div className="font-medium text-slate-700">{getDormContractStartLabel(d.id) || "-"}</div></div>
+                  <div className="rounded-lg bg-slate-50 p-2"><div className="text-slate-400">계약종료일</div><div className="font-medium text-slate-700">{getDormContractEndLabel(d.id) || "-"}</div></div>
+                  <div className="rounded-lg bg-slate-50 p-2"><div className="text-slate-400">남은일수</div><div className="font-medium text-slate-700">{getDormContractRemainLabel(d.id) || "-"}</div></div>
+                </div>
+
+                {/* [5] 정산 요약(선택 연월) */}
+                <div className="mb-3 grid grid-cols-3 gap-2 text-center text-xs sm:grid-cols-6">
+                  <div className="rounded-lg bg-white p-2 ring-1 ring-slate-100"><div className="text-slate-400">입금액</div><div className="font-semibold text-slate-800">{formatNumber(sumRevenue)}</div></div>
+                  <div className="rounded-lg bg-white p-2 ring-1 ring-slate-100"><div className="text-slate-400">비품비용</div><div className="font-semibold text-slate-800">{formatNumber(sumInventory)}</div></div>
+                  <div className="rounded-lg bg-white p-2 ring-1 ring-slate-100"><div className="text-slate-400">하자/수리비</div><div className="font-semibold text-slate-800">{formatNumber(sumDefect)}</div></div>
+                  <div className="rounded-lg bg-white p-2 ring-1 ring-slate-100"><div className="text-slate-400">청소비용</div><div className="font-semibold text-slate-800">{formatNumber(sumCleaning)}</div></div>
+                  <div className="rounded-lg bg-white p-2 ring-1 ring-slate-100"><div className="text-slate-400">기타</div><div className="font-semibold text-slate-800">{formatNumber(sumMisc)}</div></div>
+                  <div className="rounded-lg bg-slate-100 p-2"><div className="text-slate-400">정산액</div><div className="font-bold text-slate-900">{formatNumber(sumAmount)}</div></div>
+                </div>
+                <div className="mb-1 text-xs font-semibold text-slate-500">현재 거주자 {curList.length}명 · 퇴실/과거거주 {pastList.length}명</div>
+
                 <div className="erp-table-container">
                   <table className="erp-table w-full text-left text-sm">
                     <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
