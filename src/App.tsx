@@ -780,13 +780,29 @@ function CleaningThumb({ candidates, alt }: { candidates: string[]; alt: string 
   );
 }
 
+// 기숙사 기준 정원 공통 함수 — 정원을 읽는 모든 화면이 재사용(하드코딩 6 금지).
+// 실제 DB 필드명: dorms.capacity, dorm_contracts.capacity (도메인 모두 camelCase `capacity`).
+// 우선순위: 1) dorm(=operationalDorm, 이미 계약 정원 반영) 저장값 → 2) 연결 계약 저장값 → 3) fallback 6.
+// 문자열("5")·0·음수·NaN 방어(0/음수는 무효 처리해 잘못된 값이 정원을 0으로 만들지 않도록).
+function getDormCapacity(
+  dorm?: { capacity?: number | string | null } | null,
+  contract?: { capacity?: number | string | null } | null
+): number {
+  const norm = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Math.floor(Number(v));
+    return Number.isFinite(n) && n >= 1 ? n : null;
+  };
+  return norm(dorm?.capacity) ?? norm(contract?.capacity) ?? 6;
+}
+
 // 현재 거주자(거주중/만료예정, 퇴실/과거/삭제 제외) 기준. 정원 0이면 0%(NaN 방지).
 // 공실 수 = 정원 - 현재거주자, 공실률 = 공실/정원*100, 사용률 = 거주자/정원*100.
 function computeVacancyStats(
   dormList: Array<{ id: string; capacity?: number }>,
   occupants: Array<{ dormId: string; status: string; isDeleted?: boolean; deletedAt?: string; isPermanentDeleted?: boolean }>
 ) {
-  const totalCapacity = dormList.reduce((sum, d) => sum + (d.capacity || 6), 0);
+  const totalCapacity = dormList.reduce((sum, d) => sum + getDormCapacity(d), 0);
   const dormIds = new Set(dormList.map((d) => d.id));
   // 삭제 데이터(isDeleted/deletedAt/isPermanentDeleted) 전부 제외 — 통계 부풀림 방지.
   const currentResidents = occupants.filter(
@@ -5670,12 +5686,12 @@ export default function App() {
       const occupantCount = occupants.filter(
         (o) => o.dormId === dorm.id && !["퇴실", "천안이동"].includes(o.status) && !o.isDeleted
       ).length;
-      if (occupantCount > (dorm.capacity || 6)) {
+      if (occupantCount > getDormCapacity(dorm)) {
         notifications.push({
           id: `overcrowded-${dorm.id}`,
           type: "occupant",
           title: `정원초과: ${dorm.buildingName} ${dorm.dong}-${dorm.roomHo}`,
-          detail: `정원 ${dorm.capacity || 6}명 > 현재 ${occupantCount}명`,
+          detail: `정원 ${getDormCapacity(dorm)}명 > 현재 ${occupantCount}명`,
           when: "주의",
         });
       }
@@ -5804,8 +5820,8 @@ export default function App() {
     dorms.forEach((dorm) => {
       if (dorm.isDeleted) return;
       const count = occupants.filter((o) => o.dormId === dorm.id && !o.isDeleted && !["퇴실", "천안이동"].includes(o.status)).length;
-      if (count > (dorm.capacity || 6)) {
-        items.push({ id: `overcrowded-${dorm.id}`, category: "정원초과", level: "중요", title: `정원 초과: ${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}`, detail: `정원 ${dorm.capacity || 6}명 < 현재 ${count}명`, date: notifTodayStr });
+      if (count > getDormCapacity(dorm)) {
+        items.push({ id: `overcrowded-${dorm.id}`, category: "정원초과", level: "중요", title: `정원 초과: ${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}`, detail: `정원 ${getDormCapacity(dorm)}명 < 현재 ${count}명`, date: notifTodayStr });
       }
     });
     return items;
@@ -6785,7 +6801,7 @@ export default function App() {
     const cKey = makeDormMatchKey(c.site || "", c.buildingName || "", c.dong || "", c.roomHo || "");
     const count = currentResidentCountByDormKey.get(cKey) || 0;
     const dorm = operationalDorms.find((d) => makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo) === cKey);
-    const capacity = dorm?.capacity && dorm.capacity > 0 ? dorm.capacity : 6;
+    const capacity = getDormCapacity(dorm, c as { capacity?: number });
     return getDormUsageStatus(count, capacity);
   };
 
@@ -7270,10 +7286,10 @@ export default function App() {
   const dormCapacityInfo = useMemo(() => {
     return operationalDorms.map(dorm => ({
       dormId: dorm.id,
-      capacity: dorm.capacity || 6,
+      capacity: getDormCapacity(dorm),
       currentResidents: getCurrentResidentCount(dorm.id),
-      vacancy: Math.max((dorm.capacity || 6) - getCurrentResidentCount(dorm.id), 0),
-      available: (dorm.capacity || 6) - getCurrentResidentCount(dorm.id) > 0,
+      vacancy: Math.max(getDormCapacity(dorm) - getCurrentResidentCount(dorm.id), 0),
+      available: getDormCapacity(dorm) - getCurrentResidentCount(dorm.id) > 0,
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operationalDorms, occupants, newHires]);
@@ -8058,7 +8074,7 @@ export default function App() {
   // 0명=공실, 정원 미만=사용중, 정원 이상=만실.
   const getOccupancyStatus = (dormId: string, capacity?: number): "공실" | "사용중" | "만실" => {
     const count = occupancyCountByDorm.get(dormId) || 0;
-    const cap = capacity && capacity > 0 ? capacity : 6;
+    const cap = getDormCapacity({ capacity });
     if (count <= 0) return "공실";
     if (count >= cap) return "만실";
     return "사용중";
@@ -8111,7 +8127,7 @@ export default function App() {
         dong: c.dong,
         roomHo: c.roomHo,
         pyeong: c.pyeong || "",
-        capacity: md?.capacity ?? 6,
+        capacity: getDormCapacity(c, md),
         managerUserId: md?.managerUserId || "",
         contractStart: c.contractStart || "",
         contractEnd: c.contractEnd || "",
@@ -8201,7 +8217,8 @@ export default function App() {
       // 2. 거주자 TO: 각 기숙사의 저장된 정원 합계(계약 정원 우선 → 연결 기숙사 → 기본 6).
       const residentTo = activeDorms.reduce((sum, d) => {
         const dorm = dorms.find((dm) => getUniqueDormKey(dm.site, dm.buildingName, dm.dong, dm.roomHo) === getUniqueDormKey(d.site, d.buildingName, d.dong, d.roomHo));
-        return sum + (Number(d.capacity) > 0 ? Number(d.capacity) : (dorm?.capacity || 6));
+        // 계약(선택 월에 유효)에 저장된 정원 우선 → 연결 기숙사 → 6. (공통 getDormCapacity 재사용)
+        return sum + getDormCapacity(d, dorm);
       }, 0);
 
       // 입주자 데이터: occupants + newHires(occupants에 아직 반영되지 않은 배정된 신입사원)
@@ -9510,8 +9527,10 @@ export default function App() {
     const editingCurrent = editingOccupantId ? occupants.find((o) => o.id === editingOccupantId) : null;
     const adjust = editingCurrent && editingCurrent.dormId === occupantForm.dormId && ["거주중", "만료예정"].includes(editingCurrent.status) ? -1 : 0;
     const willCount = ["거주중", "만료예정"].includes(occupantForm.status);
-    if (dorm && willCount && count + adjust >= 6) {
-      alert("이 기숙사는 최대 6명까지만 배정할 수 있습니다.");
+    // 정원은 계약(operationalDorm) 저장값 우선 → 연결 기숙사 → 6. 정원 초과 시 신규 배정만 차단(기존 거주자 유지).
+    const dormCap = getDormCapacity(operationalDorms.find((d) => d.id === occupantForm.dormId) || dorm);
+    if (dorm && willCount && count + adjust >= dormCap) {
+      alert(`이 기숙사는 정원(${dormCap}명)이 가득 차 추가 배정할 수 없습니다. (현재 ${count}명)`);
       return;
     }
     const payload: Occupant = {
@@ -13209,7 +13228,8 @@ const exportExcel = () => {
 const exportDormSummaryExcel = () => {
   const rows = operationalDorms.map((dorm) => {
     const currentResidents = occupancyCountByDorm.get(dorm.id) || 0;
-    const vacancy = Math.max(dorm.capacity - currentResidents, 0);
+    const capacityVal = getDormCapacity(dorm);
+    const vacancy = Math.max(capacityVal - currentResidents, 0);
     const incompleteDefectCount = defects.filter((defect) => {
       const defectDorm = findOperationalDormForDefect(defect);
       return defectDorm?.id === dorm.id && defect.defectStatus !== "완료";
@@ -13231,8 +13251,10 @@ const exportDormSummaryExcel = () => {
       주소: dorm.address,
       동: formatDong(dorm.dong),
       호수: formatRoomHo(dorm.roomHo),
-      정원: dorm.capacity,
+      정원: capacityVal,
       현재인원: currentResidents,
+      "잔여 정원": vacancy,
+      정원상태: currentResidents > capacityVal ? "정원초과" : currentResidents >= capacityVal ? "만실" : currentResidents > 0 ? "사용중" : "공실",
       공실: vacancy,
       계약상태: dorm.leaseStatus,
       계약시작일: dorm.contractStart,
@@ -17758,7 +17780,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold">기숙사별 정보</h2>
-                <p className="text-sm text-slate-500">기숙사별 관리자 1명 지정, 최대 인원 6명 관리</p>
+                <p className="text-sm text-slate-500">기숙사별 정원과 현재 거주 인원을 관리합니다.</p>
               </div>
             </div>
 
@@ -17894,7 +17916,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         valueClassName="text-[0.68rem]"
                       />
                       <CompactField label="관리자" value={getDormManagerNameWithScore(d.id, "paren")} />
-                      <CompactField label="현재 인원" value={`${residentCount}/6`} />
+                      <CompactField label="현재 인원" value={`${residentCount}/${getDormCapacity(d)}명${residentCount > getDormCapacity(d) ? " ⚠정원초과" : ""}`} />
                       <CompactField label="부동산명" value={d.realEstateName || "-"} />
                     </div>
                     <div className="mt-2 flex flex-wrap justify-center gap-1">
@@ -18502,7 +18524,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   dorms.find((d) => d.id === selectedDormForAssignment) ||
                   null;
                 const count = selectedNewHiresForAssignment.length;
-                const capacity = selectedDorm?.capacity || 6;
+                const capacity = getDormCapacity(selectedDorm);
                 const currentOccupants = selectedDorm
                   ? normalizedOccupants.filter((o) => o.dormId === selectedDorm.id && isCurrentResidentOccupant(o)).length
                   : 0;
@@ -21006,7 +21028,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <div key={`${stat.site}-${stat.gender}`} className={`rounded-2xl p-3 shadow-sm ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
                         <div className={`font-medium ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{stat.site} ({stat.gender})</div>
                         <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>기숙사 {stat.dormCount}개 · 재원 {stat.currentResidents}명</div>
-                        <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>잔여 {stat.vacancy}명 · 사용률 {((stat.currentResidents / (stat.dormCount * 6)) * 100).toFixed(1)}%</div>
+                        <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>잔여 {stat.vacancy}명 · 사용률 {stat.totalCapacity > 0 ? ((stat.currentResidents / stat.totalCapacity) * 100).toFixed(1) : "0.0"}%</div>
                       </div>
                     ))}
                 </div>
