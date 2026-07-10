@@ -144,6 +144,7 @@ const toDbDormContract = (contract: DormContract, tenantId: string, userId: stri
   dong: contract.dong,
   room_ho: contract.roomHo,
   pyeong: safeNumberOrNull(contract.pyeong),
+  capacity: safeNumberOrNull(contract.capacity) ?? 6, // 정원(기존 dorms.capacity 와 동일 의미)
   landlord_name: contract.landlordName,
   landlord_phone: contract.landlordPhone,
   real_estate_name: contract.realEstateName,
@@ -183,6 +184,7 @@ const toDomainDormContract = (row: any): DormContract => ({
   dong: row.dong || "",
   roomHo: row.room_ho || "",
   pyeong: row.pyeong || "",
+  capacity: row.capacity ?? 6, // 기존 데이터(컬럼 없음/NULL)면 fallback 6
   landlordName: row.landlord_name || "",
   landlordPhone: row.landlord_phone || "",
   realEstateName: row.real_estate_name || "",

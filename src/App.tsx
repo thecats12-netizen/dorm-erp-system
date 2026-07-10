@@ -1080,6 +1080,7 @@ function dormContractTemplate(): DormContractFormState {
     dong: "",
     roomHo: "",
     pyeong: "",
+    capacity: 6,
     landlordName: "",
     landlordPhone: "",
     realEstateName: "",
@@ -2241,6 +2242,7 @@ export default function App() {
     dong: row.dong || "",
     roomHo: row.room_ho || "",
     pyeong: row.pyeong || "",
+    capacity: row.capacity ?? 6,
     landlordName: row.landlord_name || "",
     landlordPhone: row.landlord_phone || "",
     realEstateName: row.real_estate_name || "",
@@ -6549,7 +6551,8 @@ export default function App() {
           dong: contract.dong,
           roomHo: contract.roomHo,
           pyeong: contract.pyeong,
-          capacity: matchedDorm?.capacity ?? 6,
+          // 정원: 계약에 설정된 값 우선 → 연결 기숙사 → 기본 6.
+          capacity: (Number(contract.capacity) > 0 ? Number(contract.capacity) : (matchedDorm?.capacity ?? 6)),
           managerUserId: matchedDorm?.managerUserId || "",
           contractStart: contract.contractStart,
           contractEnd: contract.contractEnd,
@@ -8195,10 +8198,10 @@ export default function App() {
       // 1. 기숙사수: 선택 월(year/month)에 실제 운영 중이던 기숙사만(문자열 날짜 기준, 공통 함수 isDormActiveInMonth).
       const activeDorms = uniqueDorms.filter((d) => d.site === site && d.gender === gender && isDormActiveInMonth(d, year, month));
 
-      // 2. 거주자 TO: 기숙사수 × 6, capacity 우선
+      // 2. 거주자 TO: 각 기숙사의 저장된 정원 합계(계약 정원 우선 → 연결 기숙사 → 기본 6).
       const residentTo = activeDorms.reduce((sum, d) => {
         const dorm = dorms.find((dm) => getUniqueDormKey(dm.site, dm.buildingName, dm.dong, dm.roomHo) === getUniqueDormKey(d.site, d.buildingName, d.dong, d.roomHo));
-        return sum + (dorm?.capacity || 6);
+        return sum + (Number(d.capacity) > 0 ? Number(d.capacity) : (dorm?.capacity || 6));
       }, 0);
 
       // 입주자 데이터: occupants + newHires(occupants에 아직 반영되지 않은 배정된 신입사원)
@@ -9633,16 +9636,36 @@ export default function App() {
       alert("계약 종료일은 시작일과 같거나 이후여야 합니다.");
       return;
     }
+    // [1] 기숙사 정원 검증: 필수 · 정수 · 1~99.
+    const capacityNum = Number(dormContractForm.capacity);
+    if (!Number.isInteger(capacityNum) || capacityNum < 1 || capacityNum > 99) {
+      alert("기숙사 정원은 1~99 사이의 숫자로 입력하세요. (기본 6명)");
+      return;
+    }
 
     const existing = editingDormContractId
       ? dormContracts.find((c) => c.id === editingDormContractId)
       : null;
+
+    // [5] 기존 거주자 보호: 현재 거주 인원이 변경 정원보다 많으면 경고(저장은 진행, 거주자 유지).
+    const roomKey = getDormKey(dormContractForm.site, dormContractForm.buildingName, dormContractForm.dong, dormContractForm.roomHo);
+    const matchedDormForRoom = dorms.find((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo) === roomKey && !d.isDeleted);
+    const currentResidentCountForRoom = getCurrentResidentCount(matchedDormForRoom?.id || editingDormContractId || "");
+    if (currentResidentCountForRoom > capacityNum) {
+      alert(
+        "현재 거주 인원이 변경하려는 정원보다 많습니다.\n" +
+        "정원은 변경되지만 기존 거주자는 유지됩니다.\n" +
+        "추가 입주는 정원 이하가 될 때까지 제한됩니다.\n\n" +
+        `(현재 거주 ${currentResidentCountForRoom}명 / 변경 정원 ${capacityNum}명)`
+      );
+    }
 
     // [요청2] DB 저장값을 계산값으로 덮어쓰지 않는다 — 폼 값(기본 "자동선택" 또는 수동값)을 그대로 저장.
     //   자동선택이면 표시(getContractDisplayStatus/getContractTypeDisplay)에서만 계산하고, 수동 선택 시 그 값이 우선.
     const finalPayload: DormContract = {
       id: editingDormContractId || crypto.randomUUID(),
       ...dormContractForm,
+      capacity: capacityNum,
       contractStatus: dormContractForm.contractStatus as DormContractStatus,
       contractType: dormContractForm.contractType as ContractType,
       registeredBy: dormContractForm.registeredBy || currentUser?.displayName || "",
@@ -9706,7 +9729,9 @@ export default function App() {
           newStatus = "해지";
         }
 
-        return { ...dorm, leaseStatus: newStatus, updatedAt: new Date().toISOString() };
+        // [4] 이 계약(호실)과 연결된 기숙사 1건만 정원 동기화(다른 기숙사는 변경하지 않음).
+        const isSameRoom = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo) === roomKey;
+        return { ...dorm, leaseStatus: newStatus, ...(isSameRoom ? { capacity: capacityNum } : {}), updatedAt: new Date().toISOString() };
       })
     );
 
@@ -12308,7 +12333,17 @@ export default function App() {
     const workbook = XLSX.read(buffer, { type: "array" });
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "" }).map((r) => normalizeExcelRow(r, "dormContract"));
-    const mapped = rows.map((r) => ({
+    // [9] 기숙사 정원 컬럼 검증: 빈 값 → 기본 6, 그 외 1~99 정수만 허용. 잘못된 값이 있으면 업로드 중단 후 오류 표시.
+    const capacityErrors: string[] = [];
+    const parseCapacity = (raw: unknown, rowIdx: number): number => {
+      const s = String(raw ?? "").trim();
+      if (s === "") return 6;
+      if (!/^\d+$/.test(s)) { capacityErrors.push(`${rowIdx + 2}행: 정원 "${s}" (숫자만 입력)`); return 6; }
+      const n = Number(s);
+      if (n < 1 || n > 99) { capacityErrors.push(`${rowIdx + 2}행: 정원 ${n} (1~99 범위 초과)`); return 6; }
+      return n;
+    };
+    const mapped = rows.map((r, idx) => ({
       id: crypto.randomUUID(),
       site: (normSite(r["지역"] || "평택") || "평택") as Site,
       address: normText(r["도로명주소"] || r["지번주소"] || r["주소"] || r["소재지"] || ""),
@@ -12316,6 +12351,7 @@ export default function App() {
       dong: normDong(r["동"] || ""),
       roomHo: normRoomHo(r["호수"] || r["호"] || ""),
       pyeong: String(r["평수"] || ""),
+      capacity: parseCapacity(r["기숙사 정원"] ?? r["정원"] ?? r["수용인원"] ?? r["capacity"], idx),
       landlordName: String(r["임대인명"] || ""),
       landlordPhone: String(r["임대인연락처"] || ""),
       realEstateName: String(r["부동산명"] || ""),
@@ -12339,6 +12375,10 @@ export default function App() {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }));
+    if (capacityErrors.length > 0) {
+      alert("기숙사 정원 값에 오류가 있어 업로드를 중단했습니다.\n\n" + capacityErrors.slice(0, 15).join("\n") + (capacityErrors.length > 15 ? `\n… 외 ${capacityErrors.length - 15}건` : ""));
+      return;
+    }
     setDormContracts((prev) => [...mapped, ...prev]);
   };
 
@@ -12868,6 +12908,7 @@ const exportExcel = () => {
       동: c.dong,
       호수: c.roomHo,
       평수: c.pyeong,
+      "기숙사 정원": Number(c.capacity) > 0 ? Number(c.capacity) : 6,
       임대인명: c.landlordName,
       임대인연락처: c.landlordPhone,
       부동산명: c.realEstateName,
@@ -13834,7 +13875,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     const { id: _id, ...rest } = c;
     // 저장된 계약상태/유형을 그대로 로드(자동선택으로 강제 초기화하지 않음) → 폼 값이 테이블/Excel 표시값과 일치.
     // 자동 재계산이 필요하면 사용자가 직접 "자동선택"으로 변경. 자동계산값은 안내문에 참고로 항상 표시.
-    setDormContractForm({ ...rest });
+    // 기존(정원 미저장) 계약은 6명으로 표시.
+    setDormContractForm({ ...rest, capacity: Number(rest.capacity) > 0 ? Number(rest.capacity) : 6 });
     setEditingDormContractId(c.id);
     setShowDormContractForm(true);
   };
@@ -17252,6 +17294,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         dong: selected.dong,
                         roomHo: selected.roomHo,
                         pyeong: selected.pyeong,
+                        capacity: Number(selected.capacity) > 0 ? Number(selected.capacity) : 6,
                         landlordName: selected.landlordName,
                         landlordPhone: selected.landlordPhone,
                         realEstateName: selected.realEstateName,
@@ -17956,7 +17999,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <div className="mb-2 text-[0.7rem] text-slate-500">{dorm.site} / {dorm.gender} · {formatDong(dorm.dong)} {formatRoomHo(dorm.roomHo)}</div>
                     <div className="mb-2 truncate text-[0.7rem] text-slate-500">담당자 {getDormManagerNameWithScore(dorm.id, "paren")}</div>
                     <div className="flex flex-wrap gap-1">
-                      <span className={`${theme.darkMode ? "inline-flex items-center gap-0.5 rounded bg-slate-900 px-1.5 py-0.5 text-[0.65rem] font-medium" : "inline-flex items-center gap-0.5 rounded bg-slate-100 px-1.5 py-0.5 text-[0.65rem] font-medium"}`}>👥 {currentCount}/{dorm.capacity}</span>
+                      <span className={`${theme.darkMode ? "inline-flex items-center gap-0.5 rounded bg-slate-900 px-1.5 py-0.5 text-[0.65rem] font-medium" : "inline-flex items-center gap-0.5 rounded bg-slate-100 px-1.5 py-0.5 text-[0.65rem] font-medium"}`}>👥 {currentCount}/{dorm.capacity}명</span>
+                      {currentCount > dorm.capacity && (
+                        <span className="inline-flex items-center gap-0.5 rounded bg-rose-100 px-1.5 py-0.5 text-[0.65rem] font-medium text-rose-700">정원초과</span>
+                      )}
                       <span className={`${theme.darkMode ? "inline-flex items-center gap-0.5 rounded bg-slate-900 px-1.5 py-0.5 text-[0.65rem] font-medium" : "inline-flex items-center gap-0.5 rounded bg-slate-100 px-1.5 py-0.5 text-[0.65rem] font-medium"}`}>{isCleaningMissing(dorm) ? "🔴 미보" : "✓ 정상"}</span>
                       {getOpenDefectCount(dorm.id) > 0 && (
                         <span className="inline-flex items-center gap-0.5 rounded bg-rose-100 px-1.5 py-0.5 text-[0.65rem] font-medium text-rose-700">⚠️ {getOpenDefectCount(dorm.id)}</span>
@@ -18227,7 +18273,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <h4 className="mb-3 text-base font-semibold">운영정보</h4>
                       <dl className={`${theme.darkMode ? "grid gap-2 text-sm text-slate-300 sm:grid-cols-2" : "grid gap-2 text-sm text-slate-700 sm:grid-cols-2"}`}>
                         <div><dt className="font-medium">담당 관리자</dt><dd>{getDormManagerNameWithScore(selectedDetailDorm.id, "paren")}</dd></div>
-                        <div><dt className="font-medium">현재인원</dt><dd>{occupancyCountByDorm.get(selectedDetailDorm.id) || 0} / {selectedDetailDorm.capacity}</dd></div>
+                        <div><dt className="font-medium">현재인원</dt><dd>{occupancyCountByDorm.get(selectedDetailDorm.id) || 0} / {selectedDetailDorm.capacity}명{(occupancyCountByDorm.get(selectedDetailDorm.id) || 0) > selectedDetailDorm.capacity && <span className="ml-1 rounded bg-rose-100 px-1.5 py-0.5 text-xs font-medium text-rose-700">정원초과</span>}</dd></div>
                         <div><dt className="font-medium">공실수</dt><dd>{Math.max(selectedDetailDorm.capacity - (occupancyCountByDorm.get(selectedDetailDorm.id) || 0), 0)}</dd></div>
                         <div><dt className="font-medium">청소상태</dt><dd>{isCleaningMissing(selectedDetailDorm) ? "미보고" : "정상"}</dd></div>
                         <div><dt className="font-medium">미처리 하자</dt><dd>{getOpenDefectCount(selectedDetailDorm.id)}</dd></div>
@@ -24159,6 +24205,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <Input label="동" value={dormContractForm.dong} onChange={(v) => setDormContractForm((f) => ({ ...f, dong: stripDongHoSuffix(v) }))} />
                 <Input label="호수" value={dormContractForm.roomHo} onChange={(v) => setDormContractForm((f) => ({ ...f, roomHo: stripDongHoSuffix(v) }))} />
                 <Input label="평수" value={dormContractForm.pyeong} onChange={(v) => setDormContractForm((f) => ({ ...f, pyeong: v }))} />
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">기숙사 정원 <span className="text-rose-500">*</span></label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={dormContractForm.capacity ? String(dormContractForm.capacity) : ""}
+                    onChange={(e) => {
+                      const digits = e.target.value.replace(/[^0-9]/g, "").slice(0, 2); // 숫자만, 소수점 금지, 최대 2자리(≤99)
+                      setDormContractForm((f) => ({ ...f, capacity: digits === "" ? 0 : Number(digits) }));
+                    }}
+                    placeholder="6"
+                    className={`${theme.darkMode ? "w-full rounded-2xl border border-slate-600 bg-slate-950 px-3 py-3 outline-none focus:border-slate-400" : "w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400"}`}
+                  />
+                  <p className="mt-1 text-xs text-slate-500">해당 기숙사에서 동시에 거주할 수 있는 최대 인원입니다. (1~99명, 기본 6명)</p>
+                </div>
               </div>
             </div>
 

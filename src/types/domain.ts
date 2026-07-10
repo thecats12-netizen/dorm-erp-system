@@ -167,6 +167,7 @@ export type DormContract = {
   dong: string;
   roomHo: string;
   pyeong: string;
+  capacity: number; // 기숙사 정원(동시 최대 거주 인원). 기본 6, 허용 1~99.
   landlordName: string;
   landlordPhone: string;
   realEstateName: string;

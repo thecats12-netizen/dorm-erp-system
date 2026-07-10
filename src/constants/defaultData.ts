@@ -185,6 +185,7 @@ export const demoDormContracts: DormContract[] = [
     dong: "109동",
     roomHo: "2002호",
     pyeong: "24",
+    capacity: 6,
     landlordName: "김철수",
     landlordPhone: "010-1234-5678",
     realEstateName: "평택부동산",
