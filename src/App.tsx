@@ -2659,6 +2659,10 @@ export default function App() {
   const [selectedDormDetailId, setSelectedDormDetailId] = useState<string>("");
   const clickTimerRef = useRef<number | null>(null);
   const [selectedDormIds, setSelectedDormIds] = useState<string[]>([]);
+  // 기숙사 메뉴: 선택 기숙사 일괄 정원 설정 모달 상태.
+  const [bulkCapacityOpen, setBulkCapacityOpen] = useState(false);
+  const [bulkCapacityValue, setBulkCapacityValue] = useState("");
+  const [bulkCapacitySaving, setBulkCapacitySaving] = useState(false);
   const [selectedOccupantIds, setSelectedOccupantIds] = useState<string[]>([]);
   const [selectedDormContractIds, setSelectedDormContractIds] = useState<string[]>([]);
   const [selectedNewHireIds, setSelectedNewHireIds] = useState<string[]>([]);
@@ -9015,6 +9019,7 @@ export default function App() {
     if (imageLightbox) { setImageLightbox(null); return true; }
     if (excelPreview) { setExcelPreview(null); return true; }
     // 상세보기(팝업) 모달 — 폼보다 위(또는 단독)로 열리므로 우선 닫는다.
+    if (bulkCapacityOpen) { if (!bulkCapacitySaving) setBulkCapacityOpen(false); return true; }
     if (simDetailModal) { setSimDetailModal(null); return true; }
     if (settlementDetailDorm) { setSettlementDetailDorm(null); return true; }
     if (selectedDormDetailId) { setSelectedDormDetailId(""); return true; }
@@ -9042,7 +9047,7 @@ export default function App() {
     return false;
   };
   const hasOpenOverlay = !!(
-    imageLightbox || excelPreview || simDetailModal || settlementDetailDorm || selectedDormDetailId || preInspectionDetailId ||
+    imageLightbox || excelPreview || bulkCapacityOpen || simDetailModal || settlementDetailDorm || selectedDormDetailId || preInspectionDetailId ||
     showDefectForm || showCleaningReportForm || showNewHireForm ||
     showOccupantForm || showDormForm || showDormContractForm || showInventoryForm || showLeaseForm ||
     showSaleForm || showUserForm || showMilitaryPersonnelForm || showMilitaryTrainingForm ||
@@ -13903,6 +13908,75 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     setShowDormContractForm(true);
   };
 
+  // 기숙사 카드 본문 클릭 → 계약 등록/수정 열기. 체크박스/버튼/링크 등 인터랙티브 요소 클릭은 무시.
+  const openDormCardEdit = (event: React.MouseEvent, d: OperationalDorm) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('button, input, label, select, textarea, a, [data-stop-card-click="true"]')) return;
+    const matchingContract = dormContracts.find(
+      (c) => makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo)
+    );
+    if (matchingContract) {
+      openDormContractEdit(matchingContract);
+    } else {
+      setEditingDormId(d.id);
+      setShowDormForm(true);
+    }
+  };
+
+  const toggleDormSelection = (dormId: string) => {
+    setSelectedDormIds((prev) => (prev.includes(dormId) ? prev.filter((id) => id !== dormId) : [...prev, dormId]));
+  };
+
+  // [5]~[9] 선택 기숙사 일괄 정원 설정: 선택한 기숙사(및 연결 유효 계약)만 정원 갱신 → 기존 자동저장/Realtime 로 반영.
+  const applyBulkCapacity = () => {
+    if (!canEditData(currentUser) || bulkCapacitySaving) return;
+    const cap = Number(bulkCapacityValue);
+    if (!Number.isInteger(cap) || cap < 1 || cap > 99) {
+      alert("새 정원은 1~99 사이의 숫자로 입력하세요.");
+      return;
+    }
+    const selectedDorms = visibleDorms.filter((d) => selectedDormIds.includes(d.id));
+    if (selectedDorms.length === 0) return;
+
+    // [7] 현재 거주 인원이 새 정원을 초과하는 기숙사 경고(기존 거주자 유지, 신규 입주만 제한).
+    const overs = selectedDorms
+      .map((d) => ({ d, count: occupancyCountByDorm.get(d.id) || 0 }))
+      .filter((x) => x.count > cap);
+    if (overs.length > 0) {
+      const detail = overs
+        .map((x) => `- ${x.d.buildingName} ${formatDong(x.d.dong)}-${formatRoomHo(x.d.roomHo)}: 현재 ${x.count}명 / 새 정원 ${cap}명`)
+        .join("\n");
+      const ok = window.confirm(
+        `선택한 기숙사 중 ${overs.length}곳은 현재 거주 인원이 새 정원을 초과합니다.\n\n${detail}\n\n` +
+        "현재 거주자는 유지되며, 정원 이하가 될 때까지 신규 입주가 제한됩니다.\n적용하시겠습니까?"
+      );
+      if (!ok) return;
+    }
+
+    setBulkCapacitySaving(true);
+    const selDormIdSet = new Set(selectedDorms.map((d) => d.id));
+    const roomKeys = new Set(selectedDorms.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo)));
+    const nowIso = new Date().toISOString();
+    const todayStr = nowIso.slice(0, 10);
+    // dorms: 선택 기숙사 id 또는 동일 호실(건물+동+호)만 갱신(다른 기숙사 불변).
+    setDorms((prev) => prev.map((dm) =>
+      (selDormIdSet.has(dm.id) || roomKeys.has(getDormKey(dm.site, dm.buildingName, dm.dong, dm.roomHo)))
+        ? { ...dm, capacity: cap, updatedAt: nowIso }
+        : dm
+    ));
+    // 연결된 유효(미삭제) 계약만 동일 정원으로 동기화(다른 계약 불변).
+    setDormContracts((prev) => prev.map((c) =>
+      (!c.isDeleted && roomKeys.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo)))
+        ? { ...c, capacity: cap, updatedAt: todayStr }
+        : c
+    ));
+    showNetworkToast(`선택한 기숙사 ${selectedDorms.length}곳의 정원을 ${cap}명으로 변경했습니다.`);
+    setBulkCapacitySaving(false);
+    setBulkCapacityOpen(false);
+    setBulkCapacityValue("");
+    setSelectedDormIds([]);
+  };
+
   const openNewHireEdit = (h: NewHireEmployee) => {
     const { id: _id, ...rest } = h;
     setNewHireForm({
@@ -17833,7 +17907,33 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"}`}
                 />
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                {canEditData(currentUser) && (
+                  <>
+                    <label className="inline-flex items-center gap-2 text-sm font-medium">
+                      <input
+                        type="checkbox"
+                        ref={(el) => { if (el) el.indeterminate = visibleDorms.some((d) => selectedDormIds.includes(d.id)) && !visibleDorms.every((d) => selectedDormIds.includes(d.id)); }}
+                        checked={visibleDorms.length > 0 && visibleDorms.every((d) => selectedDormIds.includes(d.id))}
+                        onChange={() => {
+                          const visibleIds = visibleDorms.map((d) => d.id);
+                          const allSel = visibleIds.length > 0 && visibleIds.every((id) => selectedDormIds.includes(id));
+                          setSelectedDormIds((prev) => allSel ? prev.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...prev, ...visibleIds])));
+                        }}
+                        className={`h-5 w-5 rounded ${theme.darkMode ? "border-slate-600" : "border-slate-300"}`}
+                      />
+                      현재 목록 전체 선택
+                    </label>
+                    {selectedDormIds.length > 0 && <span className="text-sm text-slate-500">선택 {selectedDormIds.length}건</span>}
+                    <button
+                      onClick={() => { setBulkCapacityValue(""); setBulkCapacityOpen(true); }}
+                      disabled={selectedDormIds.length === 0}
+                      className={`rounded-2xl px-4 py-2 text-sm font-semibold ${selectedDormIds.length === 0 ? "cursor-not-allowed bg-slate-200 text-slate-400" : "bg-blue-600 text-white hover:bg-blue-500"}`}
+                    >
+                      일괄 정원 설정
+                    </button>
+                  </>
+                )}
                 {canEditData(currentUser) && selectedDormIds.length > 0 && (
                   <button
                     onClick={() => {
@@ -17856,30 +17956,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 return (
                   <div
                     key={d.id}
-                    className={`cursor-pointer rounded-2xl border p-3 ${theme.darkMode ? "border-slate-700 bg-slate-900 hover:shadow-md" : "border-slate-200 bg-white hover:shadow-md transition-shadow"}`}
-                    onClick={() => {
-                      const matchingContract = dormContracts.find(
-                        (c) => makeDormMatchKey(c.site, c.buildingName, c.dong, c.roomHo) === makeDormMatchKey(d.site, d.buildingName, d.dong, d.roomHo)
-                      );
-                      if (matchingContract) {
-                        openDormContractEdit(matchingContract);
-                      } else {
-                        setEditingDormId(d.id);
-                        setShowDormForm(true);
-                      }
-                    }}
+                    className={`cursor-pointer rounded-2xl border p-3 ${selectedDormIds.includes(d.id) ? "border-blue-500 ring-2 ring-blue-500" : (theme.darkMode ? "border-slate-700" : "border-slate-200")} ${theme.darkMode ? "bg-slate-900 hover:shadow-md" : "bg-white hover:shadow-md transition-shadow"}`}
+                    onClick={(e) => openDormCardEdit(e, d)}
                   >
                     <div className="mb-2 flex items-center justify-between gap-2">
                       <span className="font-medium text-xs">#{index + 1}</span>
-                      <label className="inline-flex items-center gap-2 text-xs font-medium">
+                      <label className="inline-flex items-center gap-2 text-xs font-medium" onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={selectedDormIds.includes(d.id)}
-                          onChange={(e) =>
-                            e.target.checked
-                              ? setSelectedDormIds((prev) => [...prev, d.id])
-                              : setSelectedDormIds((prev) => prev.filter((id) => id !== d.id))
-                          }
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => { e.stopPropagation(); toggleDormSelection(d.id); }}
                           className={`h-5 w-5 rounded ${theme.darkMode ? "border-slate-600 text-slate-100" : "border-slate-300 text-slate-900"}`}
                         />
                       </label>
@@ -25408,6 +25495,59 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <button type="button" onClick={() => applyZoom(lightboxZoom + 0.25)} className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-lg font-bold text-white hover:bg-white/20" title="확대">＋</button>
                 </div>
                 <div className="text-center text-xs text-white/50">휠/＋－=확대·축소 · 더블클릭=100%↔200% · 확대 후 드래그=이동 · ←/→·스와이프=이동 · ESC=닫기</div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* 선택 기숙사 일괄 정원 설정 모달 */}
+        {bulkCapacityOpen && (() => {
+          const selectedDorms = visibleDorms.filter((d) => selectedDormIds.includes(d.id));
+          const capNum = Number(bulkCapacityValue);
+          const capValid = Number.isInteger(capNum) && capNum >= 1 && capNum <= 99;
+          const overs = capValid
+            ? selectedDorms.map((d) => ({ d, count: occupancyCountByDorm.get(d.id) || 0 })).filter((x) => x.count > capNum)
+            : [];
+          return (
+            <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={() => !bulkCapacitySaving && setBulkCapacityOpen(false)}>
+              <div className={`my-8 w-full max-w-md rounded-3xl p-6 shadow-xl ${theme.darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+                <h3 className="text-lg font-semibold">선택 기숙사 정원 일괄 설정</h3>
+                <p className="mt-1 text-sm text-slate-500">선택된 기숙사 {selectedDorms.length}곳의 정원을 한 번에 변경합니다.</p>
+                <div className="mt-4">
+                  <label className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">새 정원 <span className="text-rose-500">*</span></label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoFocus
+                    value={bulkCapacityValue}
+                    onChange={(e) => setBulkCapacityValue(e.target.value.replace(/[^0-9]/g, "").slice(0, 2))}
+                    placeholder="예: 5"
+                    className={`${theme.darkMode ? "w-full rounded-2xl border border-slate-600 bg-slate-950 px-3 py-3 outline-none focus:border-slate-400" : "w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400"}`}
+                  />
+                  <p className="mt-1 text-xs text-slate-500">숫자만 · 1~99명 (필수)</p>
+                </div>
+                {overs.length > 0 && (
+                  <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                    <div className="font-semibold">선택한 기숙사 중 {overs.length}곳은 현재 거주 인원이 새 정원을 초과합니다.</div>
+                    <ul className="mt-1 space-y-0.5">
+                      {overs.slice(0, 6).map((x) => (
+                        <li key={x.d.id}>· {x.d.buildingName} {formatDong(x.d.dong)}-{formatRoomHo(x.d.roomHo)}: 현재 {x.count}명 / 새 정원 {capNum}명</li>
+                      ))}
+                      {overs.length > 6 && <li>· 외 {overs.length - 6}곳</li>}
+                    </ul>
+                    <div className="mt-1">기존 거주자는 유지되며, 정원 이하가 될 때까지 신규 입주가 제한됩니다.</div>
+                  </div>
+                )}
+                <div className="mt-6 flex justify-end gap-2">
+                  <button onClick={() => !bulkCapacitySaving && setBulkCapacityOpen(false)} className={`rounded-2xl px-4 py-2 text-sm font-medium ${theme.darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
+                  <button
+                    onClick={applyBulkCapacity}
+                    disabled={!capValid || bulkCapacitySaving}
+                    className={`rounded-2xl px-4 py-2 text-sm font-semibold ${(!capValid || bulkCapacitySaving) ? "cursor-not-allowed bg-slate-200 text-slate-400" : "bg-blue-600 text-white hover:bg-blue-500"}`}
+                  >
+                    {bulkCapacitySaving ? "적용 중…" : "적용"}
+                  </button>
+                </div>
               </div>
             </div>
           );
