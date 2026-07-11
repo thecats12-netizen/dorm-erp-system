@@ -1575,13 +1575,18 @@ function calculateNewHireResidenceStatus(employee: NewHireFormLike): NewHireResi
 
   const endDate = moveOutDate || expectedMoveOutDate;
 
-  // #3: 기숙사 미배정 → 대기중 / 실제 퇴실일 존재 → 퇴실 / 계약종료 임박 → 만료예정 / 배정+퇴실안함 → 거주중.
-  // (배정되면 moveInDate 가 없어도 거주중으로 인정 — 단일/일괄배정 직후 즉시 거주중 반영)
+  // 거주상태 자동계산 기준:
+  //  대기중 = 기숙사 미배정(dorm 없음) 또는 배정됐으나 입실일 없음(아직 미입주)
+  //  퇴실   = 실제퇴실일 존재
+  //  연장   = 계약종료일이 오늘보다 이전 + 실제퇴실 없음 + 배정 유지
+  //  만료예정 = 만료 30일 이내(기존 상태값 유지)
+  //  거주중 = 배정 + 입실일 + 미퇴실
   if (!hasAddressInfo) return "대기중"; // 미배정
   if (actualMoveOutDate) return "퇴실"; // 실제 퇴실일 최우선(예정/미래 여부와 무관하게 퇴실)
+  if (!moveInDate) return "대기중"; // 배정됐으나 입실일 없음 → 대기(미입주)
   if (endDate && endDate < today && !actualMoveOutDate) return "연장"; // 종료일 경과(미퇴실)
   if (endDate && daysDiff(endDate) >= 0 && daysDiff(endDate) <= 30) return "만료예정"; // 만료 30일 이내
-  return "거주중"; // 배정 + 퇴실 안함
+  return "거주중"; // 배정 + 입실일 + 퇴실 안함
 }
 
 function calculateMoveInType(
@@ -1589,37 +1594,40 @@ function calculateMoveInType(
   allEmployees: NewHireEmployee[]
 ): MoveInType {
   const hasAddressInfo = Boolean(employee.buildingName?.trim() && employee.dong?.trim() && employee.roomHo?.trim());
-  if (!hasAddressInfo) return "대기자"; // 기숙사 미배정
+  const moveInDate = (employee.moveInDate || "").slice(0, 10);
+  // 대기: 기숙사 미배정 또는 입실일 없음(아직 미입주)
+  if (!hasAddressInfo || !moveInDate) return "대기자";
 
   // 사용자가 명시적으로 '연장' 상태를 지정했으면 연장 유지(자동계산이 덮어쓰지 않도록).
   if ((employee.residenceStatus as string) === "연장") return "연장";
 
-  // 동일인(이름+연락처)의 과거 기록. 연락처가 비어 있으면 오매칭 방지를 위해 그룹핑에서 제외.
-  // createdAt 누락에도 안전하게 정렬(undefined.localeCompare 크래시 방지).
-  const previousRecords = allEmployees
-    .filter((e) => e.id !== employee.id && !!e.phone && e.name === employee.name && e.phone === employee.phone)
-    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  // [재입주 판정] 동일 인물의 "실제 과거 퇴실 이력"만 사용한다.
+  //  - 자기 자신/삭제 레코드 제외
+  //  - actualMoveOutDate(실제퇴실일)가 있는 과거 건만 이력으로 인정
+  //  → new_hires/occupants 에 동일 현재 입주 건이 중복 존재해도(실제퇴실 없음) 재입주로 잘못 판정하지 않음.
+  const digits = (s?: string) => String(s || "").replace(/\D/g, "");
+  const empPhone = digits(employee.phone);
+  const pastExitRecords = allEmployees.filter(
+    (e) =>
+      e.id !== employee.id &&
+      !e.isDeleted &&
+      !e.isPermanentDeleted &&
+      e.name === employee.name &&
+      (empPhone ? digits(e.phone) === empPhone : true) &&
+      !!(e.actualMoveOutDate && String(e.actualMoveOutDate).trim())
+  );
 
-  if (previousRecords.length === 0) return "신규"; // 첫 배정 = 신규입주
+  // 과거 실제퇴실 이력이 있으면 → 재입주(현재 새 배정 활성 상태). 동일/다른 기숙사 무관.
+  if (pastExitRecords.length > 0) return "재입주";
 
-  const last = previousRecords[previousRecords.length - 1];
-  const currentMoveInDate = employee.moveInDate || "";
-  const lastEndDate = last.moveOutDate || last.expectedMoveOutDate || "";
+  // 자동 연장: 계약/입주 종료일이 오늘 이전 + 본인 실제퇴실 없음 + 현재 배정 유지.
+  const today = new Date().toISOString().slice(0, 10);
+  const endDate = (employee.moveOutDate || employee.expectedMoveOutDate || "").slice(0, 10);
+  const selfActualOut = String(employee.actualMoveOutDate || "").trim();
+  if (endDate && endDate < today && !selfActualOut) return "연장";
 
-  // 같은 기숙사에서 계약/입주기간이 곧바로 이어지면 연장.
-  if (
-    lastEndDate &&
-    currentMoveInDate &&
-    currentMoveInDate === addDays(lastEndDate, 1) &&
-    employee.buildingName === last.buildingName &&
-    employee.dong === last.dong &&
-    employee.roomHo === last.roomHo
-  ) {
-    return "연장";
-  }
-
-  // 과거 거주 이력이 있고 연장이 아니면(퇴실 후 재입주 또는 다른 기숙사로 이동) 재입주.
-  return "재입주";
+  // 실제 과거 퇴실 이력이 없으면 → 신규(최초 입주). 중복 데이터만으로 재입주 판정하지 않음.
+  return "신규";
 }
 
 // 신입사원 상태/유형/미배정 단일 기준(대시보드·메뉴·필터·Excel 공통).
@@ -1633,7 +1641,12 @@ function getNewHireType(h: NewHireEmployee, allEmployees: NewHireEmployee[]): Mo
   // 저장값 우선. "자동선택"/빈값/자동일 때만 자동 계산(사용자 직접 선택값은 유지).
   const raw = String(h.moveInType ?? "").trim();
   const isAuto = !raw || raw === "자동선택" || raw === "자동" || raw === "-";
-  return isAuto ? calculateMoveInType(h, allEmployees) : h.moveInType;
+  const computed = calculateMoveInType(h, allEmployees);
+  if (isAuto) return computed;
+  // [기존 데이터 교정] 저장값이 "재입주"인데 실제 과거 퇴실 이력이 없어 자동계산이 재입주가 아니면
+  //   → 옛 자동계산 버그로 잘못 저장된 값으로 보고 재계산값을 표시(수동으로 지정한 다른 값은 그대로 유지).
+  if (h.moveInType === "재입주" && computed !== "재입주") return computed;
+  return h.moveInType;
 }
 function isUnassignedNewHire(h: NewHireEmployee): boolean {
   if (h.isDeleted) return false;
@@ -14020,15 +14033,34 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const openNewHireEdit = (h: NewHireEmployee) => {
     const { id: _id, ...rest } = h;
-    // 수정 화면: 거주상태/입주유형을 "자동선택"으로 열어 현재 DB 데이터(계약/배정/입실/퇴실/과거이력) 기준으로
-    // 자동 계산된 값을 표시한다. (DB 저장값을 강제 변경하지 않으며, 사용자가 직접 값을 고르면 수동 선택 유지)
+    // 수정 화면: 마지막 저장값을 우선 표시(수동값/자동선택 저장값 모두 그대로). 저장값이 없을 때만 "자동선택" 폴백.
+    //  열 때마다 자동선택으로 강제 초기화하지 않는다. (자동계산 결과는 폼 하단 "자동계산: …" 보조 문구로 참고 표시)
+    // 잘못 저장된 "재입주"(실제 과거 퇴실 이력 없음)는 자동선택으로 열어 재계산값을 표시(목록과 일치).
+    const typeFix = (rest.moveInType === "재입주" && calculateMoveInType(h, newHires) !== "재입주")
+      ? "자동선택"
+      : ((rest.moveInType as NewHireFormState["moveInType"]) || "자동선택");
     setNewHireForm({
       ...rest,
-      residenceStatus: "자동선택",
-      moveInType: "자동선택",
+      residenceStatus: (rest.residenceStatus as NewHireFormState["residenceStatus"]) || "자동선택",
+      moveInType: typeFix,
     });
     setEditingNewHireId(h.id);
     setShowNewHireForm(true);
+    // [개발용 로그] 개인정보 전체는 출력하지 않음(id/계산값/카운트만).
+    if (import.meta.env.DEV) {
+      const digits = (s?: string) => String(s || "").replace(/\D/g, "");
+      const ep = digits(h.phone);
+      const exits = newHires.filter((e) => e.id !== h.id && !e.isDeleted && e.name === h.name && (ep ? digits(e.phone) === ep : true) && !!(e.actualMoveOutDate && String(e.actualMoveOutDate).trim()));
+      console.debug("[거주상태/입주유형 계산]", {
+        personId: h.id,
+        savedResidence: h.residenceStatus,
+        savedType: h.moveInType,
+        computedResidence: calculateNewHireResidenceStatus(h),
+        computedType: calculateMoveInType(h, newHires),
+        currentAssignment: Boolean(h.buildingName && h.dong && h.roomHo),
+        actualMoveOutHistoryCount: exits.length,
+      });
+    }
   };
 
   // 대시보드 퇴실예정 클릭: 신입사원 데이터가 있으면 무조건 신입사원 등록/수정으로 연다.
@@ -14845,12 +14877,22 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     const findDorm = (id: string) => operationalDorms.find((d) => d.id === id) || dorms.find((d) => d.id === id);
 
     // ① 전체 운영 현황
+    // 임차만기: 선택 연/월에 계약종료일이 포함되는 기숙사(해지/종료·삭제 제외 = operationalDorms, 호실별 중복 제거됨).
+    const reportPeriodYM = `${reportYear}-${String(reportMonth).padStart(2, "0")}`;
+    const leaseExpiryCount = operationalDorms.filter((d) => (d.contractEnd || "").slice(0, 7) === reportPeriodYM).length;
+    const overallTotalCap = siteGenderStats.reduce((a, s) => a + s.totalCapacity, 0);
+    const overallResidents = siteGenderStats.reduce((a, s) => a + s.currentResidents, 0);
     const overall: ReportConfig = {
       title: "전체 운영 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: siteGenderStats.map((s) => ({ 지역: s.site, 성별: s.gender, 기숙사수: s.dormCount, 재원: s.currentResidents, 정원: s.totalCapacity, 공실: s.vacancy, "입주율(%)": s.totalCapacity ? Math.round((s.currentResidents / s.totalCapacity) * 100) : 0 })),
-      columns: [{ key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "기숙사수", label: "기숙사수" }, { key: "재원", label: "재원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "입주율(%)", label: "입주율(%)" }],
+      rows: siteGenderStats.map((s) => ({ 지역: s.site, 성별: s.gender, 기숙사수: s.dormCount, 재원: s.currentResidents, 정원: s.totalCapacity, 공실: s.vacancy, 입주율: `${s.totalCapacity ? Math.round((s.currentResidents / s.totalCapacity) * 100) : 0}%` })),
+      columns: [{ key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "기숙사수", label: "기숙사수" }, { key: "재원", label: "재원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "입주율", label: "입주율" }],
       filterKeys: ["지역", "성별"], chart: { type: "bar", groupKey: "지역", valueKey: "재원", label: "지역별 재원" },
-      extraKpis: [{ label: "전체 재원", value: String(siteGenderStats.reduce((a, s) => a + s.currentResidents, 0)) }, { label: "전체 정원", value: String(siteGenderStats.reduce((a, s) => a + s.totalCapacity, 0)) }],
+      extraKpis: [
+        { label: "전체 재원", value: String(overallResidents) },
+        { label: "전체 정원", value: String(overallTotalCap) },
+        { label: "입주율", value: `${overallTotalCap ? Math.round((overallResidents / overallTotalCap) * 100) : 0}%` },
+        { label: "임차만기", value: `${leaseExpiryCount}건` },
+      ],
     };
     // ② 기숙사별 입주 현황
     const dormOcc: ReportConfig = {
@@ -14869,8 +14911,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     // ④ 공실/입주율
     const vacancy: ReportConfig = {
       title: "공실/입주율 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: operationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 기숙사: dormLabel(d), 지역: d.site, 성별: d.gender, 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), "입주율(%)": k ? Math.round((c / k) * 100) : 0, 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
-      columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "현재인원", label: "현재인원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "입주율(%)", label: "입주율(%)" }, { key: "상태", label: "상태" }],
+      rows: operationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 기숙사: dormLabel(d), 지역: d.site, 성별: d.gender, 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), 입주율: `${k ? Math.round((c / k) * 100) : 0}%`, 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
+      columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "현재인원", label: "현재인원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "입주율", label: "입주율" }, { key: "상태", label: "상태" }],
       filterKeys: ["지역", "성별", "상태"], chart: { type: "pie", groupKey: "상태", label: "공실/사용 분포" },
       extraKpis: [{ label: "전체 입주율", value: `${(() => { const tot = operationalDorms.reduce((a, d) => a + getDormCapacity(d), 0); const occ = operationalDorms.reduce((a, d) => a + cur(d.id), 0); return tot ? Math.round((occ / tot) * 100) : 0; })()}%` }],
     };
@@ -14895,13 +14937,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "비품명", label: "비품명" }, { key: "수량", label: "수량" }, { key: "상태", label: "상태" }, { key: "구매일", label: "구매일" }, { key: "구매업체", label: "구매업체" }],
       filterKeys: ["지역", "상태"], dateField: "_date", chart: { type: "pie", groupKey: "상태", label: "비품 상태 분포" },
     };
-    // ⑧ 정산 요약
+    // ⑧ 정산 요약 — 기숙사 식별이 불가능한 행(dorm_id 없음/연결 실패/기숙사명 공백·"-")은 화면·통계·차트·내보내기에서 제외.
+    //   (원본 DB 데이터는 삭제하지 않음. 총 건수/합계도 유효 데이터만 기준으로 재계산.)
+    const validSettlement = settlementRecords.filter((r) => { const d = findDorm(r.dormId); const nm = d ? dormLabel(d).trim() : ""; return Boolean(r.dormId && d && nm && nm !== "-"); });
     const settlement: ReportConfig = {
       title: "정산 요약 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: settlementRecords.map((r) => { const d = findDorm(r.dormId); return { 연월: `${r.settlementYear}-${r.settlementMonth}`, 기숙사: d ? dormLabel(d) : "-", 기타비용: r.miscCost ?? 0, 비고: r.notes || "", _date: `${r.settlementYear}-${String(r.settlementMonth).padStart(2, "0")}-01` }; }),
+      rows: validSettlement.map((r) => { const d = findDorm(r.dormId); return { 연월: `${r.settlementYear}-${r.settlementMonth}`, 기숙사: d ? dormLabel(d) : "-", 기타비용: r.miscCost ?? 0, 비고: r.notes || "", _date: `${r.settlementYear}-${String(r.settlementMonth).padStart(2, "0")}-01` }; }),
       columns: [{ key: "연월", label: "연월" }, { key: "기숙사", label: "기숙사" }, { key: "기타비용", label: "기타비용" }, { key: "비고", label: "비고" }],
       filterKeys: ["연월"], dateField: "_date", chart: { type: "bar", groupKey: "연월", valueKey: "기타비용", label: "연월별 기타비용" },
-      extraKpis: [{ label: "기타비용 합계", value: settlementRecords.reduce((a, r) => a + (r.miscCost || 0), 0).toLocaleString() }],
+      extraKpis: [{ label: "기타비용 합계", value: validSettlement.reduce((a, r) => a + (r.miscCost || 0), 0).toLocaleString() }],
     };
     // ⑨ 예비군/민방위
     const military: ReportConfig = {
@@ -21291,39 +21335,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
             
-            {/* 월별 요약 테이블 */}
-            <div className={`${theme.darkMode ? "mt-6 overflow-auto rounded-3xl border border-slate-700 bg-slate-950 p-4" : "mt-6 overflow-auto rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
-              <div className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>운영 현황 요약</div>
-              <table className="erp-table text-left">
-                <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
-                  <tr>
-                    <th className="px-3 py-2">지역</th>
-                    <th className="px-3 py-2">총 기숙사</th>
-                    <th className="px-3 py-2">공실</th>
-                    <th className="px-3 py-2">현 거주자</th>
-                    <th className="px-3 py-2">임차만기</th>
-                    <th className="px-3 py-2">사용률</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {reportSummaryRows.map((row) => (
-                    <tr key={row.key} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
-                      <td className="px-3 py-3">{row.site} ({row.gender})</td>
-                      <td className="px-3 py-3">{row.dormCount}</td>
-                      <td className="px-3 py-3">{row.residentTo}</td>
-                      <td className="px-3 py-3">{row.currentResidents}</td>
-                      <td className="px-3 py-3">{row.expireBuildings}</td>
-                      <td className="px-3 py-3">{row.usageRate}%</td>
-                    </tr>
-                  ))}
-                  {reportSummaryRows.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="px-3 py-6 text-center text-slate-500">검색 결과가 없습니다.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            {/* [항목12] "운영 현황 요약" 월별 요약 테이블 제거 — 동일 데이터는 상단 보고서 허브(전체 운영 현황 등)에서 제공.
+                데이터 계산(reportSummaryRows)은 다른 곳 재사용 대비 유지하고 UI 섹션만 제거. */}
           </section>
         )}
 
