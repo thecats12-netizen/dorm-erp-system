@@ -5296,8 +5296,9 @@ export default function App() {
     // 삭제 상태는 신입사원(원본)을 따라감 → 삭제/복원이 입주자에 그대로 전파
     const inheritedDeleted = hire.isDeleted || false;
 
-    // actualMoveOutDate가 존재하면 퇴실 상태로 자동 설정
-    let status = mapNewHireStatusToOccupantStatus(hire.residenceStatus);
+    // actualMoveOutDate가 존재하면 퇴실 상태로 자동 설정.
+    // 신입사원 저장값이 "자동선택"일 수 있으므로 공통 getNewHireStatus 로 계산 결과를 사용(모드값 누출 방지).
+    let status = mapNewHireStatusToOccupantStatus(getNewHireStatus(hire));
     if (hire.actualMoveOutDate || inheritedDeleted) {
       status = "퇴실";
     }
@@ -8272,7 +8273,7 @@ export default function App() {
           )
           .map((h) => ({
             ...h,
-            status: h.residenceStatus as Occupant["status"],
+            status: getNewHireStatus(h) as Occupant["status"],
             moveInDate: h.moveInDate,
             moveOutDueDate: h.moveOutDate,
             actualMoveOutDate: h.actualMoveOutDate,
@@ -8446,7 +8447,7 @@ export default function App() {
         return { ...o, actualMoveOutDate: getActualMoveOutDate(o) || h.actualMoveOutDate, expectedMoveOutDate: (o as any).expectedMoveOutDate || h.expectedMoveOutDate, moveOutDueDate: (o as any).moveOutDueDate || h.moveOutDate } as any;
       }),
       ...newHires.filter((h) => !h.isDeleted && h.dormId && !occupants.some((o) => o.sourceNewHireId === h.id))
-        .map((h) => ({ ...h, name: (h as any).employeeName || (h as any).name, status: h.residenceStatus, moveInDate: h.moveInDate, moveOutDueDate: h.moveOutDate, actualMoveOutDate: h.actualMoveOutDate, expectedMoveOutDate: h.expectedMoveOutDate } as any)),
+        .map((h) => ({ ...h, name: (h as any).employeeName || (h as any).name, status: getNewHireStatus(h), moveInDate: h.moveInDate, moveOutDueDate: h.moveOutDate, actualMoveOutDate: h.actualMoveOutDate, expectedMoveOutDate: h.expectedMoveOutDate } as any)),
     ];
     // [11] 카테고리별 후보 로그(이름/기숙사/입실일/계약종료일/실제퇴실일/천안이동일/포함여부)
     const info = (o: any, included: boolean) => ({
@@ -9193,7 +9194,7 @@ export default function App() {
     for (const h of newHires) {
       if (h.isDeleted) continue;
       if (hit(h.name, h.phone, h.department))
-        out.push({ key: `nh-${h.id}`, category: "신입사원", label: h.name, sub: `${h.site} · ${h.department || "-"} · ${h.residenceStatus}`, tab: "newHires" });
+        out.push({ key: `nh-${h.id}`, category: "신입사원", label: h.name, sub: `${h.site} · ${h.department || "-"} · ${getNewHireStatus(h)}`, tab: "newHires" });
     }
     // 청소관리
     for (const r of cleaningReports) {
@@ -9820,14 +9821,15 @@ export default function App() {
     }
 
     const dorm = newHireForm.dormId ? dorms.find((d) => d.id === newHireForm.dormId) : null;
-    const actualResidenceStatus =
-      newHireForm.residenceStatus === "자동선택"
-        ? calculateNewHireResidenceStatus(newHireForm)
-        : newHireForm.residenceStatus;
-    const actualMoveInType =
-      newHireForm.moveInType === "자동선택"
-        ? calculateMoveInType(newHireForm, newHires)
-        : newHireForm.moveInType;
+    // 자동선택 여부(모드)와 자동계산 결과를 구분한다.
+    const isAutoResidence = newHireForm.residenceStatus === "자동선택";
+    const isAutoType = newHireForm.moveInType === "자동선택";
+    const actualResidenceStatus = isAutoResidence
+      ? calculateNewHireResidenceStatus(newHireForm)
+      : newHireForm.residenceStatus;
+    const actualMoveInType = isAutoType
+      ? calculateMoveInType(newHireForm, newHires)
+      : newHireForm.moveInType;
 
     const existing = editingNewHireId ? newHires.find((h) => h.id === editingNewHireId) : null;
 
@@ -9835,8 +9837,10 @@ export default function App() {
       id: editingNewHireId || crypto.randomUUID(),
       ...newHireForm,
       managerUserId: newHireForm.dormId ? newHireForm.managerUserId : "",
-      residenceStatus: actualResidenceStatus,
-      moveInType: actualMoveInType,
+      // 모드 보존: 자동선택이면 기존 residence_status/move_in_type 텍스트 컬럼에 "자동선택"을 그대로 저장한다.
+      //  (재진입 시 드롭다운이 자동선택으로 복원되고, 목록/통계/입주자 판정은 getNewHireStatus/Type 가 재계산)
+      residenceStatus: (isAutoResidence ? "자동선택" : actualResidenceStatus) as NewHireResidenceStatus,
+      moveInType: (isAutoType ? "자동선택" : actualMoveInType) as MoveInType,
       site: newHireForm.site || dorm?.site || "평택",
       createdAt:
         editingNewHireId
@@ -9846,10 +9850,11 @@ export default function App() {
     };
     setNewHires((prev) => (editingNewHireId ? prev.map((h) => (h.id === editingNewHireId ? payload : h)) : [payload, ...prev]));
 
+    // 입주자 생성 판정은 저장값("자동선택")이 아니라 "자동계산 결과값"으로 판단(모드 보존이 로직에 영향 없게).
     const shouldCreateOccupant = Boolean(
       payload.dormId &&
-        payload.moveInType !== "대기자" &&
-        ["거주중", "신규입주", "연장"].includes(payload.residenceStatus)
+        actualMoveInType !== "대기자" &&
+        ["거주중", "신규입주", "연장"].includes(actualResidenceStatus)
     );
 
     if (shouldCreateOccupant) {
@@ -23210,7 +23215,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     {newHires.filter(isInTrash).map((hire) => (
                       <div key={hire.id} className={`${theme.darkMode ? "flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between" : "flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"}`}>
                         <div className={`${theme.darkMode ? "text-sm text-slate-300" : "text-sm text-slate-700"}`}>
-                          {hire.name} ({hire.residenceStatus})
+                          {hire.name} ({getNewHireStatus(hire)})
                         </div>
                         <div className="flex flex-wrap gap-2">
                           <button
@@ -23233,7 +23238,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 (o) => isInTrash(o) && o.sourceNewHireId === hire.id
                               );
                               if (linkedOccupants.length > 0) {
-                                const restoredStatus = mapNewHireStatusToOccupantStatus(hire.residenceStatus);
+                                const restoredStatus = mapNewHireStatusToOccupantStatus(getNewHireStatus(hire));
                                 setOccupants((prev) =>
                                   prev.map((o) =>
                                     isInTrash(o) && o.sourceNewHireId === hire.id
@@ -24617,7 +24622,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     options={["자동선택", "대기중", "거주중", "만료예정", "연장", "퇴실"]}
                   />
                   <div className="text-xs text-slate-500">자동선택 시 날짜 기준으로 자동 계산됩니다. 직접 선택하면 수동값이 우선 적용됩니다.</div>
-                  <div className="text-xs text-slate-500">자동계산: {calculateNewHireResidenceStatus(newHireForm)}{newHireForm.residenceStatus !== "자동선택" ? " (참고값 · 저장은 수동 선택값 우선)" : ""}</div>
+                  <div className="text-xs text-slate-500">{newHireForm.residenceStatus === "자동선택" ? `자동계산 결과: ${calculateNewHireResidenceStatus(newHireForm)}` : `수동 선택값 저장 · 참고 자동계산: ${calculateNewHireResidenceStatus(newHireForm)}`}</div>
                 </div>
                 <div className="space-y-1">
                   <SelectInput
@@ -24627,7 +24632,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     options={["자동선택", "대기자", "신규", "재입주", "연장"]}
                   />
                   <div className="text-xs text-slate-500">자동선택 시 날짜 기준으로 자동 계산됩니다. 직접 선택하면 수동값이 우선 적용됩니다.</div>
-                  <div className="text-xs text-slate-500">자동계산: {calculateMoveInType(newHireForm, newHires)}{newHireForm.moveInType !== "자동선택" ? " (참고값 · 저장은 수동 선택값 우선)" : ""}</div>
+                  <div className="text-xs text-slate-500">{newHireForm.moveInType === "자동선택" ? `자동계산 결과: ${calculateMoveInType(newHireForm, newHires)}` : `수동 선택값 저장 · 참고 자동계산: ${calculateMoveInType(newHireForm, newHires)}`}</div>
                 </div>
                 <Input label="연장사유" value={newHireForm.extensionReason} onChange={(v) => setNewHireForm((f) => ({ ...f, extensionReason: v }))} />
                 <Input label="특이사항 메모" value={newHireForm.notes} onChange={(v) => setNewHireForm((f) => ({ ...f, notes: v }))} />
