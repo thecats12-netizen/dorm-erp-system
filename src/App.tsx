@@ -2084,6 +2084,8 @@ export default function App() {
   const [preInspectionDefectFilter, setPreInspectionDefectFilter] = useState("전체");
   const [preInspectionManagerFilter, setPreInspectionManagerFilter] = useState("전체");
   const [preInspectionMonthFilter, setPreInspectionMonthFilter] = useState("전체");
+  // [입주전점검] 데이터 완전성 필터(전체/정상 등록/확인 필요) — 자동생성/불완전 데이터 식별용(삭제 아님, 표시 분류만).
+  const [preInspectionCompletenessFilter, setPreInspectionCompletenessFilter] = useState<"전체" | "정상 등록" | "확인 필요">("전체");
   const lastPreInspectionSnapshotRef = useRef<string>("");
   const preInspectionSavingRef = useRef(false);
   // 청소보고서 지연 로딩(60초 캐시) — 메뉴 진입 시에만 조회, 초기 로딩 제외.
@@ -2734,6 +2736,9 @@ export default function App() {
   const [selectedCleaningDormId, setSelectedCleaningDormId] = useState<string>("");
   // 청소관리 소메뉴: "status"(청소 현황) | "manager"(담당자별 청소 현황 - 실시간). 관리자 전용.
   const [cleaningView, setCleaningView] = useState<"status" | "manager">("status");
+  // 청소 점수 계산 기준(시작일/미보고 감점) 설정 모달.
+  const [cleaningScoreModalOpen, setCleaningScoreModalOpen] = useState(false);
+  const [cleaningScoreForm, setCleaningScoreForm] = useState<{ startDate: string; penalty: number }>({ startDate: "", penalty: -5 });
   const [cleaningSettings, setCleaningSettings] = useState<CleaningSettings>({
     missingReportPenalty: -5,
     includeWeekendReports: false,
@@ -5143,7 +5148,10 @@ export default function App() {
   const calculateCleaningScoreByManager = (managerUserId: string): number => {
     if (!managerUserId) return 0;
     const manager = users.find((u) => u.id === managerUserId);
-    const startDate = (manager && parseSafeDate(manager.createdAt)) || null;
+    const managerStart = (manager && parseSafeDate(manager.createdAt)) || null;
+    // 점수 계산 시작일(설정) 이후만 반영. 담당 시작일과 함께 "더 늦은 날짜"를 유효 시작일로 사용.
+    const scoreStart = cleaningSettings.scoreStartDate ? parseSafeDate(cleaningSettings.scoreStartDate) : null;
+    const startDate = scoreStart && (!managerStart || scoreStart > managerStart) ? scoreStart : managerStart;
     // 본인이 담당자로 지정된(=managerUserId) 보고서만, 삭제/영구삭제 제외
     const managerReports = cleaningReports.filter(
       (r) => r.managerUserId === managerUserId && !r.isDeleted && !r.isPermanentDeleted
@@ -5151,16 +5159,18 @@ export default function App() {
 
     let score = 0;
 
-    // 1) 관리자 확인(확인완료) 시 부여 점수 합산 (+가점/감점)
+    // 1) 관리자 확인(확인완료) 시 부여 점수 합산 (+가점/감점) — 점수 계산 시작일 이후 보고만.
     managerReports.forEach((r) => {
-      if (r.cleanStatus === "확인완료") score += r.score || 0;
+      if (r.cleanStatus !== "확인완료") return;
+      if (scoreStart) { const d = parseSafeDate(r.reportDate); if (!d || d < scoreStart) return; }
+      score += r.score || 0;
     });
 
-    // 2) 담당 기숙사 주차별(월~일) 미제출 감점 — 담당 시작일 이후 ~ 마감 지난 주차만
+    // 2) 담당 기숙사 주차별(월~일) 미제출 감점 — 유효 시작일 이후 ~ 마감 지난 주차만
     const dormId = manager?.dormId;
     if (dormId && startDate) {
       const now = new Date();
-      // 담당 시작일이 속한 주의 월요일부터 시작
+      // 유효 시작일이 속한 주의 월요일부터 시작
       const cursor = new Date(startDate);
       cursor.setHours(0, 0, 0, 0);
       cursor.setDate(cursor.getDate() - ((cursor.getDay() + 6) % 7)); // 월요일로 정렬
@@ -5171,7 +5181,7 @@ export default function App() {
         const wkEnd = new Date(cursor);
         wkEnd.setDate(wkEnd.getDate() + 6);
         wkEnd.setHours(23, 59, 59, 999); // 일요일 23:59 (제출 마감)
-        // 마감이 지났고(미래/이번주 제외), 담당 시작 이전에 끝난 주가 아니어야 함
+        // 마감이 지났고(미래/이번주 제외), 유효 시작 이전에 끝난 주가 아니어야 함
         if (wkEnd < now && wkEnd >= startDate) {
           const hasReport = managerReports.some((r) => {
             if (r.dormId !== dormId) return false;
@@ -7937,6 +7947,34 @@ export default function App() {
   const getManagerCleaningPenalty = (managerUserId: string) => {
     if (!managerUserId) return 0;
     return calculateCleaningScoreByManager(managerUserId);
+  };
+
+  // 청소 점수 계산 기준 설정(시작일/미보고 감점) — 관리자 전용. 기존 cleaningSettings(JSON) 재사용, DB 컬럼 추가 없음.
+  const openCleaningScoreModal = () => {
+    setCleaningScoreForm({ startDate: cleaningSettings.scoreStartDate || "", penalty: cleaningSettings.missingReportPenalty });
+    setCleaningScoreModalOpen(true);
+  };
+  const applyCleaningScoreSettings = () => {
+    // 버튼 숨김뿐 아니라 저장 함수에서도 권한 검증(operator/viewer/manager 불가).
+    if (!canManageUsers(currentUser)) { void appAlert("권한 안내", "이 기능은 관리자만 사용할 수 있습니다."); return; }
+    const penalty = Number(cleaningScoreForm.penalty);
+    if (!Number.isFinite(penalty) || penalty > 0) { void appAlert("점수 계산 기준", "미보고 감점은 0 이하 숫자로 입력하세요. (예: 0, -5, -10)"); return; }
+    const start = String(cleaningScoreForm.startDate || "").slice(0, 10);
+    try {
+      setCleaningSettings((prev) => ({
+        ...prev,
+        scoreStartDate: start || undefined,
+        missingReportPenalty: penalty,
+        scoreUpdatedAt: new Date().toISOString(),
+        scoreUpdatedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+      }));
+      setCleaningScoreModalOpen(false);
+      showNetworkToast(start
+        ? `점수 계산 기준이 ${start}부터로 설정되었습니다. (미보고 1건당 ${penalty}점)`
+        : `미보고 감점이 건당 ${penalty}점으로 설정되었습니다.`);
+    } catch {
+      void appAlert("점수 계산 기준", "점수 계산 기준을 저장하지 못했습니다. 잠시 후 다시 시도해주세요.");
+    }
   };
 
   // [성능] 담당자별 실시간 청소 점수(100점 - 감점 + 가점) 맵 — 청소보고 변경 시에만 재계산.
@@ -10767,11 +10805,22 @@ export default function App() {
     XLSX.writeFile(workbook, "입주전점검현황.xlsx");
   };
 
+  // 데이터 불완전 여부(확인 필요): 필수 식별/입력값이 비어 있는 행(자동생성·오등록 의심). 삭제하지 않고 분류만.
+  const isIncompletePreInspection = (r: PreMoveInInspection) =>
+    !String(r.buildingName || "").trim() ||
+    !String(r.dong || "").trim() ||
+    !String(r.roomHo || "").trim() ||
+    !String(r.inspectionDate || "").trim() ||
+    !String(r.expectedMoveInName || "").trim() ||
+    !String(r.inspectorName || "").trim() ||
+    (Array.isArray(r.photos) ? r.photos.length === 0 : true);
+
   // 조회/필터/검색 적용된 표시 목록.
   const visiblePreInspections = useMemo(() => {
     const term = preInspectionSearch.trim().toLowerCase();
     return preMoveInInspections
       .filter((r) => !r.isDeleted && !r.isPermanentDeleted)
+      .filter((r) => preInspectionCompletenessFilter === "전체" || (preInspectionCompletenessFilter === "확인 필요" ? isIncompletePreInspection(r) : !isIncompletePreInspection(r)))
       .filter((r) => preInspectionSiteFilter === "전체" || r.site === preInspectionSiteFilter)
       .filter((r) => preInspectionGenderFilter === "전체" || r.gender === preInspectionGenderFilter)
       .filter((r) => preInspectionStatusFilter === "전체" || r.inspectionStatus === preInspectionStatusFilter)
@@ -10781,7 +10830,7 @@ export default function App() {
       .filter((r) => preInspectionMonthFilter === "전체" || (r.inspectionDate || "").slice(0, 7) === preInspectionMonthFilter)
       .filter((r) => !term || `${r.buildingName} ${r.dong} ${r.roomHo} ${r.expectedMoveInName} ${r.inspectorName} ${r.defectDescription}`.toLowerCase().includes(term))
       .sort((a, b) => (b.inspectionDate || "").localeCompare(a.inspectionDate || ""));
-  }, [preMoveInInspections, preInspectionSearch, preInspectionSiteFilter, preInspectionGenderFilter, preInspectionStatusFilter, preInspectionCleaningFilter, preInspectionDefectFilter, preInspectionManagerFilter, preInspectionMonthFilter]);
+  }, [preMoveInInspections, preInspectionSearch, preInspectionSiteFilter, preInspectionGenderFilter, preInspectionStatusFilter, preInspectionCleaningFilter, preInspectionDefectFilter, preInspectionManagerFilter, preInspectionMonthFilter, preInspectionCompletenessFilter]);
 
   const preInspectionManagerOptions = useMemo(
     () => ["전체", ...Array.from(new Set(preMoveInInspections.filter((r) => !r.isDeleted).map((r) => r.inspectorName).filter(Boolean)))],
@@ -19019,6 +19068,31 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           true
         )}
 
+        {/* 청소 점수 계산 기준 설정 모달 */}
+        {cleaningScoreModalOpen && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm" onClick={() => setCleaningScoreModalOpen(false)}>
+            <div className={`w-full max-w-md rounded-3xl p-6 shadow-2xl ring-1 ${theme.darkMode ? "bg-slate-900 text-slate-100 ring-slate-700" : "bg-white text-slate-900 ring-slate-200"}`} onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold">점수 계산 기준 설정</h3>
+              <p className="mt-2 text-sm text-slate-500">선택한 기준일부터 청소 보고 및 미보고 감점 점수를 다시 계산합니다. 기준일 이전 기록은 삭제되지 않으며 점수 계산에서만 제외됩니다. (적용 범위: 전체 담당자)</p>
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">점수 계산 시작일</label>
+                  <input type="date" value={cleaningScoreForm.startDate} onChange={(e) => setCleaningScoreForm((f) => ({ ...f, startDate: e.target.value }))}
+                    className={`${theme.darkMode ? "w-full rounded-2xl border border-slate-600 bg-slate-950 px-3 py-2.5 outline-none focus:border-slate-400" : "w-full rounded-2xl border border-slate-300 bg-white px-3 py-2.5 outline-none focus:border-slate-400"}`} />
+                  <p className="mt-1 text-xs text-slate-500">비워두면 전체 기간을 계산합니다.</p>
+                </div>
+                <div>
+                  <NumberInput label="미보고 감점 (0 이하, 예: -5)" value={cleaningScoreForm.penalty} onChange={(n) => setCleaningScoreForm((f) => ({ ...f, penalty: n }))} />
+                </div>
+              </div>
+              <div className="mt-6 flex justify-end gap-2">
+                <button type="button" onClick={() => setCleaningScoreModalOpen(false)} className={`rounded-2xl border px-4 py-2 text-sm font-medium ${theme.darkMode ? "border-slate-600 text-slate-200 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-50"}`}>취소</button>
+                <button type="button" onClick={applyCleaningScoreSettings} className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500">적용</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* 변경이력 모달 */}
         {/* 공통 알림/확인 모달 (브라우저 기본 팝업 대체) */}
         {appModal && (
@@ -20953,6 +21027,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <FilterSelect label="하자여부" value={preInspectionDefectFilter} onChange={setPreInspectionDefectFilter} options={["전체", ...DEFECT_YN_OPTIONS]} />
               <FilterSelect label="담당자" value={preInspectionManagerFilter} onChange={setPreInspectionManagerFilter} options={preInspectionManagerOptions} />
               <FilterSelect label="점검월" value={preInspectionMonthFilter} onChange={setPreInspectionMonthFilter} options={preInspectionMonthOptions} />
+              <FilterSelect label="데이터 상태" value={preInspectionCompletenessFilter} onChange={(v) => setPreInspectionCompletenessFilter(v as "전체" | "정상 등록" | "확인 필요")} options={["전체", "정상 등록", "확인 필요"]} />
               <div className="lg:col-span-2">
                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-400">검색</label>
                 <input value={preInspectionSearch} onChange={(e) => setPreInspectionSearch(e.target.value)} placeholder="건물명/동/호수/입주예정자/담당자/하자내용" className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-slate-400" />
@@ -21486,7 +21561,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             {/* 관리자 전용 소메뉴: 담당자별 청소 현황(실시간) — 청소보고 등록/수정/상태변경 시 즉시 반영 */}
             {!isMaintenanceReporter && cleaningView === "manager" && cleaningScopeManagerNames.length > 0 && (
               <div className="mt-4 erp-table-container">
-                <div className="mb-2 text-sm font-semibold">담당자별 청소 현황 (실시간)</div>
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm font-semibold">담당자별 청소 현황 (실시간)</div>
+                  {canManageUsers(currentUser) && (
+                    <button type="button" onClick={openCleaningScoreModal} className={`rounded-xl px-3 py-1.5 text-xs font-semibold ${theme.darkMode ? "border border-slate-600 text-slate-200 hover:bg-slate-800" : "border border-slate-300 text-slate-700 hover:bg-slate-100"}`}>점수 계산 기준 설정</button>
+                  )}
+                </div>
+                <div className="mb-2 text-xs text-slate-500">
+                  점수 계산 기준일: {cleaningSettings.scoreStartDate || "전체 기간"} · 미보고 감점: 건당 {cleaningSettings.missingReportPenalty}점
+                </div>
                 <table className="erp-table min-w-[640px] w-full text-left">
                   <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                     <tr>

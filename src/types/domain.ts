@@ -464,6 +464,9 @@ export type ThemeSettings = {
 export type CleaningSettings = {
   missingReportPenalty: number;
   includeWeekendReports: boolean;
+  scoreStartDate?: string;   // 점수 계산 시작일(YYYY-MM-DD). 이 날짜 이전 기록은 점수 합계에서 제외(목록/원본은 유지).
+  scoreUpdatedAt?: string;   // 기준 설정 변경 시각(감사/표시용)
+  scoreUpdatedBy?: string;   // 기준 설정 변경자
 };
 
 export type TabKey =
