@@ -116,6 +116,8 @@ import { validateExcel, type ExcelTableType, type ExcelValidationResult } from "
 import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
 import FilteredDormSelector from "./components/FilteredDormSelector";
+import SimMemberGridModal, { type SimMemberRow } from "./components/SimMemberGridModal";
+import ReportView, { type ReportConfig } from "./components/ReportView";
 import { usePagination, PaginationBar } from "./components/Pagination";
 import { Input, NumberInput, SelectInput, SearchableSelect, FilterSelect, MiniStat, CompactField } from "./components/FormControls";
 import { themeDefault } from "./constants/defaultData";
@@ -1157,8 +1159,8 @@ function newHireTemplate(): NewHireFormState {
     moveOutDate: "",
     actualMoveOutDate: "",
     cheonanMoveDate: "",
-    residenceStatus: "대기중",
-    moveInType: "대기자",
+    residenceStatus: "대기중", // 신규 등록 기본 거주상태: 대기(미배정)
+    moveInType: "신규",        // 신규 등록 기본 입주유형: 신규
     extensionReason: "",
     notes: "",
     createdAt: today,
@@ -2642,7 +2644,7 @@ export default function App() {
   const [settlementDetailDorm, setSettlementDetailDorm] = useState<OperationalDorm | null>(null);
   const settlementCardClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // [10] 운영시뮬레이션 통계 클릭 → 해당 인원 목록 모달.
-  const [simDetailModal, setSimDetailModal] = useState<{ title: string; rows: Array<{ name: string; dorm: string; moveIn: string; contractEnd: string; actualMoveOut: string; cheonanMove: string }> } | null>(null);
+  const [simDetailModal, setSimDetailModal] = useState<{ title: string; rows: SimMemberRow[] } | null>(null);
   const [inventorySubTab, setInventorySubTab] = useState<"status" | "manage" | "history">("status");
 
   // 저장된 로그인 아이디 복원(이메일/아이디만, 비밀번호는 저장하지 않음). tenant 는 항상 "default".
@@ -2749,6 +2751,7 @@ export default function App() {
   // Reports filters (연도/월/지역/성별)
   const [reportYear, setReportYear] = useState<string>(new Date().getFullYear().toString());
   const [reportMonth, setReportMonth] = useState<string>(String(new Date().getMonth() + 1).padStart(2, "0"));
+  const [selectedReportKey, setSelectedReportKey] = useState<string>("전체 운영 현황");
   const [reportSiteFilter, setReportSiteFilter] = useState<Site | "전체">("전체");
   const [reportGenderFilter, setReportGenderFilter] = useState<"남" | "여" | "전체">("전체");
   type PdfReportType =
@@ -2781,7 +2784,7 @@ export default function App() {
   const saveMilitaryTrainingAutoSettings = () => {
     // Supabase 모드: 자동저장이 Supabase에 반영(단일 출처). 오프라인일 때만 localStorage에 저장.
     if (!isSupabaseAvailable()) saveJson(MILITARY_TRAINING_AUTOCREATE_KEY, militaryTrainingAutoConfig, tenantId);
-    alert("자동생성 설정을 저장했습니다.");
+    void appAlert("알림", "자동생성 설정을 저장했습니다.");
   };
 
   const toggleMilitaryAutoTargetStatus = (status: string) => {
@@ -2899,7 +2902,8 @@ export default function App() {
     cancelText?: string; // 없으면 단순 알림(확인 버튼만)
     tone?: "default" | "danger";
     requireText?: string; // 입력하면 확인 활성화되는 검증 문구(예: "전체초기화")
-    resolve: (ok: boolean) => void;
+    promptMode?: boolean; // 값 입력형(window.prompt 대체)
+    resolve: (ok: boolean, value?: string) => void;
   }>(null);
   const [appModalInput, setAppModalInput] = useState("");
 
@@ -2972,7 +2976,7 @@ export default function App() {
     const validYear = getValidSettlementYear(settlementYear);
     const validMonth = getValidSettlementMonth(settlementMonth);
     if (!validYear || !validMonth) {
-      alert("정산 연도와 월을 먼저 정확히 선택하세요.");
+      void appAlert("알림", "정산 연도와 월을 먼저 정확히 선택하세요.");
       return;
     }
 
@@ -3030,8 +3034,8 @@ export default function App() {
     setSettlementSubTab("itemEntry");
   };
 
-  const deleteSettlementItem = (itemId: string) => {
-    if (!window.confirm("정산 항목을 삭제하시겠습니까?")) return;
+  const deleteSettlementItem = async (itemId: string) => {
+    if (!await appConfirm("확인", "정산 항목을 삭제하시겠습니까?")) return;
     const now = new Date().toISOString();
     const deletedBy = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
     setSettlementItems((prev) =>
@@ -3055,15 +3059,15 @@ export default function App() {
   const saveSettlementItem = () => {
     if (!canEditData(currentUser)) return;
     if (!settlementYear || !settlementMonth) {
-      alert("정산 연도와 월을 먼저 선택하세요.");
+      void appAlert("알림", "정산 연도와 월을 먼저 선택하세요.");
       return;
     }
     if (!settlementItemForm.dormId) {
-      alert("기숙사를 선택하세요.");
+      void appAlert("알림", "기숙사를 선택하세요.");
       return;
     }
     if (!settlementItemForm.amount.trim() || Number.isNaN(Number(settlementItemForm.amount))) {
-      alert("유효한 금액을 입력하세요.");
+      void appAlert("알림", "유효한 금액을 입력하세요.");
       return;
     }
 
@@ -4196,7 +4200,7 @@ export default function App() {
   const closeAppModal = (ok: boolean) => {
     setAppModalInput("");
     setAppModal((m) => {
-      m?.resolve(ok);
+      m?.resolve(ok, appModalInput);
       return null;
     });
   };
@@ -4220,6 +4224,12 @@ export default function App() {
       });
     });
 
+  // 값 입력형 모달(window.prompt 대체). 확인 시 입력값, 취소 시 null.
+  const appPrompt = (title: string, message: string, defaultValue = ""): Promise<string | null> =>
+    new Promise((resolve) => {
+      setAppModalInput(defaultValue);
+      setAppModal({ title, message, confirmText: "확인", cancelText: "취소", promptMode: true, resolve: (ok, value) => resolve(ok ? (value ?? "") : null) });
+    });
   // JSON 파일 다운로드 + 타임스탬프(파일명용)
   const downloadJsonFile = (data: unknown, filename: string) => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -4353,8 +4363,8 @@ export default function App() {
     return snapshot;
   };
 
-  const deleteBackup = (id: string) => {
-    if (!window.confirm("이 백업을 삭제하시겠습니까?")) return;
+  const deleteBackup = async (id: string) => {
+    if (!await appConfirm("확인", "이 백업을 삭제하시겠습니까?")) return;
     const next = backups.filter((b) => b.id !== id);
     setBackups(next);
     persistBackups(next);
@@ -4387,12 +4397,12 @@ export default function App() {
 
   // 복원: admin만, 확인창, 복원 전 현재 상태 자동 백업, 감사로그 기록.
   // (상태 변경 시 기존 저장 useEffect 가 Supabase/localStorage 에 자동 반영)
-  const restoreFromBackup = (backup: DataBackup) => {
+  const restoreFromBackup = async (backup: DataBackup) => {
     if (!canEditData(currentUser)) {
-      alert("복원은 관리자만 실행할 수 있습니다.");
+      void appAlert("알림", "복원은 관리자만 실행할 수 있습니다.");
       return;
     }
-    if (!window.confirm(`${formatDateTimeKorea(backup.createdAt)} 시점으로 복원하시겠습니까?\n현재 데이터는 복원 전에 자동으로 백업됩니다.`)) return;
+    if (!await appConfirm("확인", `${formatDateTimeKorea(backup.createdAt)} 시점으로 복원하시겠습니까?\n현재 데이터는 복원 전에 자동으로 백업됩니다.`)) return;
     try {
       setBackupRestoreError(null);
       // 1) 복원 전 현재 상태 자동 백업
@@ -4409,7 +4419,7 @@ export default function App() {
         afterValue: JSON.stringify({ backupId: backup.id, createdAt: backup.createdAt, type: backup.type, version: backup.version }),
         memo: `백업 복원 (${formatDateTimeKorea(backup.createdAt)} · ${backup.type === "auto" ? "자동" : "수동"})`,
       });
-      alert("복원이 완료되었습니다.");
+      void appAlert("알림", "복원이 완료되었습니다.");
     } catch (e) {
       console.error(e);
       setBackupRestoreError(String(e));
@@ -5876,7 +5886,7 @@ export default function App() {
     form: Omit<CleaningReport, "id" | "createdAt" | "updatedAt">
   ) => {
     if (!user || !canEditDormData(user, "maintenance_reporter")) {
-      alert("청소보고를 작성할 권한이 없습니다.");
+      void appAlert("알림", "청소보고를 작성할 권한이 없습니다.");
       return;
     }
     
@@ -8270,11 +8280,24 @@ export default function App() {
 
       // 통계 숫자와 상세 리스트가 "동일한 배열"을 쓰도록: 후보를 먼저 걸러 rows 로 만들고, 개수는 rows.length 로 산출.
       // → 숫자용 필터와 모달용 필터를 따로 만들지 않는다(불일치 방지).
-      const toMemberRow = (o: any) => {
+      const toMemberRow = (o: any): SimMemberRow => {
         const d = operationalDorms.find((dm) => dm.id === o.dormId) || dorms.find((dm) => dm.id === o.dormId);
+        const building = d?.buildingName || o.buildingName || "";
+        const dong = d?.dong || o.dong || "";
+        const roomHo = d?.roomHo || o.roomHo || "";
         return {
+          id: o.sourceNewHireId || o.id || "",
           name: (o as any).employeeName || (o as any).name || "-",
-          dorm: d ? `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}` : "-",
+          department: o.department || "",
+          site: o.site || "",
+          gender: o.gender || "",
+          phone: o.phone || "",
+          building,
+          dong,
+          roomHo,
+          dorm: (building || dong || roomHo) ? `${building} ${formatDong(dong)}-${formatRoomHo(roomHo)}`.trim() : "-",
+          residenceStatus: o.status || o.residenceStatus || "",
+          moveInType: o.moveInType || "",
           moveIn: getMoveInDate(o) || "-",
           contractEnd: getExpectedMoveOutDate(o) || "-",
           actualMoveOut: getActualMoveOutDate(o) || "-",
@@ -9408,7 +9431,7 @@ export default function App() {
   const manualSignOutRef = useRef(false);
   const logout = async () => {
     // 군대 모듈 저장 필요 상태면 로그아웃 전 경고(앱 내부 동작이라 beforeunload 미발생)
-    if (militaryDirty && !window.confirm("군대관리에 저장되지 않은 변경사항이 있습니다.\n저장하지 않고 로그아웃하시겠습니까?")) {
+    if (militaryDirty && !await appConfirm("확인", "군대관리에 저장되지 않은 변경사항이 있습니다.\n저장하지 않고 로그아웃하시겠습니까?")) {
       return;
     }
     manualSignOutRef.current = true; // 수동 로그아웃은 세션 만료 안내에서 제외
@@ -9489,7 +9512,7 @@ export default function App() {
   const saveDorm = () => {
     if (!canEditData(currentUser)) return;
     if (!dormForm.address.trim() || !dormForm.buildingName.trim()) {
-      alert("기숙사명과 주소는 필수입니다.");
+      void appAlert("알림", "기숙사명과 주소는 필수입니다.");
       return;
     }
     const existingDorm = editingDormId ? dorms.find((d) => d.id === editingDormId) : null;
@@ -9516,16 +9539,16 @@ export default function App() {
     setShowDormForm(false);
   };
 
-  const saveOccupant = () => {
+  const saveOccupant = async () => {
     if (!canEditData(currentUser)) return;
     if (!occupantForm.employeeName.trim()) {
-      alert("이름은 필수입니다.");
+      void appAlert("알림", "이름은 필수입니다.");
       return;
     }
     const dorm = occupantForm.dormId ? dorms.find((d) => d.id === occupantForm.dormId) : null;
     if (occupantForm.dormId && !dorm) return;
     if (occupantForm.status === "거주중" && !occupantForm.dormId) {
-      const confirmed = window.confirm("기숙사가 배정되지 않았습니다. 미배정 상태로 등록하시겠습니까?");
+      const confirmed = await appConfirm("확인", "기숙사가 배정되지 않았습니다. 미배정 상태로 등록하시겠습니까?");
       if (!confirmed) return;
     }
     const count = dorm ? (occupancyCountByDorm.get(dorm.id) || 0) : 0;
@@ -9535,7 +9558,7 @@ export default function App() {
     // 정원은 계약(operationalDorm) 저장값 우선 → 연결 기숙사 → 6. 정원 초과 시 신규 배정만 차단(기존 거주자 유지).
     const dormCap = getDormCapacity(operationalDorms.find((d) => d.id === occupantForm.dormId) || dorm);
     if (dorm && willCount && count + adjust >= dormCap) {
-      alert(`이 기숙사는 정원(${dormCap}명)이 가득 차 추가 배정할 수 없습니다. (현재 ${count}명)`);
+      void appAlert("알림", `이 기숙사는 정원(${dormCap}명)이 가득 차 추가 배정할 수 없습니다. (현재 ${count}명)`);
       return;
     }
     const payload: Occupant = {
@@ -9566,7 +9589,7 @@ export default function App() {
         
         // 기존 담당자가 있으면 confirm 표시
         if (existingManagerId && existingManagerUser) {
-          const confirmed = window.confirm(
+          const confirmed = await appConfirm("확인", 
             `현재 해당 기숙사는 ${existingManagerUser.displayName}님이 담당자로 지정되어 있습니다.\n${payload.employeeName}님으로 변경하시겠습니까?`
           );
           if (!confirmed) {
@@ -9649,21 +9672,21 @@ export default function App() {
   const saveDormContract = () => {
     if (!canEditData(currentUser)) return;
     if (!dormContractForm.buildingName.trim() || !dormContractForm.address.trim()) {
-      alert("건물명과 도로명주소는 필수입니다.");
+      void appAlert("알림", "건물명과 도로명주소는 필수입니다.");
       return;
     }
     if (!dormContractForm.contractStart || !dormContractForm.contractEnd) {
-      alert("계약 시작일과 종료일을 모두 입력하세요.");
+      void appAlert("알림", "계약 시작일과 종료일을 모두 입력하세요.");
       return;
     }
     if (new Date(dormContractForm.contractStart) > new Date(dormContractForm.contractEnd)) {
-      alert("계약 종료일은 시작일과 같거나 이후여야 합니다.");
+      void appAlert("알림", "계약 종료일은 시작일과 같거나 이후여야 합니다.");
       return;
     }
     // [1] 기숙사 정원 검증: 필수 · 정수 · 1~99.
     const capacityNum = Number(dormContractForm.capacity);
     if (!Number.isInteger(capacityNum) || capacityNum < 1 || capacityNum > 99) {
-      alert("기숙사 정원은 1~99 사이의 숫자로 입력하세요. (기본 6명)");
+      void appAlert("알림", "기숙사 정원은 1~99 사이의 숫자로 입력하세요. (기본 6명)");
       return;
     }
 
@@ -9676,7 +9699,7 @@ export default function App() {
     const matchedDormForRoom = dorms.find((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo) === roomKey && !d.isDeleted);
     const currentResidentCountForRoom = getCurrentResidentCount(matchedDormForRoom?.id || editingDormContractId || "");
     if (currentResidentCountForRoom > capacityNum) {
-      alert(
+      void appAlert("알림", 
         "현재 거주 인원이 변경하려는 정원보다 많습니다.\n" +
         "정원은 변경되지만 기존 거주자는 유지됩니다.\n" +
         "추가 입주는 정원 이하가 될 때까지 제한됩니다.\n\n" +
@@ -9767,19 +9790,19 @@ export default function App() {
   const saveNewHire = async () => {
     if (!canEditData(currentUser)) return;
     if (!newHireForm.name.trim()) {
-      alert("이름은 필수입니다.");
+      void appAlert("알림", "이름은 필수입니다.");
       return;
     }
     if (!newHireForm.phone.trim()) {
-      alert("연락처는 필수입니다.");
+      void appAlert("알림", "연락처는 필수입니다.");
       return;
     }
     if (newHireForm.residenceStatus === "거주중" && !newHireForm.dormId) {
-      const confirmed = window.confirm("기숙사가 배정되지 않았습니다. 미배정 상태로 등록하시겠습니까?");
+      const confirmed = await appConfirm("확인", "기숙사가 배정되지 않았습니다. 미배정 상태로 등록하시겠습니까?");
       if (!confirmed) return;
     }
     if (newHireForm.expectedMoveInDate && newHireForm.expectedMoveOutDate && new Date(newHireForm.expectedMoveInDate) > new Date(newHireForm.expectedMoveOutDate)) {
-      alert("예상 입주일은 예상 퇴실일 이전이어야 합니다.");
+      void appAlert("알림", "예상 입주일은 예상 퇴실일 이전이어야 합니다.");
       return;
     }
 
@@ -9941,7 +9964,7 @@ export default function App() {
     if (!canFileDefect(currentUser)) return;
     if (heicConverting) { void appAlert("사진 변환 중", "HEIC 사진을 변환하는 중입니다. 잠시 후 다시 저장해주세요."); return; }
     if (!defectForm.site.trim() || !defectForm.buildingName.trim() || !defectForm.dong.trim() || !defectForm.ho.trim() || !defectForm.requestText.trim()) {
-      alert("필수 항목을 모두 입력하세요. (지역, 기숙사, 동/호, 요청 내용을 확인하세요.)");
+      void appAlert("알림", "필수 항목을 모두 입력하세요. (지역, 기숙사, 동/호, 요청 내용을 확인하세요.)");
       return;
     }
 
@@ -11023,11 +11046,29 @@ export default function App() {
     if (!canCreateCleaningReport(currentUser)) return;
     if (heicConverting) { await appAlert("사진 변환 중", "HEIC 사진을 변환하는 중입니다. 잠시 후 다시 저장해주세요."); return; }
     if (!cleaningReportForm.buildingName.trim() || !cleaningReportForm.dong.trim() || !cleaningReportForm.roomHo.trim()) {
-      alert("청소보고서 저장을 위해 기숙사 정보(건물명, 동, 호수)를 입력해주세요.");
+      await appAlert("청소보고서", "청소보고서 저장을 위해 기숙사 정보(건물명, 동, 호수)를 입력해주세요.");
       return;
     }
     if (!cleaningReportForm.managerUserId.trim()) {
-      alert("청소보고서 저장을 위해 담당 관리자 정보를 확인해주세요.");
+      await appAlert("청소보고서", "청소보고서 저장을 위해 담당 관리자 정보를 확인해주세요.");
+      return;
+    }
+
+    // [5] 사진 첨부 필수: 사진이 1장도 없으면 API 호출 없이 저장 중단(프론트 + API 호출 전 검증).
+    //     신규 등록은 폼 사진이 필수. 수정은 기존 사진 또는 미로드(지연 로딩 미완료) 상태면 통과(기존 사진 유실 방지).
+    const formPhotoCount =
+      (cleaningReportForm.beforePhotoDataUrls?.length || 0) + (cleaningReportForm.afterPhotoDataUrls?.length || 0);
+    const existingForPhotoCheck = editingCleaningReportId
+      ? cleaningReports.find((r) => r.id === editingCleaningReportId)
+      : null;
+    const existingPhotoCount =
+      (existingForPhotoCheck?.beforePhotoDataUrls?.length || 0) + (existingForPhotoCheck?.afterPhotoDataUrls?.length || 0);
+    const hasPhoto =
+      formPhotoCount > 0 ||
+      existingPhotoCount > 0 ||
+      (!!editingCleaningReportId && !cleaningEditPhotosReadyRef.current); // 수정 중 사진 미로드면 기존 사진 존재로 간주
+    if (!hasPhoto) {
+      await appAlert("청소보고서", "사진을 1장 이상 첨부해야 청소 보고서를 등록할 수 있습니다.");
       return;
     }
 
@@ -11104,9 +11145,9 @@ export default function App() {
     setShowCleaningReportForm(false);
   };
 
-  const deleteCleaningReport = (reportId: string) => {
+  const deleteCleaningReport = async (reportId: string) => {
     if (!currentUser || currentUser.role !== "admin") return;
-    if (!confirm("이 청소보고서를 삭제하시겠습니까?")) return;
+    if (!(await appConfirm("청소보고서 삭제", "이 청소보고서를 삭제하시겠습니까?", { confirmText: "삭제", tone: "danger" }))) return;
     softDeleteItem(cleaningReports, setCleaningReports, reportId, "cleaningReport");
   };
 
@@ -11387,23 +11428,23 @@ export default function App() {
   const saveUser = async () => {
     if (!canManageUsers(currentUser)) return;
     if (!userForm.displayName.trim() || !userForm.username.trim()) {
-      alert("표시이름과 아이디는 필수입니다.");
+      void appAlert("알림", "표시이름과 아이디는 필수입니다.");
       return;
     }
     // 로그인 아이디 유효성 검사: 영문, 숫자, 점(.), 언더바(_), 하이픈(-)만 허용
     const rawUsername = userForm.username.trim();
     const usernamePattern = /^[A-Za-z0-9._-]+$/;
     if (!rawUsername.includes("@") && !usernamePattern.test(rawUsername)) {
-      alert("로그인 아이디는 영문, 숫자, 점(.), 언더바(_), 하이픈(-)만 사용할 수 있습니다.");
+      void appAlert("알림", "로그인 아이디는 영문, 숫자, 점(.), 언더바(_), 하이픈(-)만 사용할 수 있습니다.");
       return;
     }
     if (!editingUserId && !userForm.password.trim()) {
-      alert("새 계정은 비밀번호가 필요합니다.");
+      void appAlert("알림", "새 계정은 비밀번호가 필요합니다.");
       return;
     }
     const dup = users.find((u) => u.username === userForm.username.trim() && u.id !== editingUserId);
     if (dup) {
-      alert("이미 사용 중인 아이디입니다.");
+      void appAlert("알림", "이미 사용 중인 아이디입니다.");
       return;
     }
 
@@ -11458,7 +11499,7 @@ export default function App() {
 
           if (createError) {
             console.error("Edge Function user creation failed:", createError);
-            alert(`사용자 생성 실패: ${translateSupabaseError((createError as any).message || String(createError))}`);
+            void appAlert("알림", `사용자 생성 실패: ${translateSupabaseError((createError as any).message || String(createError))}`);
             return;
           }
 
@@ -11485,7 +11526,7 @@ export default function App() {
 
           if (updateError) {
             console.error("Profile update failed:", updateError);
-            alert(`프로필 업데이트 실패: ${translateSupabaseError((updateError as any).message || String(updateError))}`);
+            void appAlert("알림", `프로필 업데이트 실패: ${translateSupabaseError((updateError as any).message || String(updateError))}`);
             return;
           }
         }
@@ -11495,13 +11536,13 @@ export default function App() {
           const { error: releaseError } = await updateProfileOnly(releasePrevManagerId, { dorm_id: null });
           if (releaseError) {
             console.error("기존 관리자 해제 실패:", releaseError);
-            alert(`기존 관리자 해제 실패: ${translateSupabaseError((releaseError as any).message || String(releaseError))}`);
+            void appAlert("알림", `기존 관리자 해제 실패: ${translateSupabaseError((releaseError as any).message || String(releaseError))}`);
             return;
           }
         }
       } catch (err) {
         console.error("Supabase user save failed:", err);
-        alert(`Supabase 저장 실패: ${translateSupabaseError(String(err))}`);
+        void appAlert("알림", `Supabase 저장 실패: ${translateSupabaseError(String(err))}`);
         return;
       }
     } else if (releasePrevManagerId) {
@@ -11622,7 +11663,7 @@ export default function App() {
   const saveMilitaryPersonnel = () => {
     if (!canEditData(currentUser)) return;
     if (!militaryPersonnelForm.name.trim()) {
-      alert("이름을 입력하세요.");
+      void appAlert("알림", "이름을 입력하세요.");
       return;
     }
     const existing = editingMilitaryPersonnelId ? militaryPersonnel.find((item) => item.id === editingMilitaryPersonnelId) : null;
@@ -11850,11 +11891,11 @@ export default function App() {
 
     // 자동생성 OFF → 생성하지 않고 사유 안내
     if (!autoEnabled) {
-      alert("훈련기록 자동생성 0건\n자동생성이 OFF 상태입니다. (군대설정 > 훈련 자동생성 설정에서 ON 필요)");
+      void appAlert("알림", "훈련기록 자동생성 0건\n자동생성이 OFF 상태입니다. (군대설정 > 훈련 자동생성 설정에서 ON 필요)");
       return;
     }
     if (targetStatuses.length === 0) {
-      alert("훈련기록 자동생성 0건\n자동생성 대상 재직상태가 설정되지 않았습니다. (군대설정에서 대상 상태 선택 필요)");
+      void appAlert("알림", "훈련기록 자동생성 0건\n자동생성 대상 재직상태가 설정되지 않았습니다. (군대설정에서 대상 상태 선택 필요)");
       return;
     }
 
@@ -11907,7 +11948,7 @@ export default function App() {
       const reason = dupSkipped > 0
         ? `대상자는 있으나 모두 이미 생성되어 있습니다. (중복 제외 ${dupSkipped}건)`
         : `생성 대상(예비군 1~6년차 / 민방위 1~5년차)이 없습니다. (재직상태 제외 ${statusExcluded}명 · 교육 비대상 ${notTarget}명)`;
-      alert(`훈련기록 자동생성 0건\n${reason}`);
+      void appAlert("알림", `훈련기록 자동생성 0건\n${reason}`);
       return;
     }
 
@@ -11936,17 +11977,17 @@ export default function App() {
         });
       });
     }
-    alert(`훈련기록 자동생성 완료\n생성 ${newRecords.length}건 / 중복 제외 ${dupSkipped}건 / 재직상태 제외 ${statusExcluded}명 / 교육 비대상 ${notTarget}명${newNotices.length > 0 ? `\n통보서 ${newNotices.length}건 생성` : ""}\n\n※ 생성된 훈련기록은 'Supabase 저장' 버튼을 눌러 반영하세요.`);
+    void appAlert("알림", `훈련기록 자동생성 완료\n생성 ${newRecords.length}건 / 중복 제외 ${dupSkipped}건 / 재직상태 제외 ${statusExcluded}명 / 교육 비대상 ${notTarget}명${newNotices.length > 0 ? `\n통보서 ${newNotices.length}건 생성` : ""}\n\n※ 생성된 훈련기록은 'Supabase 저장' 버튼을 눌러 반영하세요.`);
   };
 
   const saveMilitaryTraining = () => {
     if (!canEditData(currentUser)) return;
     if (!militaryTrainingForm.personnelId) {
-      alert("훈련 대상자를 선택하세요.");
+      void appAlert("알림", "훈련 대상자를 선택하세요.");
       return;
     }
     if (!militaryTrainingForm.subject.trim()) {
-      alert("훈련명을 입력하세요.");
+      void appAlert("알림", "훈련명을 입력하세요.");
       return;
     }
     const person = militaryPersonnel.find((p) => p.id === militaryTrainingForm.personnelId);
@@ -11996,11 +12037,11 @@ export default function App() {
   const saveMilitaryNotice = () => {
     if (!canEditData(currentUser)) return;
     if (!militaryNoticeForm.personnelIds?.length) {
-      alert("통보 받을 인원을 선택하세요.");
+      void appAlert("알림", "통보 받을 인원을 선택하세요.");
       return;
     }
     if (!militaryNoticeForm.title.trim()) {
-      alert("공지 제목을 입력하세요.");
+      void appAlert("알림", "공지 제목을 입력하세요.");
       return;
     }
     const existing = editingMilitaryNoticeId ? militaryNotices.find((item) => item.id === editingMilitaryNoticeId) : null;
@@ -12079,13 +12120,13 @@ export default function App() {
       const reason = dupSkipped > 0
         ? `대상 훈련기록은 있으나 통보서가 모두 이미 생성되어 있습니다. (중복 제외 ${dupSkipped}건)`
         : `생성 대상 훈련기록이 없습니다. (훈련완료 제외 ${completedSkipped}건 · 대상아님 ${notTarget}건 · 인사정보 누락 ${missingPerson}건)`;
-      alert(`통보서 자동생성 0건\n${reason}`);
+      void appAlert("알림", `통보서 자동생성 0건\n${reason}`);
       return;
     }
 
     setMilitaryNotices((prev) => [...toCreate, ...prev]);
     toCreate.forEach((n) => createAuditLog({ targetType: "militaryNotice", targetId: n.id, actionType: "create", changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "", beforeValue: "", afterValue: JSON.stringify(n) }));
-    alert(`통보서 자동생성 완료\n생성 ${toCreate.length}건 / 중복 제외 ${dupSkipped}건 / 대상아님 ${notTarget}건 / 인사정보 누락 ${missingPerson}건 / 훈련완료 제외 ${completedSkipped}건\n\n※ 생성된 통보서는 'Supabase 저장' 버튼을 눌러 반영하세요.`);
+    void appAlert("알림", `통보서 자동생성 완료\n생성 ${toCreate.length}건 / 중복 제외 ${dupSkipped}건 / 대상아님 ${notTarget}건 / 인사정보 누락 ${missingPerson}건 / 훈련완료 제외 ${completedSkipped}건\n\n※ 생성된 통보서는 'Supabase 저장' 버튼을 눌러 반영하세요.`);
   };
 
   const openNoticePrintWindow = (notice: MilitaryNotice) => {
@@ -12277,13 +12318,13 @@ export default function App() {
 
     setMilitaryReports((prev) => [...reports, ...prev]);
     reports.forEach((r) => createAuditLog({ targetType: 'militaryReport', targetId: r.id, actionType: 'create', changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || '', beforeValue: '', afterValue: JSON.stringify(r) }));
-    alert(`${reports.length}개의 리포트를 생성했습니다.`);
+    void appAlert("알림", `${reports.length}개의 리포트를 생성했습니다.`);
   };
 
   const saveMilitaryReport = () => {
     if (!canEditData(currentUser)) return;
     if (!militaryReportForm.title.trim()) {
-      alert("보고서 제목을 입력하세요.");
+      void appAlert("알림", "보고서 제목을 입력하세요.");
       return;
     }
     const existing = editingMilitaryReportId ? militaryReports.find((item) => item.id === editingMilitaryReportId) : null;
@@ -12400,7 +12441,7 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     }));
     if (capacityErrors.length > 0) {
-      alert("기숙사 정원 값에 오류가 있어 업로드를 중단했습니다.\n\n" + capacityErrors.slice(0, 15).join("\n") + (capacityErrors.length > 15 ? `\n… 외 ${capacityErrors.length - 15}건` : ""));
+      void appAlert("알림", "기숙사 정원 값에 오류가 있어 업로드를 중단했습니다.\n\n" + capacityErrors.slice(0, 15).join("\n") + (capacityErrors.length > 15 ? `\n… 외 ${capacityErrors.length - 15}건` : ""));
       return;
     }
     setDormContracts((prev) => [...mapped, ...prev]);
@@ -12624,7 +12665,7 @@ export default function App() {
       });
       setExcelPreview({ file, fileName: file.name, tableType, result });
     } catch (e) {
-      alert(`엑셀 파일을 읽을 수 없습니다: ${String(e)}`);
+      void appAlert("알림", `엑셀 파일을 읽을 수 없습니다: ${String(e)}`);
     }
   };
 
@@ -12647,7 +12688,7 @@ export default function App() {
     if (!excelPreview) return;
     if (excelPreview.result.summary.error > 0) return; // 오류 있으면 차단
     if (excelPreview.result.summary.warning > 0) {
-      if (!window.confirm(`경고 ${excelPreview.result.summary.warning}건이 있습니다. 그래도 업로드하시겠습니까?`)) return;
+      if (!await appConfirm("확인", `경고 ${excelPreview.result.summary.warning}건이 있습니다. 그래도 업로드하시겠습니까?`)) return;
     }
     const file = excelPreview.file;
     setExcelPreview(null);
@@ -12716,17 +12757,17 @@ export default function App() {
     }).filter((x): x is InventoryItem => x !== null);
     // 필수값 누락은 업로드 전 오류 표시(상태 경고는 진행). 필수 누락이 하나라도 있으면 중단.
     const criticalErrors = errors.filter((e) => e.includes("필수"));
-    if (criticalErrors.length > 0) { alert("업로드 취소 — 필수값 누락:\n" + criticalErrors.slice(0, 20).join("\n")); return; }
+    if (criticalErrors.length > 0) { void appAlert("알림", "업로드 취소 — 필수값 누락:\n" + criticalErrors.slice(0, 20).join("\n")); return; }
     // 중복 방지: 비품명+건물명+동+호수+구매일 기준(기존 데이터 덮어쓰기 금지, 신규만 추가).
     const keyOf = (i: InventoryItem) => `${i.itemName}|${i.buildingName}|${stripDongHoSuffix(i.dong)}|${stripDongHoSuffix(i.roomHo)}|${i.purchaseDate}`.toLowerCase();
     const existingKeys = new Set(inventory.filter((x) => !x.isDeleted).map(keyOf));
     const seen = new Set<string>();
     const toAdd = parsed.filter((i) => { const k = keyOf(i); if (existingKeys.has(k) || seen.has(k)) return false; seen.add(k); return true; });
     const skipped = parsed.length - toAdd.length;
-    if (toAdd.length === 0) { alert(`추가할 신규 비품이 없습니다. (중복 ${skipped}건)`); return; }
+    if (toAdd.length === 0) { void appAlert("알림", `추가할 신규 비품이 없습니다. (중복 ${skipped}건)`); return; }
     userMutationTickRef.current += 1;
     setInventory((prev) => [...toAdd, ...prev]);
-    alert(`비품 ${toAdd.length}건 등록 완료${skipped > 0 ? ` · 중복 ${skipped}건 제외` : ""}${errors.some((e) => e.includes("상태")) ? "\n※ 일부 상태값이 인식되지 않아 '정상'으로 처리했습니다." : ""}`);
+    void appAlert("알림", `비품 ${toAdd.length}건 등록 완료${skipped > 0 ? ` · 중복 ${skipped}건 제외` : ""}${errors.some((e) => e.includes("상태")) ? "\n※ 일부 상태값이 인식되지 않아 '정상'으로 처리했습니다." : ""}`);
   };
 
   const uploadExcel = async (file: File) => {
@@ -12771,7 +12812,7 @@ export default function App() {
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
     const headers = getWorksheetHeaders(worksheet);
     if (headers.length === 0) {
-      alert("첫 번째 행에서 헤더를 찾을 수 없습니다. 올바른 엑셀파일을 업로드해주세요.");
+      void appAlert("알림", "첫 번째 행에서 헤더를 찾을 수 없습니다. 올바른 엑셀파일을 업로드해주세요.");
       return;
     }
 
@@ -12793,7 +12834,7 @@ export default function App() {
 
 const exportExcel = () => {
   if (!canEditData(currentUser)) {
-    alert("엑셀 다운로드는 관리자 권한이 필요합니다.");
+    void appAlert("알림", "엑셀 다운로드는 관리자 권한이 필요합니다.");
     return;
   }
   let rows: Record<string, unknown>[] = [];
@@ -13928,11 +13969,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   };
 
   // [5]~[9] 선택 기숙사 일괄 정원 설정: 선택한 기숙사(및 연결 유효 계약)만 정원 갱신 → 기존 자동저장/Realtime 로 반영.
-  const applyBulkCapacity = () => {
+  const applyBulkCapacity = async () => {
     if (!canEditData(currentUser) || bulkCapacitySaving) return;
     const cap = Number(bulkCapacityValue);
     if (!Number.isInteger(cap) || cap < 1 || cap > 99) {
-      alert("새 정원은 1~99 사이의 숫자로 입력하세요.");
+      void appAlert("알림", "새 정원은 1~99 사이의 숫자로 입력하세요.");
       return;
     }
     const selectedDorms = visibleDorms.filter((d) => selectedDormIds.includes(d.id));
@@ -13946,7 +13987,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       const detail = overs
         .map((x) => `- ${x.d.buildingName} ${formatDong(x.d.dong)}-${formatRoomHo(x.d.roomHo)}: 현재 ${x.count}명 / 새 정원 ${cap}명`)
         .join("\n");
-      const ok = window.confirm(
+      const ok = await appConfirm("확인", 
         `선택한 기숙사 중 ${overs.length}곳은 현재 거주 인원이 새 정원을 초과합니다.\n\n${detail}\n\n` +
         "현재 거주자는 유지되며, 정원 이하가 될 때까지 신규 입주가 제한됩니다.\n적용하시겠습니까?"
       );
@@ -13979,10 +14020,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const openNewHireEdit = (h: NewHireEmployee) => {
     const { id: _id, ...rest } = h;
+    // 수정 화면에서는 기존 저장값을 유지(값이 없을 때만 자동선택으로 폴백).
     setNewHireForm({
       ...rest,
-      residenceStatus: "자동선택",
-      moveInType: "자동선택",
+      residenceStatus: (rest.residenceStatus as NewHireFormState["residenceStatus"]) || "자동선택",
+      moveInType: (rest.moveInType as NewHireFormState["moveInType"]) || "자동선택",
     });
     setEditingNewHireId(h.id);
     setShowNewHireForm(true);
@@ -14049,7 +14091,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const handleOccupantRowDoubleClick = (occupant: Occupant) => {
     if (currentUser?.role === "maintenance_reporter" && occupant.dormId !== currentUser.dormId) {
-      alert("본인 기숙사 관련 내용만 조회 가능합니다.");
+      void appAlert("알림", "본인 기숙사 관련 내용만 조회 가능합니다.");
       return;
     }
 
@@ -14090,7 +14132,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const handleDashboardContractDoubleClick = (dorm: OperationalDorm) => {
     if (!canAccessOperationalDorm(dorm)) {
-      alert("본인 기숙사 관련 내용만 조회 가능합니다.");
+      void appAlert("알림", "본인 기숙사 관련 내용만 조회 가능합니다.");
       return;
     }
     const contract = dormContracts.find((c) =>
@@ -14106,7 +14148,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const handleNewHireDoubleClick = (occupant: Occupant) => {
     if (currentUser?.role === "maintenance_reporter" && occupant.dormId !== currentUser.dormId) {
-      alert("본인 기숙사 관련 내용만 조회 가능합니다.");
+      void appAlert("알림", "본인 기숙사 관련 내용만 조회 가능합니다.");
       return;
     }
     const targetHire = newHires.find((h) => h.name === occupant.employeeName && h.dormId === occupant.dormId);
@@ -14128,7 +14170,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           )
         : undefined;
       if (!contractDorm || contractDorm.id !== currentUser.dormId) {
-        window.alert("본인 기숙사 관련 내용만 조회 가능합니다.");
+        void appAlert("알림", "본인 기숙사 관련 내용만 조회 가능합니다.");
         return;
       }
     }
@@ -14176,7 +14218,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   const handleDormSummaryDoubleClick = (row: { id: string }) => {
     const dorm = operationalDorms.find((d) => d.id === row.id);
     if (!canAccessOperationalDorm(dorm)) {
-      alert("본인 기숙사 관련 내용만 조회 가능합니다.");
+      void appAlert("알림", "본인 기숙사 관련 내용만 조회 가능합니다.");
       return;
     }
     if (currentUser?.role === "admin" && dorm) {
@@ -14316,16 +14358,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   }, [dormContracts, occupants, currentUser?.displayName, tenantId]);
 
   // 변경이력 복구 함수
-  const restoreFromAuditLog = (auditLogId: string) => {
+  const restoreFromAuditLog = async (auditLogId: string) => {
     if (!canEditData(currentUser)) {
-      alert("복구는 관리자만 실행할 수 있습니다.");
+      void appAlert("알림", "복구는 관리자만 실행할 수 있습니다.");
       return;
     }
 
     const log = auditLogs.find((l) => l.id === auditLogId);
     if (!log) return;
 
-    const confirmed = window.confirm(
+    const confirmed = await appConfirm("확인", 
       `정말 이전값으로 복구하시겠습니까?\n\n대상: ${formatAuditTarget(log)}\n시간: ${formatDateTimeKorea(log.changedAt)}\n변경자: ${getUserDisplayName(log.changedBy)}`
     );
     if (!confirmed) return;
@@ -14360,14 +14402,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     }
   };
 
-  const softDeleteItems = <T extends { id: string; isDeleted?: boolean; deletedAt?: string; deletedBy?: string; updatedAt?: string }>(
+  const softDeleteItems = async <T extends { id: string; isDeleted?: boolean; deletedAt?: string; deletedBy?: string; updatedAt?: string }>(
     items: T[],
     setter: React.Dispatch<React.SetStateAction<T[]>>,
     ids: string[],
     targetType: AuditLog["targetType"]
   ) => {
     if (ids.length === 0) return false;
-    if (!confirm("삭제할까요?")) return false;
+    if (!(await appConfirm("삭제 확인", "삭제할까요?", { confirmText: "삭제", tone: "danger" }))) return false;
     const now = new Date().toISOString();
     const deletedBy = currentUser?.id || currentUser?.username || currentUser?.displayName || "";
     const beforeMap = new Map(items.filter((entry) => ids.includes(entry.id)).map((entry) => [entry.id, entry]));
@@ -14419,9 +14461,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   // 기숙사 삭제: 화면 목록은 dorm_contracts 기반이므로, 동일 기숙사를 가리키는
   // 계약과 dorms 레코드를 함께 soft-delete 해야 목록/통계에 삭제가 반영됨.
-  const softDeleteDormsCascade = (operationalDormIds: string[]) => {
+  const softDeleteDormsCascade = async (operationalDormIds: string[]) => {
     if (operationalDormIds.length === 0) return false;
-    if (!confirm("삭제할까요?")) return false;
+    if (!(await appConfirm("삭제 확인", "삭제할까요?", { confirmText: "삭제", tone: "danger" }))) return false;
     const now = new Date().toISOString();
     const deletedBy = currentUser?.id || currentUser?.username || currentUser?.displayName || "";
     const idSet = new Set(operationalDormIds);
@@ -14478,11 +14520,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     return true;
   };
 
-  const deleteById = <T extends { id: string }>(
+  const deleteById = async <T extends { id: string }>(
     setter: React.Dispatch<React.SetStateAction<T[]>>,
     id: string
   ) => {
-    if (!confirm("삭제할까요?")) return;
+    if (!(await appConfirm("삭제 확인", "삭제할까요?", { confirmText: "삭제", tone: "danger" }))) return;
     setter((prev) => prev.filter((item) => item.id !== id));
   };
 
@@ -14526,13 +14568,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   // 영구삭제: 로컬 state 에서 제거 + Supabase 행 hard delete → 새로고침/realtime/load 로 복원되지 않음.
   // (localStorage 는 state 기반 자동저장이라 다음 저장 시 제거 반영. 군대 모듈은 state 제거 후 블롭 재저장으로 반영.)
-  const permanentlyDeleteItem = <T extends { id: string }>(
+  const permanentlyDeleteItem = async <T extends { id: string }>(
     items: T[],
     setter: React.Dispatch<React.SetStateAction<T[]>>,
     id: string,
     targetType: AuditLog["targetType"],
     options?: { skipConfirm?: boolean }
-  ): boolean => {
+  ): Promise<boolean> => {
     const existing = items.find((entry) => entry.id === id);
     if (!existing) return false;
     if (!options?.skipConfirm && !confirm("영구 삭제할까요?\n\n이 작업은 되돌릴 수 없으며, 데이터가 완전히 삭제됩니다.")) return false;
@@ -14794,6 +14836,93 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dorms, operationalDorms, occupants, newHires, defects, cleaningReports, unifiedCurrentResidents]);
+
+  // [항목4] 9개 보고서 공통 설정(ReportView 재사용). 기존 메모/데이터 재사용 — 새 조회/저장 없음.
+  const reportConfigs = useMemo<Record<string, ReportConfig>>(() => {
+    const dormLabel = (d: { buildingName?: string; dong?: string; roomHo?: string }) => `${d.buildingName || ""} ${formatDong(d.dong || "")}-${formatRoomHo(d.roomHo || "")}`.trim();
+    const cur = (id: string) => occupancyCountByDorm.get(id) || 0;
+    const findDorm = (id: string) => operationalDorms.find((d) => d.id === id) || dorms.find((d) => d.id === id);
+
+    // ① 전체 운영 현황
+    const overall: ReportConfig = {
+      title: "전체 운영 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      rows: siteGenderStats.map((s) => ({ 지역: s.site, 성별: s.gender, 기숙사수: s.dormCount, 재원: s.currentResidents, 정원: s.totalCapacity, 공실: s.vacancy, "입주율(%)": s.totalCapacity ? Math.round((s.currentResidents / s.totalCapacity) * 100) : 0 })),
+      columns: [{ key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "기숙사수", label: "기숙사수" }, { key: "재원", label: "재원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "입주율(%)", label: "입주율(%)" }],
+      filterKeys: ["지역", "성별"], chart: { type: "bar", groupKey: "지역", valueKey: "재원", label: "지역별 재원" },
+      extraKpis: [{ label: "전체 재원", value: String(siteGenderStats.reduce((a, s) => a + s.currentResidents, 0)) }, { label: "전체 정원", value: String(siteGenderStats.reduce((a, s) => a + s.totalCapacity, 0)) }],
+    };
+    // ② 기숙사별 입주 현황
+    const dormOcc: ReportConfig = {
+      title: "기숙사별 입주 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      rows: operationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 지역: d.site, 성별: d.gender, 기숙사: dormLabel(d), 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
+      columns: [{ key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "기숙사", label: "기숙사" }, { key: "현재인원", label: "현재인원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "상태", label: "상태" }],
+      filterKeys: ["지역", "성별", "상태"], chart: { type: "pie", groupKey: "상태", label: "입주 상태 분포" },
+    };
+    // ③ 계약 만료 예정
+    const expiry: ReportConfig = {
+      title: "계약 만료 예정 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      rows: operationalDorms.filter((d) => d.contractEnd).map((d) => { const dd = daysDiff(d.contractEnd); return { 기숙사: dormLabel(d), 지역: d.site, 계약시작: formatDateOnly(d.contractStart || ""), 계약종료: formatDateOnly(d.contractEnd || ""), "D-day": dd >= 0 ? `D-${dd}` : `만료 ${-dd}일 경과`, 만료월: (d.contractEnd || "").slice(0, 7), 상태: d.leaseStatus, _end: (d.contractEnd || "").slice(0, 10) }; }),
+      columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "계약시작", label: "계약시작" }, { key: "계약종료", label: "계약종료" }, { key: "D-day", label: "D-day" }, { key: "상태", label: "상태" }],
+      filterKeys: ["지역", "상태"], dateField: "_end", chart: { type: "bar", groupKey: "만료월", label: "월별 만료 건수" },
+    };
+    // ④ 공실/입주율
+    const vacancy: ReportConfig = {
+      title: "공실/입주율 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      rows: operationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 기숙사: dormLabel(d), 지역: d.site, 성별: d.gender, 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), "입주율(%)": k ? Math.round((c / k) * 100) : 0, 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
+      columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "현재인원", label: "현재인원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "입주율(%)", label: "입주율(%)" }, { key: "상태", label: "상태" }],
+      filterKeys: ["지역", "성별", "상태"], chart: { type: "pie", groupKey: "상태", label: "공실/사용 분포" },
+      extraKpis: [{ label: "전체 입주율", value: `${(() => { const tot = operationalDorms.reduce((a, d) => a + getDormCapacity(d), 0); const occ = operationalDorms.reduce((a, d) => a + cur(d.id), 0); return tot ? Math.round((occ / tot) * 100) : 0; })()}%` }],
+    };
+    // ⑤ 청소 점검
+    const cleaning: ReportConfig = {
+      title: "청소 점검 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      rows: cleaningReports.filter((r) => !r.isDeleted && !r.isPermanentDeleted).map((r) => ({ 보고일: formatDateOnly(r.reportDate || ""), 기숙사: `${r.buildingName || ""} ${formatDong(r.dong || "")}-${formatRoomHo(r.roomHo || "")}`.trim(), 지역: r.site, 상태: r.cleanStatus, 점수: r.score ?? "", 담당자: r.managerName || "", _date: (r.reportDate || "").slice(0, 10) })),
+      columns: [{ key: "보고일", label: "보고일" }, { key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "상태", label: "상태" }, { key: "점수", label: "점수" }, { key: "담당자", label: "담당자" }],
+      filterKeys: ["지역", "상태"], dateField: "_date", chart: { type: "pie", groupKey: "상태", label: "청소 상태 분포" },
+    };
+    // ⑥ 하자 접수 현황
+    const defect: ReportConfig = {
+      title: "하자 접수 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      rows: defects.filter((d) => !d.isDeleted && !d.isPermanentDeleted).map((d) => ({ 접수일: formatDateOnly(d.receiptDate || ""), 기숙사: `${d.buildingName || ""} ${formatDong(d.dong || "")}-${formatRoomHo(d.ho || "")}`.trim(), 지역: d.site, 상태: d.defectStatus, 내용: (d.requestText || "").slice(0, 40), _date: (d.receiptDate || "").slice(0, 10) })),
+      columns: [{ key: "접수일", label: "접수일" }, { key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "상태", label: "상태" }, { key: "내용", label: "내용" }],
+      filterKeys: ["지역", "상태"], dateField: "_date", chart: { type: "pie", groupKey: "상태", label: "하자 상태 분포" },
+    };
+    // ⑦ 비품 현황
+    const inv: ReportConfig = {
+      title: "비품 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      rows: inventory.filter((i) => !i.isDeleted && !i.isPermanentDeleted).map((i) => ({ 기숙사: `${i.buildingName || ""} ${formatDong(i.dong || "")}-${formatRoomHo(i.roomHo || "")}`.trim(), 지역: i.site, 비품명: i.itemName || "", 수량: i.quantity ?? "", 상태: i.status, 구매일: formatDateOnly(i.purchaseDate || ""), 구매업체: i.purchaseVendor || "", _date: (i.purchaseDate || "").slice(0, 10) })),
+      columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "비품명", label: "비품명" }, { key: "수량", label: "수량" }, { key: "상태", label: "상태" }, { key: "구매일", label: "구매일" }, { key: "구매업체", label: "구매업체" }],
+      filterKeys: ["지역", "상태"], dateField: "_date", chart: { type: "pie", groupKey: "상태", label: "비품 상태 분포" },
+    };
+    // ⑧ 정산 요약
+    const settlement: ReportConfig = {
+      title: "정산 요약 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      rows: settlementRecords.map((r) => { const d = findDorm(r.dormId); return { 연월: `${r.settlementYear}-${r.settlementMonth}`, 기숙사: d ? dormLabel(d) : "-", 기타비용: r.miscCost ?? 0, 비고: r.notes || "", _date: `${r.settlementYear}-${String(r.settlementMonth).padStart(2, "0")}-01` }; }),
+      columns: [{ key: "연월", label: "연월" }, { key: "기숙사", label: "기숙사" }, { key: "기타비용", label: "기타비용" }, { key: "비고", label: "비고" }],
+      filterKeys: ["연월"], dateField: "_date", chart: { type: "bar", groupKey: "연월", valueKey: "기타비용", label: "연월별 기타비용" },
+      extraKpis: [{ label: "기타비용 합계", value: settlementRecords.reduce((a, r) => a + (r.miscCost || 0), 0).toLocaleString() }],
+    };
+    // ⑨ 예비군/민방위
+    const military: ReportConfig = {
+      title: "예비군/민방위 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      rows: militaryPersonnel.filter((p) => !p.isDeleted && !p.isPermanentDeleted).map((p) => ({ 이름: p.name, 계급: p.rank || "", 소속: p.unit || "", 구분: p.manualCategory || "미분류", 상태: p.status || "", 전역일: formatDateOnly(p.dischargeDate || "") })),
+      columns: [{ key: "이름", label: "이름" }, { key: "계급", label: "계급" }, { key: "소속", label: "소속" }, { key: "구분", label: "구분" }, { key: "상태", label: "상태" }, { key: "전역일", label: "전역일" }],
+      filterKeys: ["구분", "상태"], chart: { type: "pie", groupKey: "구분", label: "구분 분포" },
+    };
+
+    return {
+      "전체 운영 현황": overall,
+      "기숙사별 입주 현황": dormOcc,
+      "계약 만료 예정": expiry,
+      "공실/입주율": vacancy,
+      "청소 점검": cleaning,
+      "하자 접수 현황": defect,
+      "비품 현황": inv,
+      "정산 요약": settlement,
+      "예비군/민방위": military,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [siteGenderStats, operationalDorms, dorms, occupancyCountByDorm, cleaningReports, defects, inventory, settlementRecords, militaryPersonnel, reportYear, reportMonth]);
 
   // 운영 현황 차트 데이터 (대시보드 시각화) — isDeleted/종료·해지/퇴실 제외, 0분모=0 처리
   const dashboardChartData = useMemo(() => {
@@ -16393,9 +16522,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             <button type="button" onClick={(e) => { e.stopPropagation(); openMilitaryPersonnelEdit(p); }} className="rounded-xl border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-100">수정</button>
                             <button
                               type="button"
-                              onClick={(e) => {
+                              onClick={async (e) => {
                                 e.stopPropagation();
-                                if (!confirm("해당 인원을 삭제하시겠습니까?")) return;
+                                if (!(await appConfirm("삭제 확인", "해당 인원을 삭제하시겠습니까?", { confirmText: "삭제", tone: "danger" }))) return;
                                 const existing = militaryPersonnel.find((m) => m.id === p.id);
                                 if (!existing) return;
                                 setMilitaryPersonnel((prev) => prev.filter((m) => m.id !== p.id));
@@ -16577,8 +16706,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           </button>
                           <button
                             type="button"
-                            onClick={() => {
-                              if (!confirm("해당 훈련 기록을 삭제하시겠습니까?")) return;
+                            onClick={async () => {
+                              if (!(await appConfirm("삭제 확인", "해당 훈련 기록을 삭제하시겠습니까?", { confirmText: "삭제", tone: "danger" }))) return;
                               const existing = militaryTrainingRecords.find((item) => item.id === record.id);
                               if (!existing) return;
                               setMilitaryTrainingRecords((prev) => prev.filter((item) => item.id !== record.id));
@@ -16706,8 +16835,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                if (!confirm("해당 공지를 삭제하시겠습니까?")) return;
+                              onClick={async () => {
+                                if (!(await appConfirm("삭제 확인", "해당 공지를 삭제하시겠습니까?", { confirmText: "삭제", tone: "danger" }))) return;
                                 const existing = militaryNotices.find((item) => item.id === notice.id);
                                 if (!existing) return;
                                 setMilitaryNotices((prev) => prev.filter((item) => item.id !== notice.id));
@@ -16821,8 +16950,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           >수정</button>
                           <button
                             type="button"
-                            onClick={() => {
-                              if (!confirm("해당 보고서를 삭제하시겠습니까?")) return;
+                            onClick={async () => {
+                              if (!(await appConfirm("삭제 확인", "해당 보고서를 삭제하시겠습니까?", { confirmText: "삭제", tone: "danger" }))) return;
                               const existing = militaryReports.find((item) => item.id === report.id);
                               if (!existing) return;
                               setMilitaryReports((prev) => prev.filter((item) => item.id !== report.id));
@@ -17423,12 +17552,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
                 {canEditData(currentUser) && selectedDormContractIds.length > 0 && (
                   <button
-                    onClick={() => {
+                    onClick={async () => {
                       const idsToDelete = selectedDormContractIds;
                       setSelectedDormContractIds([]);
                       setEditingDormContractId(null);
                       setShowDormContractForm(false);
-                      if (softDeleteItems(dormContracts, setDormContracts, idsToDelete, "dormContract")) {
+                      if (await softDeleteItems(dormContracts, setDormContracts, idsToDelete, "dormContract")) {
                         // selection already cleared before delete
                       }
                     }}
@@ -17664,14 +17793,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
                 {canEditData(currentUser) && selectedNewHireIds.length > 0 && (
                   <button
-                    onClick={() => {
+                    onClick={async () => {
                       const idsToDelete = selectedNewHireIds;
                       setSelectedNewHireIds([]);
                       setEditingNewHireId(null);
                       setShowNewHireForm(false);
                       setAssigningNewHireId(null);
                       setShowAssignDormForNewHire(false);
-                      if (softDeleteItems(newHires, setNewHires, idsToDelete, "newHire")) {
+                      if (await softDeleteItems(newHires, setNewHires, idsToDelete, "newHire")) {
                         const now = new Date().toISOString();
                         const today = now.slice(0, 10);
                         const deletedBy = currentUser?.displayName || currentUser?.username || currentUser?.id || "";
@@ -17936,8 +18065,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 )}
                 {canEditData(currentUser) && selectedDormIds.length > 0 && (
                   <button
-                    onClick={() => {
-                      if (softDeleteDormsCascade(selectedDormIds)) {
+                    onClick={async () => {
+                      if (await softDeleteDormsCascade(selectedDormIds)) {
                         setSelectedDormIds([]);
                       }
                     }}
@@ -18642,11 +18771,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       disabled={!canAssign}
                       onClick={async () => {
                         try {
-                          if (!selectedDorm) { alert("기숙사를 선택해주세요."); return; }
-                          if (count === 0) { alert("배정할 인원을 선택해주세요."); return; }
+                          if (!selectedDorm) { void appAlert("알림", "기숙사를 선택해주세요."); return; }
+                          if (count === 0) { void appAlert("알림", "배정할 인원을 선택해주세요."); return; }
 
                           if (totalAfter > capacity) {
-                            if (!confirm(`현재 ${currentOccupants}명 거주 중 / 정원 ${capacity}명입니다. ${count}명을 배정하면 정원을 초과합니다. 그래도 배정하시겠습니까?`)) {
+                            if (!(await appConfirm("배정 확인", `현재 ${currentOccupants}명 거주 중 / 정원 ${capacity}명입니다. ${count}명을 배정하면 정원을 초과합니다. 그래도 배정하시겠습니까?`))) {
                               return;
                             }
                           }
@@ -18692,7 +18821,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         }
                         } catch (e) {
                           console.error("[신입사원 일괄배정] 처리 실패:", e);
-                          alert("배정 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+                          void appAlert("알림", "배정 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
                         }
                       }}
                       className={`rounded-2xl px-6 py-3 text-sm font-semibold text-white ${canAssign ? "bg-blue-600 hover:bg-blue-500" : "cursor-not-allowed bg-slate-300"}`}
@@ -18799,13 +18928,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             >
               <h3 className="text-lg font-semibold">{appModal.title}</h3>
               <p className="mt-3 whitespace-pre-line text-sm text-slate-500">{appModal.message}</p>
-              {appModal.requireText && (
+              {(appModal.requireText || appModal.promptMode) && (
                 <input
                   type="text"
                   autoFocus
                   value={appModalInput}
                   onChange={(e) => setAppModalInput(e.target.value)}
-                  placeholder={`"${appModal.requireText}" 입력`}
+                  placeholder={appModal.promptMode ? "값을 입력하세요" : `"" 입력`}
                   className={`mt-4 w-full rounded-2xl border px-3 py-2 text-sm outline-none ${theme.darkMode ? "border-slate-600 bg-slate-950 text-slate-100 focus:border-slate-400" : "border-slate-300 bg-white text-slate-900 focus:border-slate-400"}`}
                 />
               )}
@@ -19319,8 +19448,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               />
               {canEditData(currentUser) && selectedInventoryIds.length > 0 && (
                 <button
-                  onClick={() => {
-                    if (softDeleteItems(inventory, setInventory, selectedInventoryIds, "inventory")) {
+                  onClick={async () => {
+                    if (await softDeleteItems(inventory, setInventory, selectedInventoryIds, "inventory")) {
                       setSelectedInventoryIds([]);
                     }
                   }}
@@ -19938,13 +20067,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 {canEditData(currentUser) && (
                                   <button
                                     type="button"
-                                    onClick={(e) => {
+                                    onClick={async (e) => {
                                       e.stopPropagation();
-                                      const value = window.prompt("기타 비용(원)을 입력하세요.", String(manualCost || 0));
+                                      const value = await appPrompt("기타 비용", "기타 비용(원)을 입력하세요.", String(manualCost || 0));
                                       if (value === null) return;
                                       const amount = Number(value.replace(/,/g, ""));
                                       if (Number.isNaN(amount) || amount < 0) {
-                                        alert("유효한 금액을 입력하세요.");
+                                        void appAlert("알림", "유효한 금액을 입력하세요.");
                                         return;
                                       }
                                       saveSettlementMiscCost(dorm.id, amount);
@@ -21080,6 +21209,20 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
             </div>
             
+            {/* [항목4] 9개 보고서 허브 — 필터/KPI/차트/테이블 + Excel/CSV/PDF·인쇄 (기존 통계는 아래 유지) */}
+            <div className={`mb-6 rounded-3xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-white"}`}>
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <h3 className="text-base font-semibold">보고서</h3>
+                <div className="flex flex-wrap gap-1">
+                  {Object.keys(reportConfigs).map((k) => (
+                    <button key={k} type="button" onClick={() => setSelectedReportKey(k)}
+                      className={`rounded-lg px-3 py-1.5 text-xs font-medium ${selectedReportKey === k ? "bg-blue-600 text-white" : (theme.darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200")}`}>{k}</button>
+                  ))}
+                </div>
+              </div>
+              {reportConfigs[selectedReportKey] && <ReportView config={reportConfigs[selectedReportKey]} darkMode={theme.darkMode} />}
+            </div>
+
             {/* 자동 집계 통계 */}
             <div className="grid gap-4 md:grid-cols-4">
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-blue-50 to-blue-100 p-4" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-blue-50 to-blue-100 p-4"}`}>
@@ -21900,8 +22043,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           </td>
                           <td className="px-3 py-2 text-center">
                             <button
-                              onClick={() => {
-                                const newName = prompt("새 메뉴명:", menu.menuName);
+                              onClick={async () => {
+                                const newName = await appPrompt("메뉴명 변경", "새 메뉴명:", menu.menuName);
                                 if (newName) {
                                   setSystemSettings((prev) => ({
                                     ...prev,
@@ -23110,8 +23253,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             복원
                           </button>
                           <button
-                            onClick={() => {
-                              if (!permanentlyDeleteItem(newHires, setNewHires, hire.id, "newHire")) return;
+                            onClick={async () => {
+                              if (!(await permanentlyDeleteItem(newHires, setNewHires, hire.id, "newHire"))) return;
                               // 연동 입주자도 영구삭제(숨김) 처리 — sourceNewHireId 로 매칭, 휴지통 대상만.
                               occupants
                                 .filter((o) => o.sourceNewHireId === hire.id && o.isDeleted && !o.isPermanentDeleted)
@@ -23630,8 +23773,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
                 {canManageUsers(currentUser) && selectedDefectIds.length > 0 && (
                   <button
-                    onClick={() => {
-                      if (softDeleteItems(defects, setDefects, selectedDefectIds, "defect")) {
+                    onClick={async () => {
+                      if (await softDeleteItems(defects, setDefects, selectedDefectIds, "defect")) {
                         setSelectedDefectIds([]);
                       }
                     }}
@@ -24489,11 +24632,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           <div className="space-y-6">
             <FilteredDormSelector
               value=""
-              onChange={(dormId, dorm) => {
+              onChange={async (dormId, dorm) => {
                 if (!dorm) return;
                 const capacityInfo = dormCapacityInfo.find(info => info.dormId === dormId);
                 if (capacityInfo && !capacityInfo.available) {
-                  if (!window.confirm(`현재 정원 ${capacityInfo.capacity}명 중 ${capacityInfo.currentResidents}명이 거주 중입니다. 그래도 배정하시겠습니까?`)) return;
+                  if (!await appConfirm("확인", `현재 정원 ${capacityInfo.capacity}명 중 ${capacityInfo.currentResidents}명이 거주 중입니다. 그래도 배정하시겠습니까?`)) return;
                 }
                 const newHire = newHires.find(h => h.id === assigningNewHireId);
                 if (!newHire) return;
@@ -24698,7 +24841,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             try {
                               const dataUrl = await readFileDataUrl(file); // 이미지는 압축(1280px), PDF 등은 원본 base64
                               setInventoryForm((f) => ({ ...f, proofFile: JSON.stringify({ name: file.name, data: dataUrl }) }));
-                            } catch { alert("파일을 불러오지 못했습니다."); }
+                            } catch { void appAlert("알림", "파일을 불러오지 못했습니다."); }
                             e.currentTarget.value = "";
                           }}
                           className="hidden"
@@ -24714,7 +24857,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           )}
                           <div className="min-w-0 flex-1 truncate text-xs font-medium text-slate-700">{proof.name || (isPdf ? "PDF 파일" : "첨부파일")}</div>
                           <button type="button" onClick={() => window.open(proof.data, "_blank")} className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold hover:bg-slate-100">열기</button>
-                          <button type="button" onClick={() => { if (window.confirm("증빙파일을 삭제할까요?")) setInventoryForm((f) => ({ ...f, proofFile: "" })); }} className="rounded-lg border border-rose-300 px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50">삭제</button>
+                          <button type="button" onClick={async () => { if (await appConfirm("확인", "증빙파일을 삭제할까요?")) setInventoryForm((f) => ({ ...f, proofFile: "" })); }} className="rounded-lg border border-rose-300 px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50">삭제</button>
                         </div>
                       ) : proof.name ? (
                         <div className="mt-2 truncate text-xs text-slate-500">기존 파일: {proof.name}</div>
@@ -25553,47 +25696,19 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           );
         })()}
 
-        {/* [10] 운영시뮬레이션 통계 인원 목록 모달(통계 숫자 클릭 시) */}
+        {/* [10] 운영시뮬레이션 통계 인원 목록 팝업(통계 숫자 클릭 시) — 필터/정렬/숨김/고정/선택/복사/Excel/CSV/인쇄 + 직원 상세 */}
         {simDetailModal && (
-          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={() => setSimDetailModal(null)}>
-            <div className={`my-8 w-full max-w-2xl rounded-3xl p-6 shadow-xl ${theme.darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
-              <div className="mb-4 flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-lg font-semibold">{simDetailModal.title}</h3>
-                  <p className="text-sm text-slate-500">{simDetailModal.rows.length}명</p>
-                </div>
-                <button onClick={() => setSimDetailModal(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">✕</button>
-              </div>
-              <div className="erp-table-container">
-                <table className="erp-table w-full text-left text-sm">
-                  <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
-                    <tr>
-                      <th className="px-3 py-2">이름</th>
-                      <th className="px-3 py-2">기숙사</th>
-                      <th className="px-3 py-2">입실일</th>
-                      <th className="px-3 py-2">계약종료일</th>
-                      <th className="px-3 py-2">실제퇴실일</th>
-                      <th className="px-3 py-2">천안이동일</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {simDetailModal.rows.length > 0 ? simDetailModal.rows.map((m, i) => (
-                      <tr key={i} className={theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}>
-                        <td className="px-3 py-2">{m.name}</td>
-                        <td className="px-3 py-2">{m.dorm}</td>
-                        <td className="px-3 py-2">{m.moveIn}</td>
-                        <td className="px-3 py-2">{m.contractEnd}</td>
-                        <td className="px-3 py-2">{m.actualMoveOut}</td>
-                        <td className="px-3 py-2">{m.cheonanMove}</td>
-                      </tr>
-                    )) : (
-                      <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-500">해당 인원이 없습니다.</td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
+          <SimMemberGridModal
+            title={simDetailModal.title}
+            rows={simDetailModal.rows}
+            darkMode={theme.darkMode}
+            onClose={() => setSimDetailModal(null)}
+            dormContracts={dormContracts}
+            newHires={newHires}
+            cleaningReports={cleaningReports}
+            defects={defects}
+            inventory={inventory}
+          />
         )}
 
         {/* [1] 정산 기숙사 상세보기 모달(카드 더블클릭) — 현재/퇴실 포함 거주 이력 표시 */}
