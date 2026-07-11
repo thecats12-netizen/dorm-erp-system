@@ -1159,8 +1159,8 @@ function newHireTemplate(): NewHireFormState {
     moveOutDate: "",
     actualMoveOutDate: "",
     cheonanMoveDate: "",
-    residenceStatus: "대기중", // 신규 등록 기본 거주상태: 대기(미배정)
-    moveInType: "신규",        // 신규 등록 기본 입주유형: 신규
+    residenceStatus: "자동선택", // 신규 등록 기본: 자동선택(DB 계약/배정/입실/퇴실 기준 자동계산 표시)
+    moveInType: "자동선택",      // 신규 등록 기본: 자동선택
     extensionReason: "",
     notes: "",
     createdAt: today,
@@ -14020,11 +14020,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const openNewHireEdit = (h: NewHireEmployee) => {
     const { id: _id, ...rest } = h;
-    // 수정 화면에서는 기존 저장값을 유지(값이 없을 때만 자동선택으로 폴백).
+    // 수정 화면: 거주상태/입주유형을 "자동선택"으로 열어 현재 DB 데이터(계약/배정/입실/퇴실/과거이력) 기준으로
+    // 자동 계산된 값을 표시한다. (DB 저장값을 강제 변경하지 않으며, 사용자가 직접 값을 고르면 수동 선택 유지)
     setNewHireForm({
       ...rest,
-      residenceStatus: (rest.residenceStatus as NewHireFormState["residenceStatus"]) || "자동선택",
-      moveInType: (rest.moveInType as NewHireFormState["moveInType"]) || "자동선택",
+      residenceStatus: "자동선택",
+      moveInType: "자동선택",
     });
     setEditingNewHireId(h.id);
     setShowNewHireForm(true);
@@ -18902,7 +18903,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <td className="px-3 py-3">{h.name}</td>
                     <td className="px-3 py-3">{h.department}</td>
                     <td className="px-3 py-3">{formatDateOnly(h.expectedMoveInDate) || "-"}</td>
-                    <td className="px-3 py-3">{h.residenceStatus}</td>
+                    <td className="px-3 py-3">{getNewHireStatus(h)}</td>
                     <td className="px-3 py-3">
                       <button className="text-blue-600 text-sm mr-3" onClick={() => { setAssigningNewHireId(h.id); setShowAssignDormForNewHire(true); }}>배정</button>
                       <button className="text-slate-700 text-sm" onClick={() => openNewHireEdit(h)}>수정</button>
