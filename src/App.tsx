@@ -118,6 +118,16 @@ import { DateFilter } from "./components";
 import FilteredDormSelector from "./components/FilteredDormSelector";
 import SimMemberGridModal, { type SimMemberRow } from "./components/SimMemberGridModal";
 import ReportView, { type ReportConfig } from "./components/ReportView";
+import ExamManagementPage from "./features/exam-management/pages/ExamManagementPage";
+import ExamRulesPage from "./features/exam-management/pages/ExamRulesPage";
+import ExamPersonnelPage from "./features/exam-management/pages/ExamPersonnelPage";
+import ExamApplicationsPage from "./features/exam-management/pages/ExamApplicationsPage";
+import ExamDmCertificationsPage from "./features/exam-management/pages/ExamDmCertificationsPage";
+import { ExamAnnualTargetsPage, ExamMonthlyResultsPage } from "./features/exam-management/pages/ExamTargetsPage";
+import ExamDashboardPage from "./features/exam-management/pages/ExamDashboardPage";
+import ExamExcelImportPage from "./features/exam-management/pages/ExamExcelImportPage";
+import ExamReportsPage from "./features/exam-management/pages/ExamReportsPage";
+import { isExamTab } from "./features/exam-management/examTabs";
 import { usePagination, PaginationBar } from "./components/Pagination";
 import { Input, NumberInput, SelectInput, SearchableSelect, FilterSelect, MiniStat, CompactField } from "./components/FormControls";
 import { themeDefault } from "./constants/defaultData";
@@ -14744,6 +14754,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     militaryReports: "militaryModule",
     militarySettings: "militaryModule",
     testChecklist: "settings",
+    examDashboard: "시험관리",
+    examPersonnel: "시험관리",
+    examApplications: "시험관리",
+    examPmCertifications: "시험관리",
+    examDmCertifications: "시험관리",
+    examAnnualTargets: "시험관리",
+    examMonthlyResults: "시험관리",
+    examRules: "시험관리",
+    examReports: "시험관리",
+    examExcelImport: "시험관리",
   };
 
   const menuGroupForTab = useMemo<Record<TabKey, string>>(() => {
@@ -14755,6 +14775,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   }, [systemSettings.menus]);
 
   const isMaintenanceAccessUser = currentUser?.role === "maintenance_reporter" || currentUser?.role === "dorm_manager";
+  // 시험관리 접근 권한: admin/viewer 만(하자접수 전용=maintenance_reporter, 기숙사관리자=dorm_manager 는 제외).
+  //  버튼 숨김뿐 아니라 렌더/직접 activeTab 접근도 차단(아래 가드 useEffect + 렌더 조건).
+  const canAccessExam = !!currentUser && (currentUser.role === "admin" || currentUser.role === "viewer");
 
   const visibleMenuGroups = useMemo(
     () => {
@@ -14844,7 +14867,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   const menuItems = filteredMenuGroups.map((group) => ({
     groupKey: group.groupKey,
     label: group.label,
-    icon: group.groupKey === "dashboard" ? Home : group.groupKey === "users" ? UserCog : group.groupKey === "settings" ? UserCog : group.groupKey === "defects" ? Wrench : group.groupKey === "inventory" ? Package : group.groupKey === "자산관리" ? Package : group.groupKey === "운영관리" ? Wrench : group.groupKey === "leaseManagement" ? ClipboardList : group.groupKey === "salesManagement" ? ClipboardList : group.groupKey === "simulation" ? ClipboardList : group.groupKey === "reportManagement" ? FileSpreadsheet : group.groupKey === "notificationManagement" ? Bell : group.groupKey === "documentManagement" ? Camera : group.groupKey === "militaryModule" ? ShieldCheck : Building2,
+    icon: group.groupKey === "dashboard" ? Home : group.groupKey === "users" ? UserCog : group.groupKey === "settings" ? UserCog : group.groupKey === "defects" ? Wrench : group.groupKey === "inventory" ? Package : group.groupKey === "자산관리" ? Package : group.groupKey === "운영관리" ? Wrench : group.groupKey === "leaseManagement" ? ClipboardList : group.groupKey === "salesManagement" ? ClipboardList : group.groupKey === "simulation" ? ClipboardList : group.groupKey === "reportManagement" ? FileSpreadsheet : group.groupKey === "notificationManagement" ? Bell : group.groupKey === "documentManagement" ? Camera : group.groupKey === "militaryModule" ? ShieldCheck : group.groupKey === "시험관리" ? ClipboardList : Building2,
     children: group.children,
   }));
 
@@ -16451,6 +16474,95 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
           </div>
         )}
+
+        {/* 시험관리(대메뉴). 권한(admin/viewer) 없는 사용자가 직접 진입 시 권한 오류 화면으로 차단.
+            인증 기준관리는 CRUD 페이지, 그 외 하위 메뉴는 준비중 placeholder. */}
+        {isExamTab(activeTab) && (canAccessExam ? (
+          activeTab === "examDashboard" ? (
+            <ExamDashboardPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              onToast={showNetworkToast}
+            />
+          ) : activeTab === "examRules" ? (
+            <ExamRulesPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              onToast={showNetworkToast}
+            />
+          ) : activeTab === "examPersonnel" ? (
+            <ExamPersonnelPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              onToast={showNetworkToast}
+            />
+          ) : activeTab === "examApplications" ? (
+            <ExamApplicationsPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              onToast={showNetworkToast}
+            />
+          ) : activeTab === "examDmCertifications" ? (
+            <ExamDmCertificationsPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              onToast={showNetworkToast}
+            />
+          ) : activeTab === "examAnnualTargets" ? (
+            <ExamAnnualTargetsPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              onToast={showNetworkToast}
+            />
+          ) : activeTab === "examMonthlyResults" ? (
+            <ExamMonthlyResultsPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              onToast={showNetworkToast}
+            />
+          ) : activeTab === "examExcelImport" ? (
+            <ExamExcelImportPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              onToast={showNetworkToast}
+            />
+          ) : activeTab === "examReports" ? (
+            <ExamReportsPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              author={currentUser?.displayName || currentUser?.username || ""}
+              onToast={showNetworkToast}
+            />
+          ) : (
+            <ExamManagementPage tab={activeTab} darkMode={theme.darkMode} />
+          )
+        ) : (
+          <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+            <div className={`flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed px-6 py-16 text-center ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-500"}`}>
+              <span className="text-3xl">🔒</span>
+              <div className="text-sm font-medium">시험관리 메뉴에 접근할 권한이 없습니다.</div>
+              <button type="button" onClick={() => setActiveTab("dashboard")} className={`mt-1 rounded-2xl px-4 py-2 text-sm font-semibold ${theme.darkMode ? "border border-slate-600 text-slate-200 hover:bg-slate-800" : "border border-slate-300 text-slate-700 hover:bg-slate-100"}`}>대시보드로 이동</button>
+            </div>
+          </section>
+        ))}
 
         {activeTab === "militaryDashboard" && (
           <div className="space-y-6">

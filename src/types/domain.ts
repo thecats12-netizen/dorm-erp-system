@@ -495,7 +495,18 @@ export type TabKey =
   | "militaryNotices"
   | "militaryReports"
   | "militarySettings"
-  | "testChecklist";
+  | "testChecklist"
+  // 시험관리(대메뉴) — 1단계: 라우팅/사이드바/레이아웃/권한만(빈 화면 placeholder)
+  | "examDashboard"
+  | "examPersonnel"
+  | "examApplications"
+  | "examPmCertifications"
+  | "examDmCertifications"
+  | "examAnnualTargets"
+  | "examMonthlyResults"
+  | "examRules"
+  | "examReports"
+  | "examExcelImport";
 
 export type SettingsSubTab = "menuManagement" | "fieldManagement" | "permissionManagement" | "codeManagement" | "screenSettings";
 
