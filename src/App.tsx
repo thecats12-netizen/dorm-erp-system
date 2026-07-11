@@ -14036,6 +14036,35 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     setSelectedDormIds([]);
   };
 
+  // [1회성 관리자 전환] 기존 신입사원 거주상태를 "자동선택 모드"로 일괄 전환.
+  //  - residence_status 텍스트 컬럼 값만 "자동선택"으로(모드=자동선택). 기존 계산결과/이력은 getNewHireStatus 재계산으로 보호.
+  //  - 삭제/soft-delete/식별값 없음은 제외("확인 필요"). 이미 자동선택은 건너뜀 → 재실행해도 중복 처리 없음(idempotent).
+  //  - 저장은 기존 자동저장 흐름으로만 반영(로딩 시 자동 실행 아님). dryRun=true 면 집계만.
+  const convertNewHiresToAutoResidence = async (dryRun = false) => {
+    if (!canManageUsers(currentUser)) { await appAlert("권한 안내", "이 기능은 관리자만 실행할 수 있습니다."); return; }
+    const active = newHires.filter((h) => !h.isDeleted && !h.isPermanentDeleted);
+    const already = active.filter((h) => (h.residenceStatus as string) === "자동선택");
+    const needReview = active.filter((h) => !h.id || !String(h.name || "").trim()); // 필수 식별값 없음
+    const targets = active.filter((h) => h.id && String(h.name || "").trim() && (h.residenceStatus as string) !== "자동선택");
+    const summary = { 전체: active.length, 전환대상: targets.length, 이미자동선택: already.length, 확인필요: needReview.length };
+    console.debug("[신입사원 거주상태 자동선택 전환]", { ...summary, dryRun });
+    if (dryRun) {
+      await appAlert("거주상태 자동선택 전환 (미리보기)", `전체 ${summary.전체}건\n전환 대상 ${summary.전환대상}건\n이미 자동선택 ${summary.이미자동선택}건\n확인 필요 ${summary.확인필요}건\n\n실제 반영은 '전환 실행'을 눌러주세요.`);
+      return;
+    }
+    if (targets.length === 0) { await appAlert("거주상태 자동선택 전환", `전환 대상이 없습니다.\n전체 ${summary.전체}건 · 이미 자동선택 ${summary.이미자동선택}건 · 확인 필요 ${summary.확인필요}건`); return; }
+    const ok = await appConfirm(
+      "거주상태 자동선택 전환",
+      `전체 ${summary.전체}건 중 ${summary.전환대상}건을 '자동선택' 모드로 전환합니다.\n(기존 계산 결과/이력은 보호되고 화면은 자동계산으로 재계산됩니다)\n이미 자동선택 ${summary.이미자동선택}건 · 확인 필요 ${summary.확인필요}건은 제외됩니다.\n\n적용하시겠습니까?`,
+      { confirmText: "전환 실행", cancelText: "취소" }
+    );
+    if (!ok) return;
+    const targetIds = new Set(targets.map((h) => h.id));
+    const today = new Date().toISOString().slice(0, 10);
+    setNewHires((prev) => prev.map((h) => (targetIds.has(h.id) ? { ...h, residenceStatus: "자동선택" as NewHireResidenceStatus, updatedAt: today } : h)));
+    await appAlert("거주상태 자동선택 전환 완료", `성공 ${summary.전환대상}건 · 실패 0건 · 확인 필요 ${summary.확인필요}건.\n변경분은 기존 자동저장으로 반영됩니다.`);
+  };
+
   const openNewHireEdit = (h: NewHireEmployee) => {
     const { id: _id, ...rest } = h;
     // 수정 화면: 마지막 저장값을 우선 표시(수동값/자동선택 저장값 모두 그대로). 저장값이 없을 때만 "자동선택" 폴백.
@@ -14952,10 +14981,22 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       filterKeys: ["연월"], dateField: "_date", chart: { type: "bar", groupKey: "연월", valueKey: "기타비용", label: "연월별 기타비용" },
       extraKpis: [{ label: "기타비용 합계", value: validSettlement.reduce((a, r) => a + (r.miscCost || 0), 0).toLocaleString() }],
     };
-    // ⑨ 예비군/민방위
+    // ⑨ 예비군/민방위 — "구분"은 공통 계산 함수 getMilitaryCategory(수동값 우선, 자동선택은 자동계산) 사용 → "미분류" 제거.
+    //   동일인(이름+생년월일) 중복은 최신 저장(updatedAt) 1건만 집계.
+    const milDedup = new Map<string, MilitaryPersonnel>();
+    militaryPersonnel.filter((p) => !p.isDeleted && !p.isPermanentDeleted).forEach((p) => {
+      const key = p.id || `${(p.name || "").trim()}|${(p.birthDate || "").slice(0, 10)}`;
+      const prev = milDedup.get(key);
+      if (!prev || String(p.updatedAt || "") >= String(prev.updatedAt || "")) milDedup.set(key, p);
+    });
     const military: ReportConfig = {
       title: "예비군/민방위 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: militaryPersonnel.filter((p) => !p.isDeleted && !p.isPermanentDeleted).map((p) => ({ 이름: p.name, 계급: p.rank || "", 소속: p.unit || "", 구분: p.manualCategory || "미분류", 상태: p.status || "", 전역일: formatDateOnly(p.dischargeDate || "") })),
+      rows: Array.from(milDedup.values()).map((p) => {
+        // 우선순위: 수동 확정값(getMilitaryCategory 내부에서 manual 우선) → 자동계산 → 필수데이터 부족 시 확인 필요.
+        const hasBasis = Boolean(p.manualCategory || p.dischargeDate || p.birthDate || p.serviceBranch || p.status);
+        const cat = getMilitaryCategory(p, effectiveMilitaryReferenceYear);
+        return { 이름: p.name, 계급: p.rank || "", 소속: p.unit || "", 구분: hasBasis ? cat : "확인 필요", 상태: p.status || "", 전역일: formatDateOnly(p.dischargeDate || "") };
+      }),
       columns: [{ key: "이름", label: "이름" }, { key: "계급", label: "계급" }, { key: "소속", label: "소속" }, { key: "구분", label: "구분" }, { key: "상태", label: "상태" }, { key: "전역일", label: "전역일" }],
       filterKeys: ["구분", "상태"], chart: { type: "pie", groupKey: "구분", label: "구분 분포" },
     };
@@ -14972,7 +15013,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       "예비군/민방위": military,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [siteGenderStats, operationalDorms, dorms, occupancyCountByDorm, cleaningReports, defects, inventory, settlementRecords, militaryPersonnel, reportYear, reportMonth]);
+  }, [siteGenderStats, operationalDorms, dorms, occupancyCountByDorm, cleaningReports, defects, inventory, settlementRecords, militaryPersonnel, effectiveMilitaryReferenceYear, reportYear, reportMonth]);
 
   // 운영 현황 차트 데이터 (대시보드 시각화) — isDeleted/종료·해지/퇴실 제외, 0분모=0 처리
   const dashboardChartData = useMemo(() => {
@@ -17800,6 +17841,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-white hover:bg-slate-800"
                   >
                     <Plus className="h-4 w-4" /> 입주자 추가
+                  </button>
+                )}
+                {canManageUsers(currentUser) && (
+                  <button
+                    onClick={() => void convertNewHiresToAutoResidence(false)}
+                    onDoubleClick={() => void convertNewHiresToAutoResidence(true)}
+                    title="기존 신입사원 거주상태를 자동선택 모드로 일괄 전환(더블클릭: 대상 건수 미리보기)"
+                    className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-semibold ${theme.darkMode ? "border border-slate-600 text-slate-200 hover:bg-slate-800" : "border border-slate-300 text-slate-700 hover:bg-slate-100"}`}
+                  >
+                    거주상태 자동선택 전환
                   </button>
                 )}
                 {canEditData(currentUser) && selectedNewHireIds.length === 1 && (
