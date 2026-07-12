@@ -194,12 +194,14 @@ const toDomainDormContract = (row: any): DormContract => ({
   세대현관: row.unit_entry || "",
   contractStart: row.contract_start || "",
   contractEnd: row.contract_end || "",
-  contractStatus: row.contract_status || "진행중",
+  // [계약상태 모드 분리] 저장값도 모드도 없으면(빈값) 자동선택 모드로 간주(계산 결과를 직접 selected 값으로 넣지 않음).
+  //   저장된 "자동선택"/수동값은 그대로 유지 → 표시 단계에서만 자동계산(getContractComputedStatus).
+  contractStatus: row.contract_status || "자동선택",
   contractAmount: row.contract_amount || "",
   prepaymentDeposit: row.prepayment_deposit || "",
   deposit: row.deposit || "",
   monthlyRentOrMaintenance: row.monthly_rent_or_maintenance || "",
-  contractType: row.contract_type || "",
+  contractType: row.contract_type || "자동선택",
   gender: row.gender || "남",
   notes: row.notes || "",
   registeredBy: row.registered_by || "",

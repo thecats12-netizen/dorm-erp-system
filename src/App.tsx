@@ -2075,6 +2075,15 @@ function commitRowHashes<T extends { id: string }>(table: string, rows: T[], see
   }
 }
 
+// [개발용 진단] 신규계약 데이터 동기화 추적(개인정보/비밀번호/JWT/API key 미출력). production 에서는 무출력.
+// source 예: supabase_initial_load / realtime_insert / realtime_update / local_draft / manual_save / excel_import
+function logContractSync(source: string, info: Record<string, unknown>): void {
+  if (!import.meta.env.DEV) return;
+  console.debug("[신규계약 데이터 동기화]", { source, ...info });
+}
+// 계약상태 모드: "자동선택"(또는 빈값) → auto, 그 외 수동 선택값 → manual.
+const contractStatusMode = (cs?: string): "auto" | "manual" => (!cs || cs === "자동선택" ? "auto" : "manual");
+
 function dormModuleSnapshot(s: { dorms: unknown[]; occupants: unknown[]; dormContracts: unknown[]; newHires: unknown[] }): string {
   return JSON.stringify({
     dorms: stripVolatile(s.dorms),
@@ -2332,12 +2341,13 @@ export default function App() {
     세대현관: row.unit_entry || "",
     contractStart: row.contract_start || "",
     contractEnd: row.contract_end || "",
-    contractStatus: row.contract_status || "진행중",
+    // [계약상태 모드 분리] 빈값 → 자동선택 모드(계산 결과를 selected 값으로 직접 저장/표시하지 않음). 저장된 자동선택/수동값은 유지.
+    contractStatus: row.contract_status || "자동선택",
     contractAmount: row.contract_amount || "",
     prepaymentDeposit: row.prepayment_deposit || "",
     deposit: row.deposit || "",
     monthlyRentOrMaintenance: row.monthly_rent_or_maintenance || "",
-    contractType: row.contract_type || "",
+    contractType: row.contract_type || "자동선택",
     gender: row.gender || "남",
     notes: row.notes || "",
     registeredBy: row.registered_by || "",
@@ -2538,9 +2548,17 @@ export default function App() {
       case "new_hires":
         setNewHires((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeNewHire));
         break;
-      case "dorm_contracts":
+      case "dorm_contracts": {
+        // [진단] realtime 수신을 신규계약 "저장"으로 재전달하지 않는다(applyRealtimeUpdate 는 병합만; dorm_module 에코 가드로 재저장 차단).
+        const isInsert = eventType === "INSERT";
+        logContractSync(isInsert ? "realtime_insert" : "realtime_update", {
+          action: "realtime", contractId: row.id, organizationId: row.tenant_id ?? tenantId,
+          isInsert, isUpdate: !isInsert, hasManagerId: !!(row.manager_user_id || row.registered_by),
+          statusMode: contractStatusMode(row.contract_status), updatedAt: row.updated_at,
+        });
         setDormContracts((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeDormContract));
         break;
+      }
       case "cleaning_reports":
         setCleaningReports((prev) => applyRealtimeUpdate(prev, row, toDomainRealtimeCleaningReport, ["beforePhotoDataUrls", "afterPhotoDataUrls"]));
         break;
@@ -3519,6 +3537,12 @@ export default function App() {
               setDormContracts(dContracts);
               setNewHires(dNew);
               if (import.meta.env.DEV) console.log("[LOAD] dorms:", dDorms.length, "contracts:", dContracts.length, "newHires:", dNew.length, "occupants:", dOcc.length);
+              // [진단] 서버 데이터만 사용(localStorage 병합 없음). 조회 실패 시 아래 else 에서 기존 화면 유지(insert 없음).
+              logContractSync("supabase_initial_load", {
+                action: "load", organizationId: tenantId, contractCount: dContracts.length,
+                autoModeCount: dContracts.filter((c) => contractStatusMode(c.contractStatus) === "auto").length,
+                withManagerCount: dDorms.filter((d) => !!d.managerUserId).length,
+              });
             } else {
               // 세션은 유효하나 dorm 모듈 로드가 일시적으로 실패한 경우.
               // 기존 화면 데이터를 비우지 않고(로그아웃하지 않고) 유지하여 "보였다 안 보였다" 방지.
@@ -5433,6 +5457,12 @@ export default function App() {
   // 기존 관리자 isActive = false
   // ============================================
   const deactivateStaleManagers = (): void => {
+    // [계정 보호 · 요청14] 데이터 미로딩/조회 실패/다른 기기 빈 상태 등 "일시적으로 기숙사 목록이 비어 있는" 경우에는
+    //   절대 하자접수(maintenance_reporter) 계정을 자동 비활성화하지 않는다.
+    //   (네트워크 실패·초기 로딩·realtime 지연으로 operationalDorms 가 잠깐 비면 전 계정이 잘못 비활성화되던 문제 차단)
+    //   비활성화는 담당 기숙사가 실제로 운영 목록에서 사라진 경우(계약 종료/해지/삭제 = 승인된 업무 규칙)에만 수행.
+    if (isLoading || !isInitialLoadCompleteRef.current) return;
+    if (operationalDorms.length === 0) return;
     // 담당자 유효성은 profiles.dorm_id 단일 기준: 담당 기숙사가 운영 목록(operationalDorms)에 존재하면 유효.
     // (과거 dorms.managerUserId 기준으로 비활성화하던 로직 제거 — 신규 profiles 기반 담당자가
     //  활성 저장 직후 다시 비활성화되던 문제 수정.)
@@ -5932,10 +5962,7 @@ export default function App() {
   // 주차 자동계산, 담당자 기반 필터링, 권한 기반 접근 제어
   // ============================================
   
-  // 8-1) 계약 상태 변경 시 매니저 비활성화 자동 체크
-  useEffect(() => {
-    deactivateStaleManagers();
-  }, [dorms, users]);
+  // 8-1) 계약 상태 변경 시 매니저 비활성화 자동 체크는 8-7)에서 로딩/빈목록 가드와 함께 수행(중복 무가드 실행 제거).
 
   // 8-3) 청소보고에서 기숙사 선택 시 주소/담당자 자동 채움
   const handleCleaningReportDormChange = (dorm: OperationalDorm | null) => {
@@ -9829,6 +9856,14 @@ export default function App() {
           : dormContractForm.createdAt || new Date().toISOString().slice(0, 10),
       updatedAt: new Date().toISOString().slice(0, 10),
     };
+
+    // [진단] 사용자 명시 저장(등록/수정)만 신규 row 생성 가능. 조회/새로고침/realtime/localStorage 복원은 생성하지 않음.
+    logContractSync("manual_save", {
+      action: editingDormContractId ? "update" : "insert", contractId: finalPayload.id,
+      organizationId: tenantId, isInsert: !editingDormContractId, isUpdate: !!editingDormContractId,
+      hasManagerId: !!finalPayload.registeredBy, statusMode: contractStatusMode(finalPayload.contractStatus),
+      updatedAt: finalPayload.updatedAt,
+    });
 
     setDormContracts((prev) =>
       editingDormContractId
