@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
+import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
+import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import {
   listExamRows, listExamRefOptions, upsertExamRow, softDeleteExamRow,
   writeExamAudit, examSupabaseReady, type ExamRow, type ExamMasterTable,
@@ -52,6 +54,21 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   const [saving, setSaving] = useState(false);
   const [importPreview, setImportPreview] = useState<{ okRows: ExamRow[]; dup: number; err: Array<{ row: number; reason: string }> } | null>(null);
   const [showColMenu, setShowColMenu] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(-1);
+
+  // 미저장 변경 보호 + 앱 공통 닫기(ESC·뒤로가기·최상위 우선) 연동.
+  const [editBase, setEditBase] = useState("");
+  const editKey = editRow ? String(editRow.id ?? "__new__") : "";
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  useEffect(() => { if (editRow) setEditBase(JSON.stringify(editRow)); }, [editKey]);
+  const editDirty = !!editRow && JSON.stringify(editRow) !== editBase;
+  const requestCloseEdit = () => { if (saving) return; if (editDirty) setConfirmClose(true); else setEditRow(null); };
+  const topClose = importPreview ? () => setImportPreview(null)
+    : confirmClose ? undefined
+      : editRow ? requestCloseEdit
+        : undefined;
+  useRegisteredOverlay(!!topClose, () => topClose && topClose());
 
   const filterCols = useMemo(() => cfg.cols.filter((c) => c.filter), [cfg.cols]);
   const formCols = useMemo(() => cfg.cols.filter((c) => c.type !== "computed"), [cfg.cols]);
@@ -151,6 +168,11 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
     try { await softDeleteExamRow(cfg.table, String(r.id), userId); await writeExamAudit(tenantId, userId, cfg.table, String(r.id), "delete", r, null); onToast?.("삭제되었습니다."); await reload(); }
     catch (e) { setError((e as { message?: string })?.message || "삭제하지 못했습니다."); }
   };
+  // 테이블 행 키보드 이동 + Enter 수정(편집 권한 시).
+  const tableKeyDown = useTableKeyboardNav({
+    count: paged.length, active: activeIdx, setActive: setActiveIdx, pageSize: 10,
+    onEnter: (i) => { if (canEdit && paged[i]) setEditRow({ ...paged[i] }); },
+  });
 
   const exportRows = () => filtered.map((r) => { const o: Record<string, string | number> = {}; cfg.cols.forEach((c) => { o[c.label] = c.type === "computed" ? c.compute!(r) : (c.type === "ref" ? levelLabel(r[c.key]) : (r[c.key] as string ?? "")); }); return o; });
   const exportExcel = () => { const ws = XLSX.utils.json_to_sheet(exportRows()); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, cfg.title); XLSX.writeFile(wb, `시험관리_${cfg.fileBase}.xlsx`); };
@@ -251,7 +273,7 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
       {error && <div className="mb-2 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</div>}
       {loading && <div className="mb-2 text-xs text-slate-500">불러오는 중…</div>}
 
-      <div className="max-h-[52vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
+      <div tabIndex={0} onKeyDown={tableKeyDown} aria-label={`${cfg.title} 목록`} className="max-h-[52vh] overflow-auto rounded-xl border border-slate-200 outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-slate-700">
         <table className="w-full text-left text-xs">
           <thead className={`sticky top-0 z-[1] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
             <tr>
@@ -260,8 +282,8 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
             </tr>
           </thead>
           <tbody>
-            {paged.map((r) => (
-              <tr key={String(r.id)} className={`border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+            {paged.map((r, ri) => (
+              <tr key={String(r.id)} aria-selected={ri === activeIdx} onClick={() => setActiveIdx(ri)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                 {visibleCols.map((c) => (
                   <td key={c.key} className="whitespace-nowrap px-2.5 py-2">
                     {c.type === "computed" && c.tone ? <span className={`font-semibold ${rateTone(c.compute!(r))}`}>{c.compute!(r)}%</span> : cellText(c, r)}
@@ -288,9 +310,9 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
 
       {/* 등록/수정 */}
       {editRow && (
-        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={() => !saving && setEditRow(null)}>
-          <div className={`my-8 w-full max-w-3xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
-            <h3 className="mb-4 text-lg font-semibold">{editRow.id ? `${cfg.title} 수정` : `${cfg.title} 등록`}</h3>
+        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={requestCloseEdit}>
+          <div role="dialog" aria-modal="true" aria-labelledby="exam-target-edit-title" tabIndex={-1} className={`my-8 w-full max-w-3xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <h3 id="exam-target-edit-title" className="mb-4 text-lg font-semibold">{editRow.id ? `${cfg.title} 수정` : `${cfg.title} 등록`}</h3>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {formCols.map((c) => (
                 <div key={c.key}>
@@ -312,8 +334,8 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
               <span className={`rounded-lg px-3 py-1 ${darkMode ? "bg-slate-800" : "bg-slate-100"}`}>달성률: <b className={rateTone(pct(cfg.actualOf(editRow), cfg.targetOf(editRow)))}>{pct(cfg.actualOf(editRow), cfg.targetOf(editRow))}%</b></span>
             </div>
             <div className="mt-6 flex justify-end gap-2">
-              <button onClick={() => setEditRow(null)} className={`rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
-              <button onClick={() => void saveRow()} disabled={saving} className={`rounded-2xl px-4 py-2 text-sm font-semibold text-white ${saving ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{saving ? "저장 중…" : "저장"}</button>
+              <button type="button" onClick={requestCloseEdit} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
+              <button type="button" data-modal-save onClick={() => void saveRow()} disabled={saving} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-semibold text-white ${saving ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{saving ? "저장 중…" : "저장"}</button>
             </div>
           </div>
         </div>
@@ -338,6 +360,11 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
           </div>
         </div>
       )}
+
+      <UnsavedChangesDialog open={confirmClose} darkMode={darkMode}
+        onKeepEditing={() => setConfirmClose(false)}
+        onDiscard={() => { setConfirmClose(false); setEditRow(null); }}
+        onSave={() => { setConfirmClose(false); void saveRow(); }} />
     </section>
   );
 }

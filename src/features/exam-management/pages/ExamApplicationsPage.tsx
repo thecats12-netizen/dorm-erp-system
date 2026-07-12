@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
+import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
+import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import {
   listExamRows, listExamRefOptions, upsertExamRow, softDeleteExamRow,
   writeExamAudit, listExamAudit, isDuplicateApplication, examSupabaseReady,
@@ -84,6 +86,24 @@ export default function ExamApplicationsPage({
   const [historyList, setHistoryList] = useState<ExamRow[]>([]);
   const [importPreview, setImportPreview] = useState<{ okRows: ExamRow[]; dup: number; err: Array<{ row: number; reason: string }> } | null>(null);
   const [showColMenu, setShowColMenu] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+
+  // 미저장 변경 보호 + 앱 공통 닫기(ESC·뒤로가기·최상위 우선) 연동.
+  const [editBase, setEditBase] = useState("");
+  const editKey = editRow ? String(editRow.id ?? "__new__") : "";
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  useEffect(() => { if (editRow) setEditBase(JSON.stringify(editRow)); }, [editKey]);
+  const editDirty = !!editRow && JSON.stringify(editRow) !== editBase;
+  const requestCloseEdit = () => { if (saving) return; if (editDirty) setConfirmClose(true); else setEditRow(null); };
+  const topClose = importPreview ? () => setImportPreview(null)
+    : confirmClose ? undefined
+      : historyRow ? () => setHistoryRow(null)
+        : detailRow ? () => setDetailRow(null)
+          : editRow ? requestCloseEdit
+            : undefined;
+  useRegisteredOverlay(!!topClose, () => topClose && topClose());
+
+  const [activeIdx, setActiveIdx] = useState(-1);
 
   const refCols = useMemo(() => COLS.filter((c) => c.type === "ref"), []);
   const reload = useCallback(async () => {
@@ -221,6 +241,13 @@ export default function ExamApplicationsPage({
   const openDetail = (r: ExamRow) => setDetailRow(r);
   const openHistory = async (r: ExamRow) => { setHistoryRow(r); try { setHistoryList(await listExamAudit(tenantId, "exam_applications", String(r.id))); } catch { setHistoryList([]); } };
 
+  // 테이블 행 키보드 이동(위/아래/Home/End/PageUp·Down) + Enter 상세 + Space 선택 토글.
+  const tableKeyDown = useTableKeyboardNav({
+    count: paged.length, active: activeIdx, setActive: setActiveIdx, pageSize: 10,
+    onEnter: (i) => paged[i] && openDetail(paged[i]),
+    onSpace: (i) => paged[i] && toggleSel(rowKey(paged[i])),
+  });
+
   const exportRows = () => filtered.map((r) => { const o: Record<string, string> = {}; COLS.forEach((c) => { o[c.label] = cellText(c, r); }); return o; });
   const exportExcel = () => { const ws = XLSX.utils.json_to_sheet(exportRows()); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "시험응시"); XLSX.writeFile(wb, "시험관리_시험응시.xlsx"); };
   const exportCsv = () => {
@@ -350,7 +377,7 @@ export default function ExamApplicationsPage({
       {loading && <div className="mb-2 text-xs text-slate-500">불러오는 중…</div>}
 
       {/* 테이블 */}
-      <div className="max-h-[52vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
+      <div tabIndex={0} onKeyDown={tableKeyDown} aria-label="시험 응시 목록" className="max-h-[52vh] overflow-auto rounded-xl border border-slate-200 outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-slate-700">
         <table className="w-full text-left text-xs">
           <thead className={`sticky top-0 z-[1] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
             <tr>
@@ -364,10 +391,10 @@ export default function ExamApplicationsPage({
             </tr>
           </thead>
           <tbody>
-            {paged.map((r) => {
-              const k = rowKey(r); const sel = selected.has(k);
+            {paged.map((r, ri) => {
+              const k = rowKey(r); const sel = selected.has(k); const activeRow = ri === activeIdx;
               return (
-                <tr key={k} onDoubleClick={() => openDetail(r)} className={`${sel ? (darkMode ? "bg-blue-950/40" : "bg-blue-50") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+                <tr key={k} aria-selected={activeRow} onClick={() => setActiveIdx(ri)} onDoubleClick={() => openDetail(r)} className={`${activeRow ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : sel ? (darkMode ? "bg-blue-950/40" : "bg-blue-50") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                   <td className={`px-2 py-2 ${pinFirst ? "sticky left-0 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}><input type="checkbox" checked={sel} onChange={() => toggleSel(k)} onClick={(e) => e.stopPropagation()} /></td>
                   {visibleCols.map((c) => (
                     <td key={c.key} className={`whitespace-nowrap px-2.5 py-2 ${pinFirst && c.key === "employee_no" ? "sticky left-9 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}>
@@ -395,9 +422,9 @@ export default function ExamApplicationsPage({
 
       {/* 등록/수정 모달 */}
       {editRow && (
-        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={() => !saving && setEditRow(null)}>
-          <div className={`my-8 w-full max-w-3xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
-            <h3 className="mb-4 text-lg font-semibold">{editRow.id ? "시험 응시 수정" : "시험 응시 등록"}</h3>
+        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={requestCloseEdit}>
+          <div role="dialog" aria-modal="true" aria-labelledby="exam-app-edit-title" tabIndex={-1} className={`my-8 w-full max-w-3xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <h3 id="exam-app-edit-title" className="mb-4 text-lg font-semibold">{editRow.id ? "시험 응시 수정" : "시험 응시 등록"}</h3>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {COLS.filter((c) => c.type !== "cert").map((c) => (
                 <div key={c.key}>
@@ -421,8 +448,8 @@ export default function ExamApplicationsPage({
               </div>
             </div>
             <div className="mt-6 flex justify-end gap-2">
-              <button onClick={() => setEditRow(null)} className={`rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
-              <button onClick={() => void saveRow()} disabled={saving} className={`rounded-2xl px-4 py-2 text-sm font-semibold text-white ${saving ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{saving ? "저장 중…" : "저장"}</button>
+              <button type="button" onClick={requestCloseEdit} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
+              <button type="button" data-modal-save onClick={() => void saveRow()} disabled={saving} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-semibold text-white ${saving ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{saving ? "저장 중…" : "저장"}</button>
             </div>
           </div>
         </div>
@@ -495,6 +522,11 @@ export default function ExamApplicationsPage({
           </div>
         </div>
       )}
+
+      <UnsavedChangesDialog open={confirmClose} darkMode={darkMode}
+        onKeepEditing={() => setConfirmClose(false)}
+        onDiscard={() => { setConfirmClose(false); setEditRow(null); }}
+        onSave={() => { setConfirmClose(false); void saveRow(); }} />
     </section>
   );
 }

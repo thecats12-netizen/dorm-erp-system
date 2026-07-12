@@ -128,6 +128,7 @@ import ExamDashboardPage from "./features/exam-management/pages/ExamDashboardPag
 import ExamExcelImportPage from "./features/exam-management/pages/ExamExcelImportPage";
 import ExamReportsPage from "./features/exam-management/pages/ExamReportsPage";
 import { isExamTab } from "./features/exam-management/examTabs";
+import { closeTopRegisteredOverlay, useRegisteredOverlayCount } from "./hooks/overlayA11y";
 import { usePagination, PaginationBar } from "./components/Pagination";
 import { Input, NumberInput, SelectInput, SearchableSelect, FilterSelect, MiniStat, CompactField } from "./components/FormControls";
 import { themeDefault } from "./constants/defaultData";
@@ -1662,6 +1663,42 @@ function isUnassignedNewHire(h: NewHireEmployee): boolean {
   if (h.isDeleted) return false;
   if (getNewHireStatus(h) === "퇴실") return false; // 퇴실자는 미배정 통계에서 제외
   return !(h.dormId && h.dormId.trim());
+}
+
+// 운영시뮬레이션 상세: 저장 수동값/자동선택 모드/자동계산을 정확히 판정해 입주유형 표시 라벨을 결정한다.
+//  - 신입사원 등록/수정과 "동일한 공통 함수"(getNewHireType/calculateMoveInType)만 재사용(별도 계산식 없음).
+//  - 우선순위: ① 저장된 수동 입주유형 → ② 자동선택이면 자동계산 → ③ 계산 가능하면 자동계산 → ④ 데이터 부족 시 "확인 필요".
+//  - 동일 인물 연결(sourceNewHireId → id)로 수동 저장값의 원본(신입사원)을 찾고, 단순 중복은 재입주로 계산하지 않는다.
+// 반환 label ∈ 대기 | 신규 | 재입주 | 연장 | 확인 필요, auto = 자동선택 모드 여부(보조 배지 표시용).
+function resolveSimMoveInType(
+  o: any,
+  newHires: NewHireEmployee[],
+  nhById: Map<string, NewHireEmployee>,
+  addr: { buildingName: string; dong: string; roomHo: string }
+): { label: "대기" | "신규" | "재입주" | "연장" | "확인 필요"; auto: boolean } {
+  const toLabel = (t: MoveInType) => (t === "대기자" ? "대기" : t) as "대기" | "신규" | "재입주" | "연장";
+  const isAutoRaw = (raw: string) => !raw || raw === "자동선택" || raw === "자동" || raw === "-";
+  // 동일 인물의 신입사원 원본(수동 저장값 출처)을 우선 연결.
+  const linked = (o.sourceNewHireId && nhById.get(o.sourceNewHireId)) || (o.id && nhById.get(o.id)) || undefined;
+  if (linked) {
+    return { label: toLabel(getNewHireType(linked, newHires)), auto: isAutoRaw(String(linked.moveInType ?? "").trim()) };
+  }
+  // 입주자 단독(신입사원 미연결): occupant 필드로 form-like 구성 후 공통 계산.
+  const raw = String(o.moveInType ?? "").trim();
+  const auto = isAutoRaw(raw);
+  const moveIn = getMoveInDate(o);
+  const hasCore = Boolean(addr.buildingName || addr.dong || addr.roomHo || moveIn || getActualMoveOutDate(o));
+  const hasIdentity = Boolean(o?.employeeName || o?.name);
+  if (!hasCore && !hasIdentity) return { label: "확인 필요", auto };
+  if (!auto && (["대기자", "신규", "재입주", "연장"] as string[]).includes(raw)) return { label: toLabel(raw as MoveInType), auto: false };
+  const formLike = {
+    id: o.id, name: o.employeeName || o.name, phone: o.phone,
+    buildingName: addr.buildingName, dong: addr.dong, roomHo: addr.roomHo,
+    moveInDate: moveIn, actualMoveOutDate: getActualMoveOutDate(o),
+    moveOutDate: getExpectedMoveOutDate(o), expectedMoveOutDate: getExpectedMoveOutDate(o),
+    residenceStatus: (o.status || o.residenceStatus || "") as NewHireResidenceStatus | "자동선택",
+  } as NewHireFormLike;
+  return { label: toLabel(calculateMoveInType(formLike, newHires)), auto };
 }
 
 // 신입사원 통계 단일 분류: 모든 row 를 정확히 하나의 버킷(거주중/퇴실/만료예정/미배정)에 배정.
@@ -8347,6 +8384,8 @@ export default function App() {
         const building = d?.buildingName || o.buildingName || "";
         const dong = d?.dong || o.dong || "";
         const roomHo = d?.roomHo || o.roomHo || "";
+        // 입주유형: 저장 수동값/자동선택/자동계산을 공통 함수로 정확히 판정(빈값·미표시 방지).
+        const mit = resolveSimMoveInType(o, newHires, nhById, { buildingName: building, dong, roomHo });
         return {
           id: o.sourceNewHireId || o.id || "",
           name: (o as any).employeeName || (o as any).name || "-",
@@ -8359,7 +8398,8 @@ export default function App() {
           roomHo,
           dorm: (building || dong || roomHo) ? `${building} ${formatDong(dong)}-${formatRoomHo(roomHo)}`.trim() : "-",
           residenceStatus: o.status || o.residenceStatus || "",
-          moveInType: o.moveInType || "",
+          moveInType: mit.label,
+          moveInTypeAuto: mit.auto,
           moveIn: getMoveInDate(o) || "-",
           contractEnd: getExpectedMoveOutDate(o) || "-",
           actualMoveOut: getActualMoveOutDate(o) || "-",
@@ -9098,9 +9138,13 @@ export default function App() {
   // 오버레이(모달/미리보기/메뉴) 닫기 우선순위 + 키보드 단축키 + 모바일 뒤로가기
   // ============================================
   // 현재 열려 있는 최상위 오버레이를 닫는다(우선순위: 미리보기 > 폼/모달 > 모바일 메뉴). 닫았으면 true.
+  // 자체(로컬 상태) 오버레이 등록 개수 — hasOpenOverlay 계산에 반영(popstate/포커스 복원 활성화).
+  const registeredOverlayCount = useRegisteredOverlayCount();
   const closeTopOverlay = (): boolean => {
     // [8] 저장/변환 중에는 닫기 금지(데이터 유실 방지). 완료 후 정상 동작.
     if (heicConverting || savingPdf) return false;
+    // 자체(로컬 상태) 오버레이(시험관리 모달·시뮬레이션 내부 상세 등)를 먼저 닫는다(최상위 우선).
+    if (closeTopRegisteredOverlay()) return true;
     if (imageLightbox) { setImageLightbox(null); return true; }
     if (excelPreview) { setExcelPreview(null); return true; }
     // 상세보기(팝업) 모달 — 폼보다 위(또는 단독)로 열리므로 우선 닫는다.
@@ -9138,7 +9182,7 @@ export default function App() {
     showSaleForm || showUserForm || showMilitaryPersonnelForm || showMilitaryTrainingForm ||
     showMilitaryNoticeForm || showMilitaryReportForm || showAssignDormForNewHire ||
     showNewHireAssignmentModal || showExpiringDormsModal || showUnassignedNewHiresModal ||
-    showAuditLogModal || mobileMenuOpen
+    showAuditLogModal || mobileMenuOpen || registeredOverlayCount > 0
   );
   // 최신 closeTopOverlay 를 ref 로 보관(이벤트 리스너에서 항상 최신 상태 사용).
   const closeTopOverlayRef = useRef(closeTopOverlay);

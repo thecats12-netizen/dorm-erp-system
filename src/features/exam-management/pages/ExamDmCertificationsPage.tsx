@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
+import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import * as XLSX from "xlsx";
 import {
   listExamRows, upsertExamRow, softDeleteExamRow,
@@ -95,6 +97,23 @@ export default function ExamDmCertificationsPage({
   const [historyList, setHistoryList] = useState<ExamRow[]>([]);
   const [importPreview, setImportPreview] = useState<{ okRows: ExamRow[]; dup: number; err: Array<{ row: number; reason: string }> } | null>(null);
   const [showColMenu, setShowColMenu] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(-1);
+
+  // 미저장 변경 보호 + 앱 공통 닫기(ESC·뒤로가기·최상위 우선) 연동.
+  const [editBase, setEditBase] = useState("");
+  const editKey = editRow ? String(editRow.id ?? "__new__") : "";
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  useEffect(() => { if (editRow) setEditBase(JSON.stringify(editRow)); }, [editKey]);
+  const editDirty = !!editRow && JSON.stringify(editRow) !== editBase;
+  const requestCloseEdit = () => { if (saving) return; if (editDirty) setConfirmClose(true); else setEditRow(null); };
+  const topClose = importPreview ? () => setImportPreview(null)
+    : confirmClose ? undefined
+      : historyRow ? () => setHistoryRow(null)
+        : detailRow ? () => setDetailRow(null)
+          : editRow ? requestCloseEdit
+            : undefined;
+  useRegisteredOverlay(!!topClose, () => topClose && topClose());
 
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
@@ -219,6 +238,12 @@ export default function ExamDmCertificationsPage({
 
   const openHistory = async (r: ExamRow) => { setHistoryRow(r); try { setHistoryList(await listExamAudit(tenantId, "dm_certifications", String(r.id))); } catch { setHistoryList([]); } };
 
+  // 테이블 행 키보드 이동 + Enter 상세보기.
+  const tableKeyDown = useTableKeyboardNav({
+    count: paged.length, active: activeIdx, setActive: setActiveIdx, pageSize: 10,
+    onEnter: (i) => paged[i] && setDetailRow(paged[i]),
+  });
+
   const exportExcel = () => {
     const ws = XLSX.utils.json_to_sheet(filtered.map((r) => { const o: Record<string, string> = {}; COLS.forEach((c) => { o[c.label] = cellText(c, r); }); return o; }));
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "DM인증"); XLSX.writeFile(wb, "시험관리_DM인증.xlsx");
@@ -323,7 +348,7 @@ export default function ExamDmCertificationsPage({
       {error && <div className="mb-2 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</div>}
       {loading && <div className="mb-2 text-xs text-slate-500">불러오는 중…</div>}
 
-      <div className="max-h-[52vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
+      <div tabIndex={0} onKeyDown={tableKeyDown} aria-label="D.M 인증 목록" className="max-h-[52vh] overflow-auto rounded-xl border border-slate-200 outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-slate-700">
         <table className="w-full text-left text-xs">
           <thead className={`sticky top-0 z-[1] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
             <tr>
@@ -332,8 +357,8 @@ export default function ExamDmCertificationsPage({
             </tr>
           </thead>
           <tbody>
-            {paged.map((r) => (
-              <tr key={String(r.id)} onDoubleClick={() => setDetailRow(r)} className={`cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+            {paged.map((r, ri) => (
+              <tr key={String(r.id)} aria-selected={ri === activeIdx} onClick={() => setActiveIdx(ri)} onDoubleClick={() => setDetailRow(r)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                 {visibleCols.map((c) => (
                   <td key={c.key} className="whitespace-nowrap px-2.5 py-2">
                     {c.type === "expiry" ? <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${expiryOf(r).tone}`}>{expiryOf(r).label}</span>
@@ -361,9 +386,9 @@ export default function ExamDmCertificationsPage({
 
       {/* 등록/수정 */}
       {editRow && (
-        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={() => !saving && setEditRow(null)}>
-          <div className={`my-8 w-full max-w-3xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
-            <h3 className="mb-4 text-lg font-semibold">{editRow.id ? "D.M 인증 수정" : "D.M 인증 등록"}</h3>
+        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={requestCloseEdit}>
+          <div role="dialog" aria-modal="true" aria-labelledby="exam-dm-edit-title" tabIndex={-1} className={`my-8 w-full max-w-3xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <h3 id="exam-dm-edit-title" className="mb-4 text-lg font-semibold">{editRow.id ? "D.M 인증 수정" : "D.M 인증 등록"}</h3>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {FORM_COLS.map((c) => (
                 <div key={c.key}>
@@ -383,8 +408,8 @@ export default function ExamDmCertificationsPage({
             </div>
             {rules.length === 0 && <p className="mt-3 text-xs text-amber-600">※ exam_rules에 D.M 계산 규칙이 없어 D.M Level 자동 제안이 비활성화됩니다(수동 입력).</p>}
             <div className="mt-6 flex justify-end gap-2">
-              <button onClick={() => setEditRow(null)} className={`rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
-              <button onClick={() => void saveRow()} disabled={saving} className={`rounded-2xl px-4 py-2 text-sm font-semibold text-white ${saving ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{saving ? "저장 중…" : "저장"}</button>
+              <button type="button" onClick={requestCloseEdit} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
+              <button type="button" data-modal-save onClick={() => void saveRow()} disabled={saving} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-semibold text-white ${saving ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{saving ? "저장 중…" : "저장"}</button>
             </div>
           </div>
         </div>
@@ -473,6 +498,11 @@ export default function ExamDmCertificationsPage({
           </div>
         </div>
       )}
+
+      <UnsavedChangesDialog open={confirmClose} darkMode={darkMode}
+        onKeepEditing={() => setConfirmClose(false)}
+        onDiscard={() => { setConfirmClose(false); setEditRow(null); }}
+        onSave={() => { setConfirmClose(false); void saveRow(); }} />
     </section>
   );
 }

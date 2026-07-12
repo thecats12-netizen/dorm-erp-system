@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { formatDong, formatRoomHo } from "../utils/formatUtils";
 import { formatDateOnly } from "../utils/formatters";
+import { useRegisteredOverlay } from "../hooks/overlayA11y";
 import type { DormContract, NewHireEmployee, CleaningReport, DefectRequest, InventoryItem } from "../types/domain";
 
 // 운영시뮬레이션 통계 팝업(현거주자/만료자/중도퇴거/천안이동/신규입주) 상세 명단 1행.
@@ -18,6 +19,7 @@ export type SimMemberRow = {
   dorm: string;
   residenceStatus: string;
   moveInType: string;
+  moveInTypeAuto?: boolean;   // 자동선택 모드로 계산된 값인지(보조 배지 표시용)
   moveIn: string;
   contractEnd: string;
   actualMoveOut: string;
@@ -25,7 +27,7 @@ export type SimMemberRow = {
 };
 
 type ColKey =
-  | "name" | "department" | "site" | "gender" | "dorm"
+  | "name" | "department" | "site" | "gender" | "dorm" | "dong" | "roomHo"
   | "residenceStatus" | "moveInType" | "moveIn" | "contractEnd" | "actualMoveOut" | "cheonanMove";
 
 const COLUMNS: { key: ColKey; label: string }[] = [
@@ -34,6 +36,8 @@ const COLUMNS: { key: ColKey; label: string }[] = [
   { key: "site", label: "근무지" },
   { key: "gender", label: "성별" },
   { key: "dorm", label: "기숙사" },
+  { key: "dong", label: "동" },
+  { key: "roomHo", label: "호수" },
   { key: "residenceStatus", label: "거주상태" },
   { key: "moveInType", label: "입주유형" },
   { key: "moveIn", label: "입실일" },
@@ -118,6 +122,8 @@ export default function SimMemberGridModal({
   const [showColMenu, setShowColMenu] = useState(false);
   const [copied, setCopied] = useState(false);
   const [detail, setDetail] = useState<SimMemberRow | null>(null);
+  // 내부 직원 상세 모달을 앱 공통 닫기 시스템에 등록(ESC·뒤로가기 시 최상위 = 이 모달부터 닫기).
+  useRegisteredOverlay(!!detail, () => setDetail(null));
 
   const siteOpts = useMemo(() => uniqueSorted(rows.map((r) => r.site)), [rows]);
   const deptOpts = useMemo(() => uniqueSorted(rows.map((r) => r.department)), [rows]);
@@ -224,13 +230,13 @@ export default function SimMemberGridModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={onClose}>
-      <div className={`my-6 w-full max-w-5xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="sim-grid-title" className={`my-6 w-full max-w-5xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-start justify-between gap-3">
           <div>
-            <h3 className="text-lg font-semibold">{title}</h3>
+            <h3 id="sim-grid-title" className="text-lg font-semibold">{title}</h3>
             <p className="text-sm text-slate-500">전체 {rows.length}명 · 표시 {filtered.length}명 ({pct}%){selected.size ? ` · 선택 ${selected.size}` : ""}</p>
           </div>
-          <button onClick={onClose} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+          <button type="button" aria-label="닫기" onClick={onClose} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
         </div>
 
         {/* 필터 */}
@@ -300,7 +306,14 @@ export default function SimMemberGridModal({
                     </td>
                     {visibleCols.map((c) => (
                       <td key={c.key} className={`whitespace-nowrap px-3 py-2 ${pinName && c.key === "name" ? "sticky left-9 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}>
-                        {r[c.key] || "-"}
+                        {c.key === "moveInType" ? (
+                          <span className="inline-flex items-center gap-1">
+                            <span>{r.moveInType || "-"}</span>
+                            {r.moveInTypeAuto && r.moveInType && r.moveInType !== "확인 필요" && (
+                              <span title="자동선택 모드로 계산된 값입니다" className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동</span>
+                            )}
+                          </span>
+                        ) : (r[c.key] || "-")}
                       </td>
                     ))}
                   </tr>
@@ -374,13 +387,13 @@ function EmployeeDetailModal({ member, darkMode, onClose, dormContracts, newHire
 
   return (
     <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={onClose}>
-      <div className={`my-8 w-full max-w-3xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="sim-detail-title" className={`my-8 w-full max-w-3xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-start justify-between">
           <div>
-            <h3 className="text-lg font-semibold">{member.name} <span className="text-sm font-normal text-slate-500">직원 상세정보</span></h3>
+            <h3 id="sim-detail-title" className="text-lg font-semibold">{member.name} <span className="text-sm font-normal text-slate-500">직원 상세정보</span></h3>
             <p className="text-sm text-slate-500">{member.site} · {member.department || "부서 미지정"} · {member.dorm}</p>
           </div>
-          <button onClick={onClose} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+          <button type="button" aria-label="닫기" onClick={onClose} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
         </div>
         <div className="mb-3 flex flex-wrap gap-1">
           {TABS.map((t) => (
@@ -392,7 +405,8 @@ function EmployeeDetailModal({ member, darkMode, onClose, dormContracts, newHire
         {tab === "기본정보" && (
           <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
             {[["이름", member.name], ["연락처", member.phone], ["부서", member.department], ["근무지", member.site], ["성별", member.gender],
-              ["기숙사", member.dorm], ["거주상태", member.residenceStatus], ["입주유형", member.moveInType],
+              ["기숙사", member.dorm], ["거주상태", member.residenceStatus],
+              ["입주유형", member.moveInType + (member.moveInTypeAuto && member.moveInType && member.moveInType !== "확인 필요" ? " · 자동선택" : "")],
               ["입실일", member.moveIn], ["계약종료일", member.contractEnd], ["실제퇴실일", member.actualMoveOut], ["천안이동일", member.cheonanMove]].map(([k, v]) => (
               <div key={k} className={`rounded-lg border p-2 ${cell}`}>
                 <div className="text-[0.65rem] uppercase tracking-wide text-slate-400">{k}</div>

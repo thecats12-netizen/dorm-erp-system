@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
+import { useRegisteredOverlay } from "../../../hooks/overlayA11y";
 
 type RefOpt = { id: string; label: string };
 type Kind = "personnel" | "application" | "cert" | "target";
@@ -71,6 +72,8 @@ export default function ExamDashboardPage({ darkMode, tenantId }: { darkMode: bo
     { year: "전체", month: "전체", group: "전체", product: "전체", part: "전체", process: "전체", level: "전체" }
   );
   const [detail, setDetail] = useState<{ title: string; kind: Kind; rows: ExamRow[] } | null>(null);
+  // 상세 목록 모달을 앱 공통 닫기 시스템에 등록(ESC·뒤로가기로 닫기).
+  useRegisteredOverlay(!!detail, () => setDetail(null));
 
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
@@ -287,10 +290,10 @@ export default function ExamDashboardPage({ darkMode, tenantId }: { darkMode: bo
       {/* 상세 목록 모달 */}
       {detail && (
         <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={() => setDetail(null)}>
-          <div className={`my-8 w-full max-w-3xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+          <div role="dialog" aria-modal="true" aria-labelledby="exam-dash-detail-title" tabIndex={-1} className={`my-8 w-full max-w-3xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-lg font-semibold">{detail.title} <span className="text-sm font-normal text-slate-500">· {detail.rows.length}건</span></h3>
-              <button onClick={() => setDetail(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+              <h3 id="exam-dash-detail-title" className="text-lg font-semibold">{detail.title} <span className="text-sm font-normal text-slate-500">· {detail.rows.length}건</span></h3>
+              <button type="button" aria-label="닫기" onClick={() => setDetail(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
             </div>
             <div className="max-h-[60vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
               <table className="w-full text-left text-xs">
