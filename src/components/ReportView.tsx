@@ -14,7 +14,7 @@ export type ReportConfig = {
   dateField?: string;           // KPI 시간 버킷(오늘/주/월)용 컬럼(YYYY-MM-DD)
   filterKeys?: string[];        // 드롭다운 필터 대상 컬럼 key
   chart?: ReportChart;
-  extraKpis?: { label: string; value: string }[]; // 보고서 특화 KPI(공실률 등)
+  extraKpis?: { label: string; value: string; sub?: string }[]; // 보고서 특화 KPI(공실률/정원초과 등). sub = 보조 문구.
 };
 
 const PIE_COLORS = ["#2563eb", "#16a34a", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#64748b"];
@@ -98,7 +98,7 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
       out.push({ label: "지난달", value: String(cLastM) });
       out.push({ label: "전월 대비", value: `${delta >= 0 ? "+" : ""}${delta}%`, sub: `${cThisM} vs ${cLastM}` });
     }
-    extraKpis.forEach((k) => out.push({ label: k.label, value: k.value }));
+    extraKpis.forEach((k) => out.push({ label: k.label, value: k.value, sub: k.sub }));
     return out;
   }, [filtered, dateField, extraKpis]);
 

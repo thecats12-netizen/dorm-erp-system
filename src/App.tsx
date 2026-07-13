@@ -4659,19 +4659,6 @@ export default function App() {
   const getOpenDefectCount = (dormId: string): number =>
     defects.filter((d) => d.dormId === dormId && !d.isDeleted && d.defectStatus !== "완료").length;
 
-  const isCleaningMissing = (dorm: OperationalDorm): boolean => {
-    const currentMonth = new Date().toISOString().slice(0, 7);
-    const reportsThisMonth = cleaningReports.filter(
-      (report) => report.dormId === dorm.id && report.reportDate.startsWith(currentMonth)
-    );
-    if (reportsThisMonth.length === 0) return true;
-    const latest = reportsThisMonth.reduce((latestReport, report) =>
-      report.reportDate > latestReport.reportDate ? report : latestReport,
-      reportsThisMonth[0]
-    );
-    return latest.cleanStatus === "미제출";
-  };
-
   const handleDormCardClick = (dormId: string) => {
     if (clickTimerRef.current) {
       window.clearTimeout(clickTimerRef.current);
@@ -8111,6 +8098,54 @@ export default function App() {
     }
     return { latest, cleanerName, lastDate, photoCount, needsInspection, reason, latestStatus: latest?.cleanStatus || "미제출" };
   };
+
+  // [입주자 카드] "해당 주차(현재 날짜 기준 주차)" 청소보고 상태 — 청소관리 공통 주차 계산(getCleaningWeekInfo) 재사용.
+  //  이번 주 보고서를 한 번만 그룹핑(useMemo) → 모든 카드가 Map 을 재사용(카드별 개별 조회/재계산·API 호출 없음).
+  //  매칭: dorm_id → 건물+동+호 정규화 키(makeDormMatchKey). 원본+보완 보고서를 함께 보고 최신(등록순) 상태로 판정.
+  const cleaningWeekStatusCtx = useMemo(() => {
+    const wk = getCleaningWeekInfo(new Date());
+    const weekLabelText = wk ? `${wk.month}월 ${wk.weekNumber}주차` : "";
+    const byKey = new Map<string, CleaningReport>();
+    const byId = new Map<string, CleaningReport>();
+    if (wk) {
+      cleaningReports.forEach((r) => {
+        if (r.isDeleted || r.isPermanentDeleted) return;
+        const info = getCleaningWeekInfo(r.reportDate);
+        if (!info || info.weekKey !== wk.weekKey) return; // 이번 주 보고서만(다른 주차 영향 없음)
+        const newer = (a?: CleaningReport) => !a || String(r.createdAt || "") >= String(a.createdAt || "");
+        const key = makeDormMatchKey(r.site, r.buildingName, r.dong, r.roomHo);
+        if (newer(byKey.get(key))) byKey.set(key, r);
+        if (r.dormId && newer(byId.get(r.dormId))) byId.set(r.dormId, r);
+      });
+    }
+    return { weekLabelText, byKey, byId };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cleaningReports]);
+
+  // 청소보고 상태 → 화면 표시 라벨(개발용 코드값 미노출). 보완(제출완료) = 재검토 대기.
+  const cleaningDisplayStatus = (report: CleaningReport | null): string => {
+    if (!report) return "미보고";
+    switch (report.cleanStatus) {
+      case "불량": return "불량";
+      case "재청소요청": return "재청소요청";
+      case "확인완료": return "정상";
+      case "제출완료": return report.parentReportId ? "재검토 대기" : "정상";
+      default: return "미보고"; // 미제출 등
+    }
+  };
+
+  // 기숙사 카드용: 해당 주차 청소상태 + 주차 라벨(dorm_id 우선, 없으면 정규화 키).
+  const getDormCleaningWeekStatus = (dorm: { id: string; site: string; buildingName: string; dong: string; roomHo: string }) => {
+    const { weekLabelText, byKey, byId } = cleaningWeekStatusCtx;
+    const report = byId.get(dorm.id) || byKey.get(makeDormMatchKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo)) || null;
+    const status = cleaningDisplayStatus(report);
+    return { status, weekLabel: weekLabelText, missing: status === "미보고" };
+  };
+  const cleaningStatusTone = (status: string): string =>
+    status === "정상" ? "bg-emerald-100 text-emerald-700"
+      : status === "불량" || status === "재청소요청" ? "bg-rose-100 text-rose-700"
+        : status === "재검토 대기" ? "bg-amber-100 text-amber-700"
+          : "bg-slate-200 text-slate-500"; // 미보고
 
   useEffect(() => {
     if (currentUser?.role === "maintenance_reporter" && currentUser?.dormId) {
@@ -15153,14 +15188,19 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     const leaseExpiryCount = operationalDorms.filter((d) => (d.contractEnd || "").slice(0, 7) === reportPeriodYM).length;
     const overallTotalCap = siteGenderStats.reduce((a, s) => a + s.totalCapacity, 0);
     const overallResidents = siteGenderStats.reduce((a, s) => a + s.currentResidents, 0);
+    // 전체 잔여 = 전체 정원 - 전체 재원(원본값 유지 — 음수면 정원초과). 정원/재원은 동일 기준(siteGenderStats)이라 상·하단 합계 일치.
+    const overallRemaining = overallTotalCap - overallResidents;
     const overall: ReportConfig = {
       title: "전체 운영 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: siteGenderStats.map((s) => ({ 지역: s.site, 성별: s.gender, 기숙사수: s.dormCount, 재원: s.currentResidents, 정원: s.totalCapacity, 공실: s.vacancy, 입주율: `${s.totalCapacity ? Math.round((s.currentResidents / s.totalCapacity) * 100) : 0}%` })),
-      columns: [{ key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "기숙사수", label: "기숙사수" }, { key: "재원", label: "재원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "입주율", label: "입주율" }],
+      // 하단 통계: 지역·성별·기숙사수·정원·재원·잔여·입주율(잔여 = 그룹 정원 - 그룹 재원, 원본값 유지). "공실"→"잔여".
+      rows: siteGenderStats.map((s) => ({ 지역: s.site, 성별: s.gender, 기숙사수: s.dormCount, 정원: s.totalCapacity, 재원: s.currentResidents, 잔여: s.totalCapacity - s.currentResidents, 입주율: `${s.totalCapacity ? Math.round((s.currentResidents / s.totalCapacity) * 100) : 0}%` })),
+      columns: [{ key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "기숙사수", label: "기숙사수" }, { key: "정원", label: "정원" }, { key: "재원", label: "재원" }, { key: "잔여", label: "잔여" }, { key: "입주율", label: "입주율" }],
       filterKeys: ["지역", "성별"], chart: { type: "bar", groupKey: "지역", valueKey: "재원", label: "지역별 재원" },
+      // 상단 KPI 순서: 총 건수(내장) · 전체 정원 · 전체 재원 · 전체 잔여 · 입주율 · 임차만기.
       extraKpis: [
-        { label: "전체 재원", value: String(overallResidents) },
         { label: "전체 정원", value: String(overallTotalCap) },
+        { label: "전체 재원", value: String(overallResidents) },
+        { label: "전체 잔여", value: String(overallRemaining), ...(overallRemaining < 0 ? { sub: `정원초과 ${-overallRemaining}명` } : {}) },
         { label: "입주율", value: `${overallTotalCap ? Math.round((overallResidents / overallTotalCap) * 100) : 0}%` },
         { label: "임차만기", value: `${leaseExpiryCount}건` },
       ],
@@ -18669,7 +18709,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       {currentCount > dorm.capacity && (
                         <span className="inline-flex items-center gap-0.5 rounded bg-rose-100 px-1.5 py-0.5 text-[0.65rem] font-medium text-rose-700">정원초과</span>
                       )}
-                      <span className={`${theme.darkMode ? "inline-flex items-center gap-0.5 rounded bg-slate-900 px-1.5 py-0.5 text-[0.65rem] font-medium" : "inline-flex items-center gap-0.5 rounded bg-slate-100 px-1.5 py-0.5 text-[0.65rem] font-medium"}`}>{isCleaningMissing(dorm) ? "🔴 미보" : "✓ 정상"}</span>
+                      {(() => { const cw = getDormCleaningWeekStatus(dorm); return (
+                        <span className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[0.65rem] font-medium ${cleaningStatusTone(cw.status)}`} title={`${cw.weekLabel} 기준 청소상태`}>{cw.weekLabel} · {cw.status}</span>
+                      ); })()}
                       {getOpenDefectCount(dorm.id) > 0 && (
                         <span className="inline-flex items-center gap-0.5 rounded bg-rose-100 px-1.5 py-0.5 text-[0.65rem] font-medium text-rose-700">⚠️ {getOpenDefectCount(dorm.id)}</span>
                       )}
@@ -18844,7 +18886,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractEndLabel(o.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getDormContractRemainLabel(o.dormId)}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(dorm?.id)}</td>
-                        <td className="px-3 py-3 whitespace-nowrap">{dorm ? (isCleaningMissing(dorm) ? "미보고" : "정상") : "-"}</td>
+                        <td className="px-3 py-3 whitespace-nowrap">{dorm ? (() => { const cw = getDormCleaningWeekStatus(dorm); return <span title={`${cw.weekLabel} 기준`}>{cw.weekLabel} · {cw.status}</span>; })() : "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap">{getOpenDefectCount(dorm?.id || "")}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{o.employeeName}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
@@ -18941,7 +18983,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <div><dt className="font-medium">담당 관리자</dt><dd>{getDormManagerNameWithScore(selectedDetailDorm.id, "paren")}</dd></div>
                         <div><dt className="font-medium">현재인원</dt><dd>{occupancyCountByDorm.get(selectedDetailDorm.id) || 0} / {selectedDetailDorm.capacity}명{(occupancyCountByDorm.get(selectedDetailDorm.id) || 0) > selectedDetailDorm.capacity && <span className="ml-1 rounded bg-rose-100 px-1.5 py-0.5 text-xs font-medium text-rose-700">정원초과</span>}</dd></div>
                         <div><dt className="font-medium">공실수</dt><dd>{Math.max(selectedDetailDorm.capacity - (occupancyCountByDorm.get(selectedDetailDorm.id) || 0), 0)}</dd></div>
-                        <div><dt className="font-medium">청소상태</dt><dd>{isCleaningMissing(selectedDetailDorm) ? "미보고" : "정상"}</dd></div>
+                        <div><dt className="font-medium">청소상태</dt><dd>{(() => { const cw = getDormCleaningWeekStatus(selectedDetailDorm); return `${cw.weekLabel} · ${cw.status}`; })()}</dd></div>
                         <div><dt className="font-medium">미처리 하자</dt><dd>{getOpenDefectCount(selectedDetailDorm.id)}</dd></div>
                         <div><dt className="font-medium">공동현관</dt><dd>{selectedDetailDorm.공동현관 || "-"}</dd></div>
                         <div><dt className="font-medium">세대현관</dt><dd>{selectedDetailDorm.세대현관 || "-"}</dd></div>
