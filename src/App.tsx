@@ -15910,7 +15910,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.currentResidents}</div>
               </button>
               <button type="button" onClick={() => { setDormStatusFilter("공실"); setDormSiteFilter("전체"); setDormGenderFilter("전체"); setDormSearch(""); setActiveTab("dorms"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
-                <div className="text-sm font-medium text-slate-500">남은공실</div>
+                <div className="text-sm font-medium text-slate-500">남은 잔여</div>
                 <div className="mt-3 text-3xl font-bold">{dashboardStat.totalVacancy}</div>
               </button>
               <button type="button" onClick={() => { setDefectStatusFilter("진행중"); setDefectSearch(""); setActiveTab("defects"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
@@ -16499,14 +16499,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <p className="text-sm text-slate-500">지역·성별 단위 운영 현황 (현 거주자 = 거주중 + 만료예정)</p>
               </div>
               <div className="erp-table-container">
-                <table className="erp-table min-w-[900px] text-left">
+                <table className="erp-table min-w-[900px] text-center">
                   <thead className={`${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
                     <tr>
                       <th className="px-3 py-2">지역</th>
                       <th className="px-3 py-2">성별</th>
                       <th className="px-3 py-2">기숙사 수</th>
                       <th className="px-3 py-2">현재 거주자</th>
-                      <th className="px-3 py-2">남은 공실</th>
+                      <th className="px-3 py-2">남은 잔여</th>
                       <th className="px-3 py-2">사용률</th>
                       <th className="px-3 py-2">만료예정 계약</th>
                       <th className="px-3 py-2">미처리 하자</th>
