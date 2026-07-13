@@ -15204,6 +15204,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         { label: "입주율", value: `${overallTotalCap ? Math.round((overallResidents / overallTotalCap) * 100) : 0}%` },
         { label: "임차만기", value: `${leaseExpiryCount}건` },
       ],
+      // 머리글/데이터 가운데 정렬 + 총계 행(항상 마지막 · KPI와 동일 합계 재사용). 이 보고서에만 적용.
+      centerAlign: true,
+      totalRow: {
+        지역: "총계", 성별: "-",
+        기숙사수: siteGenderStats.reduce((a, s) => a + s.dormCount, 0),
+        정원: overallTotalCap,
+        재원: overallResidents,
+        잔여: overallRemaining,
+        입주율: `${overallTotalCap ? Math.round((overallResidents / overallTotalCap) * 100) : 0}%`,
+      },
     };
     // ② 기숙사별 입주 현황
     const dormOcc: ReportConfig = {

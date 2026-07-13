@@ -15,6 +15,8 @@ export type ReportConfig = {
   filterKeys?: string[];        // 드롭다운 필터 대상 컬럼 key
   chart?: ReportChart;
   extraKpis?: { label: string; value: string; sub?: string }[]; // 보고서 특화 KPI(공실률/정원초과 등). sub = 보조 문구.
+  centerAlign?: boolean;                         // 머리글/데이터 가운데 정렬(해당 보고서만 opt-in).
+  totalRow?: Record<string, string | number>;    // 총계 행(항상 마지막 고정 · 필터/정렬 무관 · 내보내기 포함).
 };
 
 const PIE_COLORS = ["#2563eb", "#16a34a", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#64748b"];
@@ -35,7 +37,8 @@ function GridSelect({ value, onChange, options, label, darkMode }: { value: stri
 }
 
 export default function ReportView({ config, darkMode }: { config: ReportConfig; darkMode: boolean }) {
-  const { title, subtitle, rows, columns, dateField, filterKeys = [], chart, extraKpis = [] } = config;
+  const { title, subtitle, rows, columns, dateField, filterKeys = [], chart, extraKpis = [], centerAlign = false, totalRow } = config;
+  const alignCls = centerAlign ? "text-center" : "";
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [fromDate, setFromDate] = useState("");
@@ -125,7 +128,9 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
   const asObj = (r: Record<string, string | number>) => columns.reduce((o, c) => { o[c.label] = r[c.key] ?? ""; return o; }, {} as Record<string, string | number>);
   const safeName = title.replace(/[\\/:*?"<>|]/g, "_");
   const exportExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(filtered.map(asObj));
+    const data = filtered.map(asObj);
+    if (totalRow) data.push(asObj(totalRow)); // 총계 행 마지막에 포함
+    const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "보고서");
     XLSX.writeFile(wb, `${safeName}.xlsx`);
@@ -134,6 +139,7 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
     const lines = [columns.map((c) => c.label).join(",")].concat(
       filtered.map((r) => columns.map((c) => `"${String(r[c.key] ?? "").replace(/"/g, '""')}"`).join(","))
     );
+    if (totalRow) lines.push(columns.map((c) => `"${String(totalRow[c.key] ?? "").replace(/"/g, '""')}"`).join(",")); // 총계
     const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url; a.download = `${safeName}.csv`; a.click();
@@ -143,6 +149,7 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
     const w = window.open("", "_blank", "width=1000,height=760"); if (!w) return;
     const th = columns.map((c) => `<th>${c.label}</th>`).join("");
     const trs = filtered.map((r) => `<tr>${columns.map((c) => `<td>${String(r[c.key] ?? "")}</td>`).join("")}</tr>`).join("");
+    const totalTr = totalRow ? `<tr class="total">${columns.map((c) => `<td>${String(totalRow[c.key] ?? "")}</td>`).join("")}</tr>` : ""; // 총계 마지막 고정
     const kpiHtml = kpis.map((k) => `<div class="kpi"><div class="kl">${k.label}</div><div class="kv">${k.value}</div></div>`).join("");
     w.document.write(`<!doctype html><meta charset="utf-8"><title>${title}</title>
       <style>
@@ -152,12 +159,13 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
         .kpis{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
         .kpi{border:1px solid #cbd5e1;border-radius:8px;padding:6px 12px;min-width:80px}
         .kl{font-size:10px;color:#64748b}.kv{font-size:15px;font-weight:700}
-        table{border-collapse:collapse;width:100%}th,td{border:1px solid #cbd5e1;padding:5px 7px;text-align:left}
+        table{border-collapse:collapse;width:100%}th,td{border:1px solid #cbd5e1;padding:5px 7px;text-align:${centerAlign ? "center" : "left"}}
         th{background:#f1f5f9}tr{page-break-inside:avoid}thead{display:table-header-group}
+        tr.total td{font-weight:700;background:#f1f5f9;border-top:2px solid #94a3b8}
       </style>
       <h1>${title}</h1><div class="sub">${subtitle || ""} · 총 ${filtered.length}건 · 출력 ${formatDateOnly(new Date().toISOString())}</div>
       <div class="kpis">${kpiHtml}</div>
-      <table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`);
+      <table><thead><tr>${th}</tr></thead><tbody>${trs}${totalTr}</tbody></table>`);
     w.document.close(); w.focus(); w.print();
   };
 
@@ -248,7 +256,7 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
         <table className="w-full text-left text-sm">
           <thead className={`sticky top-0 z-[1] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
             <tr>{columns.map((c) => (
-              <th key={c.key} onClick={() => toggleSort(c.key)} className="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:underline">
+              <th key={c.key} onClick={() => toggleSort(c.key)} className={`cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:underline ${alignCls}`}>
                 {c.label}{sortKey === c.key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
               </th>
             ))}</tr>
@@ -256,10 +264,16 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
           <tbody>
             {filtered.map((r, i) => (
               <tr key={i} className={`border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
-                {columns.map((c) => <td key={c.key} className="whitespace-nowrap px-3 py-2">{r[c.key] === "" || r[c.key] == null ? "-" : r[c.key]}</td>)}
+                {columns.map((c) => <td key={c.key} className={`whitespace-nowrap px-3 py-2 ${alignCls}`}>{r[c.key] === "" || r[c.key] == null ? "-" : r[c.key]}</td>)}
               </tr>
             ))}
             {filtered.length === 0 && <tr><td colSpan={columns.length} className="px-3 py-8 text-center text-slate-500">데이터가 없습니다.</td></tr>}
+            {totalRow && (
+              // 총계 행: 항상 마지막 고정(필터/정렬과 무관) · Bold · 연한 회색 배경 · 상단 Border 강조.
+              <tr className={`border-t-2 font-bold ${darkMode ? "border-slate-500 bg-slate-800/70" : "border-slate-300 bg-slate-100"}`}>
+                {columns.map((c) => <td key={c.key} className={`whitespace-nowrap px-3 py-2 ${alignCls}`}>{totalRow[c.key] === "" || totalRow[c.key] == null ? "-" : totalRow[c.key]}</td>)}
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
