@@ -10217,8 +10217,13 @@ export default function App() {
   const canEditCleaningReport = (user: LoginUser | null, report: CleaningReport) => {
     if (!user) return false;
     if (user.role === "admin") return true;
+    // [보완] 비관리자(하자접수 전용 계정 등)는 보완(추가) 청소보고서를 최초 저장한 뒤에는 수정 불가(조회 전용).
+    if (report.parentReportId) return false;
     return report.reporterUserId === user.id && report.cleanStatus === "제출완료";
   };
+
+  // 청소사진 개별 삭제 권한: super_admin/admin 만(현 시스템은 super_admin 미도입 → admin). manager 권한이 별도로 있으면 정책 유지.
+  const canDeleteCleaningPhoto = (user: LoginUser | null) => user?.role === "admin";
 
   const canEditDefect = (user: LoginUser | null, defect: DefectRequest) => {
     if (!user) return false;
@@ -10360,11 +10365,86 @@ export default function App() {
   };
 
   // 통합 "사진" 영역에서 개별 사진 삭제 (기존 before/after 필드 구조는 유지)
-  const removeCleaningReportPhoto = (field: "beforePhotoDataUrls" | "afterPhotoDataUrls", idx: number) => {
-    setCleaningReportForm((prev) => ({
-      ...prev,
-      [field]: prev[field].filter((_, i) => i !== idx),
-    }));
+  // - 청소사진은 별도 Storage 없이 청소보고서 행에 data URL 배열(before/after)로 인라인 저장됨 → "삭제" = 해당 URL 1개만 배열에서 제거.
+  // - 저장 전 새로 추가한 사진: 작성 중이므로 확인 없이 즉시 제거(등록 전 수정).
+  // - 이미 저장된(기존 등록) 사진: super_admin/admin 만 삭제(권한 함수 검증) + 확인 다이얼로그 + 보완보고서 마지막 1장 삭제 차단 + 즉시 반영/감사로그.
+  const removeCleaningReportPhoto = async (
+    field: "beforePhotoDataUrls" | "afterPhotoDataUrls",
+    idx: number,
+    url?: string
+  ) => {
+    const targetUrl = url ?? cleaningReportForm[field]?.[idx];
+    const isSavedPhoto = !!targetUrl && cleaningEditOriginalPhotos.has(targetUrl);
+
+    // 신규(미저장) 사진 → 확인/권한 없이 즉시 제거(고유 URL + 인덱스 정합으로 선택한 1장만).
+    if (!isSavedPhoto) {
+      setCleaningReportForm((prev) => ({
+        ...prev,
+        [field]: prev[field].filter((u, i) => !(i === idx && (url === undefined || u === url))),
+      }));
+      return;
+    }
+
+    // 저장된 사진 삭제는 관리자만(버튼 숨김 + 함수/강제호출 검증 이중).
+    if (!canDeleteCleaningPhoto(currentUser)) {
+      await appAlert("사진 삭제", "사진을 삭제할 권한이 없습니다. 관리자에게 문의해주세요.");
+      return;
+    }
+
+    // 보완 청소보고서는 사진 0장을 허용하지 않음 → 마지막 1장 삭제 차단(정책: 새 사진 선등록 후 기존 사진 삭제).
+    const isSupplement = !!cleaningReportForm.parentReportId;
+    const totalPhotos =
+      (cleaningReportForm.beforePhotoDataUrls?.length || 0) + (cleaningReportForm.afterPhotoDataUrls?.length || 0);
+    if (isSupplement && totalPhotos <= 1) {
+      await appAlert("사진 삭제", "보완 청소보고서에는 사진이 1장 이상 필요합니다. 새 사진을 먼저 등록한 후 기존 사진을 삭제해주세요.");
+      return;
+    }
+
+    if (!(await appConfirm("사진 삭제 확인", "선택한 사진 1장을 삭제하시겠습니까?\n삭제된 사진은 복구할 수 없습니다.", { confirmText: "사진 삭제", tone: "danger" }))) return;
+
+    try {
+      // 폼에서 선택한 1장만 제거(고유 URL + 인덱스 정합 — 정렬/중복에 안전).
+      const nextBefore = field === "beforePhotoDataUrls"
+        ? cleaningReportForm.beforePhotoDataUrls.filter((u, i) => !(i === idx && u === targetUrl))
+        : [...(cleaningReportForm.beforePhotoDataUrls || [])];
+      const nextAfter = field === "afterPhotoDataUrls"
+        ? cleaningReportForm.afterPhotoDataUrls.filter((u, i) => !(i === idx && u === targetUrl))
+        : [...(cleaningReportForm.afterPhotoDataUrls || [])];
+      setCleaningReportForm((prev) => ({ ...prev, beforePhotoDataUrls: nextBefore, afterPhotoDataUrls: nextAfter }));
+      const stillUsed = [...nextBefore, ...nextAfter].includes(targetUrl!);
+      if (!stillUsed) {
+        setCleaningEditOriginalPhotos((prev) => {
+          const n = new Set(prev);
+          n.delete(targetUrl!);
+          return n;
+        });
+      }
+
+      // 이미 저장된 보고서면 즉시 반영(원본/보완 연결·보고일·주차·상태·차수·관리자 의견 등은 그대로 유지, 사진 1장만 제거).
+      if (editingCleaningReportId) {
+        const existing = cleaningReports.find((r) => r.id === editingCleaningReportId);
+        if (existing) {
+          const updated: CleaningReport = {
+            ...existing,
+            beforePhotoDataUrls: field === "beforePhotoDataUrls" ? (existing.beforePhotoDataUrls || []).filter((u) => u !== targetUrl) : existing.beforePhotoDataUrls,
+            afterPhotoDataUrls: field === "afterPhotoDataUrls" ? (existing.afterPhotoDataUrls || []).filter((u) => u !== targetUrl) : existing.afterPhotoDataUrls,
+            updatedAt: new Date().toISOString(),
+          };
+          setCleaningReports((prev) => prev.map((r) => (r.id === existing.id ? updated : r)));
+          createAuditLog({
+            targetType: "cleaningReport",
+            targetId: existing.id,
+            actionType: "update",
+            changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+            beforeValue: JSON.stringify({ photoCount: (existing.beforePhotoDataUrls?.length || 0) + (existing.afterPhotoDataUrls?.length || 0) }),
+            afterValue: JSON.stringify({ photoCount: (updated.beforePhotoDataUrls?.length || 0) + (updated.afterPhotoDataUrls?.length || 0), deletedFrom: field }),
+          });
+        }
+      }
+      await appAlert("사진 삭제", "사진이 삭제되었습니다.");
+    } catch {
+      await appAlert("사진 삭제", "사진을 삭제하지 못했습니다. 잠시 후 다시 시도해주세요.");
+    }
   };
 
   // ============================================================================
@@ -11339,6 +11419,11 @@ export default function App() {
     //   신규 보완 등록일 때만 보완 조건(권한/상태/중복)을 검증하고, 기존 보완 수정은 그대로 통과(원본 주차 유지).
     const isSupplementForm = !!cleaningReportForm.parentReportId;
     const isNewSupplement = isSupplementForm && !editingCleaningReportId;
+    // [2] 저장 완료된 보완 청소보고서는 비관리자(하자접수 전용 계정 등) 수정 불가 — 프론트 버튼 숨김 + URL/강제 호출/저장 차단(이중 검증).
+    if (isSupplementForm && editingCleaningReportId && currentUser?.role !== "admin") {
+      await appAlert("보완 청소보고", "등록이 완료된 보완 청소보고서는 수정할 수 없습니다.\n내용 변경이 필요한 경우 관리자에게 문의해주세요.");
+      return;
+    }
     if (isNewSupplement) {
       const original = cleaningReports.find((r) => r.id === cleaningReportForm.parentReportId);
       if (!original) { await appAlert("보완 청소보고", "원본 청소보고서를 찾을 수 없습니다."); return; }
@@ -15967,7 +16052,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <div className={`mt-2 text-2xl font-bold ${theme.darkMode ? "text-slate-100" : "text-slate-900"}`}>{stat.currentResidents}</div>
                       </div>
                       <div className={`rounded-2xl p-3 shadow-sm ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
-                        <div className={`text-[11px] font-semibold uppercase tracking-wide ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>공실</div>
+                        <div className={`text-[11px] font-semibold uppercase tracking-wide ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>잔여</div>
                         <div className={`mt-2 text-2xl font-bold ${theme.darkMode ? "text-slate-100" : "text-slate-900"}`}>{stat.vacancy}</div>
                       </div>
                       <div className={`rounded-2xl p-3 shadow-sm ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
@@ -16284,7 +16369,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="mt-2 text-xs text-amber-600">건 예정 (30일)</div>
               </button>
               <button type="button" onClick={() => { setDormStatusFilter("공실"); setDormSiteFilter("전체"); setDormGenderFilter("전체"); setDormSearch(""); setActiveTab("dorms"); }} className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-purple-50 to-purple-100 p-4 hover:shadow-lg transition-shadow" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-purple-50 to-purple-100 p-4 hover:shadow-lg transition-shadow"}`}>
-                <div className="text-xs font-semibold uppercase tracking-wide text-purple-600">공실률</div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-purple-600">잔여율</div>
                 <div className="mt-3 text-3xl font-bold text-purple-700">{dashboardSummaryStats.vacancyRate}%</div>
                 <div className="mt-2 text-xs text-purple-600">입주 가능</div>
               </button>
@@ -16565,7 +16650,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
                 <div className="mb-4">
                   <h2 className="text-lg font-semibold">지역별 기숙사 현황</h2>
-                  <p className="text-sm text-slate-500">평택·천안 / 남·여 — 사용중·공실 (총 기숙사 기준)</p>
+                  <p className="text-sm text-slate-500">평택·천안 / 남·여 — 사용중·잔여 (총 기숙사 기준)</p>
                 </div>
                 <div className="space-y-3">
                   {dashboardChartData.regionStatus.map((r) => {
@@ -16574,7 +16659,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <div key={r.label}>
                         <div className="mb-1 flex items-center justify-between text-xs">
                           <span className="font-semibold">{r.label}</span>
-                          <span className="text-slate-500">총 {r.total} · 사용중 {r.inUse} · 공실 {r.vacant}</span>
+                          <span className="text-slate-500">총 {r.total} · 사용중 {r.inUse} · 잔여 {r.vacant}</span>
                         </div>
                         <div className={`flex h-5 overflow-hidden rounded-full ${theme.darkMode ? "bg-slate-800" : "bg-slate-100"}`}>
                           <div className="bg-blue-600 transition-all" style={{ width: `${(r.inUse / max) * 100}%` }} />
@@ -16589,7 +16674,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
                 <div className="mt-4 flex gap-4 text-xs text-slate-500">
                   <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-blue-600" /> 사용중</span>
-                  <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-blue-200" /> 공실</span>
+                  <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-blue-200" /> 잔여</span>
                 </div>
               </section>
 
@@ -22146,7 +22231,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </thead>
                   <tbody>
                     {cleaningReportPg.pagedItems.map((report) => (
-                      <tr key={report.id} onClick={() => void openCleaningReportEdit(report)} className={`cursor-pointer ${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
+                      <tr key={report.id} onClick={() => { if (canEditCleaningReport(currentUser, report)) void openCleaningReportEdit(report); else void openCleaningPhotoViewer(report); }} className={`cursor-pointer ${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
                         <td className="px-3 py-3 whitespace-nowrap">{formatDateOnly(report.reportDate) || "-"}</td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[180px]">{`${report.buildingName} ${report.dong}-${report.roomHo}`}</td>
                         <td className="px-3 py-3 whitespace-nowrap">
@@ -22205,7 +22290,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                                 {savingPdf ? "PDF 생성 중..." : "PDF"}
                               </button>
                             )}
-                            {shouldShowMaintenanceControls(currentUser) && (
+                            {shouldShowMaintenanceControls(currentUser) && canEditCleaningReport(currentUser, report) && (
                               <button onClick={(e) => { e.stopPropagation(); void openCleaningReportEdit(report); }} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}>
                                 수정
                               </button>
@@ -24768,7 +24853,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     return <div className={`rounded-2xl border border-dashed p-4 text-center text-sm ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-400"}`}>{cleaningEditPhotosLoading ? "기존 사진을 불러오는 중입니다..." : "등록된 사진이 없습니다."}</div>;
                   }
                   const base = `청소사진_${cleaningReportForm.buildingName || "기숙사"}_${reportFileDate(cleaningReportForm.reportDate)}`;
-                  const renderThumb = (m: { url: string; field: "beforePhotoDataUrls" | "afterPhotoDataUrls"; idx: number }) => {
+                  const renderThumb = (m: { url: string; field: "beforePhotoDataUrls" | "afterPhotoDataUrls"; idx: number }, isOriginal = false) => {
                     const gi = Math.max(0, urls.indexOf(m.url));
                     const nsrc = normalizePhotoSrc(m.url);
                     return (
@@ -24782,7 +24867,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         {canDownloadFiles && (
                           <button type="button" onClick={() => downloadImage(nsrc || m.url, `${base}_${gi + 1}.${dataUrlExt(nsrc || m.url)}`)} className="absolute -left-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[11px] font-bold text-white hover:bg-blue-500" title="이 사진 다운로드">↓</button>
                         )}
-                        <button type="button" onClick={() => removeCleaningReportPhoto(m.field, m.idx)} className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white hover:bg-rose-500" title="이 사진 삭제">×</button>
+                        {(!isOriginal || canDeleteCleaningPhoto(currentUser)) && (
+                          <button type="button" onClick={() => void removeCleaningReportPhoto(m.field, m.idx, m.url)} className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white hover:bg-rose-500" title="이 사진 삭제">×</button>
+                        )}
                       </div>
                     );
                   };
@@ -24794,13 +24881,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       {original.length > 0 && (
                         <div>
                           <div className="mb-1 text-xs font-semibold text-slate-500">기존 등록 사진 · {original.length}장</div>
-                          <div className="flex flex-wrap gap-2">{original.map(renderThumb)}</div>
+                          <div className="flex flex-wrap gap-2">{original.map((m) => renderThumb(m, true))}</div>
                         </div>
                       )}
                       {added.length > 0 && (
                         <div className={original.length > 0 ? "mt-3" : ""}>
                           <div className="mb-1 text-xs font-semibold text-emerald-600">새로 추가할 사진 · {added.length}장</div>
-                          <div className="flex flex-wrap gap-2">{added.map(renderThumb)}</div>
+                          <div className="flex flex-wrap gap-2">{added.map((m) => renderThumb(m, false))}</div>
                         </div>
                       )}
                       <div className="mt-3 flex flex-wrap items-center gap-2">
