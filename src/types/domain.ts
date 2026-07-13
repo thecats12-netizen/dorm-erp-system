@@ -451,6 +451,9 @@ export type CleaningReport = {
   isPermanentDeleted?: boolean;
   permanentDeletedAt?: string;
   permanentDeletedBy?: string;
+  // 보완(추가) 청소보고서: 원본 보고서 id. 원본의 보고일/주차를 상속하고 stats/중복로직에서 분리한다.
+  //  (전용 DB 컬럼이 없어 Supabase 저장 시 memo 에 인코딩 — operationalSupabaseService 매퍼에서 처리)
+  parentReportId?: string;
 };
 
 export type ThemeSettings = {

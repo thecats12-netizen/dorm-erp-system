@@ -34,6 +34,18 @@ export type OperationalModuleState = {
 
 const tsOrNow = (v?: string) => (v && v !== "" ? v : new Date().toISOString());
 
+// 보완 청소보고서 원본연결(parentReportId)을 전용 컬럼 없이 memo 에 인코딩/디코딩(기존 스키마 유지).
+//  형식: "<사용자 메모>␞보완:<원본id>" — ␞(RS)는 사용자 입력에 나타나지 않는 제어문자.
+const SUP_TAG = "␞보완:";
+const encodeCleaningMemo = (memo: string, parentReportId?: string): string =>
+  parentReportId ? `${memo || ""}${SUP_TAG}${parentReportId}` : (memo || "");
+const decodeCleaningMemo = (raw: string): { memo: string; parentReportId?: string } => {
+  const s = raw || "";
+  const i = s.indexOf(SUP_TAG);
+  if (i < 0) return { memo: s };
+  return { memo: s.slice(0, i), parentReportId: s.slice(i + SUP_TAG.length).trim() || undefined };
+};
+
 const toDbCleaningReport = (report: CleaningReport, tenantId: string, userId: string) => ({
   id: report.id,
   tenant_id: tenantId,
@@ -54,7 +66,7 @@ const toDbCleaningReport = (report: CleaningReport, tenantId: string, userId: st
   clean_status: report.cleanStatus,
   check_result: report.checkResult,
   score: report.score,
-  memo: report.memo,
+  memo: encodeCleaningMemo(report.memo, report.parentReportId),
   before_photo_data_urls: report.beforePhotoDataUrls,
   after_photo_data_urls: report.afterPhotoDataUrls,
   reporter_user_id: report.reporterUserId,
@@ -92,7 +104,8 @@ const toDomainCleaningReport = (row: any): CleaningReport => ({
   cleanStatus: row.clean_status || "미제출",
   checkResult: row.check_result || "-",
   score: row.score ?? 0,
-  memo: row.memo || "",
+  memo: decodeCleaningMemo(row.memo || "").memo,
+  parentReportId: decodeCleaningMemo(row.memo || "").parentReportId,
   beforePhotoDataUrls: row.before_photo_data_urls || row.before_photos || row.images || row.photos || row.imageUrls || row.attachments || [],
   afterPhotoDataUrls: row.after_photo_data_urls || row.after_photos || row.attachments || [],
   reporterUserId: row.reporter_user_id || "",

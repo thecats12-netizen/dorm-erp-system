@@ -2176,6 +2176,8 @@ export default function App() {
   const localPhotoRecoveryRef = useRef<{ lookup: (r: any) => { before: string[]; after: string[] } | null; size: number } | null>(null);
   // 수정 모달에서 기존 사진을 실제로 불러왔는지 표시 → 저장 시 미로드 상태에서 사진이 지워지는 것 방지.
   const cleaningEditPhotosReadyRef = useRef(false);
+  // 청소보고서 저장 중복 실행 방지(저장 버튼 연속 클릭/재시도로 동일 보완 건 2건 생성 차단).
+  const cleaningSavingRef = useRef(false);
   // 수정 모달 오픈 시 "기존 등록 사진" URL 집합(신규 추가 사진과 구분 표시용).
   const [cleaningEditOriginalPhotos, setCleaningEditOriginalPhotos] = useState<Set<string>>(new Set());
   // 비동기 사진 조회 완료 시점에 현재 열려 있는 편집 대상이 바뀌지 않았는지 확인용.
@@ -2416,7 +2418,9 @@ export default function App() {
     cleanStatus: row.clean_status || "미제출",
     checkResult: row.check_result || "-",
     score: row.score ?? 0,
-    memo: row.memo || "",
+    // 보완 청소보고 원본연결(parentReportId)은 memo 에 인코딩됨(␞보완:<id>) — 디코딩하여 분리.
+    memo: (() => { const m = String(row.memo || ""); const i = m.indexOf("␞보완:"); return i < 0 ? m : m.slice(0, i); })(),
+    parentReportId: (() => { const m = String(row.memo || ""); const i = m.indexOf("␞보완:"); return i < 0 ? undefined : (m.slice(i + "␞보완:".length).trim() || undefined); })(),
     beforePhotoDataUrls: row.before_photo_data_urls || row.before_photos || row.images || row.photos || row.imageUrls || row.attachments || [],
     afterPhotoDataUrls: row.after_photo_data_urls || row.after_photos || row.attachments || [],
     reporterUserId: row.reporter_user_id || "",
@@ -5223,9 +5227,10 @@ export default function App() {
     // 점수 계산 시작일(설정) 이후만 반영. 담당 시작일과 함께 "더 늦은 날짜"를 유효 시작일로 사용.
     const scoreStart = cleaningSettings.scoreStartDate ? parseSafeDate(cleaningSettings.scoreStartDate) : null;
     const startDate = scoreStart && (!managerStart || scoreStart > managerStart) ? scoreStart : managerStart;
-    // 본인이 담당자로 지정된(=managerUserId) 보고서만, 삭제/영구삭제 제외
+    // 본인이 담당자로 지정된(=managerUserId) 보고서만, 삭제/영구삭제 제외.
+    //  보완(추가) 보고서(parentReportId)는 통계/점수에서 제외 → 기존 통계 계산 결과 불변(원본만 반영).
     const managerReports = cleaningReports.filter(
-      (r) => r.managerUserId === managerUserId && !r.isDeleted && !r.isPermanentDeleted
+      (r) => r.managerUserId === managerUserId && !r.isDeleted && !r.isPermanentDeleted && !r.parentReportId
     );
 
     let score = 0;
@@ -5275,7 +5280,8 @@ export default function App() {
   };
 
   const getManagerCleaningStats = (managerUserId: string) => {
-    const reports = cleaningReports.filter(r => r.managerUserId === managerUserId);
+    // 보완 보고서 제외(기존 통계 불변) — 원본 보고서만 집계.
+    const reports = cleaningReports.filter(r => r.managerUserId === managerUserId && !r.parentReportId);
     const totalReports = reports.length;
     const completedReports = reports.filter(r => r.cleanStatus === "확인완료").length;
     const defectReports = reports.filter(r => r.cleanStatus === "불량").length;
@@ -5630,13 +5636,15 @@ export default function App() {
     month: string
   ): "O" | "X" | "예정" | "사진누락" => {
     // 동일 조건 보고서가 여러 개면 최신 1건만 사용(이전 사진없음 보고서로 인해 사진누락 오표시 방지).
+    //  보완(추가) 보고서(parentReportId)는 상태 매트릭스에서 제외 → 기존 주차 상태 표시 불변(원본만 반영).
     const report = pickLatestCleaningReport(
       cleaningReports.filter(
         (r) =>
           !r.isDeleted &&
           r.managerUserId === managerUserId &&
           r.weekLabel === `${weekNumber}주차` &&
-          r.monthLabel === month
+          r.monthLabel === month &&
+          !r.parentReportId
       )
     );
 
@@ -7997,6 +8005,7 @@ export default function App() {
     const dormKey = matchDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
     const reports = cleaningReports.filter((report) => {
       if (report.isDeleted || report.isPermanentDeleted) return false;
+      if (report.parentReportId) return false; // 보완 보고서 제외 → 기존 주차 상태 표시 불변(원본만 반영)
       const reportDate = parseSafeDate(report.reportDate);
       if (!reportDate) return false;
       if (reportDate < range.start || reportDate > range.end) return false;
@@ -11198,8 +11207,71 @@ export default function App() {
     });
   };
 
+  // ── 보완(추가) 청소보고서 ─────────────────────────────────────────────
+  // 원본의 보완 목록(삭제 제외, 등록순).
+  const cleaningSupplementsOf = (originalId: string): CleaningReport[] =>
+    cleaningReports
+      .filter((r) => r.parentReportId === originalId && !r.isDeleted && !r.isPermanentDeleted)
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+
+  // 보완 등록 허용: 원본(보완 아님) + 삭제 아님 + 최신 앵커 상태(보완 없으면 원본, 있으면 최신 보완)가 불량/재청소요청.
+  //  → 양호/확인완료/제출완료(대기)/삭제/취소 등에서는 새 보완 등록을 허용하지 않음(대기 중 보완 중복 방지).
+  const canRegisterCleaningSupplement = (original: CleaningReport | null | undefined): boolean => {
+    if (!original || original.isDeleted || original.isPermanentDeleted || original.parentReportId) return false;
+    const sups = cleaningSupplementsOf(original.id);
+    const anchor = sups.length ? sups[sups.length - 1].cleanStatus : original.cleanStatus;
+    return anchor === "불량" || anchor === "재청소요청";
+  };
+
+  // 보완 담당 권한: 관리자 또는 원본에 배정된 하자접수/담당자 계정만(버튼 숨김뿐 아니라 저장 함수에서도 검증).
+  const canUserRegisterSupplement = (user: LoginUser | null, original: CleaningReport): boolean => {
+    if (!user) return false;
+    if (user.role === "admin") return true;
+    if (user.role === "maintenance_reporter" || user.role === "dorm_manager") {
+      return (!!user.dormId && user.dormId === original.dormId) || original.managerUserId === user.id;
+    }
+    return false;
+  };
+
+  // 보완 등록 폼 열기 — 원본 보고일/주차/기숙사/담당자를 상속(현재 날짜를 보고일/주차에 사용하지 않음).
+  const openCleaningSupplementForm = (original: CleaningReport) => {
+    if (!canUserRegisterSupplement(currentUser, original)) { void appAlert("보완 청소보고", "보완 청소보고를 등록할 권한이 없습니다."); return; }
+    if (!canRegisterCleaningSupplement(original)) { void appAlert("보완 청소보고", "이 보고서는 현재 보완 등록 대상이 아닙니다.\n(불량/재청소요청 상태이며 대기 중 보완이 없어야 합니다.)"); return; }
+    const initial: Omit<CleaningReport, "id" | "createdAt" | "updatedAt"> = {
+      ...cleaningReportTemplate(),
+      reportDate: original.reportDate,   // 원본 보고일 상속
+      weekLabel: original.weekLabel,     // 원본 주차 상속(저장 시 원본 보고일 기준으로 재계산되어도 동일)
+      monthLabel: original.monthLabel,
+      site: original.site,
+      dormId: original.dormId,
+      buildingName: original.buildingName,
+      address: original.address,
+      dong: original.dong,
+      roomHo: original.roomHo,
+      공동현관: original.공동현관,
+      세대현관: original.세대현관,
+      managerUserId: original.managerUserId,
+      managerName: original.managerName,
+      cleanerName: original.cleanerName,
+      cleanStatus: "제출완료",           // 보완 등록 → 재검토 대기(제출완료)
+      reporterUserId: currentUser?.id || "",
+      reporterName: currentUser?.displayName || "",
+      parentReportId: original.id,
+      memo: "",
+      beforePhotoDataUrls: [],
+      afterPhotoDataUrls: [],
+    };
+    setCleaningReportForm(initial);
+    setEditingCleaningReportId(null);
+    editingCleaningReportIdRef.current = null;
+    cleaningEditPhotosReadyRef.current = true;
+    setCleaningEditOriginalPhotos(new Set());
+    setShowCleaningReportForm(true);
+  };
+
   const saveCleaningReport = async () => {
     if (!canCreateCleaningReport(currentUser)) return;
+    if (cleaningSavingRef.current) return; // 저장 중복 실행 방지(연속 클릭/재시도)
     if (heicConverting) { await appAlert("사진 변환 중", "HEIC 사진을 변환하는 중입니다. 잠시 후 다시 저장해주세요."); return; }
     if (!cleaningReportForm.buildingName.trim() || !cleaningReportForm.dong.trim() || !cleaningReportForm.roomHo.trim()) {
       await appAlert("청소보고서", "청소보고서 저장을 위해 기숙사 정보(건물명, 동, 호수)를 입력해주세요.");
@@ -11228,9 +11300,17 @@ export default function App() {
       return;
     }
 
-    // [2] 하자접수 계정(maintenance_reporter)은 "금주차" 청소보고서만 등록/수정 가능(지난/미래 주차 금지).
-    //     공통 주차 계산(getCleaningWeekInfo)의 weekKey 로 보고일과 오늘의 주차를 비교. 관리자 등은 기존 권한 유지.
-    if (currentUser?.role === "maintenance_reporter") {
+    // [보완] 보완(추가) 청소보고서는 원본 주차를 상속하므로 "금주차" 제한을 예외 처리한다.
+    //   신규 보완 등록일 때만 보완 조건(권한/상태/중복)을 검증하고, 기존 보완 수정은 그대로 통과(원본 주차 유지).
+    const isSupplementForm = !!cleaningReportForm.parentReportId;
+    const isNewSupplement = isSupplementForm && !editingCleaningReportId;
+    if (isNewSupplement) {
+      const original = cleaningReports.find((r) => r.id === cleaningReportForm.parentReportId);
+      if (!original) { await appAlert("보완 청소보고", "원본 청소보고서를 찾을 수 없습니다."); return; }
+      if (!canUserRegisterSupplement(currentUser, original)) { await appAlert("보완 청소보고", "보완 청소보고를 등록할 권한이 없습니다."); return; }
+      if (!canRegisterCleaningSupplement(original)) { await appAlert("보완 청소보고", "이 보고서는 현재 보완 등록 대상이 아닙니다.\n(불량/재청소요청 상태이며 대기 중 보완이 없어야 합니다.)"); return; }
+    } else if (!isSupplementForm && currentUser?.role === "maintenance_reporter") {
+      // [2] 하자접수 계정은 일반 등록 시 "금주차" 청소보고서만 등록/수정 가능(지난/미래 주차 금지).
       const reportWeek = getCleaningWeekInfo(cleaningReportForm.reportDate || "");
       const thisWeek = getCleaningWeekInfo(new Date());
       if (!reportWeek || !thisWeek || reportWeek.weekKey !== thisWeek.weekKey) {
@@ -11238,6 +11318,9 @@ export default function App() {
         return;
       }
     }
+
+    cleaningSavingRef.current = true;
+    try {
 
     const existing = editingCleaningReportId
       ? cleaningReports.find((r) => r.id === editingCleaningReportId)
@@ -11299,6 +11382,9 @@ export default function App() {
     setCleaningReportForm(cleaningReportTemplate());
     setEditingCleaningReportId(null);
     setShowCleaningReportForm(false);
+    } finally {
+      cleaningSavingRef.current = false;
+    }
   };
 
   const deleteCleaningReport = async (reportId: string) => {
@@ -22019,7 +22105,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               st === "제출완료" ? "bg-blue-100 text-blue-700" :
                               st === "불량" || st === "재청소요청" ? "bg-rose-100 text-rose-700" :
                               "bg-slate-100 text-slate-600";
-                            return <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${cls}`}>{st}</span>;
+                            const supCount = report.parentReportId ? 0 : cleaningSupplementsOf(report.id).length;
+                            return (
+                              <span className="inline-flex items-center gap-1">
+                                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${cls}`}>{st}</span>
+                                {report.parentReportId && <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[0.6rem] font-medium text-indigo-700" title="보완(추가) 청소보고서">보완</span>}
+                                {supCount > 0 && <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[0.6rem] font-medium text-indigo-700" title="이 원본에 등록된 보완 건수">보완 {supCount}건</span>}
+                              </span>
+                            );
                           })()}
                         </td>
                         <td className="px-3 py-3 whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]">{getDormManagerDisplayName(report.dormId)}</td>
@@ -22063,6 +22156,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             {shouldShowMaintenanceControls(currentUser) && (
                               <button onClick={(e) => { e.stopPropagation(); void openCleaningReportEdit(report); }} className={`${theme.darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-900" : "rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100"}`}>
                                 수정
+                              </button>
+                            )}
+                            {canRegisterCleaningSupplement(report) && canUserRegisterSupplement(currentUser, report) && (
+                              <button onClick={(e) => { e.stopPropagation(); openCleaningSupplementForm(report); }} className="rounded-xl border border-indigo-300 px-3 py-2 text-xs font-medium text-indigo-600 hover:bg-indigo-50" title="원본 보고일/주차를 유지한 보완 청소보고 등록">
+                                보완 등록
                               </button>
                             )}
                             {canModifyPermission(currentUser) && (
@@ -24504,8 +24602,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         )}
 
         {showCleaningReportForm && modalWrap(
-          "청소보고서 등록/수정",
+          cleaningReportForm.parentReportId ? "보완 청소보고 등록" : "청소보고서 등록/수정",
           <div className="space-y-6">
+            {cleaningReportForm.parentReportId && (
+              <div className={`rounded-2xl border p-3 text-sm ${theme.darkMode ? "border-indigo-800 bg-indigo-950/40 text-indigo-200" : "border-indigo-200 bg-indigo-50 text-indigo-800"}`}>
+                <div className="font-semibold">보완(추가) 청소보고 등록</div>
+                <div className="mt-1 text-xs">이 보고서는 {formatDateOnly(cleaningReportForm.reportDate)}, {getCleaningWeekLabel(cleaningReportForm.reportDate || "")} 청소보고서에 대한 보완 등록입니다.</div>
+                <div className="mt-2 grid grid-cols-2 gap-1 text-xs sm:grid-cols-4">
+                  <div>원본 보고일: <b>{formatDateOnly(cleaningReportForm.reportDate) || "-"}</b></div>
+                  <div>원본 주차: <b>{getCleaningWeekLabel(cleaningReportForm.reportDate || "")}</b></div>
+                  <div>기숙사: <b>{cleaningReportForm.buildingName || "-"}</b></div>
+                  <div>동/호수: <b>{formatDong(cleaningReportForm.dong)}-{formatRoomHo(cleaningReportForm.roomHo)}</b></div>
+                </div>
+                <div className="mt-1 text-[0.7rem] opacity-80">※ 보고일·주차는 원본을 유지하며, 실제 보완 등록 시각은 자동 기록됩니다. 사진 1장 이상 필수입니다.</div>
+              </div>
+            )}
             <div className={`rounded-2xl border p-4 ${theme.darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
               <h3 className="text-lg font-semibold mb-4">보고 기본정보</h3>
               {isMaintenanceReporter ? (
@@ -24527,11 +24638,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               )}
               <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <div>
-                  <Input label="보고일" type="date-text" value={cleaningReportForm.reportDate} onChange={(v) => setCleaningReportForm((f) => ({ ...f, reportDate: v }))} readOnly={isMaintenanceReporter} />
-                  {/* 보고일 기준 해당월/주차(월요일 기준). 보고일 변경 시 즉시 갱신. */}
-                  <p className="mt-1 text-xs font-semibold text-blue-600">해당주차: {getCleaningWeekLabel(cleaningReportForm.reportDate || "")}</p>
-                  {/* [2] 하자접수 계정: 금주차가 아니면 저장 불가 경고 */}
-                  {currentUser?.role === "maintenance_reporter" && (() => {
+                  <Input label="보고일" type="date-text" value={cleaningReportForm.reportDate} onChange={(v) => setCleaningReportForm((f) => ({ ...f, reportDate: v }))} readOnly={isMaintenanceReporter || !!cleaningReportForm.parentReportId} />
+                  {/* 보고일 기준 해당월/주차(월요일 기준). 보고일 변경 시 즉시 갱신. 보완 등록은 원본 보고일 기준(고정). */}
+                  <p className="mt-1 text-xs font-semibold text-blue-600">해당주차: {getCleaningWeekLabel(cleaningReportForm.reportDate || "")}{cleaningReportForm.parentReportId ? " (원본 유지)" : ""}</p>
+                  {/* [2] 하자접수 계정: 금주차가 아니면 저장 불가 경고 (보완 등록은 예외 → 경고 미표시) */}
+                  {currentUser?.role === "maintenance_reporter" && !cleaningReportForm.parentReportId && (() => {
                     const rw = getCleaningWeekInfo(cleaningReportForm.reportDate || "");
                     const tw = getCleaningWeekInfo(new Date());
                     if (rw && tw && rw.weekKey === tw.weekKey) return null;
