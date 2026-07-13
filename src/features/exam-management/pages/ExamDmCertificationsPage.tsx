@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
+import { calculateDmLevel, calculateCertExpiry } from "../services/examAutomationService";
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import * as XLSX from "xlsx";
 import {
@@ -363,7 +364,17 @@ export default function ExamDmCertificationsPage({
                   <td key={c.key} className="whitespace-nowrap px-2.5 py-2">
                     {c.type === "expiry" ? <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${expiryOf(r).tone}`}>{expiryOf(r).label}</span>
                       : c.key === "approval_status" ? <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${r.approval_status === "승인" ? "bg-emerald-100 text-emerald-700" : r.approval_status === "반려" ? "bg-rose-100 text-rose-700" : "bg-slate-200 text-slate-500"}`}>{String(r.approval_status ?? "대기")}</span>
-                      : cellText(c, r)}
+                      : c.key === "dm_level" ? (() => {
+                        // 저장된 D.M Level 은 그대로 두고, 자동계산 D.M 판정을 배지+툴팁(근거)으로 보조 표시.
+                        const dm = calculateDmLevel(r, pmForRow(r), rules);
+                        return (
+                          <span className="inline-flex items-center gap-1">
+                            <span>{cellText(c, r)}</span>
+                            <span title={`자동계산 근거: ${dm.reasons.join(", ") || "-"}${dm.warnings.length ? " · " + dm.warnings.join(", ") : ""}`} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동:{dm.value}</span>
+                          </span>
+                        );
+                      })()
+                        : cellText(c, r)}
                   </td>
                 ))}
                 <td className="whitespace-nowrap px-2.5 py-2">
@@ -459,6 +470,60 @@ export default function ExamDmCertificationsPage({
                 </dl>
               </div>
             ))}
+
+            {/* D.M 자동판정(exam_rules 기준, 유효 공정 인증 참조) — 저장값 미변경, 표시 전용. 승인/수동 확정 시 그 값 유지. */}
+            {(() => {
+              const dm = calculateDmLevel(detailRow, pmForRow(detailRow), rules);
+              const approved = String(detailRow.approval_status ?? "") === "승인";
+              const tone = dm.value === "Master 후보" ? "bg-purple-100 text-purple-700"
+                : dm.value === "확인 필요" ? "bg-amber-100 text-amber-700"
+                  : "bg-blue-100 text-blue-700";
+              return (
+                <div className="mb-3">
+                  <div className="mb-1 flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-500">
+                    D.M 자동판정
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}>{dm.value}</span>
+                    <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[0.6rem] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">자동계산</span>
+                    {approved && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[0.6rem] font-medium text-emerald-700">관리자 승인 확정: {String(detailRow.dm_level || detailRow.dm_stage || "-")}</span>}
+                  </div>
+                  <dl className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                      <div className="text-[0.65rem] uppercase tracking-wide text-emerald-500">계산 근거</div>
+                      <div className="mt-0.5">{dm.reasons.length ? dm.reasons.join(" · ") : "-"}</div>
+                    </div>
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                      <div className="text-[0.65rem] uppercase tracking-wide text-amber-500">미충족 / 다음 단계</div>
+                      <div className="mt-0.5">{dm.warnings.length ? dm.warnings.join(" · ") : "-"}</div>
+                    </div>
+                  </dl>
+                  <p className="mt-1 text-[0.7rem] text-slate-400">※ D.M / Dual Multi / Master 는 자동계산 후 관리자 승인 시 확정됩니다(수동 확정값은 자동계산이 덮어쓰지 않음).</p>
+                </div>
+              );
+            })()}
+
+            {/* 인증 만료·갱신 자동판정(취득일 + exam_rules 유효기간 기준) — 표시 전용 */}
+            {(() => {
+              const ex = calculateCertExpiry(detailRow, rules).value;
+              const tone = ex.status === "만료" ? "bg-rose-100 text-rose-700"
+                : ex.status === "만료 30일 전" ? "bg-amber-100 text-amber-700"
+                  : ex.status === "만료 90일 전" ? "bg-yellow-100 text-yellow-700"
+                    : ex.status === "갱신완료" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-500";
+              return (
+                <div className="mb-3">
+                  <div className="mb-1 flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-500">
+                    인증 만료·갱신 자동판정
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}>{ex.status}</span>
+                    {ex.isExpiringSoon && ex.status !== "만료" && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[0.6rem] font-medium text-amber-700">만료예정</span>}
+                  </div>
+                  <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}><div className="text-[0.65rem] uppercase tracking-wide text-slate-400">만료일</div><div className="mt-0.5">{ex.expiryDate || "-"}</div></div>
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}><div className="text-[0.65rem] uppercase tracking-wide text-slate-400">남은 일수</div><div className="mt-0.5">{ex.remainingDays === null ? "-" : `${ex.remainingDays}일`}</div></div>
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}><div className="text-[0.65rem] uppercase tracking-wide text-slate-400">현재 상태</div><div className="mt-0.5">{ex.status}</div></div>
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}><div className="text-[0.65rem] uppercase tracking-wide text-slate-400">갱신 필요</div><div className={`mt-0.5 ${ex.needRenewal ? "font-semibold text-rose-600" : ""}`}>{ex.needRenewal ? "필요" : "불필요"}</div></div>
+                  </dl>
+                </div>
+              );
+            })()}
             {/* PM 인증 참조(읽기 전용) */}
             <div className="mb-3">
               <div className="mb-1 text-sm font-semibold text-slate-500">PM 인증 참조 <span className="text-xs font-normal text-slate-400">(원본 미수정)</span></div>

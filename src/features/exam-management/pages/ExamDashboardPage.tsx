@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
+import { buildRetestCandidates, summarizeCertExpiry, buildExamNotifications, runRecalculation, type ExamNotification, type RecalcResult, type RecalcScope } from "../services/examAutomationService";
+import { listRetestCandidates, generateRetestCandidates, setRetestCandidateStatus, type RetestCandidateRow, type RetestStatus } from "../services/examRetestService";
+import { writeAutomationLog, listAutomationLogs, type AutomationLogRow } from "../services/examAutomationLogService";
 import { useRegisteredOverlay } from "../../../hooks/overlayA11y";
 
 type RefOpt = { id: string; label: string };
@@ -60,38 +63,143 @@ function Columns({ data, onPick }: { data: Segment[]; onPick: (s: Segment) => vo
   );
 }
 
-export default function ExamDashboardPage({ darkMode, tenantId }: { darkMode: boolean; canEdit?: boolean; tenantId: string; userId?: string; onToast?: (m: string) => void; }) {
+export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId, onToast, onNavigate }: { darkMode: boolean; canEdit?: boolean; tenantId: string; userId?: string; onToast?: (m: string) => void; onNavigate?: (tab: string) => void; }) {
   const [personnel, setPersonnel] = useState<ExamRow[]>([]);
   const [apps, setApps] = useState<ExamRow[]>([]);
   const [certs, setCerts] = useState<ExamRow[]>([]);
   const [targets, setTargets] = useState<ExamRow[]>([]);
   const [levels, setLevels] = useState<RefOpt[]>([]);
+  const [rules, setRules] = useState<ExamRow[]>([]);
+  const [retest, setRetest] = useState<RetestCandidateRow[]>([]);
+  const [retestOpen, setRetestOpen] = useState(false);
+  const [retestBusy, setRetestBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [f, setF] = useState<{ year: string; month: string; group: string; product: string; part: string; process: string; level: string }>(
     { year: "전체", month: "전체", group: "전체", product: "전체", part: "전체", process: "전체", level: "전체" }
   );
   const [detail, setDetail] = useState<{ title: string; kind: Kind; rows: ExamRow[] } | null>(null);
+  const [notiOpen, setNotiOpen] = useState(false);
   // 상세 목록 모달을 앱 공통 닫기 시스템에 등록(ESC·뒤로가기로 닫기).
   useRegisteredOverlay(!!detail, () => setDetail(null));
+  useRegisteredOverlay(retestOpen, () => setRetestOpen(false));
+  useRegisteredOverlay(notiOpen, () => setNotiOpen(false));
 
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
     setLoading(true); setError(null);
     try {
-      const [p, a, c, t, lv] = await Promise.all([
+      const [p, a, c, t, lv, ru, rc] = await Promise.all([
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_annual_targets", tenantId).catch(() => [] as ExamRow[]),
         listExamRefOptions("exam_levels", tenantId).catch(() => [] as RefOpt[]),
+        listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
+        listRetestCandidates(tenantId).catch(() => [] as RetestCandidateRow[]),
       ]);
-      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv);
+      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv); setRules(ru); setRetest(rc);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId]);
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void reload(); }, [reload]);
+
+  // 재시험 후보: 활성(후보/승인) 건수, 자동생성/상태 전환.
+  const retestActive = useMemo(() => retest.filter((r) => ["후보", "승인"].includes(str(r.status))), [retest]);
+  const reloadRetest = useCallback(async () => { try { setRetest(await listRetestCandidates(tenantId)); } catch { /* noop */ } }, [tenantId]);
+  const generateRetest = useCallback(async () => {
+    if (!canEdit) return;
+    setRetestBusy(true);
+    try {
+      const specs = buildRetestCandidates(apps, certs, rules, (id) => levels.find((o) => o.id === id)?.label || id);
+      const res = await generateRetestCandidates(tenantId, userId || "", specs);
+      onToast?.(`재시험 후보 자동생성: 신규 ${res.created}건 · 중복 제외 ${res.skipped}건`);
+      void writeAutomationLog(tenantId, userId || "", { runType: "재시험 후보 자동생성", module: "재시험", total: specs.length, success: res.created, failed: 0, needCheck: 0, reasons: [`신규 ${res.created} · 중복 제외 ${res.skipped}`] });
+      await reloadRetest();
+    } catch (e) { setError((e as { message?: string })?.message || "후보 생성 실패."); }
+    finally { setRetestBusy(false); }
+  }, [canEdit, apps, certs, rules, levels, tenantId, userId, onToast, reloadRetest]);
+  const changeRetest = useCallback(async (id: string, status: RetestStatus) => {
+    if (!canEdit) return;
+    try { await setRetestCandidateStatus(id, status, userId || ""); onToast?.(`재시험 후보 상태: ${status}`); await reloadRetest(); }
+    catch (e) { setError((e as { message?: string })?.message || "상태 변경 실패."); }
+  }, [canEdit, userId, onToast, reloadRetest]);
+
+  // 앱 내 알림(파생 · 중복 방지). 클릭 시 해당 시험관리 탭으로 이동.
+  const notifications = useMemo<ExamNotification[]>(() => buildExamNotifications({
+    applications: apps, dmCertifications: certs, annualTargets: targets, retestCandidates: retest, rules,
+  }), [apps, certs, targets, retest, rules]);
+  const openNotification = useCallback((n: ExamNotification) => {
+    setNotiOpen(false);
+    if (n.targetTab === "examDashboard") { setRetestOpen(true); return; } // 재시험 필요 → 본 대시보드의 재시험 후보 모달
+    onNavigate?.(n.targetTab);
+  }, [onNavigate]);
+
+  // 관리자 재계산/검증(파생 계산 재실행). 화면 진입만으로 실행하지 않음(버튼 클릭 시에만).
+  const [recalcOpen, setRecalcOpen] = useState(false);
+  const [recalcBusy, setRecalcBusy] = useState(false);
+  const [recalcResult, setRecalcResult] = useState<RecalcResult | null>(null);
+  const [confirmAll, setConfirmAll] = useState(false);
+  const [rcEmp, setRcEmp] = useState("");
+  const [rcPart, setRcPart] = useState("");
+  const [rcYear, setRcYear] = useState(String(new Date().getFullYear()));
+  const [rcMonth, setRcMonth] = useState(String(new Date().getMonth() + 1).padStart(2, "0"));
+  useRegisteredOverlay(recalcOpen, () => setRecalcOpen(false));
+  useRegisteredOverlay(confirmAll, () => setConfirmAll(false));
+
+  const runRecalc = useCallback((scope: RecalcScope) => {
+    if (!canEdit || recalcBusy) return; // 중복 실행 방지
+    setRecalcBusy(true);
+    try {
+      const res = runRecalculation({ applications: apps, dmCertifications: certs, rules }, scope, { ranBy: userId || "관리자" });
+      setRecalcResult(res);
+      onToast?.(`${res.scopeLabel}: 대상 ${res.total} · 성공 ${res.success} · 실패 ${res.failed} · 확인 필요 ${res.needCheck}`);
+      // 자동화 이력 저장(개인정보 제외 — 집계 건수 + 오류 메시지만).
+      void writeAutomationLog(tenantId, userId || "", {
+        runType: res.scopeLabel, module: scope.kind === "month" ? "월간실적" : "재계산/검증",
+        total: res.total, success: res.success, failed: res.failed, needCheck: res.needCheck,
+        errors: res.items.filter((i) => i.status === "실패").map((i) => i.detail),
+      });
+    } catch (e) { setError((e as { message?: string })?.message || "재계산 실패."); }
+    finally { setRecalcBusy(false); }
+  }, [canEdit, recalcBusy, apps, certs, rules, userId, onToast, tenantId]);
+  const empOptions = useMemo(() => Array.from(new Set(apps.concat(certs).map((r) => str(r.employee_no)).filter(Boolean))).sort(), [apps, certs]);
+  const partOptions = useMemo(() => Array.from(new Set(apps.map((r) => str(r.part_name) || str(r.process)).filter(Boolean))).sort(), [apps]);
+
+  // 자동화 작업 이력(exam_audit_logs 재사용).
+  const [histOpen, setHistOpen] = useState(false);
+  const [histLogs, setHistLogs] = useState<AutomationLogRow[]>([]);
+  const [histLoading, setHistLoading] = useState(false);
+  const [hf, setHf] = useState({ from: "", to: "", type: "전체", user: "전체", result: "전체", module: "전체" });
+  useRegisteredOverlay(histOpen, () => setHistOpen(false));
+  const loadHistory = useCallback(async () => {
+    setHistLoading(true);
+    try { setHistLogs(await listAutomationLogs(tenantId)); } catch (e) { setError((e as { message?: string })?.message || "이력 불러오기 실패."); }
+    finally { setHistLoading(false); }
+  }, [tenantId]);
+  const openHistory = useCallback(() => { setHistOpen(true); void loadHistory(); }, [loadHistory]);
+  const histOpts = useMemo(() => {
+    const uniq = (arr: string[]) => Array.from(new Set(arr.filter(Boolean))).sort();
+    return {
+      types: uniq(histLogs.map((l) => str(l.action_type))),
+      users: uniq(histLogs.map((l) => str(l.changed_by))),
+      modules: uniq(histLogs.map((l) => str(l.target_id))),
+    };
+  }, [histLogs]);
+  const histFiltered = useMemo(() => histLogs.filter((l) => {
+    const d = str(l.created_at).slice(0, 10);
+    if (hf.from && d < hf.from) return false;
+    if (hf.to && d > hf.to) return false;
+    if (hf.type !== "전체" && str(l.action_type) !== hf.type) return false;
+    if (hf.user !== "전체" && str(l.changed_by) !== hf.user) return false;
+    if (hf.module !== "전체" && str(l.target_id) !== hf.module) return false;
+    if (hf.result !== "전체") {
+      const failed = num((l.after_value as { failed?: number } | null)?.failed);
+      if (hf.result === "실패" ? failed <= 0 : failed > 0) return false;
+    }
+    return true;
+  }), [histLogs, hf]);
 
   const levelLabel = useCallback((id: unknown) => (!id ? "-" : (levels.find((o) => o.id === str(id))?.label || "-")), [levels]);
 
@@ -179,6 +287,9 @@ export default function ExamDashboardPage({ darkMode, tenantId }: { darkMode: bo
   })).sort((a, b) => a.rate - b.rate).slice(0, 12), [fTargets, levelLabel]);
   const notAcquired = useMemo(() => fApps.filter((a) => isTaken(a) && !isAcquired(a) && !isFail(a)), [fApps]);
   const expiringSoon = useMemo(() => fCerts.filter((r) => { const s = expiryState(r); return s === "만료예정" || s === "만료"; }), [fCerts]);
+  // 인증 만료/갱신 자동판정 상태별 요약(취득일 + exam_rules 유효기간 기준).
+  const certExpiry = useMemo(() => summarizeCertExpiry(fCerts, rules), [fCerts, rules]);
+  const needRenewalCount = useMemo(() => (certExpiry["만료"] || 0) + (certExpiry["만료 30일 전"] || 0), [certExpiry]);
 
   // ── UI helpers ──
   const sectionCls = `rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`;
@@ -201,7 +312,15 @@ export default function ExamDashboardPage({ darkMode, tenantId }: { darkMode: bo
       <section className={sectionCls}>
         <div className="mb-3 flex items-center justify-between">
           <div><h2 className="text-lg font-semibold">시험 대시보드</h2><p className="text-sm text-slate-500">인증 현황·목표 대비 실적을 한눈에 확인합니다.</p></div>
-          <button type="button" onClick={resetF} className={selCls}>필터 초기화</button>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setNotiOpen(true)} aria-label={`알림 ${notifications.length}건`} className={`relative rounded-xl border px-3 py-1.5 text-sm ${darkMode ? "border-slate-600 hover:bg-slate-800" : "border-slate-300 hover:bg-slate-100"}`}>
+              🔔 알림
+              {notifications.length > 0 && <span className="absolute -right-1.5 -top-1.5 min-w-[18px] rounded-full bg-rose-600 px-1 text-center text-[0.6rem] font-bold text-white">{notifications.length > 99 ? "99+" : notifications.length}</span>}
+            </button>
+            {canEdit && <button type="button" onClick={() => setRecalcOpen(true)} className={`rounded-xl border px-3 py-1.5 text-sm ${darkMode ? "border-slate-600 hover:bg-slate-800" : "border-slate-300 hover:bg-slate-100"}`}>🔄 재계산</button>}
+            <button type="button" onClick={openHistory} className={`rounded-xl border px-3 py-1.5 text-sm ${darkMode ? "border-slate-600 hover:bg-slate-800" : "border-slate-300 hover:bg-slate-100"}`}>📜 자동화 이력</button>
+            <button type="button" onClick={resetF} className={selCls}>필터 초기화</button>
+          </div>
         </div>
         <div className="flex flex-wrap gap-1.5">
           {([
@@ -218,6 +337,15 @@ export default function ExamDashboardPage({ darkMode, tenantId }: { darkMode: bo
 
       {error && <div className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</div>}
       {loading && <div className="text-xs text-slate-500">불러오는 중…</div>}
+
+      {/* 재시험 후보(자동 후보 → 관리자 검토 → 승인 → 실제 재시험 신청) */}
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="button" onClick={() => setRetestOpen(true)} className={`rounded-3xl border bg-gradient-to-br p-3 text-left transition-shadow hover:shadow-lg ${GRAD.rose} ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+          <div className="text-[0.62rem] font-semibold uppercase tracking-wide opacity-80">재시험 후보</div>
+          <div className="mt-1.5 text-2xl font-bold">{retestActive.length}</div>
+        </button>
+        <span className="text-xs text-slate-500">자동 후보 → 관리자 검토 → 승인 → 실제 재시험 신청 (승인 전 실제 신청 없음)</span>
+      </div>
 
       {/* KPI — 응시/합격 */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
@@ -284,6 +412,15 @@ export default function ExamDashboardPage({ darkMode, tenantId }: { darkMode: bo
               <div className="mt-1 text-xs opacity-70">건 (30일 이내 포함)</div>
             </button>
           </div>
+          {/* 인증 만료·갱신 자동판정 상태별 현황(취득일 + exam_rules 유효기간 기준) */}
+          <div className="mt-3">
+            <div className="mb-1 text-xs font-semibold text-slate-500">인증 만료 현황 <span className="font-normal text-slate-400">(갱신 필요 {needRenewalCount}건)</span></div>
+            <div className="flex flex-wrap gap-1.5 text-xs">
+              {([["정상", "bg-emerald-100 text-emerald-700"], ["만료 90일 전", "bg-yellow-100 text-yellow-700"], ["만료 30일 전", "bg-amber-100 text-amber-700"], ["만료", "bg-rose-100 text-rose-700"], ["갱신완료", "bg-blue-100 text-blue-700"]] as const).map(([k, tone]) => (
+                <span key={k} className={`rounded-lg px-2 py-1 font-medium ${tone}`}>{k} {certExpiry[k] || 0}</span>
+              ))}
+            </div>
+          </div>
         </section>
       </div>
 
@@ -307,6 +444,212 @@ export default function ExamDashboardPage({ darkMode, tenantId }: { darkMode: bo
                     </tr>
                   ))}
                   {detail.rows.length === 0 && <tr><td colSpan={DETAIL_COLS[detail.kind].length} className="px-3 py-10 text-center text-slate-400">해당 데이터가 없습니다.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 재시험 후보 목록 모달 */}
+      {retestOpen && (
+        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={() => setRetestOpen(false)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="retest-title" tabIndex={-1} className={`my-8 w-full max-w-4xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 id="retest-title" className="text-lg font-semibold">재시험 후보 <span className="text-sm font-normal text-slate-500">· 활성 {retestActive.length}건 / 전체 {retest.length}건</span></h3>
+                <p className="text-sm text-slate-500">자동 후보 → 관리자 검토 → 승인 → 실제 재시험 신청. 승인 전에는 실제 시험회차에 등록되지 않습니다.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {canEdit && <button type="button" disabled={retestBusy} onClick={() => void generateRetest()} className={`rounded-xl px-3 py-1.5 text-xs font-semibold text-white ${retestBusy ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{retestBusy ? "생성 중…" : "후보 자동생성"}</button>}
+                <button type="button" aria-label="닫기" onClick={() => setRetestOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+              </div>
+            </div>
+            <div className="max-h-[60vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
+              <table className="w-full text-left text-xs">
+                <thead className={`sticky top-0 ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
+                  <tr>{["직원", "인증단계", "사유", "발생일", "상태", "승인자", "작업"].map((h) => <th key={h} className="whitespace-nowrap px-2.5 py-2">{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {retest.map((r) => {
+                    const st = str(r.status) || "후보";
+                    const tone = st === "승인" ? "bg-emerald-100 text-emerald-700" : st === "반려" ? "bg-rose-100 text-rose-700" : st === "신청" ? "bg-blue-100 text-blue-700" : "bg-slate-200 text-slate-500";
+                    return (
+                      <tr key={str(r.id)} className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+                        <td className="whitespace-nowrap px-2.5 py-2">{str(r.name) || "-"} <span className="text-slate-400">{str(r.employee_no)}</span></td>
+                        <td className="whitespace-nowrap px-2.5 py-2">{str(r.level_label) || str(r.level_id) || "-"}</td>
+                        <td className="whitespace-nowrap px-2.5 py-2">{str(r.reason) || "-"}</td>
+                        <td className="whitespace-nowrap px-2.5 py-2">{ymd(r.occurred_date) || "-"}</td>
+                        <td className="whitespace-nowrap px-2.5 py-2"><span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}>{st}</span></td>
+                        <td className="whitespace-nowrap px-2.5 py-2">{str(r.approved_at) ? String(r.approved_at).slice(0, 10) : "-"}</td>
+                        <td className="whitespace-nowrap px-2.5 py-2">
+                          {canEdit ? (
+                            <>
+                              {st === "후보" && <><button className="text-emerald-600 hover:underline" onClick={() => void changeRetest(str(r.id), "승인")}>승인</button><span className="mx-1 text-slate-300">·</span><button className="text-rose-600 hover:underline" onClick={() => void changeRetest(str(r.id), "반려")}>반려</button></>}
+                              {st === "승인" && <button className="text-blue-600 hover:underline" onClick={() => void changeRetest(str(r.id), "신청")}>실제 재시험 신청</button>}
+                              {(st === "반려" || st === "신청") && <span className="text-slate-400">-</span>}
+                            </>
+                          ) : <span className="text-slate-400">조회</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {retest.length === 0 && <tr><td colSpan={7} className="px-3 py-10 text-center text-slate-400">재시험 후보가 없습니다. {canEdit ? "‘후보 자동생성’으로 생성하세요." : ""}</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 알림 목록 모달 — 클릭 시 해당 시험관리 상세 화면으로 이동 */}
+      {notiOpen && (
+        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={() => setNotiOpen(false)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="noti-title" tabIndex={-1} className={`my-8 w-full max-w-lg rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <h3 id="noti-title" className="text-lg font-semibold">알림 <span className="text-sm font-normal text-slate-500">· {notifications.length}건</span></h3>
+              <button type="button" aria-label="닫기" onClick={() => setNotiOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+            </div>
+            <div className="max-h-[60vh] space-y-1.5 overflow-auto">
+              {notifications.map((n) => {
+                const tone = n.severity === "error" ? "bg-rose-100 text-rose-700" : n.severity === "warn" ? "bg-amber-100 text-amber-700" : "bg-blue-100 text-blue-700";
+                return (
+                  <button key={n.key} type="button" onClick={() => openNotification(n)} className={`flex w-full items-center gap-2 rounded-xl border p-2.5 text-left ${darkMode ? "border-slate-700 hover:bg-slate-800" : "border-slate-200 hover:bg-slate-50"}`}>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[0.6rem] font-medium ${tone}`}>{n.type}</span>
+                    <span className="flex-1 truncate text-sm">{n.message}</span>
+                    <span className="shrink-0 text-[0.65rem] text-slate-400">{n.occurredAt || ""} ›</span>
+                  </button>
+                );
+              })}
+              {notifications.length === 0 && <div className="py-10 text-center text-sm text-slate-400">새로운 알림이 없습니다.</div>}
+            </div>
+            <p className="mt-2 text-[0.7rem] text-slate-400">※ 앱 내 알림만 제공합니다(문자·이메일·카카오톡 미연동). 알림 클릭 시 해당 상세 화면으로 이동합니다.</p>
+          </div>
+        </div>
+      )}
+
+      {/* 관리자 재계산 모달 (admin) */}
+      {recalcOpen && canEdit && (
+        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={() => setRecalcOpen(false)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="recalc-title" tabIndex={-1} className={`my-8 w-full max-w-2xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <div><h3 id="recalc-title" className="text-lg font-semibold">관리자 재계산 / 검증</h3><p className="text-sm text-slate-500">파생 계산을 재실행해 검증합니다(DB 재저장 없음). 화면 진입만으로 실행되지 않습니다.</p></div>
+              <button type="button" aria-label="닫기" onClick={() => setRecalcOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <select value={rcEmp} onChange={(e) => setRcEmp(e.target.value)} className={selCls}><option value="">직원 선택</option>{empOptions.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+                <button type="button" disabled={!rcEmp || recalcBusy} onClick={() => runRecalc({ kind: "employee", employeeNo: rcEmp })} className={`rounded-xl px-3 py-1.5 text-xs font-semibold text-white ${!rcEmp || recalcBusy ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>선택 직원 재계산</button>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <select value={rcPart} onChange={(e) => setRcPart(e.target.value)} className={selCls}><option value="">파트/공정 선택</option>{partOptions.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+                <button type="button" disabled={!rcPart || recalcBusy} onClick={() => runRecalc({ kind: "part", part: rcPart })} className={`rounded-xl px-3 py-1.5 text-xs font-semibold text-white ${!rcPart || recalcBusy ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>선택 파트 재계산</button>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <input value={rcYear} onChange={(e) => setRcYear(e.target.value.replace(/[^0-9]/g, "").slice(0, 4))} className={`${selCls} w-20`} inputMode="numeric" placeholder="연도" />
+                <select value={rcMonth} onChange={(e) => setRcMonth(e.target.value)} className={selCls}>{Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0")).map((m) => <option key={m} value={m}>{Number(m)}월</option>)}</select>
+                <button type="button" disabled={recalcBusy} onClick={() => runRecalc({ kind: "month", year: rcYear, month: rcMonth })} className={`rounded-xl px-3 py-1.5 text-xs font-semibold text-white ${recalcBusy ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>선택 월 실적 재계산</button>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 border-t pt-2 dark:border-slate-700">
+                <button type="button" disabled={recalcBusy} onClick={() => setConfirmAll(true)} className={`rounded-xl px-3 py-1.5 text-xs font-semibold text-white ${recalcBusy ? "bg-slate-400" : "bg-slate-900 hover:bg-slate-800"}`}>전체 검증</button>
+                <button type="button" disabled={recalcBusy || !recalcResult} onClick={() => runRecalc({ kind: "errorsOnly" })} className={`rounded-xl border px-3 py-1.5 text-xs font-medium ${darkMode ? "border-slate-600 hover:bg-slate-800" : "border-slate-300 hover:bg-slate-100"}`}>오류 항목만 재처리</button>
+                {recalcBusy && <span className="text-xs text-slate-500">실행 중…</span>}
+              </div>
+            </div>
+
+            {recalcResult && (
+              <div className="mt-4">
+                <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
+                  <span className="font-semibold">{recalcResult.scopeLabel}</span>
+                  <span className="text-xs text-slate-400">실행 {recalcResult.ranAt.slice(0, 19).replace("T", " ")} · 사용자 {recalcResult.ranBy}</span>
+                </div>
+                <div className="grid grid-cols-4 gap-2 text-center">
+                  {[["대상", recalcResult.total, "text-slate-600"], ["성공", recalcResult.success, "text-emerald-600"], ["실패", recalcResult.failed, "text-rose-600"], ["확인 필요", recalcResult.needCheck, "text-amber-600"]].map(([l, v, tone]) => (
+                    <div key={l as string} className={`rounded-2xl border p-2.5 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+                      <div className="text-[0.6rem] font-semibold uppercase tracking-wide text-slate-400">{l as string}</div>
+                      <div className={`mt-0.5 text-xl font-bold ${tone as string}`}>{v as number}</div>
+                    </div>
+                  ))}
+                </div>
+                {recalcResult.items.filter((i) => i.status !== "성공").length > 0 && (
+                  <div className={`mt-3 max-h-52 overflow-auto rounded-xl border p-2 text-xs ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                    {recalcResult.items.filter((i) => i.status !== "성공").slice(0, 100).map((i, k) => (
+                      <div key={k} className="flex items-center gap-2 py-0.5">
+                        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[0.6rem] font-medium ${i.status === "실패" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-700"}`}>{i.status}</span>
+                        <span className="shrink-0 text-slate-400">[{i.kind}]</span>
+                        <span className="truncate">{i.ref} — {i.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 전체 검증 확인 Dialog (브라우저 confirm 미사용) */}
+      {confirmAll && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" onClick={() => setConfirmAll(false)}>
+          <div role="alertdialog" aria-modal="true" aria-labelledby="recalc-confirm-title" tabIndex={-1} className={`w-full max-w-sm rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <h3 id="recalc-confirm-title" className="text-lg font-semibold">전체 검증 실행</h3>
+            <p className="mt-2 text-sm text-slate-500">전체 응시·D.M 인증 데이터를 재계산해 검증합니다. 계속하시겠습니까? (DB는 재저장되지 않습니다)</p>
+            <div className="mt-6 flex justify-end gap-2">
+              <button type="button" onClick={() => setConfirmAll(false)} className={`rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
+              <button type="button" onClick={() => { setConfirmAll(false); runRecalc({ kind: "all" }); }} className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500">전체 검증 실행</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 자동화 작업 이력 모달 */}
+      {histOpen && (
+        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={() => setHistOpen(false)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="hist-title" tabIndex={-1} className={`my-8 w-full max-w-4xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <div><h3 id="hist-title" className="text-lg font-semibold">자동화 작업 이력 <span className="text-sm font-normal text-slate-500">· {histFiltered.length}/{histLogs.length}건</span></h3><p className="text-sm text-slate-500">재계산·자동생성 등 자동화 실행 이력(개인정보 미저장).</p></div>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => void loadHistory()} className={selCls}>새로고침</button>
+                <button type="button" aria-label="닫기" onClick={() => setHistOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+              </div>
+            </div>
+
+            <div className="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="text-slate-500">기간</span>
+              <input type="date" value={hf.from} onChange={(e) => setHf((p) => ({ ...p, from: e.target.value }))} className={selCls} />~
+              <input type="date" value={hf.to} onChange={(e) => setHf((p) => ({ ...p, to: e.target.value }))} className={selCls} />
+              <select value={hf.type} onChange={(e) => setHf((p) => ({ ...p, type: e.target.value }))} className={selCls}><option value="전체">실행 유형: 전체</option>{histOpts.types.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+              <select value={hf.user} onChange={(e) => setHf((p) => ({ ...p, user: e.target.value }))} className={selCls}><option value="전체">사용자: 전체</option>{histOpts.users.map((o) => <option key={o} value={o}>{o.slice(0, 8)}</option>)}</select>
+              <select value={hf.result} onChange={(e) => setHf((p) => ({ ...p, result: e.target.value }))} className={selCls}><option value="전체">성공/실패: 전체</option><option value="성공">성공(실패 0)</option><option value="실패">실패 포함</option></select>
+              <select value={hf.module} onChange={(e) => setHf((p) => ({ ...p, module: e.target.value }))} className={selCls}><option value="전체">대상 모듈: 전체</option>{histOpts.modules.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+            </div>
+
+            {histLoading && <div className="mb-2 text-xs text-slate-500">불러오는 중…</div>}
+            <div className="max-h-[56vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
+              <table className="w-full text-left text-xs">
+                <thead className={`sticky top-0 ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
+                  <tr>{["실행 시각", "실행 유형", "대상 모듈", "사용자", "대상", "성공", "실패", "확인", "오류/근거"].map((h) => <th key={h} className="whitespace-nowrap px-2.5 py-2">{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {histFiltered.map((l, k) => {
+                    const av = (l.after_value as { total?: number; success?: number; failed?: number; needCheck?: number; errors?: string[]; reasons?: string[] } | null) || {};
+                    const errText = (av.errors && av.errors.length ? av.errors : av.reasons || []).slice(0, 3).join(" / ");
+                    return (
+                      <tr key={str(l.id) || k} className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+                        <td className="whitespace-nowrap px-2.5 py-2">{str(l.created_at).slice(0, 19).replace("T", " ")}</td>
+                        <td className="whitespace-nowrap px-2.5 py-2">{str(l.action_type)}</td>
+                        <td className="whitespace-nowrap px-2.5 py-2">{str(l.target_id)}</td>
+                        <td className="whitespace-nowrap px-2.5 py-2">{str(l.changed_by).slice(0, 8) || "-"}</td>
+                        <td className="px-2.5 py-2 text-center">{num(av.total)}</td>
+                        <td className="px-2.5 py-2 text-center text-emerald-600">{num(av.success)}</td>
+                        <td className="px-2.5 py-2 text-center text-rose-600">{num(av.failed)}</td>
+                        <td className="px-2.5 py-2 text-center text-amber-600">{num(av.needCheck)}</td>
+                        <td className="max-w-[220px] truncate px-2.5 py-2" title={errText}>{errText || "-"}</td>
+                      </tr>
+                    );
+                  })}
+                  {!histLoading && histFiltered.length === 0 && <tr><td colSpan={9} className="px-3 py-10 text-center text-slate-400">자동화 실행 이력이 없습니다.</td></tr>}
                 </tbody>
               </table>
             </div>

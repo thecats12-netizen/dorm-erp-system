@@ -16564,6 +16564,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
+              onNavigate={(tab) => setActiveTab(tab as TabKey)}
             />
           ) : activeTab === "examRules" ? (
             <ExamRulesPage

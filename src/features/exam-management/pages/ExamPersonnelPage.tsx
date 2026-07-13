@@ -6,6 +6,7 @@ import {
   listExamRows, upsertExamRow, softDeleteExamRow, writeExamAudit, listExamAudit,
   isDuplicateEmployeeNo, listByPersonnel, examSupabaseReady, type ExamRow, type ExamPersonnelChildTable,
 } from "../services/examMasterService";
+import { calculatePmLevel } from "../services/examAutomationService";
 
 type ColType = "text" | "date" | "number" | "select" | "boolean";
 type Col = { key: string; label: string; type: ColType; options?: string[]; required?: boolean; filter?: boolean };
@@ -65,6 +66,7 @@ export default function ExamPersonnelPage({
   darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void;
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
+  const [rules, setRules] = useState<ExamRow[]>([]); // exam_rules(PM 승급 요건 검증용)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -98,7 +100,13 @@ export default function ExamPersonnelPage({
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
-    try { setRows(await listExamRows("exam_personnel", tenantId)); }
+    try {
+      const [people, ruleRows] = await Promise.all([
+        listExamRows("exam_personnel", tenantId),
+        listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
+      ]);
+      setRows(people); setRules(ruleRows);
+    }
     catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId]);
@@ -282,7 +290,20 @@ export default function ExamPersonnelPage({
             {paged.map((r, ri) => (
               <tr key={String(r.id)} aria-selected={ri === activeIdx} onClick={() => setActiveIdx(ri)} onDoubleClick={() => void openDetail(r)}
                 className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
-                {COLS.map((c) => <td key={c.key} className="whitespace-nowrap px-2.5 py-2">{cellText(c, r)}</td>)}
+                {COLS.map((c) => (
+                  <td key={c.key} className="whitespace-nowrap px-2.5 py-2">
+                    {c.key === "current_pm_level" ? (() => {
+                      // 저장된 현재 PM Level 은 그대로 두고, 자동계산 PM Level 을 작은 배지+툴팁(근거)으로 보조 표시.
+                      const pm = calculatePmLevel(r, [], rules);
+                      return (
+                        <span className="inline-flex items-center gap-1">
+                          <span>{cellText(c, r)}</span>
+                          <span title={`자동계산 근거: ${pm.reasons.join(", ") || "-"}`} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동:{pm.value}</span>
+                        </span>
+                      );
+                    })() : cellText(c, r)}
+                  </td>
+                ))}
                 <td className="whitespace-nowrap px-2.5 py-2">{tenureText(r.hire_date)}</td>
                 <td className="whitespace-nowrap px-2.5 py-2">
                   <button className="text-slate-500 hover:underline" onClick={(e) => { e.stopPropagation(); void openDetail(r); }}>상세</button>
@@ -369,6 +390,38 @@ export default function ExamPersonnelPage({
                 <div className="mt-0.5">{tenureText(detailRow.hire_date)}</div>
               </div>
             </dl>
+
+            {/* PM Level 자동판정(exam_rules 기준, 인증 이력 참조) — 저장값 미변경, 표시 전용. 수동 확정 시 그 값 유지. */}
+            {(() => {
+              const pm = calculatePmLevel(detailRow, detailData["pm_certifications"] || [], rules);
+              const stored = String(detailRow.current_pm_level || "").trim();
+              const manual = detailRow.pm_level_manual === true && stored;
+              const nextUnmet = pm.warnings.filter((w) => /승급/.test(w));
+              return (
+                <div className="mb-4">
+                  <div className="mb-1 flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-500">
+                    PM Level 자동판정
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${darkMode ? "bg-blue-900/40 text-blue-300" : "bg-blue-100 text-blue-700"}`}>{pm.value}</span>
+                    <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[0.6rem] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">자동계산</span>
+                    {manual && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[0.6rem] font-medium text-amber-700">수동 확정값 유지: {stored}</span>}
+                  </div>
+                  <dl className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                      <div className="text-[0.65rem] uppercase tracking-wide text-slate-400">현재 PM Level(저장값)</div>
+                      <div className="mt-0.5">{stored || "-"}</div>
+                    </div>
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                      <div className="text-[0.65rem] uppercase tracking-wide text-emerald-500">계산 근거</div>
+                      <div className="mt-0.5">{pm.reasons.length ? pm.reasons.join(" · ") : "-"}</div>
+                    </div>
+                    <div className={`rounded-lg border p-2 sm:col-span-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                      <div className="text-[0.65rem] uppercase tracking-wide text-amber-500">다음 단계 미충족 조건</div>
+                      <div className="mt-0.5">{nextUnmet.length ? nextUnmet.join(" · ") : (pm.value === "Master" ? "최고 단계(Master) 달성" : "없음(다음 단계 요건 충족)")}</div>
+                    </div>
+                  </dl>
+                </div>
+              );
+            })()}
             {([["exam_applications", "시험 응시"], ["exam_results", "시험 결과"], ["pm_certifications", "PM 인증"], ["dm_certifications", "D.M 인증"]] as const).map(([t, label]) => (
               <div key={t} className="mb-3">
                 <div className="mb-1 text-sm font-semibold text-slate-500">{label} ({(detailData[t] || []).length})</div>

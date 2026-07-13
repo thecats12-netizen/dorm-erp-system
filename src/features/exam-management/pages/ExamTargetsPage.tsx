@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
+import { calculateMonthlyPerformanceYear, calculateAnnualPerformance } from "../services/examAutomationService";
 import {
   listExamRows, listExamRefOptions, upsertExamRow, softDeleteExamRow,
   writeExamAudit, examSupabaseReady, type ExamRow, type ExamMasterTable,
@@ -398,17 +399,242 @@ const MONTHLY_COLS: Col[] = [
 type PageProps = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void };
 
 export function ExamAnnualTargetsPage(props: PageProps) {
-  return <TargetGrid cfg={{
-    table: "exam_annual_targets", title: "연간목표", subtitle: "시험관리 · 연도별 인증 목표/현재 인원과 달성률을 관리합니다. (기준: Excel 년간목표)",
-    fileBase: "연간목표", cols: ANNUAL_COLS, actualLabel: "현재인원",
-    actualOf: (r) => num(r.current_count), targetOf: (r) => num(r.target_count),
-  }} {...props} />;
+  return (
+    <div className="space-y-6">
+      {/* 자동계산(읽기 전용) — 실제 인증 확정 실적/달성률. 화면 진입 시 조회만 하고 DB 재저장하지 않는다. */}
+      <AnnualAutoAggregatePanel darkMode={props.darkMode} tenantId={props.tenantId} />
+      <TargetGrid cfg={{
+        table: "exam_annual_targets", title: "연간목표(수기 입력/목표)", subtitle: "시험관리 · 연도별 인증 목표/현재 인원과 달성률을 관리합니다. (기준: Excel 년간목표)",
+        fileBase: "연간목표", cols: ANNUAL_COLS, actualLabel: "현재인원",
+        actualOf: (r) => num(r.current_count), targetOf: (r) => num(r.target_count),
+      }} {...props} />
+    </div>
+  );
+}
+
+// 연간목표 실적/달성률 자동계산 패널(읽기 전용) — 실적은 인증 확정 건수, 목표는 exam_annual_targets 합계.
+//  월간실적 합계와 동일 기준(calculateMonthlyPerformanceYear) → 값 일치. 조회 전용(DB 재저장 없음).
+function AnnualAutoAggregatePanel({ darkMode, tenantId }: { darkMode: boolean; tenantId: string }) {
+  const [records, setRecords] = useState<ExamRow[]>([]);
+  const [targets, setTargets] = useState<ExamRow[]>([]);
+  const [levels, setLevels] = useState<RefOpt[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [year, setYear] = useState(String(new Date().getFullYear()));
+  const [f, setF] = useState({ group: "전체", product: "전체", part: "전체", process: "전체", level: "전체" });
+
+  const load = useCallback(async () => {
+    if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRecords([]); return; }
+    setLoading(true); setError(null);
+    try {
+      const [apps, dm, tgt, lv] = await Promise.all([
+        listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_annual_targets", tenantId).catch(() => [] as ExamRow[]),
+        listExamRefOptions("exam_levels", tenantId).catch(() => [] as RefOpt[]),
+      ]);
+      setRecords([...apps, ...dm]); setTargets(tgt); setLevels(lv);
+    } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
+    finally { setLoading(false); }
+  }, [tenantId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { void load(); }, [load]);
+
+  const str = (v: unknown) => (v === null || v === undefined ? "" : String(v));
+  const levelLabel = (id: string) => levels.find((o) => o.id === id)?.label || id;
+  const recYear = (r: ExamRow) => { const s = str(r.cert_acquired_date ?? r.acquired_date ?? r.practical_pass_date); const m = s.match(/(\d{4})/); return m ? m[1] : ""; };
+
+  const opts = useMemo(() => {
+    const uniq = (arr: string[]) => Array.from(new Set(arr.filter(Boolean))).sort();
+    const levelPairs = new Map<string, string>();
+    records.forEach((r) => { const lid = str(r.level_id); if (lid) levelPairs.set(lid, levelLabel(lid)); const st = str(r.dm_stage); if (st) levelPairs.set(st, st); });
+    targets.forEach((r) => { const lid = str(r.level_id); if (lid) levelPairs.set(lid, levelLabel(lid)); });
+    return {
+      years: uniq([...records.map(recYear), ...targets.map((t) => str(t.year))]).reverse(),
+      groups: uniq([...records.map((r) => str(r.group_name)), ...targets.map((r) => str(r.group_name))]),
+      products: uniq([...records.map((r) => str(r.product ?? r.product_group)), ...targets.map((r) => str(r.product_group))]),
+      parts: uniq([...records.map((r) => str(r.part_name ?? r.part)), ...targets.map((r) => str(r.part_name))]),
+      processes: uniq(records.map((r) => str(r.process ?? r.dm_process))),
+      levels: Array.from(levelPairs.entries()),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [records, targets, levels]);
+
+  // 목표 합계(exam_annual_targets) — 연도 + 그룹/제품/파트/인증단계 필터 매칭.
+  const targetTotal = useMemo(() => targets.filter((t) =>
+    str(t.year) === year &&
+    (f.group === "전체" || str(t.group_name) === f.group) &&
+    (f.product === "전체" || str(t.product_group) === f.product) &&
+    (f.part === "전체" || str(t.part_name) === f.part) &&
+    (f.level === "전체" || str(t.level_id) === f.level)
+  ).reduce((s, t) => s + (Number(t.target_count) || 0), 0), [targets, year, f]);
+
+  const perf = useMemo(() => calculateAnnualPerformance(records, year, {
+    target: targetTotal,
+    filters: {
+      group: f.group === "전체" ? undefined : f.group,
+      product: f.product === "전체" ? undefined : f.product,
+      part: f.part === "전체" ? undefined : f.part,
+      process: f.process === "전체" ? undefined : f.process,
+      level: f.level === "전체" ? undefined : f.level,
+    },
+  }), [records, year, f, targetTotal]);
+
+  const { actual, target, rate, months } = perf.value;
+  const section = `rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`;
+  const selCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
+  const btn = darkMode ? "rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800" : "rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100";
+  const rateTone = rate >= 100 ? "text-emerald-600" : rate >= 80 ? "text-amber-600" : "text-rose-600";
+  const kpiCard = (label: string, value: string, tone = "") => (
+    <div className={`rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+      <div className="text-[0.62rem] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
+      <div className={`mt-1 text-2xl font-bold ${tone}`}>{value}</div>
+    </div>
+  );
+
+  return (
+    <section className={section}>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-lg font-semibold">연간목표 실적·달성률 자동계산 <span className="text-xs font-normal text-slate-400">(실제 인증 확정 기준 · 읽기 전용)</span></h2>
+          <p className="text-sm text-slate-500">실적 = 선택 연도 1~12월 최종 확정 인증 합계(취소·삭제·중복·자동 후보 제외) · 목표 = 연간목표 합계.</p>
+        </div>
+        <button className={btn} onClick={() => void load()}>새로고침</button>
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        <select value={year} onChange={(e) => setYear(e.target.value)} className={selCls}>
+          {(opts.years.length ? opts.years : [String(new Date().getFullYear())]).map((y) => <option key={y} value={y}>{y}년</option>)}
+        </select>
+        <select value={f.group} onChange={(e) => setF((p) => ({ ...p, group: e.target.value }))} className={selCls}><option value="전체">그룹: 전체</option>{opts.groups.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <select value={f.product} onChange={(e) => setF((p) => ({ ...p, product: e.target.value }))} className={selCls}><option value="전체">제품: 전체</option>{opts.products.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <select value={f.part} onChange={(e) => setF((p) => ({ ...p, part: e.target.value }))} className={selCls}><option value="전체">파트: 전체</option>{opts.parts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <select value={f.process} onChange={(e) => setF((p) => ({ ...p, process: e.target.value }))} className={selCls}><option value="전체">공정: 전체</option>{opts.processes.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <select value={f.level} onChange={(e) => setF((p) => ({ ...p, level: e.target.value }))} className={selCls}><option value="전체">인증단계: 전체</option>{opts.levels.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
+      </div>
+
+      {error && <div className="mb-2 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</div>}
+      {loading && <div className="mb-2 text-xs text-slate-500">불러오는 중…</div>}
+
+      <div className="grid grid-cols-3 gap-2 sm:max-w-md">
+        {kpiCard("목표", String(target))}
+        {kpiCard("실적", String(actual))}
+        {kpiCard("달성률", `${rate}%`, rateTone)}
+      </div>
+      <p className="mt-2 text-[0.7rem] text-slate-400">※ 월별 실적: {months.map((m, i) => `${i + 1}월 ${m}`).join(" · ")} (합계 {actual}) — 월간실적 자동집계와 동일 기준. 조회 전용(DB 재저장 없음).</p>
+    </section>
+  );
 }
 
 export function ExamMonthlyResultsPage(props: PageProps) {
-  return <TargetGrid cfg={{
-    table: "exam_monthly_results", title: "월간실적", subtitle: "시험관리 · 월별 실적/누계/목표와 달성률을 관리합니다. (기준: Excel D.M 월간 실적)",
-    fileBase: "월간실적", cols: MONTHLY_COLS, actualLabel: "누계",
-    actualOf: sumMonths, targetOf: (r) => num(r.target_count),
-  }} {...props} />;
+  return (
+    <div className="space-y-6">
+      {/* 자동집계(읽기 전용) — 실제 인증 확정 건수 기준. 화면 진입 시 조회만 하고 DB 재저장하지 않는다. */}
+      <MonthlyAutoAggregatePanel darkMode={props.darkMode} tenantId={props.tenantId} />
+      <TargetGrid cfg={{
+        table: "exam_monthly_results", title: "월간실적(수기 입력/목표)", subtitle: "시험관리 · 월별 실적/누계/목표와 달성률을 관리합니다. (기준: Excel D.M 월간 실적)",
+        fileBase: "월간실적", cols: MONTHLY_COLS, actualLabel: "누계",
+        actualOf: sumMonths, targetOf: (r) => num(r.target_count),
+      }} {...props} />
+    </div>
+  );
+}
+
+// 월간실적 자동집계 패널(읽기 전용) — exam_applications/dm_certifications 의 최종 인증 확정 건수를 월별 집계.
+//  저장/승인 발생 시 새로고침으로 해당 연도만 다시 계산. 화면 진입마다 DB 재저장하지 않음(조회 전용).
+function MonthlyAutoAggregatePanel({ darkMode, tenantId }: { darkMode: boolean; tenantId: string }) {
+  const [records, setRecords] = useState<ExamRow[]>([]);
+  const [levels, setLevels] = useState<RefOpt[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [year, setYear] = useState(String(new Date().getFullYear()));
+  const [f, setF] = useState({ group: "전체", product: "전체", part: "전체", process: "전체", level: "전체" });
+
+  const load = useCallback(async () => {
+    if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRecords([]); return; }
+    setLoading(true); setError(null);
+    try {
+      const [apps, dm, lv] = await Promise.all([
+        listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
+        listExamRefOptions("exam_levels", tenantId).catch(() => [] as RefOpt[]),
+      ]);
+      setRecords([...apps, ...dm]); setLevels(lv);
+    } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
+    finally { setLoading(false); }
+  }, [tenantId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { void load(); }, [load]);
+
+  const str = (v: unknown) => (v === null || v === undefined ? "" : String(v));
+  const levelLabel = (id: string) => levels.find((o) => o.id === id)?.label || id;
+  const recYear = (r: ExamRow) => { const s = str(r.cert_acquired_date ?? r.acquired_date ?? r.practical_pass_date); const m = s.match(/(\d{4})/); return m ? m[1] : ""; };
+
+  const opts = useMemo(() => {
+    const uniq = (arr: string[]) => Array.from(new Set(arr.filter(Boolean))).sort();
+    const levelPairs = new Map<string, string>();
+    records.forEach((r) => { const lid = str(r.level_id); if (lid) levelPairs.set(lid, levelLabel(lid)); const st = str(r.dm_stage); if (st) levelPairs.set(st, st); });
+    return {
+      years: uniq(records.map(recYear)).reverse(),
+      groups: uniq(records.map((r) => str(r.group_name))),
+      products: uniq(records.map((r) => str(r.product ?? r.product_group))),
+      parts: uniq(records.map((r) => str(r.part_name ?? r.part))),
+      processes: uniq(records.map((r) => str(r.process ?? r.dm_process))),
+      levels: Array.from(levelPairs.entries()),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [records, levels]);
+
+  const agg = useMemo(() => calculateMonthlyPerformanceYear(records, year, {
+    group: f.group === "전체" ? undefined : f.group,
+    product: f.product === "전체" ? undefined : f.product,
+    part: f.part === "전체" ? undefined : f.part,
+    process: f.process === "전체" ? undefined : f.process,
+    level: f.level === "전체" ? undefined : f.level,
+  }), [records, year, f]);
+
+  const section = `rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`;
+  const selCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
+  const btn = darkMode ? "rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800" : "rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100";
+
+  return (
+    <section className={section}>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-lg font-semibold">월간실적 자동집계 <span className="text-xs font-normal text-slate-400">(실제 인증 확정 건수 · 읽기 전용)</span></h2>
+          <p className="text-sm text-slate-500">해당 월에 최종 확정(수동 확정/승인 완료)된 인증만 집계 — 취소·삭제·중복·자동 후보 제외.</p>
+        </div>
+        <button className={btn} onClick={() => void load()}>새로고침</button>
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        <select value={year} onChange={(e) => setYear(e.target.value)} className={selCls}>
+          {(opts.years.length ? opts.years : [String(new Date().getFullYear())]).map((y) => <option key={y} value={y}>{y}년</option>)}
+        </select>
+        <select value={f.group} onChange={(e) => setF((p) => ({ ...p, group: e.target.value }))} className={selCls}><option value="전체">그룹: 전체</option>{opts.groups.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <select value={f.product} onChange={(e) => setF((p) => ({ ...p, product: e.target.value }))} className={selCls}><option value="전체">제품: 전체</option>{opts.products.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <select value={f.part} onChange={(e) => setF((p) => ({ ...p, part: e.target.value }))} className={selCls}><option value="전체">파트: 전체</option>{opts.parts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <select value={f.process} onChange={(e) => setF((p) => ({ ...p, process: e.target.value }))} className={selCls}><option value="전체">공정: 전체</option>{opts.processes.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <select value={f.level} onChange={(e) => setF((p) => ({ ...p, level: e.target.value }))} className={selCls}><option value="전체">인증단계: 전체</option>{opts.levels.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
+      </div>
+
+      {error && <div className="mb-2 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</div>}
+      {loading && <div className="mb-2 text-xs text-slate-500">불러오는 중…</div>}
+
+      <div className="overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
+        <table className="w-full text-center text-xs">
+          <thead className={darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}>
+            <tr>{Array.from({ length: 12 }, (_, i) => <th key={i} className="whitespace-nowrap px-2.5 py-2">{i + 1}월</th>)}<th className="whitespace-nowrap px-2.5 py-2 font-semibold">누계</th></tr>
+          </thead>
+          <tbody>
+            <tr className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+              {agg.months.map((v, i) => <td key={i} className="px-2.5 py-2">{v}</td>)}
+              <td className="px-2.5 py-2 font-semibold text-blue-600">{agg.total}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-[0.7rem] text-slate-400">※ 자동집계는 조회 전용입니다(DB 재저장 없음). 저장/승인 후 “새로고침”으로 다시 계산됩니다. 아래 표는 수기 입력/목표 관리용입니다.</p>
+    </section>
+  );
 }

@@ -7,6 +7,7 @@ import {
   writeExamAudit, listExamAudit, isDuplicateApplication, examSupabaseReady,
   type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
+import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming } from "../services/examAutomationService";
 
 type RefOpt = { id: string; label: string };
 type ColType = "text" | "date" | "number" | "select" | "ref" | "cert";
@@ -66,6 +67,7 @@ export default function ExamApplicationsPage({
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [refMap, setRefMap] = useState<Record<string, RefOpt[]>>({});
+  const [rules, setRules] = useState<ExamRow[]>([]); // exam_rules(인증취득 요건 검증용)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -110,11 +112,12 @@ export default function ExamApplicationsPage({
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
-      const [data, refs] = await Promise.all([
+      const [data, refs, ruleRows] = await Promise.all([
         listExamRows("exam_applications", tenantId),
         Promise.all(refCols.map(async (c) => [c.refTable as string, await listExamRefOptions(c.refTable as ExamMasterTable, tenantId)] as const)),
+        listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]), // 인증취득 요건(없으면 기본값)
       ]);
-      setRows(data); setRefMap(Object.fromEntries(refs));
+      setRows(data); setRefMap(Object.fromEntries(refs)); setRules(ruleRows);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId, refCols]);
@@ -398,7 +401,28 @@ export default function ExamApplicationsPage({
                   <td className={`px-2 py-2 ${pinFirst ? "sticky left-0 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}><input type="checkbox" checked={sel} onChange={() => toggleSel(k)} onClick={(e) => e.stopPropagation()} /></td>
                   {visibleCols.map((c) => (
                     <td key={c.key} className={`whitespace-nowrap px-2.5 py-2 ${pinFirst && c.key === "employee_no" ? "sticky left-9 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}>
-                      {c.type === "cert" ? <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${certOf(r) === "취득" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-500"}`}>{certOf(r)}{r.cert_status_manual ? " ✓" : ""}</span> : cellText(c, r)}
+                      {c.type === "cert" ? <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${certOf(r) === "취득" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-500"}`}>{certOf(r)}{r.cert_status_manual ? " ✓" : ""}</span>
+                        : c.key === "status" ? (() => {
+                          // 저장된 status(수동/저장값)는 그대로 표시하고, 자동계산 상태를 작은 배지+툴팁(근거)으로 보조 표시.
+                          const auto = calculateExamStatus(r);
+                          return (
+                            <span className="inline-flex items-center gap-1">
+                              <span>{cellText(c, r)}</span>
+                              <span title={`자동계산 근거: ${auto.reasons.join(", ")}`} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동:{auto.value}</span>
+                            </span>
+                          );
+                        })()
+                          : c.key === "timing_status" ? (() => {
+                            // 저장된 조기/지연 값은 그대로 두고, 취득 시점 자동판정을 배지+툴팁(근거)으로 보조 표시.
+                            const t = resolveAcquisitionTiming(r, rules);
+                            return (
+                              <span className="inline-flex items-center gap-1">
+                                <span>{cellText(c, r)}</span>
+                                <span title={`자동판정 근거: ${t.reasons.join(", ") || "-"}${t.warnings.length ? " · " + t.warnings.join(", ") : ""}`} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동:{t.value}</span>
+                              </span>
+                            );
+                          })()
+                            : cellText(c, r)}
                     </td>
                   ))}
                   <td className="whitespace-nowrap px-2.5 py-2">
@@ -507,6 +531,39 @@ export default function ExamApplicationsPage({
                 </dl>
               </div>
             ))}
+
+            {/* 인증취득 자동판정(exam_rules 요건 검증) — 저장값 미변경, 표시 전용. 수동 확정 시 그 값 유지. */}
+            {(() => {
+              const cert = calculateCertificationStatus(detailRow, rules);
+              const approved = isCertificationApproved(detailRow);
+              const manual = detailRow.cert_status_manual === true;
+              const tone = cert.value === "인증취득 확정" ? "bg-emerald-100 text-emerald-700"
+                : cert.value === "인증취득 후보" ? "bg-blue-100 text-blue-700"
+                  : cert.value === "확인 필요" ? "bg-amber-100 text-amber-700" : "bg-slate-200 text-slate-500";
+              return (
+                <div className="mb-3">
+                  <div className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-500">
+                    인증취득 자동판정
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}>{cert.value}</span>
+                    {manual && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[0.65rem] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">수동 확정값 유지</span>}
+                  </div>
+                  <dl className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                      <div className="text-[0.65rem] uppercase tracking-wide text-emerald-500">충족 조건</div>
+                      <div className="mt-0.5">{cert.reasons.length ? cert.reasons.join(" · ") : "-"}</div>
+                    </div>
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                      <div className="text-[0.65rem] uppercase tracking-wide text-amber-500">미충족 / 확인 필요</div>
+                      <div className="mt-0.5">{cert.warnings.length ? cert.warnings.join(" · ") : "-"}</div>
+                    </div>
+                    <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                      <div className="text-[0.65rem] uppercase tracking-wide text-slate-400">관리자 승인 여부</div>
+                      <div className="mt-0.5">{approved ? "승인 완료" : "미승인(승인 대기)"}</div>
+                    </div>
+                  </dl>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
