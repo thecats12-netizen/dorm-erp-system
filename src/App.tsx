@@ -15815,7 +15815,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-500"><Building2 className="h-4 w-4" /> 기숙사 운영 통합 시스템</div>
-                <h1 className="text-2xl font-bold tracking-tight md:text-3xl">운영관리 대시보드 v4</h1>
+                <h1 className="text-2xl font-bold tracking-tight md:text-3xl">HTS 운영관리 v4</h1>
                 <p className="mt-1 text-sm text-slate-500">기숙사, 입주배정, 비품, 계약, 매각, 하자접수, 운영시뮬레이션까지 한 번에</p>
               </div>
 
@@ -19775,14 +19775,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
 
             <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3 xl:grid-cols-6">
+              <MiniStat label="전체 TO" value={String(simulationTotal.residentTo)} />
               <MiniStat label="남자 총원" value={String(simulationTotal.maleCount)} />
               <MiniStat label="여자 총원" value={String(simulationTotal.femaleCount)} />
               <MiniStat label="입주율" value={`${simulationTotal.usageRate}%`} />
-              <MiniStat label="공실률" value={`${simulationTotal.vacancyRate}%`} />
-              <MiniStat label="전체 TO" value={String(simulationTotal.residentTo)} />
+              <MiniStat label="잔여율" value={`${Math.max(0, Number.isFinite(simulationTotal.vacancyRate) ? simulationTotal.vacancyRate : 0)}%`} />
               <MiniStat label="계약 만료 위험" value={String(simulationTotal.totalExpireRisk)} />
-              <MiniStat label="평택 부족 TO" value={String(simulationTotal.siteShortage.평택)} />
-              <MiniStat label="천안 부족 TO" value={String(simulationTotal.siteShortage.천안)} />
+              <MiniStat label="평택 부족 TO" value={String(Math.max(0, Math.trunc(Number(simulationTotal.siteShortage.평택)) || 0))} />
+              <MiniStat label="천안 부족 TO" value={String(Math.max(0, Math.trunc(Number(simulationTotal.siteShortage.천안)) || 0))} />
             </div>
 
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
