@@ -7,7 +7,7 @@ import {
   writeExamAudit, listExamAudit, isDuplicateApplication, examSupabaseReady,
   type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
-import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming, resolvePmLevel, resolveDmLevel } from "../services/examAutomationService";
+import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES } from "../services/examAutomationService";
 
 type RefOpt = { id: string; label: string };
 type ColType = "text" | "date" | "number" | "select" | "ref" | "cert";
@@ -66,6 +66,15 @@ const PERSONNEL_AUTOFILL: Array<{ app: string; person: string }> = [
 ];
 // 사번 기준 자동입력 → 사용자가 직접 입력하지 않는(읽기전용) 식별 필드.
 const AUTO_READONLY = new Set(["name", "group_name", "product", "process", "pm_level"]);
+
+// 연명부 단계 플래그(Single/M1~M4/D.M 등)의 보유 여부(느슨한 텍스트 판정).
+const truthyFlag = (v: unknown): boolean => {
+  if (typeof v === "boolean") return v;
+  const s = String(v ?? "").trim().toLowerCase();
+  return !!s && !["0", "false", "n", "no", "x", "-", "없음", "미이수", "불필요"].includes(s);
+};
+// 재직여부: 값이 없으면 통과(미기재), 있으면 "재직" 포함만 재직으로 본다.
+const isEmployed = (v: unknown): boolean => { const s = String(v ?? "").trim(); return s === "" || /재직/.test(s); };
 
 // 인증취득여부: 수동 확정값 우선, 아니면 실기 합격일 존재 시 "취득"(자동계산).
 const certOf = (r: ExamRow): "취득" | "미취득" => {
@@ -185,6 +194,52 @@ export default function ExamApplicationsPage({
     return all.filter((o) => allowed.has(o.id) || o.id === cur);
   }, [refMap, levelProcessIds, equipmentRows, editRow?.equipment_id]);
 
+  // 선택된 사번의 인력(연명부) 레코드 — 재직여부/기존 인증 단계/이력 요약 표시용.
+  const selectedPerson = useMemo(
+    () => personnel.find((p) => String(p.employee_no ?? "") === String(editRow?.employee_no ?? "")) || null,
+    [personnel, editRow?.employee_no]
+  );
+  // 기존 인증 이력 요약(연명부 단계 플래그 기준).
+  const certHistorySummary = useMemo(() => {
+    const p = selectedPerson; if (!p) return "";
+    const stages: Array<[string, string]> = [["single_job", "Single"], ["m1", "M1"], ["m2", "M2"], ["m3", "M3"], ["m4", "M4"], ["dm", "D.M"]];
+    const held = stages.filter(([k]) => truthyFlag(p[k])).map(([, label]) => label);
+    return held.length ? held.join(" · ") : "이력 없음";
+  }, [selectedPerson]);
+
+  // 인증단계(level_id) 선택 시 인증 기준관리(exam_rules) 기준 자동판정.
+  const levelReq = useMemo(() => {
+    const lvlId = String(editRow?.level_id ?? "");
+    if (!lvlId) return null;
+    const levelOpts = refMap["exam_levels"] || [];
+    const levelName = levelOpts.find((o) => o.id === lvlId)?.label || "";
+    const rule = rules.find((r) => String(r.level_id ?? "") === lvlId) || null;
+    const prereqId = String(rule?.prerequisite_level_id ?? "");
+    const prereqName = prereqId ? (levelOpts.find((o) => o.id === prereqId)?.label || "") : "";
+    const p = selectedPerson;
+    // 선행 충족: 선행 규칙 없으면 충족. 있으면 연명부 단계 플래그/현재 레벨 텍스트로 보유 확인.
+    const holds = (name: string): boolean => {
+      if (!name) return true; if (!p) return false;
+      const ln = name.toLowerCase();
+      const flagMap: Record<string, unknown> = { single: p.single_job, m1: p.m1, m2: p.m2, m3: p.m3, m4: p.m4, "d.m": p.dm, dm: p.dm };
+      for (const [k, v] of Object.entries(flagMap)) if (ln.includes(k) && truthyFlag(v)) return true;
+      const cur = `${p.current_pm_level ?? ""} ${p.cert_level ?? ""}`.toLowerCase();
+      return cur.includes(ln);
+    };
+    const prereqMet = !prereqId || holds(prereqName);
+    const employed = isEmployed(p?.employment_status);
+    const requireWritten = rule?.require_written === true;
+    const requirePractical = rule?.require_practical === true;
+    const requiredEquip = Number(rule?.required_equipment_count) || 0;
+    const validMonths = rule?.valid_months != null && rule.valid_months !== "" ? Number(rule.valid_months) : null;
+    const autoPromote = rule?.auto_promote === true;
+    const timingMonths = extractTimingMonths(rules, { level: lvlId });
+    const isDm = /d\.?m|dual|multi|single\s*job|master/i.test(levelName);
+    const idx = PM_STAGES.findIndex((s) => levelName.toLowerCase().replace(/\s+/g, "").includes(s.toLowerCase()));
+    const nextPm = idx >= 0 && idx < PM_STAGES.length - 1 ? PM_STAGES[idx + 1] : (idx === PM_STAGES.length - 1 ? "최고 단계" : "-");
+    return { levelName, hasRule: !!rule, prereqName, prereqMet, employed, requireWritten, requirePractical, requiredEquip, validMonths, autoPromote, timingMonths, isDm, expectedLevel: levelName, nextPm };
+  }, [editRow?.level_id, rules, refMap, selectedPerson]);
+
   // 저장 시 자동계산(사용자가 직접 계산하지 않음): 진행 날짜 → 인증 취득일/취득여부/PM Level/D.M 공정.
   //  기존 자동화 함수(examAutomationService)와 화면 표시 규칙(certOf)을 그대로 재사용한다.
   const computeDerivedFields = (row: ExamRow): ExamRow => {
@@ -274,6 +329,11 @@ export default function ExamApplicationsPage({
     if (!editRow) return;
     for (const c of COLS) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
     for (const c of COLS) if (c.type === "date" && !isValidDateCell(editRow[c.key])) { setError(`${c.label} 날짜 형식이 올바르지 않습니다.`); return; }
+    // 선행 인증 미충족 시 저장 차단(인증 기준관리 규칙 기준). 브라우저 alert 미사용 — 오류 배너로 안내.
+    if (levelReq && !levelReq.prereqMet) {
+      setError(`선행 인증 단계(${levelReq.prereqName || "-"})가 충족되지 않아 저장할 수 없습니다. 선행 단계 취득 후 등록해주세요.`);
+      return;
+    }
     setSaving(true); setError(null);
     try {
       const empNo = String(editRow.employee_no ?? "").trim(), code = String(editRow.category_code ?? "").trim();
@@ -555,6 +615,40 @@ export default function ExamApplicationsPage({
                 </div>
               </div>
             </div>
+
+            {/* 인력 정보(사번 자동 · 읽기전용): 재직여부 / 기존 인증 단계 / 인증 이력 요약 */}
+            {selectedPerson && (
+              <div className={`mt-3 rounded-xl border p-3 text-xs ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+                <div className="mb-1 font-semibold text-slate-500">인력 정보 <span className="font-normal text-slate-400">(사번 자동 · 읽기전용)</span></div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  <div><div className="text-slate-400">재직여부</div><div>{String(selectedPerson.employment_status ?? "") || "-"}</div></div>
+                  <div><div className="text-slate-400">기존 인증 단계</div><div>{String(selectedPerson.cert_level ?? selectedPerson.current_pm_level ?? "") || "-"}</div></div>
+                  <div className="col-span-2 sm:col-span-1"><div className="text-slate-400">인증 이력 요약</div><div>{certHistorySummary || "-"}</div></div>
+                </div>
+              </div>
+            )}
+
+            {/* 인증단계 자동판정(인증 기준관리 exam_rules 기준) */}
+            {levelReq && (
+              <div className={`mt-3 rounded-xl border p-3 text-xs ${levelReq.prereqMet ? (darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50") : "border-rose-300 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/30"}`}>
+                <div className="mb-1 flex flex-wrap items-center gap-2 font-semibold text-slate-500">
+                  인증단계 자동판정
+                  <span className={`rounded-full px-2 py-0.5 text-[0.65rem] font-medium ${levelReq.prereqMet && levelReq.employed ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>{levelReq.prereqMet && levelReq.employed ? "응시 가능" : "응시 불가"}</span>
+                  {!levelReq.hasRule && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[0.65rem] font-medium text-amber-700">규칙 미등록(수동)</span>}
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  <div><div className="text-slate-400">선행 인증 충족</div><div className={levelReq.prereqMet ? "" : "font-semibold text-rose-600"}>{levelReq.prereqName ? `${levelReq.prereqName} · ${levelReq.prereqMet ? "충족" : "미충족"}` : "없음"}</div></div>
+                  <div><div className="text-slate-400">필기/실기 필요</div><div>{`필기 ${levelReq.requireWritten ? "필요" : "불필요"} · 실기 ${levelReq.requirePractical ? "필요" : "불필요"}`}</div></div>
+                  <div><div className="text-slate-400">필수/선택 설비</div><div>{`필수 ${levelReq.requiredEquip || 0}종 · 선택가능 ${equipmentOptions.length}종`}</div></div>
+                  <div><div className="text-slate-400">예상 취득 단계</div><div>{levelReq.expectedLevel || "-"}</div></div>
+                  <div><div className="text-slate-400">조기/지연 기준</div><div>{levelReq.timingMonths ? `${levelReq.timingMonths}개월` : "-"}{levelReq.validMonths ? ` · 유효 ${levelReq.validMonths}개월` : ""}</div></div>
+                  <div><div className="text-slate-400">다음 PM Level</div><div>{levelReq.nextPm}</div></div>
+                  <div><div className="text-slate-400">D.M 공정 적용</div><div>{levelReq.isDm ? "적용" : "미적용"}{levelReq.autoPromote ? " · 자동승급" : ""}</div></div>
+                </div>
+                {!levelReq.prereqMet && <div className="mt-1.5 font-semibold text-rose-600">※ 선행 인증 미충족 — 저장이 차단됩니다.</div>}
+              </div>
+            )}
+
             <div className="mt-6 flex justify-end gap-2">
               <button type="button" onClick={requestCloseEdit} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
               <button type="button" data-modal-save onClick={() => void saveRow()} disabled={saving} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-semibold text-white ${saving ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{saving ? "저장 중…" : "저장"}</button>
