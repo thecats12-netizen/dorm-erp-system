@@ -655,7 +655,7 @@ function classifyOperationalSaveError(error: unknown): string {
   }
   // DB 스키마 불일치(컬럼/관계/형식/400)
   if (/does not exist|schema cache|column|relation|pgrst|invalid input|violates|null value|not-null/.test(msg) || status === 400) {
-    return "저장 항목과 데이터베이스 구조가 맞지 않습니다.";
+    return "저장하지 못했습니다. 데이터베이스 구조와 저장 항목이 일치하지 않습니다. 관리자에게 문의해주세요.";
   }
   return "회사 네트워크에서 저장 요청이 차단되었을 수 있습니다. 다시 시도하거나 관리자에게 문의해주세요.";
 }
@@ -2667,18 +2667,24 @@ export default function App() {
     if (rAutoConfig && (rAutoConfig as any).targetStatuses) setMilitaryTrainingAutoConfig(rAutoConfig);
   };
 
-  // 운영 설정 Realtime: 관리자가 운영시뮬레이션 설정을 바꾸면 모든 기기에서 즉시 반영.
+  // 운영 설정 Realtime: 관리자가 운영시뮬레이션 비용/청소 점수 계산 기준을 바꾸면 같은 조직(tenant)의 모든 기기에서 즉시 반영.
   const handleAppSettingsRealtime = (payload: any) => {
     const newRow = payload.new ?? payload.record;
     if (!newRow || newRow.tenant_id !== tenantId) return;
     const data = newRow.data;
     if (!data || typeof data !== "object") return;
+    realtimeUpdateSourceRef.current.add("app_settings"); // 자기 저장분 재저장 루프 방지(수신분을 다시 DB 로 저장하지 않음)
+    let mergedSim = simCostSettings;
     if (data.simCostSettings && typeof data.simCostSettings === "object") {
-      const merged = { ...DEFAULT_SIM_COST_SETTINGS, ...data.simCostSettings };
-      realtimeUpdateSourceRef.current.add("app_settings"); // 자기 저장분 재저장 루프 방지
-      lastAppSettingsSnapshotRef.current = JSON.stringify(merged);
-      setSimCostSettings(merged);
+      mergedSim = { ...DEFAULT_SIM_COST_SETTINGS, ...data.simCostSettings };
+      setSimCostSettings(mergedSim);
     }
+    let mergedCleaning = cleaningSettings;
+    if (data.cleaningSettings && typeof data.cleaningSettings === "object") {
+      mergedCleaning = { missingReportPenalty: -5, includeWeekendReports: false, ...data.cleaningSettings };
+      setCleaningSettings(mergedCleaning);
+    }
+    lastAppSettingsSnapshotRef.current = JSON.stringify({ simCostSettings: mergedSim, cleaningSettings: mergedCleaning });
   };
 
   const militaryReferenceYear = Number(militarySettings["기준연도"]);
@@ -3508,6 +3514,9 @@ export default function App() {
         // 유효 세션 존재 여부. 일시적 모듈 로드 실패와 "로그아웃/세션 없음"을 구분해
         // 네트워크 일시 오류로 화면이 비워지거나 강제 로그아웃되는(보였다 안보였다) 문제를 방지.
         let hasValidSession = false;
+        // 공유 설정(app_settings: 운영시뮬레이션 비용 + 청소 점수 계산 기준) — 세션 블록에서 로드 후 Step 4(로컬 로드)에서 서버 우선 적용하기 위해 상위 스코프에 선언.
+        let serverAppSettings: Record<string, any> | null = null;
+        let loadedSimSettings: SimCostSettings | null = null;
         if (isSupabaseAvailable()) {
           const session = await getCurrentSession();
           if (session?.user?.id) {
@@ -3599,13 +3608,14 @@ export default function App() {
               useSupabase = false;
             }
 
-            // 운영 설정(운영시뮬레이션: 월 예상 운영비/공실 손실) — 모든 기기 공유. 실패 시 로컬 설정 유지.
+            // 운영 설정(운영시뮬레이션 비용 + 청소 점수 계산 기준) — 모든 기기 공유(app_settings, tenant 별). 실패 시 로컬 설정 유지.
+            // 서버가 단일 원본 → 아래 청소 설정 로드(localStorage)보다 서버값을 우선 적용하기 위해 여기서 캡처만 하고 적용은 뒤에서 처리.
             if (useSupabase) {
-              const appSettings = await loadAppSettings(tenantId);
-              if (appSettings?.simCostSettings) {
-                const merged = { ...DEFAULT_SIM_COST_SETTINGS, ...appSettings.simCostSettings };
+              serverAppSettings = await loadAppSettings(tenantId);
+              if (serverAppSettings?.simCostSettings) {
+                const merged = { ...DEFAULT_SIM_COST_SETTINGS, ...serverAppSettings.simCostSettings };
                 setSimCostSettings(merged);
-                lastAppSettingsSnapshotRef.current = JSON.stringify(merged);
+                loadedSimSettings = merged;
               }
             }
 
@@ -3693,9 +3703,20 @@ export default function App() {
         setMilitaryTrainingAutoConfig(
           loadJson<{ enabled: boolean; targetStatuses: string[] }>(MILITARY_TRAINING_AUTOCREATE_KEY, { enabled: true, targetStatuses: ["재직"] }, tenantId)
         );
-        setCleaningSettings(
-          loadJson<CleaningSettings>(CLEANING_SETTINGS_KEY, { missingReportPenalty: -5, includeWeekendReports: false }, tenantId)
-        );
+        // 청소 점수 계산 기준: 서버(app_settings)가 단일 원본 — 서버값 있으면 우선(다른 기기와 동일 적용), 없으면 로컬 캐시.
+        //  → 로컬(localStorage) 값이 서버 설정을 덮어쓰지 않도록, 서버값을 우선하고 저장 스냅샷을 미리 맞춰 재저장 루프/덮어쓰기를 방지.
+        {
+          const localCleaning = loadJson<CleaningSettings>(CLEANING_SETTINGS_KEY, { missingReportPenalty: -5, includeWeekendReports: false }, tenantId);
+          const serverCleaning = serverAppSettings?.cleaningSettings && typeof serverAppSettings.cleaningSettings === "object"
+            ? { missingReportPenalty: -5, includeWeekendReports: false, ...serverAppSettings.cleaningSettings }
+            : null;
+          const finalCleaning = serverCleaning ?? localCleaning;
+          setCleaningSettings(finalCleaning);
+          lastAppSettingsSnapshotRef.current = JSON.stringify({
+            simCostSettings: loadedSimSettings ?? simCostSettings,
+            cleaningSettings: finalCleaning,
+          });
+        }
         setSystemSettings(
           loadSystemSettings(JSON.stringify(loadJson<SystemSettings>(SYSTEM_SETTINGS_KEY, getDefaultSystemSettings(), tenantId)), tenantId)
         );
@@ -6033,17 +6054,18 @@ export default function App() {
       realtimeUpdateSourceRef.current.delete("app_settings");
       return;
     }
-    const snap = JSON.stringify(simCostSettings);
+    // 운영시뮬레이션 비용 + 청소 점수 계산 기준을 함께 저장(같은 data blob) → 한쪽 저장이 다른 쪽을 덮어쓰지 않음.
+    const snap = JSON.stringify({ simCostSettings, cleaningSettings });
     if (snap === lastAppSettingsSnapshotRef.current) return;
     const timer = setTimeout(() => {
       lastAppSettingsSnapshotRef.current = snap;
-      void saveAppSettings(tenantId, { simCostSettings }).catch((e) => {
+      void saveAppSettings(tenantId, { simCostSettings, cleaningSettings }).catch((e) => {
         console.warn("[app_settings] 저장 실패(로컬 유지):", (e as { message?: string })?.message || e);
       });
     }, 500);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [simCostSettings, tenantId, isLoading, currentUser?.role]);
+  }, [simCostSettings, cleaningSettings, tenantId, isLoading, currentUser?.role]);
   useEffect(() => {
     if (isLoading) return;
     // Supabase 모드에서는 profiles 가 단일 출처. localStorage 로 users 를 다시 저장하면

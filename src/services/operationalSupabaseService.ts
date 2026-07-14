@@ -646,6 +646,15 @@ export type OperationalSaveResult = {
 const CLEANING_PHOTO_KEYS = ["before_photo_data_urls", "after_photo_data_urls"];
 const DEFECT_PHOTO_KEYS = ["request_photo_data_urls", "completion_photo_data_urls"];
 const stripKeys = (obj: Record<string, any>, keys: string[]) => { const c = { ...obj }; keys.forEach((k) => delete c[k]); return c; };
+
+// DB 스키마 불일치(존재하지 않는 컬럼/테이블/캐시 미갱신) — 재시도해도 동일하게 실패하므로 즉시 중단한다.
+// (PGRST204: 컬럼 캐시 없음, 42703: undefined column, 42P01: undefined table)
+const isSchemaMismatchError = (err: any): boolean => {
+  const code = String(err?.code ?? "");
+  const msg = `${err?.message ?? ""} ${err?.details ?? ""} ${err?.hint ?? ""}`.toLowerCase();
+  return code === "PGRST204" || code === "42703" || code === "42P01" ||
+    /could not find the .* column|column .* does not exist|relation .* does not exist|schema cache/.test(msg);
+};
 const base64Len = (arr?: string[]) => (Array.isArray(arr) ? arr.reduce((s, x) => s + (typeof x === "string" ? x.length : 0), 0) : 0);
 
 // ── [9] 장기 개선: 현재는 DB base64 저장 유지. 추후 Supabase Storage 업로드로 전환할 수 있도록
@@ -664,8 +673,8 @@ const savePhotosOptional = async (photoJobs: PhotoJob[]): Promise<string[]> => {
     }
   };
   let results = await Promise.all(photoJobs.map(run));
-  // [7] 사진 저장 실패 시 1회 자동 재시도(1.5초 후).
-  const failedOnce = results.filter((r) => r.error);
+  // [7] 사진 저장 실패 시 1회 자동 재시도(1.5초 후). 단, 스키마 불일치(존재하지 않는 컬럼 등)는 재시도 무의미 → 즉시 중단.
+  const failedOnce = results.filter((r) => r.error && !isSchemaMismatchError(r.error));
   if (failedOnce.length > 0) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     const retried = await Promise.all(failedOnce.map((r) => run(r.pj)));
@@ -676,15 +685,19 @@ const savePhotosOptional = async (photoJobs: PhotoJob[]): Promise<string[]> => {
   for (const r of results) {
     if (!r.error) continue;
     failedTables.add(r.pj.table);
-    const err = r.error as { code?: unknown; message?: string; name?: unknown };
-    // [8] 오류 로그: table/action/message/code + 이미지 수/총 base64 크기.
+    // [8][16] 오류 로그: 실제 Supabase Response(code/message/details/hint/status) + 이미지 수/총 base64 크기.
+    //   cleaning_reports PATCH 500 등의 실제 원인(트리거/제약/형식/용량)을 콘솔에서 그대로 확인할 수 있게 남긴다.
+    const err = r.error as { code?: unknown; message?: string; name?: unknown; details?: unknown; hint?: unknown; status?: unknown };
     console.error("[photo save] 사진 저장 실패(본문은 저장됨):", {
       table: r.pj.table,
       action: "photo-update",
       id: r.pj.id,
       code: err?.code ?? "(unknown)",
+      status: err?.status ?? "(unknown)",
       name: err?.name ?? "(unknown)",
       message: err?.message ?? String(r.error),
+      details: err?.details ?? "(none)",
+      hint: err?.hint ?? "(none)",
       imageCount: r.pj.imageCount,
       totalBase64Size: r.pj.base64Size,
     });
@@ -733,15 +746,18 @@ export const saveOperationalModule = async (payload: OperationalModuleState, use
 
   let settled = await Promise.all(jobs.map(upsertOne));
 
-  // 실패 테이블 1.5초 후 1회 자동 재시도.
+  // 실패 테이블 1.5초 후 1회 자동 재시도. 단, 스키마 불일치(PGRST204 등)는 재시도해도 동일 실패 → 즉시 중단.
   const firstFailed = settled.filter((s) => s.error);
   if (firstFailed.length > 0) {
     firstFailed.forEach((s) => logFailure("upsert", s));
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const retryJobs = jobs.filter((j) => firstFailed.some((f) => f.table === j.table));
-    const retried = await Promise.all(retryJobs.map(upsertOne));
-    const retriedByTable = new Map(retried.map((r) => [r.table, r]));
-    settled = settled.map((s) => retriedByTable.get(s.table) ?? s);
+    const retriable = firstFailed.filter((s) => !isSchemaMismatchError(s.error));
+    if (retriable.length > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const retryJobs = jobs.filter((j) => retriable.some((f) => f.table === j.table));
+      const retried = await Promise.all(retryJobs.map(upsertOne));
+      const retriedByTable = new Map(retried.map((r) => [r.table, r]));
+      settled = settled.map((s) => retriedByTable.get(s.table) ?? s);
+    }
   }
 
   const savedTables: string[] = [];
