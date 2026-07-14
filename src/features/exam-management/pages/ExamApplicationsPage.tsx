@@ -7,7 +7,7 @@ import {
   writeExamAudit, listExamAudit, isDuplicateApplication, examSupabaseReady,
   type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
-import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming } from "../services/examAutomationService";
+import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming, resolvePmLevel, resolveDmLevel } from "../services/examAutomationService";
 
 type RefOpt = { id: string; label: string };
 type ColType = "text" | "date" | "number" | "select" | "ref" | "cert";
@@ -54,6 +54,19 @@ const COLS: Col[] = [
 ];
 const FILTERS = COLS.filter((c) => c.filter);
 
+// 사번(연명부) 선택 시 응시 필드 ← 인력(exam_personnel) 필드 자동입력 매핑.
+const PERSONNEL_AUTOFILL: Array<{ app: string; person: string }> = [
+  { app: "name", person: "name" },                 // 성명
+  { app: "group_name", person: "group_name" },     // 그룹
+  { app: "product", person: "product_group" },     // 제품(← 제품군)
+  { app: "process", person: "part_name" },         // 공정(← 연명부 파트/공정 표기)
+  { app: "pm_level", person: "current_pm_level" }, // PM Level
+  { app: "category_code", person: "category_code" }, // 구분코드(인력에 있으면)
+  { app: "category", person: "category" },           // 구분(인력에 있으면)
+];
+// 사번 기준 자동입력 → 사용자가 직접 입력하지 않는(읽기전용) 식별 필드.
+const AUTO_READONLY = new Set(["name", "group_name", "product", "process", "pm_level"]);
+
 // 인증취득여부: 수동 확정값 우선, 아니면 실기 합격일 존재 시 "취득"(자동계산).
 const certOf = (r: ExamRow): "취득" | "미취득" => {
   if (r.cert_status_manual && (r.cert_status === "취득" || r.cert_status === "미취득")) return r.cert_status as "취득" | "미취득";
@@ -68,6 +81,8 @@ export default function ExamApplicationsPage({
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [refMap, setRefMap] = useState<Record<string, RefOpt[]>>({});
   const [rules, setRules] = useState<ExamRow[]>([]); // exam_rules(인증취득 요건 검증용)
+  const [personnel, setPersonnel] = useState<ExamRow[]>([]);       // exam_personnel(사번 선택/자동입력용)
+  const [equipmentRows, setEquipmentRows] = useState<ExamRow[]>([]); // exam_equipment(인증단계별 설비 필터용 — process_id 보유)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -112,12 +127,14 @@ export default function ExamApplicationsPage({
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
-      const [data, refs, ruleRows] = await Promise.all([
+      const [data, refs, ruleRows, people, equip] = await Promise.all([
         listExamRows("exam_applications", tenantId),
         Promise.all(refCols.map(async (c) => [c.refTable as string, await listExamRefOptions(c.refTable as ExamMasterTable, tenantId)] as const)),
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]), // 인증취득 요건(없으면 기본값)
+        listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]), // 사번 선택/자동입력
+        listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]), // 인증단계별 설비 필터(process_id)
       ]);
-      setRows(data); setRefMap(Object.fromEntries(refs)); setRules(ruleRows);
+      setRows(data); setRefMap(Object.fromEntries(refs)); setRules(ruleRows); setPersonnel(people); setEquipmentRows(equip);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId, refCols]);
@@ -136,6 +153,57 @@ export default function ExamApplicationsPage({
     return String(v);
   };
   const rowMonth = (r: ExamRow) => ymd(r.written_exam_date || r.cert_acquired_date || r.practical_pass_date).slice(0, 7);
+
+  // 사번(연명부) 선택 → 인력 정보 자동입력(성명/그룹/제품/공정/PM Level 등). 사용자 직접 입력 방지.
+  const applyPersonnel = (empNo: string) => {
+    const p = personnel.find((x) => String(x.employee_no ?? "") === empNo);
+    setEditRow((f) => {
+      const next: ExamRow = { ...(f || {}), employee_no: empNo };
+      if (p) for (const { app, person } of PERSONNEL_AUTOFILL) {
+        const v = p[person];
+        if (v !== undefined && v !== null && v !== "") next[app] = v;
+        else if (AUTO_READONLY.has(app)) next[app] = ""; // 인력값 없으면 식별 필드 비움(이전 사번 잔재 제거)
+      }
+      return next;
+    });
+  };
+
+  // 선택된 인증단계(level_id)에 연결된 공정(process_id) 집합 — exam_rules 기준. 매핑 없으면 null(전체 설비 표시).
+  const levelProcessIds = useMemo(() => {
+    const lvl = String(editRow?.level_id ?? "");
+    if (!lvl) return null;
+    const ids = new Set(rules.filter((r) => String(r.level_id ?? "") === lvl && r.process_id).map((r) => String(r.process_id)));
+    return ids.size ? ids : null;
+  }, [editRow?.level_id, rules]);
+
+  // 인증 설비 드롭다운 옵션 — 인증단계 선택 시 해당 공정의 설비만, 미선택/매핑없음이면 전체 표시(폴백).
+  const equipmentOptions = useMemo(() => {
+    const all = refMap["exam_equipment"] || [];
+    if (!levelProcessIds) return all;
+    const allowed = new Set(equipmentRows.filter((e) => levelProcessIds.has(String(e.process_id ?? ""))).map((e) => String(e.id)));
+    const cur = String(editRow?.equipment_id ?? ""); // 현재 선택값은 항상 보이도록(수정 시 유실 방지)
+    return all.filter((o) => allowed.has(o.id) || o.id === cur);
+  }, [refMap, levelProcessIds, equipmentRows, editRow?.equipment_id]);
+
+  // 저장 시 자동계산(사용자가 직접 계산하지 않음): 진행 날짜 → 인증 취득일/취득여부/PM Level/D.M 공정.
+  //  기존 자동화 함수(examAutomationService)와 화면 표시 규칙(certOf)을 그대로 재사용한다.
+  const computeDerivedFields = (row: ExamRow): ExamRow => {
+    const next: ExamRow = { ...row };
+    const practicalPass = ymd(next.practical_pass_date);
+    // ① 인증 취득일 = 실기 합격일(비어 있을 때만 자동 채움 — 수동 입력값은 보존).
+    if (practicalPass && !ymd(next.cert_acquired_date)) next.cert_acquired_date = practicalPass;
+    // ② 인증취득여부: 관리자 수동 확정이 아니면 자동(실기 합격 → 취득, 그 외 미취득) — 목록/필터의 certOf 와 동일 규칙.
+    if (next.cert_status_manual !== true) next.cert_status = practicalPass ? "취득" : "미취득";
+    // ③ PM Level / ④ D.M 공정: 연결된 인력(연명부) + 인증 기준(exam_rules) 기준 자동계산(수동 확정값은 유지).
+    const person = personnel.find((x) => String(x.employee_no ?? "") === String(next.employee_no ?? ""));
+    if (person) {
+      const pm = resolvePmLevel(person, undefined, rules);
+      if (pm.value) next.pm_level = pm.value;
+      const dm = resolveDmLevel(person, undefined, rules);
+      if (dm.value && dm.value !== "확인 필요") next.dm_process = dm.value;
+    }
+    return next;
+  };
 
   const filterOptions = useMemo(() => {
     const m: Record<string, string[]> = {};
@@ -214,7 +282,8 @@ export default function ExamApplicationsPage({
       }
       const isNew = !editRow.id;
       const before = isNew ? null : rows.find((r) => r.id === editRow.id) || null;
-      const saved = await upsertExamRow("exam_applications", editRow, tenantId, userId);
+      const payload = computeDerivedFields(editRow); // 저장 직전 자동계산(인증 취득일/취득여부/PM Level/D.M 공정)
+      const saved = await upsertExamRow("exam_applications", payload, tenantId, userId);
       await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), isNew ? "create" : "update", before, saved);
       setEditRow(null); onToast?.(isNew ? "응시 항목이 등록되었습니다." : "응시 항목이 수정되었습니다."); await reload();
     } catch (e) { setError((e as { message?: string })?.message || "저장하지 못했습니다."); }
@@ -300,7 +369,7 @@ export default function ExamApplicationsPage({
   const commitImport = async () => {
     if (!importPreview) return;
     try {
-      for (const row of importPreview.okRows) { const saved = await upsertExamRow("exam_applications", row, tenantId, userId); await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), "import", null, saved); }
+      for (const row of importPreview.okRows) { const saved = await upsertExamRow("exam_applications", computeDerivedFields(row), tenantId, userId); await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), "import", null, saved); }
       onToast?.(`정상 ${importPreview.okRows.length}건 등록 · 중복 ${importPreview.dup}건 · 오류 ${importPreview.err.length}건`);
       setImportPreview(null); await reload();
     } catch (e) { setError((e as { message?: string })?.message || "Excel 반영 실패."); }
@@ -452,8 +521,23 @@ export default function ExamApplicationsPage({
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {COLS.filter((c) => c.type !== "cert").map((c) => (
                 <div key={c.key}>
-                  <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}</label>
-                  {c.type === "ref" ? (
+                  <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}{AUTO_READONLY.has(c.key) && <span className="ml-1 text-[0.6rem] font-normal text-slate-400">(사번 자동)</span>}</label>
+                  {c.key === "employee_no" ? (
+                    // 사번: 인력(연명부)에서 선택 → 성명/그룹/제품/공정/PM Level 자동입력.
+                    <select className={`${inputCls} w-full`} value={String(editRow.employee_no ?? "")} onChange={(e) => applyPersonnel(e.target.value)}>
+                      <option value="">사번 선택</option>
+                      {personnel.map((p) => <option key={String(p.id)} value={String(p.employee_no ?? "")}>{String(p.employee_no ?? "")}{p.name ? ` · ${String(p.name)}` : ""}</option>)}
+                    </select>
+                  ) : AUTO_READONLY.has(c.key) ? (
+                    // 사번 선택 시 자동입력되는 식별 필드 — 직접 입력 금지(읽기전용).
+                    <input readOnly disabled className={`${inputCls} w-full cursor-not-allowed opacity-70`} value={String(editRow[c.key] ?? "")} placeholder="사번 선택 시 자동 입력" />
+                  ) : c.key === "level_id" ? (
+                    // 인증단계 변경 시 설비 선택 초기화(단계별 설비만 표시되도록).
+                    <select className={`${inputCls} w-full`} value={String(editRow.level_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), level_id: e.target.value || null, equipment_id: null }))}><option value="">선택</option>{(refMap["exam_levels"] || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
+                  ) : c.key === "equipment_id" ? (
+                    // 인증 설비: 선택된 인증단계에 연결된 공정의 설비만 표시.
+                    <select className={`${inputCls} w-full`} value={String(editRow.equipment_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), equipment_id: e.target.value || null }))}><option value="">선택</option>{equipmentOptions.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
+                  ) : c.type === "ref" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}><option value="">선택</option>{(refMap[c.refTable as string] || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
                   ) : c.type === "select" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}><option value="">선택</option>{(c.options || []).map((o) => <option key={o} value={o}>{o}</option>)}</select>

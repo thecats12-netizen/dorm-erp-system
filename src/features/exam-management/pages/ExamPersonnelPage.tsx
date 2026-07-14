@@ -61,9 +61,9 @@ const cellText = (c: Col, r: ExamRow) => {
 };
 
 export default function ExamPersonnelPage({
-  darkMode, canEdit, tenantId, userId, onToast,
+  darkMode, canEdit, tenantId, userId, onToast, refreshKey,
 }: {
-  darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void;
+  darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void; refreshKey?: number;
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [rules, setRules] = useState<ExamRow[]>([]); // exam_rules(PM 승급 요건 검증용)
@@ -109,7 +109,7 @@ export default function ExamPersonnelPage({
     }
     catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
-  }, [tenantId]);
+  }, [tenantId, refreshKey]);
 
   // 최초 로드(내부 비동기 — 렌더 캐스케이드 아님).
   // eslint-disable-next-line react-hooks/set-state-in-effect

@@ -124,6 +124,7 @@ import ExamRulesPage from "./features/exam-management/pages/ExamRulesPage";
 import ExamPersonnelPage from "./features/exam-management/pages/ExamPersonnelPage";
 import ExamApplicationsPage from "./features/exam-management/pages/ExamApplicationsPage";
 import ExamDmCertificationsPage from "./features/exam-management/pages/ExamDmCertificationsPage";
+import ExamPmCertificationsPage from "./features/exam-management/pages/ExamPmCertificationsPage";
 import { ExamAnnualTargetsPage, ExamMonthlyResultsPage } from "./features/exam-management/pages/ExamTargetsPage";
 import ExamDashboardPage from "./features/exam-management/pages/ExamDashboardPage";
 import ExamExcelImportPage from "./features/exam-management/pages/ExamExcelImportPage";
@@ -3199,6 +3200,9 @@ export default function App() {
   const getUniqueDormKey = (site: string, buildingName: string, dong: string, roomHo: string) => `${site}-${buildingName}-${dong}-${roomHo}`;
 
   const [tenantId] = useState<string>("default");
+  // 시험관리 통계 자동 갱신 신호: PM 인증 승인 등 데이터 변경 시 증가 → 시험 통계 페이지가 재조회(수동 재계산 불필요).
+  const [examDataVersion, setExamDataVersion] = useState(0);
+  const bumpExamData = () => setExamDataVersion((v) => v + 1);
   const [isLoading, setIsLoading] = useState(true);
   // 로그인 직후 Supabase 데이터 강제 재로드 트리거(새로고침 없이 데이터 표시)
   const [dataReloadKey, setDataReloadKey] = useState(0);
@@ -16878,6 +16882,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
               onNavigate={(tab) => setActiveTab(tab as TabKey)}
+              refreshKey={examDataVersion}
             />
           ) : activeTab === "examRules" ? (
             <ExamRulesPage
@@ -16894,6 +16899,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
+              refreshKey={examDataVersion}
             />
           ) : activeTab === "examApplications" ? (
             <ExamApplicationsPage
@@ -16902,6 +16908,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
+            />
+          ) : activeTab === "examPmCertifications" ? (
+            <ExamPmCertificationsPage
+              darkMode={theme.darkMode}
+              canEdit={currentUser?.role === "admin"}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              onToast={showNetworkToast}
+              onDataChanged={bumpExamData}
             />
           ) : activeTab === "examDmCertifications" ? (
             <ExamDmCertificationsPage
@@ -16918,6 +16933,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
+              refreshKey={examDataVersion}
             />
           ) : activeTab === "examMonthlyResults" ? (
             <ExamMonthlyResultsPage
@@ -16926,6 +16942,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
+              refreshKey={examDataVersion}
             />
           ) : activeTab === "examExcelImport" ? (
             <ExamExcelImportPage
@@ -16943,6 +16960,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               userId={currentUser?.id || ""}
               author={currentUser?.displayName || currentUser?.username || ""}
               onToast={showNetworkToast}
+              refreshKey={examDataVersion}
             />
           ) : (
             <ExamManagementPage tab={activeTab} darkMode={theme.darkMode} />

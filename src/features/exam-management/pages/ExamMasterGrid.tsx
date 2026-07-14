@@ -79,6 +79,7 @@ export default function ExamMasterGrid({
   const cellText = (col: ExamColumn, row: ExamRow) => {
     const v = row[col.key];
     if (col.type === "ref") return refLabel(col, v);
+    if (col.type === "boolean") return v === true ? "예" : "아니오";
     if (v === null || v === undefined || v === "") return "-";
     if (col.type === "date") return String(v).slice(0, 10);
     return String(v);
@@ -205,6 +206,8 @@ export default function ExamMasterGrid({
             row[c.key] = opt?.id ?? null;
           } else if (c.type === "number") {
             row[c.key] = v === "" ? null : Number(v.replace(/[^0-9.-]/g, ""));
+          } else if (c.type === "boolean") {
+            row[c.key] = /^(예|y|yes|true|1|자동|사용|o)$/i.test(v);
           } else {
             row[c.key] = v || null;
           }
@@ -304,6 +307,11 @@ export default function ExamMasterGrid({
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}>
                       <option value="">선택 안 함</option>
                       {(refMap[c.refTable as string] || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                    </select>
+                  ) : c.type === "boolean" ? (
+                    <select className={`${inputCls} w-full`} value={editRow[c.key] === true ? "true" : "false"} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value === "true" }))}>
+                      <option value="false">아니오</option>
+                      <option value="true">예</option>
                     </select>
                   ) : c.type === "select" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}>

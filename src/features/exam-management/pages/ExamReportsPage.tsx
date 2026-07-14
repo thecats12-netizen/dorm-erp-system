@@ -25,7 +25,7 @@ const REPORT_TYPES = [
 ] as const;
 type ReportType = typeof REPORT_TYPES[number];
 
-export default function ExamReportsPage({ darkMode, tenantId, author }: { darkMode: boolean; canEdit?: boolean; tenantId: string; userId?: string; author?: string; onToast?: (m: string) => void; }) {
+export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey }: { darkMode: boolean; canEdit?: boolean; tenantId: string; userId?: string; author?: string; onToast?: (m: string) => void; refreshKey?: number; }) {
   const [personnel, setPersonnel] = useState<ExamRow[]>([]);
   const [apps, setApps] = useState<ExamRow[]>([]);
   const [certs, setCerts] = useState<ExamRow[]>([]);
@@ -53,7 +53,7 @@ export default function ExamReportsPage({ darkMode, tenantId, author }: { darkMo
       setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setMonthly(m); setLevels(lv);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
-  }, [tenantId]);
+  }, [tenantId, refreshKey]);
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void reload(); }, [reload]);
 

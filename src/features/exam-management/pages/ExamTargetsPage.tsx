@@ -396,13 +396,13 @@ const MONTHLY_COLS: Col[] = [
   { key: "notes", label: "비고", type: "text", hideable: true },
 ];
 
-type PageProps = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void };
+type PageProps = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void; refreshKey?: number };
 
 export function ExamAnnualTargetsPage(props: PageProps) {
   return (
     <div className="space-y-6">
       {/* 자동계산(읽기 전용) — 실제 인증 확정 실적/달성률. 화면 진입 시 조회만 하고 DB 재저장하지 않는다. */}
-      <AnnualAutoAggregatePanel darkMode={props.darkMode} tenantId={props.tenantId} />
+      <AnnualAutoAggregatePanel darkMode={props.darkMode} tenantId={props.tenantId} refreshKey={props.refreshKey} />
       <TargetGrid cfg={{
         table: "exam_annual_targets", title: "연간목표(수기 입력/목표)", subtitle: "시험관리 · 연도별 인증 목표/현재 인원과 달성률을 관리합니다. (기준: Excel 년간목표)",
         fileBase: "연간목표", cols: ANNUAL_COLS, actualLabel: "현재인원",
@@ -414,7 +414,7 @@ export function ExamAnnualTargetsPage(props: PageProps) {
 
 // 연간목표 실적/달성률 자동계산 패널(읽기 전용) — 실적은 인증 확정 건수, 목표는 exam_annual_targets 합계.
 //  월간실적 합계와 동일 기준(calculateMonthlyPerformanceYear) → 값 일치. 조회 전용(DB 재저장 없음).
-function AnnualAutoAggregatePanel({ darkMode, tenantId }: { darkMode: boolean; tenantId: string }) {
+function AnnualAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode: boolean; tenantId: string; refreshKey?: number }) {
   const [records, setRecords] = useState<ExamRow[]>([]);
   const [targets, setTargets] = useState<ExamRow[]>([]);
   const [levels, setLevels] = useState<RefOpt[]>([]);
@@ -436,7 +436,7 @@ function AnnualAutoAggregatePanel({ darkMode, tenantId }: { darkMode: boolean; t
       setRecords([...apps, ...dm]); setTargets(tgt); setLevels(lv);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
-  }, [tenantId]);
+  }, [tenantId, refreshKey]);
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, [load]);
 
@@ -530,7 +530,7 @@ export function ExamMonthlyResultsPage(props: PageProps) {
   return (
     <div className="space-y-6">
       {/* 자동집계(읽기 전용) — 실제 인증 확정 건수 기준. 화면 진입 시 조회만 하고 DB 재저장하지 않는다. */}
-      <MonthlyAutoAggregatePanel darkMode={props.darkMode} tenantId={props.tenantId} />
+      <MonthlyAutoAggregatePanel darkMode={props.darkMode} tenantId={props.tenantId} refreshKey={props.refreshKey} />
       <TargetGrid cfg={{
         table: "exam_monthly_results", title: "월간실적(수기 입력/목표)", subtitle: "시험관리 · 월별 실적/누계/목표와 달성률을 관리합니다. (기준: Excel D.M 월간 실적)",
         fileBase: "월간실적", cols: MONTHLY_COLS, actualLabel: "누계",
@@ -542,7 +542,7 @@ export function ExamMonthlyResultsPage(props: PageProps) {
 
 // 월간실적 자동집계 패널(읽기 전용) — exam_applications/dm_certifications 의 최종 인증 확정 건수를 월별 집계.
 //  저장/승인 발생 시 새로고침으로 해당 연도만 다시 계산. 화면 진입마다 DB 재저장하지 않음(조회 전용).
-function MonthlyAutoAggregatePanel({ darkMode, tenantId }: { darkMode: boolean; tenantId: string }) {
+function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode: boolean; tenantId: string; refreshKey?: number }) {
   const [records, setRecords] = useState<ExamRow[]>([]);
   const [levels, setLevels] = useState<RefOpt[]>([]);
   const [loading, setLoading] = useState(false);
@@ -562,7 +562,7 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId }: { darkMode: boolean; 
       setRecords([...apps, ...dm]); setLevels(lv);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
-  }, [tenantId]);
+  }, [tenantId, refreshKey]);
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, [load]);
 

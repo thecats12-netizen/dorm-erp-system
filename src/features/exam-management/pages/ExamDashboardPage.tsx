@@ -63,7 +63,7 @@ function Columns({ data, onPick }: { data: Segment[]; onPick: (s: Segment) => vo
   );
 }
 
-export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId, onToast, onNavigate }: { darkMode: boolean; canEdit?: boolean; tenantId: string; userId?: string; onToast?: (m: string) => void; onNavigate?: (tab: string) => void; }) {
+export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId, onToast, onNavigate, refreshKey }: { darkMode: boolean; canEdit?: boolean; tenantId: string; userId?: string; onToast?: (m: string) => void; onNavigate?: (tab: string) => void; refreshKey?: number; }) {
   const [personnel, setPersonnel] = useState<ExamRow[]>([]);
   const [apps, setApps] = useState<ExamRow[]>([]);
   const [certs, setCerts] = useState<ExamRow[]>([]);
@@ -101,7 +101,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
       setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv); setRules(ru); setRetest(rc);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
-  }, [tenantId]);
+  }, [tenantId, refreshKey]);
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void reload(); }, [reload]);
 

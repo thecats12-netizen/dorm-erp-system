@@ -37,7 +37,7 @@ const EXAM_TABLE_ORDER: Record<ExamMasterTable, string[]> = {
   exam_parts: ["sort_order", "created_at"],
   exam_processes: ["sort_order", "created_at"],
   exam_equipment: ["sort_order", "created_at"],
-  exam_levels: ["created_at"],
+  exam_levels: ["rank_order", "created_at"],
   exam_rules: ["created_at"],
   exam_personnel: ["employee_no", "created_at"],
   exam_applications: ["created_at"],
