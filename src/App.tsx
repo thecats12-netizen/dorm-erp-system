@@ -85,6 +85,7 @@ import {
   rowToPreMoveInInspection,
 } from "./services/preMoveInInspectionService";
 import { uploadTempFileAndSign } from "./services/pdfStorageService";
+import { uploadFileToStorage, uploadFilesToStorage, INVENTORY_PROOF_BUCKET, CLEANING_PHOTO_BUCKET } from "./services/storageUploadService";
 import { savePdfSafely } from "./utils/savePdfSafely";
 import { isHeicFile, normalizeUploadImage, isHeicDataUrl, convertHeicSrcToJpegDataUrl } from "./utils/imageUtils";
 import {
@@ -2178,6 +2179,7 @@ export default function App() {
   const cleaningEditPhotosReadyRef = useRef(false);
   // 청소보고서 저장 중복 실행 방지(저장 버튼 연속 클릭/재시도로 동일 보완 건 2건 생성 차단).
   const cleaningSavingRef = useRef(false);
+  const inventorySavingRef = useRef(false); // 비품 저장 중복 실행 방지(연속 클릭/업로드 대기 중)
   // 수정 모달 오픈 시 "기존 등록 사진" URL 집합(신규 추가 사진과 구분 표시용).
   const [cleaningEditOriginalPhotos, setCleaningEditOriginalPhotos] = useState<Set<string>>(new Set());
   // 비동기 사진 조회 완료 시점에 현재 열려 있는 편집 대상이 바뀌지 않았는지 확인용.
@@ -5997,19 +5999,20 @@ export default function App() {
   // 8-6) 데이터 저장 시 권한 확인 후 자동 연결
   const addCleaningReportWithAutoFill = (
     user: LoginUser | null,
-    form: Omit<CleaningReport, "id" | "createdAt" | "updatedAt">
+    form: Omit<CleaningReport, "id" | "createdAt" | "updatedAt">,
+    presetId?: string
   ) => {
     if (!user || !canEditDormData(user, "maintenance_reporter")) {
       void appAlert("알림", "청소보고를 작성할 권한이 없습니다.");
       return;
     }
-    
+
     // 주차/월 자동 계산
     const week = getWeekOfMonth(form.reportDate);
     const month = getMonthLabel(form.reportDate);
-    
+
     const autoFilledForm: CleaningReport = {
-      id: `report-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      id: presetId || `report-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       ...form,
       weekLabel: `${week}주차`,
       monthLabel: month,
@@ -9190,6 +9193,8 @@ export default function App() {
     const enriched = occupants
       .filter((o) => !o.isDeleted && !o.isPermanentDeleted)
       .filter((o) => !restrictOwn || o.dormId === ownDormId)
+      // 실제퇴실일(actual_checkout_date)이 입력된 직원은 계약종료일과 무관하게 이미 퇴실 처리됨 → 3개 퇴실 예정 목록에서 제외(IS NULL 만 표시).
+      .filter((o) => !getActualMoveOutDate(o))
       .map((o) => {
         // 기준일: 예상퇴실일이 있으면 예상퇴실일 우선, 없으면 퇴실일(거주기한/실제퇴실일).
         // (예상퇴실일이 미래면 실제퇴실일이 과거여도 예상퇴실일 기준으로 판단 — 요청 예시 반영)
@@ -10097,35 +10102,60 @@ export default function App() {
     setShowNewHireForm(false);
   };
 
-  const saveInventory = () => {
+  const saveInventory = async () => {
     if (!canEditData(currentUser)) return;
+    if (inventorySavingRef.current) return; // 연속 클릭/업로드 대기 중복 실행 방지
+    inventorySavingRef.current = true;
+    try {
+      const existing = editingInventoryId
+        ? inventory.find((i) => i.id === editingInventoryId)
+        : null;
 
-    const existing = editingInventoryId
-      ? inventory.find((i) => i.id === editingInventoryId)
-      : null;
+      const id = editingInventoryId || crypto.randomUUID();
 
-    const payload: InventoryItem = {
-      id: editingInventoryId || crypto.randomUUID(),
-      ...inventoryForm,
-      createdAt: editingInventoryId ? existing?.createdAt || new Date().toISOString() : new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+      // [증빙파일] Base64/DB 직접 저장 대신 Supabase Storage 로 업로드 → DB 에는 Public URL 만 저장.
+      //   proofFile 은 {name,data} JSON(또는 data URL/URL). data(base64)만 Storage 로 올리고 URL 로 교체(이름은 유지).
+      //   경로: inventory-proof/{년도}/{비품ID}/{파일명}. 이미 URL이면 재업로드하지 않음. 실패/미가용 시 기존 base64 폴백.
+      const proofYear = (inventoryForm.purchaseDate || "").slice(0, 4) || String(new Date().getFullYear());
+      let proofFileToSave = inventoryForm.proofFile || "";
+      if (proofFileToSave) {
+        let proofName = "증빙파일";
+        let proofData = proofFileToSave;
+        if (proofFileToSave.startsWith("{")) {
+          try { const p = JSON.parse(proofFileToSave); proofName = p.name || proofName; proofData = p.data || ""; } catch { /* legacy 문자열 */ }
+        }
+        if (proofData) {
+          const url = await uploadFileToStorage(INVENTORY_PROOF_BUCKET, `${proofYear}/${id}`, proofData);
+          proofFileToSave = JSON.stringify({ name: proofName, data: url });
+        }
+      }
 
-    setInventory((prev) => (editingInventoryId ? prev.map((i) => (i.id === editingInventoryId ? payload : i)) : [payload, ...prev]));
+      const payload: InventoryItem = {
+        id,
+        ...inventoryForm,
+        proofFile: proofFileToSave,
+        createdAt: editingInventoryId ? existing?.createdAt || new Date().toISOString() : new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
-    const actionType = existing ? "update" : "create";
-    createAuditLog({
-      targetType: "inventory",
-      targetId: payload.id,
-      actionType,
-      changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
-      beforeValue: existing ? JSON.stringify(existing) : "",
-      afterValue: JSON.stringify(payload),
-    });
+      setInventory((prev) => (editingInventoryId ? prev.map((i) => (i.id === editingInventoryId ? payload : i)) : [payload, ...prev]));
 
-    setInventoryForm(inventoryTemplate());
-    setEditingInventoryId(null);
-    setShowInventoryForm(false);
+      const actionType = existing ? "update" : "create";
+      createAuditLog({
+        targetType: "inventory",
+        targetId: payload.id,
+        actionType,
+        changedBy: currentUser?.displayName || currentUser?.username || currentUser?.id || "",
+        beforeValue: existing ? JSON.stringify(existing) : "",
+        afterValue: JSON.stringify(payload),
+      });
+
+      setInventoryForm(inventoryTemplate());
+      setEditingInventoryId(null);
+      setShowInventoryForm(false);
+    } finally {
+      inventorySavingRef.current = false;
+    }
   };
 
   const saveLease = () => {
@@ -11497,6 +11527,13 @@ export default function App() {
       if (afterP.length === 0 && Array.isArray(existing.afterPhotoDataUrls) && existing.afterPhotoDataUrls.length > 0 && !cleaningEditPhotosReadyRef.current) {
         afterP = existing.afterPhotoDataUrls;
       }
+      // [사진] Base64 대신 Supabase Storage 로 병렬 업로드 → DB 에는 Public URL 만 저장(cleaning-photos/{년도}/{보고서ID}/{파일명}).
+      //   이미 URL인 항목은 재업로드하지 않음. 실패/미가용 시 기존 base64 폴백(저장 안 깨짐).
+      const cleanYear = (cleaningReportForm.reportDate || "").slice(0, 4) || String(new Date().getFullYear());
+      [beforeP, afterP] = await Promise.all([
+        uploadFilesToStorage(CLEANING_PHOTO_BUCKET, `${cleanYear}/${existing.id}/before`, beforeP),
+        uploadFilesToStorage(CLEANING_PHOTO_BUCKET, `${cleanYear}/${existing.id}/after`, afterP),
+      ]);
       const payload: CleaningReport = {
         id: existing.id,
         ...cleaningReportForm,
@@ -11518,7 +11555,18 @@ export default function App() {
         afterValue: JSON.stringify(payload),
       });
     } else {
-      addCleaningReportWithAutoFill(currentUser, cleaningReportForm);
+      // [사진] 신규 등록도 동일하게 Storage 병렬 업로드 → URL 저장. 보고서 ID를 미리 만들어 경로에 사용.
+      const newReportId = `report-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const cleanYear = (cleaningReportForm.reportDate || "").slice(0, 4) || String(new Date().getFullYear());
+      const [beforeUrls, afterUrls] = await Promise.all([
+        uploadFilesToStorage(CLEANING_PHOTO_BUCKET, `${cleanYear}/${newReportId}/before`, cleaningReportForm.beforePhotoDataUrls || []),
+        uploadFilesToStorage(CLEANING_PHOTO_BUCKET, `${cleanYear}/${newReportId}/after`, cleaningReportForm.afterPhotoDataUrls || []),
+      ]);
+      addCleaningReportWithAutoFill(
+        currentUser,
+        { ...cleaningReportForm, beforePhotoDataUrls: beforeUrls, afterPhotoDataUrls: afterUrls },
+        newReportId
+      );
     }
 
     setCleaningReportForm(cleaningReportTemplate());
@@ -25438,11 +25486,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   const parseProof = (v: string) => {
                     if (!v) return { name: "", data: "" };
                     if (v.startsWith("{")) { try { const p = JSON.parse(v); return { name: p.name || "", data: p.data || "" }; } catch { /* legacy */ } }
-                    return v.startsWith("data:") ? { name: "증빙파일", data: v } : { name: v, data: "" };
+                    return (v.startsWith("data:") || /^https?:\/\//i.test(v)) ? { name: "증빙파일", data: v } : { name: v, data: "" };
                   };
                   const proof = parseProof(inventoryForm.proofFile);
-                  const isImg = proof.data.startsWith("data:image/");
-                  const isPdf = proof.data.startsWith("data:application/pdf") || /\.pdf$/i.test(proof.name);
+                  // data 는 base64(data:) 또는 Storage Public URL(http). 둘 다 미리보기/열기 지원.
+                  const isPdf = proof.data.startsWith("data:application/pdf") || /\.pdf(\?|$)/i.test(proof.data) || /\.pdf$/i.test(proof.name);
+                  const isImg = proof.data.startsWith("data:image/") || (/^https?:\/\//i.test(proof.data) && !isPdf);
                   return (
                     <div className="md:col-span-2 xl:col-span-2">
                       <label className={`mb-2 block text-sm font-medium ${theme.darkMode ? "text-slate-300" : "text-slate-700"}`}>증빙파일 (이미지/PDF)</label>
