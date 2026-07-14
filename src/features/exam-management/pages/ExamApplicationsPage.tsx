@@ -76,6 +76,13 @@ const truthyFlag = (v: unknown): boolean => {
 // 재직여부: 값이 없으면 통과(미기재), 있으면 "재직" 포함만 재직으로 본다.
 const isEmployed = (v: unknown): boolean => { const s = String(v ?? "").trim(); return s === "" || /재직/.test(s); };
 
+// 자동계산 응시상태(AutoExamStatus, 공백 없음) → 저장 라벨(STATUS_OPTIONS, 공백 포함) 매핑.
+const AUTO_STATUS_MAP: Record<string, string> = {
+  "인증취득": "인증 취득", "실기합격": "실기 합격", "실기불합격": "실기 불합격", "실기진행": "실기 진행",
+  "필기합격": "필기 합격", "필기불합격": "필기 불합격", "필기진행": "필기 진행",
+  "응시예정": "예정", "미등록": "예정", "취소": "취소", "재응시": "재응시",
+};
+
 // 인증취득여부: 수동 확정값 우선, 아니면 실기 합격일 존재 시 "취득"(자동계산).
 const certOf = (r: ExamRow): "취득" | "미취득" => {
   if (r.cert_status_manual && (r.cert_status === "취득" || r.cert_status === "미취득")) return r.cert_status as "취득" | "미취득";
@@ -244,16 +251,47 @@ export default function ExamApplicationsPage({
   //  기존 자동화 함수(examAutomationService)와 화면 표시 규칙(certOf)을 그대로 재사용한다.
   const computeDerivedFields = (row: ExamRow): ExamRow => {
     const next: ExamRow = { ...row };
+    // 인증 기준관리(exam_rules) — 선택 인증단계의 필기/실기 필요 여부(규칙 없으면 기존 규칙: 실기 합격 = 취득).
+    const rule = rules.find((r) => String(r.level_id ?? "") === String(next.level_id ?? "")) || null;
+    const requireWritten = rule?.require_written === true;
+    const requirePractical = rule?.require_practical === true;
+    const writtenPass = ymd(next.written_pass_date);
     const practicalPass = ymd(next.practical_pass_date);
-    // ① 인증 취득일 = 실기 합격일(비어 있을 때만 자동 채움 — 수동 입력값은 보존).
-    if (practicalPass && !ymd(next.cert_acquired_date)) next.cert_acquired_date = practicalPass;
-    // ② 인증취득여부: 관리자 수동 확정이 아니면 자동(실기 합격 → 취득, 그 외 미취득) — 목록/필터의 certOf 와 동일 규칙.
-    if (next.cert_status_manual !== true) next.cert_status = practicalPass ? "취득" : "미취득";
-    // ③ PM Level / ④ D.M 공정: 연결된 인력(연명부) + 인증 기준(exam_rules) 기준 자동계산(수동 확정값은 유지).
+    // 필기 필요 인증은 필기 합격일, 실기 필요 인증은 실기 합격일이 있어야 충족 → 모두 충족 시 취득.
+    const writtenOk = requireWritten ? !!writtenPass : true;
+    const practicalOk = requirePractical ? !!practicalPass : true;
+    const acquired = rule ? (writtenOk && practicalOk && (!!writtenPass || !!practicalPass)) : !!practicalPass;
+
+    // ① 인증취득여부: 관리자 수동 확정(cert_status_manual)이 우선, 아니면 규칙 기반 자동.
+    if (next.cert_status_manual !== true) next.cert_status = acquired ? "취득" : "미취득";
+
+    // ② 인증 취득일 = 가장 늦은 "필수 합격일"(비어 있을 때만 — 관리자 지정일/수동값 보존). 취득일 때만.
+    if (!ymd(next.cert_acquired_date) && acquired) {
+      const req: string[] = [];
+      if ((requireWritten || !rule) && writtenPass) req.push(writtenPass);
+      if ((requirePractical || !rule) && practicalPass) req.push(practicalPass);
+      if (!req.length && practicalPass) req.push(practicalPass);
+      if (req.length) next.cert_acquired_date = req.sort().slice(-1)[0]; // 가장 늦은 날짜
+    }
+
+    // ③ 응시상태: 비어 있거나 기본값("예정")일 때만 자동(날짜 기반). 사용자가 명시 선택한 상태(취소/재응시/불합격 등)는 보존.
+    const curStatus = String(next.status ?? "").trim();
+    if (curStatus === "" || curStatus === "예정") {
+      const autoStatus = AUTO_STATUS_MAP[calculateExamStatus(next).value] ?? "";
+      if (autoStatus) next.status = autoStatus;
+    }
+
+    // ④ 조기/지연취득: 비어 있을 때만 자동(수동 선택 보존). 취득일 때만 판정.
+    if (acquired && !String(next.timing_status ?? "").trim()) {
+      const t = resolveAcquisitionTiming(next, rules).value;
+      if (t) next.timing_status = t;
+    }
+
+    // ⑤ PM Level(후보) / D.M 공정: 연결 인력(연명부) 기준 자동계산.
+    //    불합격/미취득이면 취득 레벨을 변경하지 않고, 실제 PM Level 확정은 PM 인증관리 "승인" 시에만 반영(여기선 후보값).
     const person = personnel.find((x) => String(x.employee_no ?? "") === String(next.employee_no ?? ""));
     if (person) {
-      const pm = resolvePmLevel(person, undefined, rules);
-      if (pm.value) next.pm_level = pm.value;
+      if (acquired) { const pm = resolvePmLevel(person, undefined, rules); if (pm.value) next.pm_level = pm.value; }
       const dm = resolveDmLevel(person, undefined, rules);
       if (dm.value && dm.value !== "확인 필요") next.dm_process = dm.value;
     }
