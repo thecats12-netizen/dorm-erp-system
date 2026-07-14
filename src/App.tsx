@@ -9190,11 +9190,34 @@ export default function App() {
     const restrictOwn = role === "maintenance_reporter" || role === "dorm_manager";
 
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    // 실제퇴실 판정(공통): occupant 자체 + 연결된 신입사원 원본의 실제퇴실일 + 거주상태(퇴실/과거거주)를 모두 확인.
+    //   신입사원 화면에서 실제퇴실일을 입력했으나 occupant 에 아직 반영되지 않은 경우까지 제외(요청 반영).
+    const normPhone = (s?: string) => (s || "").replace(/\D/g, "");
+    const activeHires = newHires.filter((h) => !h.isDeleted && !h.isPermanentDeleted);
+    const hasCheckedOut = (o: Occupant): boolean => {
+      if (getActualMoveOutDate(o)) return true; // ① 활성 occupant 실제퇴실일
+      const hire =
+        (o.sourceNewHireId && activeHires.find((h) => h.id === o.sourceNewHireId)) ||
+        (o.phone && activeHires.find((h) => normPhone(h.phone) && normPhone(h.phone) === normPhone(o.phone))) ||
+        (o.employeeName && activeHires.find((h) => h.name && h.name === o.employeeName)) ||
+        null;
+      if (hire && getActualMoveOutDate(hire)) return true; // ② 연결된 신입사원 원본 실제퇴실일
+      const st = occupantDisplayStatus(o);
+      return st === "퇴실" || st === "과거거주"; // ③ 거주상태가 퇴실
+    };
+    const seenPersons = new Set<string>();
     const enriched = occupants
       .filter((o) => !o.isDeleted && !o.isPermanentDeleted)
       .filter((o) => !restrictOwn || o.dormId === ownDormId)
-      // 실제퇴실일(actual_checkout_date)이 입력된 직원은 계약종료일과 무관하게 이미 퇴실 처리됨 → 3개 퇴실 예정 목록에서 제외(IS NULL 만 표시).
-      .filter((o) => !getActualMoveOutDate(o))
+      // 실제퇴실 처리된 사람은 계약종료일이 남아 있어도 3개 퇴실 예정 목록에서 제외.
+      .filter((o) => !hasCheckedOut(o))
+      // 동일 인물/입주 건 중복 제거(신입사원 연결 우선 → 없으면 occupant id).
+      .filter((o) => {
+        const key = o.sourceNewHireId || o.id;
+        if (seenPersons.has(key)) return false;
+        seenPersons.add(key);
+        return true;
+      })
       .map((o) => {
         // 기준일: 예상퇴실일이 있으면 예상퇴실일 우선, 없으면 퇴실일(거주기한/실제퇴실일).
         // (예상퇴실일이 미래면 실제퇴실일이 과거여도 예상퇴실일 기준으로 판단 — 요청 예시 반영)
@@ -9230,7 +9253,7 @@ export default function App() {
 
     return { today, within30, thisMonth };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [occupants, operationalDorms, dorms, currentUser?.role, currentUser?.dormId]);
+  }, [occupants, newHires, operationalDorms, dorms, currentUser?.role, currentUser?.dormId]);
 
   // ============================================
   // 오버레이(모달/미리보기/메뉴) 닫기 우선순위 + 키보드 단축키 + 모바일 뒤로가기
@@ -14525,13 +14548,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       // ③ 이름 마지막 기준
       activeHires.find((h) => h.name && h.name === o.employeeName) ||
       null;
+    // [대시보드] 메뉴 이동 없이 현재 대시보드 화면 위에 신입사원 등록/수정 모달만 연다(사이드바/탭/URL 유지).
     if (hire) {
-      setActiveTab("newHires");
       openNewHireEdit(hire);
       return;
     }
-    // 매칭되는 신입사원 레코드가 없어도 항상 신입사원 등록/수정 화면으로 연다(입주자 정보로 프리필).
-    setActiveTab("newHires");
+    // 매칭되는 신입사원 레코드가 없어도 신입사원 등록/수정 모달로 연다(입주자 정보로 프리필). 메뉴 이동 없음.
     setNewHireForm(buildNewHireFormFromOccupant(o));
     setEditingNewHireId(null);
     setShowNewHireForm(true);
