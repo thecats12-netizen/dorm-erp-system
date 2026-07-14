@@ -26,17 +26,49 @@ const nowIso = () => new Date().toISOString();
 
 export const examSupabaseReady = () => isSupabaseAvailable();
 
-// 목록 조회(미삭제, 최신순). 실패 시 예외(상위에서 안내).
+// 테이블별 정렬 컬럼(실제 운영 DB 컬럼 기준).
+//  - sort_order 컬럼은 기준정보(카테고리/그룹/파트/공정/설비)에만 존재한다.
+//  - 나머지 테이블(levels/rules/personnel/applications/pm·dm_certifications/annual·monthly)에는 sort_order 가 없어
+//    `.order("sort_order")` 를 붙이면 400(column "sort_order" does not exist)이 발생한다 → 존재하는 컬럼만 정렬에 사용.
+//  - tenant_id(text), deleted_at 은 모든 시험 테이블에 존재하므로 공통 적용한다.
+const EXAM_TABLE_ORDER: Record<ExamMasterTable, string[]> = {
+  exam_categories: ["sort_order", "created_at"],
+  exam_groups: ["sort_order", "created_at"],
+  exam_parts: ["sort_order", "created_at"],
+  exam_processes: ["sort_order", "created_at"],
+  exam_equipment: ["sort_order", "created_at"],
+  exam_levels: ["created_at"],
+  exam_rules: ["created_at"],
+  exam_personnel: ["employee_no", "created_at"],
+  exam_applications: ["created_at"],
+  pm_certifications: ["created_at"],
+  dm_certifications: ["created_at"],
+  exam_annual_targets: ["created_at"],
+  exam_monthly_results: ["created_at"],
+};
+
+// 목록 조회(미삭제). 실패 시 예외(상위에서 안내). 존재하지 않는 컬럼으로 정렬/필터하지 않는다.
 export async function listExamRows(table: ExamMasterTable, tenantId: string): Promise<ExamRow[]> {
   if (!isSupabaseAvailable() || !supabase) return [];
-  const { data, error } = await supabase
+  const orderCols = EXAM_TABLE_ORDER[table] || ["created_at"];
+  let q = supabase
     .from(table)
     .select("*")
-    .eq("tenant_id", tenantId)
-    .is("deleted_at", null)
-    .order("sort_order", { ascending: true, nullsFirst: true })
-    .order("created_at", { ascending: true });
-  if (error) throw new Error(translateSupabaseError(error.message || String(error)));
+    .eq("tenant_id", tenantId)   // tenant_id: text (기존 데이터 기본값 'default') — 앱의 실제 tenantId 재사용
+    .is("deleted_at", null);     // deleted_at 은 모든 시험 테이블에 존재
+  for (const col of orderCols) q = q.order(col, { ascending: true, nullsFirst: true });
+  const { data, error } = await q;
+  if (error) {
+    // [진단용] 실제 Supabase 응답(code/message/details/hint)을 개발 콘솔에 남긴다. 사용자 UI 는 상위에서 안내.
+    console.error("[examMasterService] listExamRows 실패:", {
+      table, tenantId, orderColumns: orderCols,
+      code: (error as { code?: unknown })?.code ?? "(unknown)",
+      message: error.message,
+      details: (error as { details?: unknown })?.details ?? "(none)",
+      hint: (error as { hint?: unknown })?.hint ?? "(none)",
+    });
+    throw new Error(translateSupabaseError(error.message || String(error)));
+  }
   return (data as ExamRow[]) || [];
 }
 
