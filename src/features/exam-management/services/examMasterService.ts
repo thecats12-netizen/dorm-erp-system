@@ -96,34 +96,53 @@ export async function upsertExamRow(table: ExamMasterTable, row: ExamRow, tenant
     updated_at: nowIso(),
     ...(isNew ? { created_by: userId, created_at: nowIso() } : {}),
   };
+  // 저장 직전 세션 확인 — 세션이 없으면 어차피 403 이므로 요청을 보내지 않고 즉시 안내(불필요한 403 제거).
+  const { data: sess } = await supabase.auth.getSession();
+  if (!sess?.session?.access_token) {
+    console.error("[examMasterService] upsertExamRow 중단: 유효한 세션 없음", { table, action: isNew ? "insert" : "update", tenantId, userId });
+    throw new Error("로그인 세션이 만료되었습니다.\n다시 로그인한 후 저장해주세요.");
+  }
+
   const { data, error } = await supabase.from(table).upsert(payload, { onConflict: "id" }).select().single();
   if (error) {
-    // [진단] 실제 Supabase 응답을 개발 콘솔에 그대로 남긴다(토큰/키는 출력하지 않음). 403 은 재시도하지 않고 즉시 실패.
+    // [진단] 실제 Supabase 응답을 개발 콘솔에 그대로 남긴다. access_token/anon key 등 민감정보는 출력하지 않는다.
+    // 권한/인증(401·403) 오류는 자동 재시도하지 않고 즉시 실패시킨다.
     const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown };
     console.error("[examMasterService] upsertExamRow 실패:", {
-      table, action: isNew ? "insert(upsert)" : "update(upsert)",
+      table, action: isNew ? "insert(upsert)" : "update(upsert)", method: "POST",
+      request: `POST /rest/v1/${table}?on_conflict=id&select=*`,
       code: e?.code ?? "(unknown)", status: e?.status ?? "(unknown)",
       message: e?.message, details: e?.details ?? "(none)", hint: e?.hint ?? "(none)",
-      tenantId, userId, rowId: id,
+      userId, tenantId, rowId: id,
+      payloadKeys: Object.keys(payload),        // 값이 아닌 key 목록만 출력
+      hasSession: true, sessionUserId: sess.session.user?.id ?? "(none)",
     });
     throw new Error(translateExamWriteError(error));
   }
   return data as ExamRow;
 }
 
-// 저장 오류 → 사용자 메시지. 권한(RLS/권한부족)과 일반 실패를 구분한다(브라우저 alert 미사용 — 화면의 오류 배너로 표시).
+// 저장 오류 → 사용자 메시지. 세션만료 / 권한부족 / tenant 불일치 / 일반 실패를 구분한다.
+// 브라우저 alert 미사용 — 호출부의 기존 오류 배너·Toast 로 표시된다.
 export function translateExamWriteError(error: unknown): string {
   const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown };
   const code = String(e?.code ?? "");
   const status = Number(e?.status ?? 0);
   const msg = `${e?.message ?? ""} ${e?.details ?? ""} ${e?.hint ?? ""}`.toLowerCase();
-  const isPermission =
-    status === 401 || status === 403 || code === "42501" || code === "PGRST301" ||
-    /row-level security|permission denied|insufficient privilege|not authorized|jwt/.test(msg);
-  if (isPermission) {
+
+  // 세션 만료/토큰 무효(PGRST301 = JWT 검증 실패)
+  if (status === 401 || code === "PGRST301" || /jwt expired|invalid jwt|token is expired/.test(msg)) {
+    return "로그인 세션이 만료되었습니다.\n다시 로그인한 후 저장해주세요.";
+  }
+  // tenant 불일치(정책의 tenant 조건 위반이 명시된 경우)
+  if (/tenant/.test(msg)) {
+    return "현재 회사 정보와 저장 대상 회사 정보가 일치하지 않습니다.";
+  }
+  // 권한 부족(RLS 위반 42501 / GRANT 누락 / 403)
+  if (status === 403 || code === "42501" || /row-level security|permission denied|insufficient privilege|not authorized/.test(msg)) {
     return "인증 기준정보를 저장할 권한이 없습니다.\n로그인 상태와 관리자 권한을 확인해주세요.";
   }
-  return `인증 기준정보를 저장하지 못했습니다.\n잠시 후 다시 시도해주세요.\n(${translateSupabaseError(e?.message || String(error))})`;
+  return `시험관리 데이터를 저장하지 못했습니다.\n잠시 후 다시 시도해주세요.\n(${translateSupabaseError(e?.message || String(error))})`;
 }
 
 // 소프트 삭제(원본 보존): deleted_at 세팅 + is_active=false.

@@ -126,6 +126,7 @@ export default function ExamMasterGrid({
 
   const saveRow = async () => {
     if (!editRow) return;
+    if (saving) return; // 재진입 차단: disabled={saving} 는 리렌더 후에만 적용되어 빠른 연속 클릭이 2회 발송될 수 있음.
     for (const c of config.columns) {
       if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
     }
