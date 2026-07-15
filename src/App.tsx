@@ -2917,6 +2917,8 @@ export default function App() {
   const [pendingManagerLink, setPendingManagerLink] = useState<{ newHireId: string; dormId: string } | null>(null);
   const [showMilitaryPersonnelForm, setShowMilitaryPersonnelForm] = useState(false);
   const [showMilitaryTrainingForm, setShowMilitaryTrainingForm] = useState(false);
+  // 훈련기록 행 클릭으로 모달을 연 경우, 닫힌 뒤 해당 행으로 포커스 복귀(키보드 접근성).
+  const lastTrainingRowRef = useRef<HTMLTableRowElement | null>(null);
   const [showMilitaryNoticeForm, setShowMilitaryNoticeForm] = useState(false);
   const [showMilitaryReportForm, setShowMilitaryReportForm] = useState(false);
   const [expandedMilitaryPersonnelIds, setExpandedMilitaryPersonnelIds] = useState<string[]>([]);
@@ -8935,6 +8937,16 @@ export default function App() {
     });
   }, [militaryPersonnel, militaryTrainingRecords, militaryNotices]);
 
+  // 훈련기록 모달이 닫히면 직전에 클릭/포커스한 행으로 포커스 복귀(모달을 행에서 연 경우에만).
+  useEffect(() => {
+    if (!showMilitaryTrainingForm && lastTrainingRowRef.current) {
+      const row = lastTrainingRowRef.current;
+      lastTrainingRowRef.current = null;
+      // 렌더 정리 후 포커스(모달 언마운트 타이밍 보정)
+      requestAnimationFrame(() => { try { row.focus(); } catch { /* 행이 사라진 경우 무시 */ } });
+    }
+  }, [showMilitaryTrainingForm]);
+
   // 군인 대시보드 통계(연차별 예비군/민방위 · 부서별 · 상태별) — 행 클릭 상세보기를 위해 인원 목록까지 함께 보관.
   //  [미지정 정상집계] 부서(unit)/상태(status)는 null·undefined·공백(" ")을 모두 trim 후 빈값이면 "미지정"으로 통일한다.
   //   (기존에는 `p.unit || "미지정"` 이라 공백 문자열이 truthy → 이름 없는 별도 그룹으로 새어 미지정과 분리 집계됨)
@@ -12143,6 +12155,7 @@ export default function App() {
   };
 
   const openMilitaryTrainingEdit = (record: TrainingRecord) => {
+    // 목록의 기존 데이터를 그대로 사용(선택 1건 재조회/전체 재조회 없음). 저장값을 자동계산으로 덮어쓰지 않는다.
     setMilitaryTrainingForm(record);
     setEditingMilitaryTrainingId(record.id);
     setShowMilitaryTrainingForm(true);
@@ -17498,7 +17511,24 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </thead>
                 <tbody>
                   {militaryTrainingPg.pagedItems.map((record) => (
-                    <tr key={record.id} className={`${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}>
+                    <tr
+                      key={record.id}
+                      // 행(빈 영역) 클릭/Enter/Space → 해당 훈련기록 수정 모달(기존 모달 재사용, 목록 데이터 그대로 사용 — 재조회 없음).
+                      {...(canEditData(currentUser) ? {
+                        tabIndex: 0,
+                        role: "button" as const,
+                        "aria-label": `${militaryPersonnel.find((p) => p.id === record.personnelId)?.name || "훈련기록"} 수정`,
+                        onClick: (e: React.MouseEvent<HTMLTableRowElement>) => { lastTrainingRowRef.current = e.currentTarget; openMilitaryTrainingEdit(record); },
+                        onKeyDown: (e: React.KeyboardEvent<HTMLTableRowElement>) => {
+                          if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+                            e.preventDefault();
+                            lastTrainingRowRef.current = e.currentTarget;
+                            openMilitaryTrainingEdit(record);
+                          }
+                        },
+                      } : {})}
+                      className={`${canEditData(currentUser) ? "cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 " : ""}${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-950" : "border-b border-slate-100 hover:bg-slate-50"}`}
+                    >
                         <td className="px-3 py-3 erp-col-name" title={militaryPersonnel.find((person) => person.id === record.personnelId)?.name || ""}>{militaryPersonnel.find((person) => person.id === record.personnelId)?.name || "-"}</td>
                       <td className="px-3 py-3" title={record.subject}>{record.subject}</td>
                       <td className="px-3 py-3 erp-col-date">{formatDateOnly(record.trainingDate) || "-"}</td>
@@ -17512,14 +17542,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 space-x-2 erp-col-action">
                           <button
                             type="button"
-                            onClick={() => openMilitaryTrainingEdit(record)}
+                            onClick={(e) => { e.stopPropagation(); openMilitaryTrainingEdit(record); }}
                             className="rounded-2xl border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-100"
                           >
                             수정
                           </button>
                           <button
                             type="button"
-                            onClick={async () => {
+                            onClick={async (e) => {
+                              e.stopPropagation(); // 행 클릭(수정 모달) 중복 실행 방지 — 삭제 확인만 실행
                               if (!(await appConfirm("삭제 확인", "해당 훈련 기록을 삭제하시겠습니까?", { confirmText: "삭제", tone: "danger" }))) return;
                               const existing = militaryTrainingRecords.find((item) => item.id === record.id);
                               if (!existing) return;
