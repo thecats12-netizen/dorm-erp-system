@@ -97,8 +97,33 @@ export async function upsertExamRow(table: ExamMasterTable, row: ExamRow, tenant
     ...(isNew ? { created_by: userId, created_at: nowIso() } : {}),
   };
   const { data, error } = await supabase.from(table).upsert(payload, { onConflict: "id" }).select().single();
-  if (error) throw new Error(translateSupabaseError(error.message || String(error)));
+  if (error) {
+    // [진단] 실제 Supabase 응답을 개발 콘솔에 그대로 남긴다(토큰/키는 출력하지 않음). 403 은 재시도하지 않고 즉시 실패.
+    const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown };
+    console.error("[examMasterService] upsertExamRow 실패:", {
+      table, action: isNew ? "insert(upsert)" : "update(upsert)",
+      code: e?.code ?? "(unknown)", status: e?.status ?? "(unknown)",
+      message: e?.message, details: e?.details ?? "(none)", hint: e?.hint ?? "(none)",
+      tenantId, userId, rowId: id,
+    });
+    throw new Error(translateExamWriteError(error));
+  }
   return data as ExamRow;
+}
+
+// 저장 오류 → 사용자 메시지. 권한(RLS/권한부족)과 일반 실패를 구분한다(브라우저 alert 미사용 — 화면의 오류 배너로 표시).
+export function translateExamWriteError(error: unknown): string {
+  const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown };
+  const code = String(e?.code ?? "");
+  const status = Number(e?.status ?? 0);
+  const msg = `${e?.message ?? ""} ${e?.details ?? ""} ${e?.hint ?? ""}`.toLowerCase();
+  const isPermission =
+    status === 401 || status === 403 || code === "42501" || code === "PGRST301" ||
+    /row-level security|permission denied|insufficient privilege|not authorized|jwt/.test(msg);
+  if (isPermission) {
+    return "인증 기준정보를 저장할 권한이 없습니다.\n로그인 상태와 관리자 권한을 확인해주세요.";
+  }
+  return `인증 기준정보를 저장하지 못했습니다.\n잠시 후 다시 시도해주세요.\n(${translateSupabaseError(e?.message || String(error))})`;
 }
 
 // 소프트 삭제(원본 보존): deleted_at 세팅 + is_active=false.
