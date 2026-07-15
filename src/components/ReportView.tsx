@@ -17,6 +17,7 @@ export type ReportConfig = {
   extraKpis?: { label: string; value: string; sub?: string }[]; // 보고서 특화 KPI(공실률/정원초과 등). sub = 보조 문구.
   centerAlign?: boolean;                         // 머리글/데이터 가운데 정렬(해당 보고서만 opt-in).
   totalRow?: Record<string, string | number>;    // 총계 행(항상 마지막 고정 · 필터/정렬 무관 · 내보내기 포함).
+  numericKeys?: string[];                        // 숫자 정렬을 강제할 컬럼 key(예: "80%" 같은 단위 포함 값). 지정한 보고서만 opt-in.
 };
 
 const PIE_COLORS = ["#2563eb", "#16a34a", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#db2777", "#64748b"];
@@ -37,7 +38,7 @@ function GridSelect({ value, onChange, options, label, darkMode }: { value: stri
 }
 
 export default function ReportView({ config, darkMode }: { config: ReportConfig; darkMode: boolean }) {
-  const { title, subtitle, rows, columns, dateField, filterKeys = [], chart, extraKpis = [], centerAlign = false, totalRow } = config;
+  const { title, subtitle, rows, columns, dateField, filterKeys = [], chart, extraKpis = [], centerAlign = false, totalRow, numericKeys = [] } = config;
   const alignCls = centerAlign ? "text-center" : "";
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<Record<string, string>>({});
@@ -66,15 +67,18 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
     });
     if (sortKey) {
       const dir = sortDir === "asc" ? 1 : -1;
+      // numericKeys 로 지정된 컬럼은 단위(%, 쉼표 등)를 떼고 숫자로 비교한다. 지정되지 않은 컬럼은 기존 동작 그대로.
+      const forceNum = numericKeys.includes(sortKey);
+      const num = (v: unknown) => (forceNum ? Number(String(v ?? "").replace(/[^0-9.-]/g, "")) : Number(v));
       list.sort((a, b) => {
         const av = a[sortKey], bv = b[sortKey];
-        const an = Number(av), bn = Number(bv);
+        const an = num(av), bn = num(bv);
         if (!Number.isNaN(an) && !Number.isNaN(bn) && av !== "" && bv !== "") return (an - bn) * dir;
         return String(av ?? "").localeCompare(String(bv ?? ""), "ko") * dir;
       });
     }
     return list;
-  }, [rows, columns, filterKeys, filters, search, dateField, fromDate, toDate, sortKey, sortDir]);
+  }, [rows, columns, filterKeys, filters, search, dateField, fromDate, toDate, sortKey, sortDir, numericKeys]);
 
   // ── KPI: 총건수 + (dateField 있으면) 오늘/이번주/이번달/지난달/전월대비 ──
   const kpis = useMemo(() => {

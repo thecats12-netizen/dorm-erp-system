@@ -14147,7 +14147,7 @@ const PDF_REPORT_LABELS: Record<PdfReportType, string> = {
   overall: "전체 운영 현황 보고서",
   occupancy: "기숙사별 입주 현황 보고서",
   expiring: "계약 만료 예정 보고서",
-  vacancy: "공실/입주율 보고서",
+  vacancy: "잔여/입주율 보고서",
   cleaning: "청소 점검 보고서",
   defect: "하자 접수 현황 보고서",
   inventory: "비품 현황 보고서",
@@ -14241,7 +14241,7 @@ const buildPdfReport = (type: PdfReportType): {
         { label: "총 정원", value: `${cap}명` },
         { label: "현 거주자", value: `${cur}명` },
       ],
-      headers: ["지역", "성별", "정원", "현거주자", "공실", "입주율"],
+      headers: ["지역", "성별", "정원", "현거주자", "잔여", "입주율"],
       rows, notes: "",
     };
   }
@@ -15517,11 +15517,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "계약시작", label: "계약시작" }, { key: "계약종료", label: "계약종료" }, { key: "D-day", label: "D-day" }, { key: "상태", label: "상태" }],
       filterKeys: ["지역", "상태"], dateField: "_end", chart: { type: "bar", groupKey: "만료월", label: "월별 만료 건수" },
     };
-    // ④ 공실/입주율
+    // ④ 잔여/입주율 — 표시 라벨만 "잔여". 내부 데이터 key(공실)와 상태 enum(공실/사용중/만실)은 기존 값 유지.
+    //   잔여 = 정원 - 현재인원(기존 정책과 동일하게 0 하한 · 초과 시 0). 입주율 = 현재인원/정원*100, 정원 0 → 0%.
     const vacancy: ReportConfig = {
-      title: "공실/입주율 보고서", subtitle: `${reportYear}-${reportMonth}`,
+      title: "잔여/입주율 보고서", subtitle: `${reportYear}-${reportMonth}`,
       rows: operationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 기숙사: dormLabel(d), 지역: d.site, 성별: d.gender, 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), 입주율: `${k ? Math.round((c / k) * 100) : 0}%`, 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
-      columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "현재인원", label: "현재인원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "입주율", label: "입주율" }, { key: "상태", label: "상태" }],
+      columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "정원", label: "정원" }, { key: "현재인원", label: "현재인원" }, { key: "공실", label: "잔여" }, { key: "입주율", label: "입주율" }, { key: "상태", label: "상태" }],
+      // 입주율은 "80%" 문자열이라 기본 비교가 문자열 정렬로 빠진다 → 이 보고서에서만 숫자 정렬로 지정(다른 보고서 영향 없음).
+      numericKeys: ["입주율"],
       filterKeys: ["지역", "성별", "상태"], chart: { type: "pie", groupKey: "상태", label: "공실/사용 분포" },
       extraKpis: [{ label: "전체 입주율", value: `${(() => { const tot = operationalDorms.reduce((a, d) => a + getDormCapacity(d), 0); const occ = operationalDorms.reduce((a, d) => a + cur(d.id), 0); return tot ? Math.round((occ / tot) * 100) : 0; })()}%` }],
     };
@@ -15580,7 +15583,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       "전체 운영 현황": overall,
       "기숙사별 입주 현황": dormOcc,
       "계약 만료 예정": expiry,
-      "공실/입주율": vacancy,
+      "잔여/입주율": vacancy,
       "청소 점검": cleaning,
       "하자 접수 현황": defect,
       "비품 현황": inv,
