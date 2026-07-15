@@ -923,8 +923,20 @@ function isEarlyMoveOut(row: any): boolean {
   return actual < expected;
 }
 
+// 공지/통보서 내용에서 "내부 식별자"를 화면에 노출하지 않도록 제거(저장값에는 그대로 유지).
+//  - [훈련기록:<uuid>] 연결 마커(중복 방지/추적용) 및 내부 키(id/tenant_id/organization_id) 라인 방어.
+const NOTICE_RECORD_MARKER_RE = /\[훈련기록:[^\]]*\]/g;
+function stripNoticeInternalIds(text: string): string {
+  return text
+    .replace(NOTICE_RECORD_MARKER_RE, "")                                   // 훈련기록 UUID 마커 제거
+    .replace(/^\s*(id|tenant_id|organization_id|personnel_id|record_id)\s*[:=].*$/gim, "") // 내부 키 라인 방어
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 // [1] 공지 "내용" 표시 정규화: 저장값이 JSON 문자열/객체/HTML/escape 여도 실제 내용만 자연스럽게 표시.
 // (content/body/text/message 중 실제 값만 추출, 태그 제거, \n 복원, undefined/null 노출 방지)
+// + 내부 ID/UUID 마커는 화면에 절대 노출하지 않는다(저장값 유지).
 function getNoticeDisplayContent(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") {
@@ -935,17 +947,17 @@ function getNoticeDisplayContent(value: unknown): string {
         const parsed = JSON.parse(s);
         if (parsed && typeof parsed === "object") {
           const o = parsed as Record<string, any>;
-          return String(o.content || o.body || o.text || o.message || "");
+          return stripNoticeInternalIds(String(o.content || o.body || o.text || o.message || ""));
         }
       } catch { /* JSON 아님 — 평문 처리 */ }
     }
-    return s.replace(/<[^>]*>/g, "").replace(/\\n/g, "\n").trim(); // HTML 태그 제거 + \n 복원
+    return stripNoticeInternalIds(s.replace(/<[^>]*>/g, "").replace(/\\n/g, "\n")); // HTML 태그 제거 + \n 복원 + 내부 ID 제거
   }
   if (typeof value === "object") {
     const o = value as Record<string, any>;
-    return String(o.content || o.body || o.text || o.message || "");
+    return stripNoticeInternalIds(String(o.content || o.body || o.text || o.message || ""));
   }
-  return String(value);
+  return stripNoticeInternalIds(String(value));
 }
 
 // 비품 증빙파일(proof_file) 은 {name,data} JSON 또는 과거 문자열(파일명/URL/dataURL). 표시용 "파일명"만 추출.
@@ -2935,7 +2947,7 @@ export default function App() {
     email: "",
     bankName: "",
     accountNumber: "",
-    status: "",
+    status: "예정", // 신규 훈련 등록 기본 상태(훈련 종료 후 관리자가 진행중/완료/불참 등으로 변경)
     notes: "",
     createdAt: "",
     updatedAt: "",
@@ -8923,6 +8935,60 @@ export default function App() {
     });
   }, [militaryPersonnel, militaryTrainingRecords, militaryNotices]);
 
+  // 군인 대시보드 통계(연차별 예비군/민방위 · 부서별 · 상태별) — 행 클릭 상세보기를 위해 인원 목록까지 함께 보관.
+  //  [미지정 정상집계] 부서(unit)/상태(status)는 null·undefined·공백(" ")을 모두 trim 후 빈값이면 "미지정"으로 통일한다.
+  //   (기존에는 `p.unit || "미지정"` 이라 공백 문자열이 truthy → 이름 없는 별도 그룹으로 새어 미지정과 분리 집계됨)
+  const militaryStatGroups = useMemo(() => {
+    type PersonRow = (typeof militaryPersonnelSummary)[number];
+    const norm = (v: unknown) => String(v ?? "").trim();
+    const build = (list: PersonRow[], keyOf: (p: PersonRow) => string, sort: "year" | "count"): Array<[string, PersonRow[]]> => {
+      const m = new Map<string, PersonRow[]>();
+      list.forEach((p) => { const k = keyOf(p); const arr = m.get(k) || []; arr.push(p); m.set(k, arr); });
+      const entries = Array.from(m.entries());
+      entries.sort((a, b) => (sort === "year" ? (parseInt(a[0], 10) || 999) - (parseInt(b[0], 10) || 999) : b[1].length - a[1].length));
+      return entries;
+    };
+    const yearKey = (p: PersonRow) => (p.trainingYear ? `${p.trainingYear}년차` : "미산정");
+    return {
+      "연차별 현황 (예비군)": build(militaryPersonnelSummary.filter((p) => p.currentCategory === "예비군"), yearKey, "year"),
+      "연차별 현황 (민방위)": build(militaryPersonnelSummary.filter((p) => p.currentCategory === "민방위"), yearKey, "year"),
+      "부서별 현황": build(militaryPersonnelSummary, (p) => norm(p.unit) || "미지정", "count"),
+      "상태별 현황": build(militaryPersonnelSummary, (p) => norm(p.status) || "미지정", "count"),
+    } as Record<string, Array<[string, PersonRow[]]>>;
+  }, [militaryPersonnelSummary]);
+
+  const militaryStatSections = useMemo(
+    () => Object.entries(militaryStatGroups).map(([title, groups]) => ({ title, rows: groups.map(([k, arr]) => [k, arr.length] as [string, number]) })),
+    [militaryStatGroups]
+  );
+
+  // 통계 카드 행 클릭 → 상세보기(모달). 검색/부서·상태 필터/Excel 지원.
+  const [militaryStatDetail, setMilitaryStatDetail] = useState<{ title: string; key: string } | null>(null);
+  const [militaryStatDetailSearch, setMilitaryStatDetailSearch] = useState("");
+  const openMilitaryStatDetail = (title: string, key: string) => { setMilitaryStatDetailSearch(""); setMilitaryStatDetail({ title, key }); };
+
+  // 대상자의 교육일(최근 지난 훈련) / 다음 교육일(가장 가까운 예정) — 훈련기록 기준.
+  const militaryTrainingDatesOf = (personId: string) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const dates = militaryTrainingRecords
+      .filter((r) => r.personnelId === personId && r.trainingDate)
+      .map((r) => String(r.trainingDate).slice(0, 10))
+      .filter(Boolean)
+      .sort();
+    const past = dates.filter((d) => d <= today);
+    const future = dates.filter((d) => d > today);
+    return { last: past.length ? past[past.length - 1] : "", next: future.length ? future[0] : "" };
+  };
+
+  const militaryStatDetailRows = useMemo(() => {
+    if (!militaryStatDetail) return [];
+    const groups = militaryStatGroups[militaryStatDetail.title] || [];
+    const list = (groups.find(([k]) => k === militaryStatDetail.key)?.[1]) || [];
+    const q = militaryStatDetailSearch.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((p) => `${p.serviceNumber ?? ""} ${p.name ?? ""} ${p.unit ?? ""} ${p.currentCategory ?? ""} ${p.status ?? ""} ${p.notes ?? ""}`.toLowerCase().includes(q));
+  }, [militaryStatDetail, militaryStatGroups, militaryStatDetailSearch]);
+
   const filteredMilitaryPersonnel = useMemo(
     () => militaryPersonnelSummary.filter((person) => {
       if (militaryPersonnelStatusFilter !== "전체" && person.status !== militaryPersonnelStatusFilter) return false;
@@ -9275,6 +9341,7 @@ export default function App() {
     // 상세보기(팝업) 모달 — 폼보다 위(또는 단독)로 열리므로 우선 닫는다.
     if (bulkCapacityOpen) { if (!bulkCapacitySaving) setBulkCapacityOpen(false); return true; }
     if (simDetailModal) { setSimDetailModal(null); return true; }
+    if (militaryStatDetail) { setMilitaryStatDetail(null); return true; } // 군인 대시보드 통계 상세보기
     if (settlementDetailDorm) { setSettlementDetailDorm(null); return true; }
     if (selectedDormDetailId) { setSelectedDormDetailId(""); return true; }
     if (preInspectionDetailId) { setPreInspectionDetailId(null); return true; }
@@ -9301,7 +9368,7 @@ export default function App() {
     return false;
   };
   const hasOpenOverlay = !!(
-    imageLightbox || excelPreview || bulkCapacityOpen || simDetailModal || settlementDetailDorm || selectedDormDetailId || preInspectionDetailId ||
+    imageLightbox || excelPreview || bulkCapacityOpen || simDetailModal || militaryStatDetail || settlementDetailDorm || selectedDormDetailId || preInspectionDetailId ||
     showDefectForm || showCleaningReportForm || showNewHireForm ||
     showOccupantForm || showDormForm || showDormContractForm || showInventoryForm || showLeaseForm ||
     showSaleForm || showUserForm || showMilitaryPersonnelForm || showMilitaryTrainingForm ||
@@ -12450,9 +12517,10 @@ export default function App() {
       return;
     }
     const person = militaryPersonnel.find((p) => p.id === militaryTrainingForm.personnelId);
-    const requiredHours = person ? computeRequiredTraining(person).hours : 0;
     const enteredHours = Number(militaryTrainingForm.trainingHours) || 0;
-    const computedStatus = requiredHours > 0 ? (enteredHours >= requiredHours ? "완료" : "미이수") : militaryTrainingForm.status || "완료";
+    // [상태] 훈련 상태는 관리자가 직접 관리한다(훈련 종료 후 진행중/완료/불참 등으로 변경).
+    //  신규 등록 기본값은 "예정" — 이수시간으로 완료/미이수를 자동 확정하지 않는다(기존 저장 데이터는 그대로 유지).
+    const computedStatus = String(militaryTrainingForm.status ?? "").trim() || "예정";
     const existing = editingMilitaryTrainingId ? militaryTrainingRecords.find((item) => item.id === editingMilitaryTrainingId) : null;
     const payload: TrainingRecord = {
       ...militaryTrainingForm,
@@ -12484,7 +12552,7 @@ export default function App() {
       trainingHours: 0,
       location: "",
       attendees: 0,
-      status: "",
+      status: "예정",
       notes: "",
       createdAt: "",
       updatedAt: "",
@@ -12504,8 +12572,12 @@ export default function App() {
       return;
     }
     const existing = editingMilitaryNoticeId ? militaryNotices.find((item) => item.id === editingMilitaryNoticeId) : null;
+    // 화면에는 내부 마커([훈련기록:id])를 감추므로, 저장 시 원본 마커를 다시 붙여 연결/중복방지 정보를 유지한다.
+    const keptMarker = String(existing?.content ?? "").match(NOTICE_RECORD_MARKER_RE)?.[0] || "";
+    const cleanContent = stripNoticeInternalIds(String(militaryNoticeForm.content ?? ""));
     const payload: MilitaryNotice = {
       ...militaryNoticeForm,
+      content: keptMarker ? `${cleanContent}\n${keptMarker}` : cleanContent,
       id: editingMilitaryNoticeId || crypto.randomUUID(),
       createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -17006,45 +17078,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               ))}
             </div>
 
-            {/* 연차별 / 부서별 / 상태별 현황 */}
-            <div className="grid gap-6 lg:grid-cols-3">
-              {([
-                {
-                  title: "연차별 현황 (예비군)",
-                  rows: (() => {
-                    const m = new Map<string, number>();
-                    militaryPersonnelSummary
-                      .filter((p) => p.currentCategory === "예비군")
-                      .forEach((p) => {
-                        const key = p.trainingYear ? `${p.trainingYear}년차` : "미산정";
-                        m.set(key, (m.get(key) || 0) + 1);
-                      });
-                    return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-                  })(),
-                },
-                {
-                  title: "부서별 현황",
-                  rows: (() => {
-                    const m = new Map<string, number>();
-                    militaryPersonnelSummary.forEach((p) => {
-                      const key = p.unit || "미지정";
-                      m.set(key, (m.get(key) || 0) + 1);
-                    });
-                    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
-                  })(),
-                },
-                {
-                  title: "상태별 현황",
-                  rows: (() => {
-                    const m = new Map<string, number>();
-                    militaryPersonnelSummary.forEach((p) => {
-                      const key = p.status || "미지정";
-                      m.set(key, (m.get(key) || 0) + 1);
-                    });
-                    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
-                  })(),
-                },
-              ] as Array<{ title: string; rows: Array<[string, number]> }>).map((sec) => (
+            {/* 연차별(예비군/민방위) / 부서별 / 상태별 현황 — 행 클릭 시 상세보기 */}
+            <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-4">
+              {(militaryStatSections as Array<{ title: string; rows: Array<[string, number]> }>).map((sec) => (
                 <section key={sec.title} className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
                   <h3 className="mb-3 text-base font-semibold">{sec.title}</h3>
                   <div className="erp-table-container max-h-72 overflow-y-auto">
@@ -17054,9 +17090,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       </thead>
                       <tbody>
                         {sec.rows.map(([k, v]) => (
-                          <tr key={k} className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}`}>
+                          <tr
+                            key={k}
+                            onClick={() => openMilitaryStatDetail(sec.title, k)}
+                            title={`${k} — 클릭하여 상세보기`}
+                            className={`cursor-pointer ${theme.darkMode ? "border-b border-slate-700 hover:bg-slate-800/60" : "border-b border-slate-100 hover:bg-slate-50"}`}
+                          >
                             <td className="px-3 py-2" title={k}>{k}</td>
-                            <td className="px-3 py-2">{v}명</td>
+                            <td className="px-3 py-2"><span className="font-semibold text-blue-600 underline-offset-2 hover:underline">{v}명</span></td>
                           </tr>
                         ))}
                         {sec.rows.length === 0 && (
@@ -17068,6 +17109,89 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </section>
               ))}
             </div>
+
+            {/* 통계 카드 상세보기(모달) — 사번/이름/부서/지역/구분/연차/상태/교육일/다음교육일/비고 + 검색 + Excel */}
+            {militaryStatDetail && (
+              <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={() => setMilitaryStatDetail(null)}>
+                <div role="dialog" aria-modal="true" className={`my-8 w-full max-w-5xl rounded-3xl p-5 shadow-xl ${theme.darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+                  <div className="mb-3 flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold">{militaryStatDetail.title} <span className="text-sm font-normal text-slate-500">· {militaryStatDetail.key}</span></h3>
+                      <p className="text-sm text-slate-500">총 {militaryStatDetailRows.length}명</p>
+                    </div>
+                    <button type="button" onClick={() => setMilitaryStatDetail(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+                  </div>
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <input
+                      value={militaryStatDetailSearch}
+                      onChange={(e) => setMilitaryStatDetailSearch(e.target.value)}
+                      placeholder="검색(사번/이름/부서/구분/상태/비고)"
+                      className={`min-w-[220px] rounded-lg border px-2.5 py-1.5 text-sm outline-none ${theme.darkMode ? "border-slate-600 bg-slate-950" : "border-slate-300 bg-white"}`}
+                    />
+                    <button
+                      type="button"
+                      className={`ml-auto rounded-xl border px-3 py-1.5 text-xs font-medium ${theme.darkMode ? "border-slate-600 hover:bg-slate-800" : "border-slate-300 hover:bg-slate-100"}`}
+                      onClick={() => {
+                        const data = militaryStatDetailRows.map((p) => {
+                          const t = militaryTrainingDatesOf(p.id);
+                          return {
+                            사번: p.serviceNumber || "",
+                            이름: p.name || "",
+                            부서: String(p.unit ?? "").trim() || "미지정",
+                            지역: p.serviceBranch || "",
+                            "예비군/민방위": p.currentCategory || "",
+                            연차: p.trainingYear ? `${p.trainingYear}년차` : "",
+                            상태: String(p.status ?? "").trim() || "미지정",
+                            교육일: formatDateOnly(t.last) || "",
+                            다음교육일: formatDateOnly(t.next) || "",
+                            비고: p.notes || "",
+                          };
+                        });
+                        const ws = XLSX.utils.json_to_sheet(data.map(sanitizeExcelRow));
+                        const wb = XLSX.utils.book_new();
+                        XLSX.utils.book_append_sheet(wb, ws, "상세");
+                        XLSX.writeFile(wb, `군인현황_${militaryStatDetail.title}_${militaryStatDetail.key}.xlsx`);
+                      }}
+                    >
+                      Excel 다운로드
+                    </button>
+                  </div>
+                  <div className="erp-table-container max-h-[60vh] overflow-auto">
+                    <table className="erp-table erp-table--compact w-full min-w-[900px] text-left text-xs">
+                      <thead className={`sticky top-0 z-[1] ${theme.darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-700"}`}>
+                        <tr>
+                          {["사번", "이름", "부서", "지역", "예비군/민방위", "연차", "상태", "교육일", "다음교육일", "비고"].map((h) => (
+                            <th key={h} className="whitespace-nowrap px-3 py-2">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {militaryStatDetailRows.map((p) => {
+                          const t = militaryTrainingDatesOf(p.id);
+                          return (
+                            <tr key={p.id} className={`${theme.darkMode ? "border-b border-slate-700" : "border-b border-slate-100"}`}>
+                              <td className="whitespace-nowrap px-3 py-2">{p.serviceNumber || "-"}</td>
+                              <td className="whitespace-nowrap px-3 py-2">{p.name || "-"}</td>
+                              <td className="whitespace-nowrap px-3 py-2">{String(p.unit ?? "").trim() || "미지정"}</td>
+                              <td className="whitespace-nowrap px-3 py-2">{p.serviceBranch || "-"}</td>
+                              <td className="whitespace-nowrap px-3 py-2">{p.currentCategory || "-"}</td>
+                              <td className="whitespace-nowrap px-3 py-2">{p.trainingYear ? `${p.trainingYear}년차` : "-"}</td>
+                              <td className="whitespace-nowrap px-3 py-2">{String(p.status ?? "").trim() || "미지정"}</td>
+                              <td className="whitespace-nowrap px-3 py-2">{formatDateOnly(t.last) || "-"}</td>
+                              <td className="whitespace-nowrap px-3 py-2">{formatDateOnly(t.next) || "-"}</td>
+                              <td className="px-3 py-2 erp-col-memo" title={p.notes || ""}>{p.notes || "-"}</td>
+                            </tr>
+                          );
+                        })}
+                        {militaryStatDetailRows.length === 0 && (
+                          <tr><td colSpan={10} className="px-3 py-8 text-center text-slate-400">데이터가 없습니다.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -17310,7 +17434,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           trainingDate: "",
                           location: "",
                           attendees: 0,
-                          status: "",
+                          status: "예정",
                           notes: "",
                           createdAt: "",
                           updatedAt: "",
@@ -19191,7 +19315,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <dl className={`${theme.darkMode ? "grid gap-2 text-sm text-slate-300 sm:grid-cols-2" : "grid gap-2 text-sm text-slate-700 sm:grid-cols-2"}`}>
                         <div><dt className="font-medium">담당 관리자</dt><dd>{getDormManagerNameWithScore(selectedDetailDorm.id, "paren")}</dd></div>
                         <div><dt className="font-medium">현재인원</dt><dd>{occupancyCountByDorm.get(selectedDetailDorm.id) || 0} / {selectedDetailDorm.capacity}명{(occupancyCountByDorm.get(selectedDetailDorm.id) || 0) > selectedDetailDorm.capacity && <span className="ml-1 rounded bg-rose-100 px-1.5 py-0.5 text-xs font-medium text-rose-700">정원초과</span>}</dd></div>
-                        <div><dt className="font-medium">공실수</dt><dd>{Math.max(selectedDetailDorm.capacity - (occupancyCountByDorm.get(selectedDetailDorm.id) || 0), 0)}</dd></div>
+                        <div><dt className="font-medium">잔여수</dt><dd>{Math.max(selectedDetailDorm.capacity - (occupancyCountByDorm.get(selectedDetailDorm.id) || 0), 0)}</dd></div>
                         <div><dt className="font-medium">청소상태</dt><dd>{(() => { const cw = getDormCleaningWeekStatus(selectedDetailDorm); return `${cw.weekLabel} · ${cw.status}`; })()}</dd></div>
                         <div><dt className="font-medium">미처리 하자</dt><dd>{getOpenDefectCount(selectedDetailDorm.id)}</dd></div>
                         <div><dt className="font-medium">공동현관</dt><dd>{selectedDetailDorm.공동현관 || "-"}</dd></div>
