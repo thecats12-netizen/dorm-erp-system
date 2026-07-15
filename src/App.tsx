@@ -16908,6 +16908,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
+              refreshKey={examDataVersion}
             />
           ) : activeTab === "examPmCertifications" ? (
             <ExamPmCertificationsPage
@@ -16917,6 +16918,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
               onDataChanged={bumpExamData}
+              refreshKey={examDataVersion}
             />
           ) : activeTab === "examDmCertifications" ? (
             <ExamDmCertificationsPage
@@ -16925,6 +16927,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
+              refreshKey={examDataVersion}
+              onDataChanged={bumpExamData}
             />
           ) : activeTab === "examAnnualTargets" ? (
             <ExamAnnualTargetsPage

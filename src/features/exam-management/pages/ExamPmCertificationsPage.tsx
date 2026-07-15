@@ -73,10 +73,10 @@ const COLS: Array<{ key: string; label: string; date?: boolean }> = [
 ];
 
 export default function ExamPmCertificationsPage({
-  darkMode, canEdit, tenantId, userId, onToast, onDataChanged,
+  darkMode, canEdit, tenantId, userId, onToast, onDataChanged, refreshKey,
 }: {
   darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void;
-  onDataChanged?: () => void;
+  onDataChanged?: () => void; refreshKey?: number;
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [apps, setApps] = useState<ExamRow[]>([]);
@@ -190,7 +190,7 @@ export default function ExamPmCertificationsPage({
       setRows(finalCerts);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
-  }, [tenantId, canEdit, userId]);
+  }, [tenantId, canEdit, userId, refreshKey]);
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void reload(); }, [reload]);
 
@@ -313,7 +313,15 @@ export default function ExamPmCertificationsPage({
     try {
       const up = await upsertExamRow("pm_certifications", { ...r, is_active: false, notes: `${String(r.notes ?? "")} · 취소(${nowIso().slice(0, 10)})`.trim() }, tenantId, userId);
       await writeExamAudit(tenantId, userId, "pm_certifications", String(up.id), "update", r, up, "인증 취소");
-      onToast?.("인증을 취소 처리했습니다(이력 보존)."); setDetailRow(enrich(up)); await reload(); onDataChanged?.();
+      // 취소 시 원본 응시의 "인증취득 확정"을 해제 → 공통 집계(연간목표/월간실적)에서 제외되도록 단일 기준 유지.
+      if (r.source_application_id) {
+        const app = appById.get(String(r.source_application_id));
+        if (app && app.cert_status_manual === true) {
+          const upApp = await upsertExamRow("exam_applications", { ...app, cert_status_manual: false }, tenantId, userId);
+          await writeExamAudit(tenantId, userId, "exam_applications", String(upApp.id), "update", app, upApp, "PM 인증 취소 반영(확정 해제)");
+        }
+      }
+      onToast?.("인증을 취소 처리했습니다(이력 보존 · 실적에서 제외)."); setDetailRow(enrich(up)); await reload(); onDataChanged?.();
     } catch (e) { setError((e as { message?: string })?.message || "취소 실패."); }
   };
   const renewCert = async (r: ExamRow) => {

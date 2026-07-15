@@ -76,9 +76,10 @@ const suggestDmLevel = (row: ExamRow, rules: ExamRow[]): string | null => {
 };
 
 export default function ExamDmCertificationsPage({
-  darkMode, canEdit, tenantId, userId, onToast,
+  darkMode, canEdit, tenantId, userId, onToast, refreshKey, onDataChanged,
 }: {
   darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void;
+  refreshKey?: number; onDataChanged?: () => void;
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [pmRows, setPmRows] = useState<ExamRow[]>([]);
@@ -129,7 +130,7 @@ export default function ExamDmCertificationsPage({
       setRows(data); setPmRows(pm); setRules(rule.filter(isDmRule));
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
-  }, [tenantId]);
+  }, [tenantId, refreshKey]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void reload(); }, [reload]);
@@ -234,6 +235,7 @@ export default function ExamDmCertificationsPage({
       const saved = await upsertExamRow("dm_certifications", { ...r, approval_status: approve ? "승인" : "반려", approved_by: userId, approved_at: new Date().toISOString() }, tenantId, userId);
       await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), approve ? "approve" : "reject", r, saved, approve ? "승인" : "반려");
       onToast?.(approve ? "승인 처리했습니다." : "반려 처리했습니다."); setDetailRow(saved); await reload();
+      onDataChanged?.(); // 승인/반려로 실적 변경 → 시험 통계(대시보드/연간/월간/보고서) 자동 갱신.
     } catch (e) { setError((e as { message?: string })?.message || "승인 처리 실패."); }
   };
 

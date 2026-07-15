@@ -90,9 +90,9 @@ const certOf = (r: ExamRow): "취득" | "미취득" => {
 };
 
 export default function ExamApplicationsPage({
-  darkMode, canEdit, tenantId, userId, onToast,
+  darkMode, canEdit, tenantId, userId, onToast, refreshKey,
 }: {
-  darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void;
+  darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void; refreshKey?: number;
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [refMap, setRefMap] = useState<Record<string, RefOpt[]>>({});
@@ -153,7 +153,7 @@ export default function ExamApplicationsPage({
       setRows(data); setRefMap(Object.fromEntries(refs)); setRules(ruleRows); setPersonnel(people); setEquipmentRows(equip);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
-  }, [tenantId, refCols]);
+  }, [tenantId, refCols, refreshKey]);
 
   // 최초 로드(내부 비동기).
   // eslint-disable-next-line react-hooks/set-state-in-effect
