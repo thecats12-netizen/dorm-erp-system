@@ -9026,27 +9026,49 @@ export default function App() {
   );
 
   const filteredMilitaryTrainingRecords = useMemo(
-    () => militaryTrainingRecords.filter((record) => {
-      if (militaryTrainingStatusFilter !== "전체" && record.status !== militaryTrainingStatusFilter) return false;
-      if (militaryTrainingPersonFilter !== "전체" && record.personnelId !== militaryTrainingPersonFilter) return false;
-      if (militaryTrainingTypeFilter !== "전체" && (record.trainingType || record.subject) !== militaryTrainingTypeFilter) return false;
-      if (militaryTrainingRoundFilter !== "전체" && record.trainingRound !== militaryTrainingRoundFilter) return false;
-      if (militaryTrainingDepartmentFilter !== "전체") {
-        const person = militaryPersonnel.find((p) => p.id === record.personnelId);
-        if ((person?.unit || "") !== militaryTrainingDepartmentFilter) return false;
-      }
-      if (militaryTrainingYearFilter !== "전체") {
-        const year = militaryTrainingYearFilter;
-        const recordYear =
-          String(record.trainingYear || "") ||
-          String(record.trainingDate || "").slice(0, 4) ||
-          String(record.completionDate || "").slice(0, 4) ||
-          String(record.createdAt || "").slice(0, 4);
-        if (recordYear !== year) return false;
-      }
-      const query = `${record.subject} ${record.location} ${record.status} ${record.notes}`.toLowerCase();
-      return !militaryTrainingSearch || query.includes(militaryTrainingSearch.toLowerCase());
-    }),
+    () => {
+      // 대상자(인적사항) 조인용 — 부서 필터/검색에서 공통 사용(레코드마다 find 하지 않도록 Map).
+      const personById = new Map(militaryPersonnel.map((p) => [p.id, p]));
+      // 검색 정규화: 대소문자 무시(lowercase) + 공백 영향 제거(연속공백 1칸 / 공백 완전제거 두 형태로 비교).
+      const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+      const compact = (s: string) => s.toLowerCase().replace(/\s+/g, "");
+      const rawQuery = String(militaryTrainingSearch ?? "").trim();
+      const qNorm = norm(rawQuery);
+      const qCompact = compact(rawQuery);
+
+      return militaryTrainingRecords.filter((record) => {
+        if (militaryTrainingStatusFilter !== "전체" && record.status !== militaryTrainingStatusFilter) return false;
+        if (militaryTrainingPersonFilter !== "전체" && record.personnelId !== militaryTrainingPersonFilter) return false;
+        if (militaryTrainingTypeFilter !== "전체" && (record.trainingType || record.subject) !== militaryTrainingTypeFilter) return false;
+        if (militaryTrainingRoundFilter !== "전체" && record.trainingRound !== militaryTrainingRoundFilter) return false;
+        const person = personById.get(record.personnelId);
+        if (militaryTrainingDepartmentFilter !== "전체") {
+          if ((person?.unit || "") !== militaryTrainingDepartmentFilter) return false;
+        }
+        if (militaryTrainingYearFilter !== "전체") {
+          const year = militaryTrainingYearFilter;
+          const recordYear =
+            String(record.trainingYear || "") ||
+            String(record.trainingDate || "").slice(0, 4) ||
+            String(record.completionDate || "").slice(0, 4) ||
+            String(record.createdAt || "").slice(0, 4);
+          if (recordYear !== year) return false;
+        }
+        // 검색(부분검색): 대상자 이름/사번/부서 + 훈련명/훈련유형/상태 (+ 기존 장소/비고 유지). 필터와 동시 적용.
+        if (!rawQuery) return true;
+        const haystack = [
+          person?.name,            // 대상자 이름
+          person?.serviceNumber,   // 사번
+          person?.unit,            // 부서
+          record.subject,          // 훈련명
+          record.trainingType,     // 훈련유형
+          record.status,           // 상태
+          record.location,         // (기존) 장소
+          record.notes,            // (기존) 비고
+        ].filter(Boolean).join(" ");
+        return norm(haystack).includes(qNorm) || compact(haystack).includes(qCompact);
+      });
+    },
     [militaryTrainingRecords, militaryTrainingSearch, militaryTrainingStatusFilter, militaryTrainingYearFilter, militaryTrainingPersonFilter, militaryTrainingTypeFilter, militaryTrainingRoundFilter, militaryTrainingDepartmentFilter, militaryPersonnel]
   );
 
@@ -17356,7 +17378,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   type="text"
                   value={militaryTrainingSearch}
                   onChange={(e) => setMilitaryTrainingSearch(e.target.value)}
-                  placeholder="훈련명, 위치, 상태 검색"
+                  placeholder="이름, 사번, 부서, 훈련명, 훈련유형, 상태 검색"
                   className="rounded-2xl border px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <select
