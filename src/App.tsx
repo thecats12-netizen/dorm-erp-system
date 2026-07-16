@@ -121,6 +121,7 @@ import SimMemberGridModal, { type SimMemberRow } from "./components/SimMemberGri
 import ReportView, { type ReportConfig } from "./components/ReportView";
 import ExamManagementPage from "./features/exam-management/pages/ExamManagementPage";
 import ExamRulesPage from "./features/exam-management/pages/ExamRulesPage";
+import ExamProcessScopeEditor from "./features/exam-management/pages/ExamProcessScopeEditor";
 import ExamPersonnelPage from "./features/exam-management/pages/ExamPersonnelPage";
 import ExamApplicationsPage from "./features/exam-management/pages/ExamApplicationsPage";
 import ExamDmCertificationsPage from "./features/exam-management/pages/ExamDmCertificationsPage";
@@ -17075,6 +17076,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
+              onDataChanged={bumpExamData}
             />
           ) : activeTab === "examReports" ? (
             <ExamReportsPage
@@ -26347,6 +26349,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <SelectInput label="성별 권한" value={userForm.genderAccess || "전체"} onChange={(v) => setUserForm((f) => ({ ...f, genderAccess: v as "남" | "여" | "전체" }))} options={["전체", "남", "여"]} />
               </div>
             </div>
+
+            {/* 시험관리 공정 권한(자체 저장 · 감사로그). 시험 총관리자=시스템 admin 만 편집. 신규 계정은 저장 후 지정. */}
+            <ExamProcessScopeEditor
+              userId={editingUserId}
+              userLabel={userForm.displayName || userForm.username || ""}
+              baseRole={userForm.role as string}
+              tenantId={tenantId}
+              actingUserId={currentUser?.id || ""}
+              darkMode={theme.darkMode}
+              canManage={currentUser?.role === "admin"}
+              onToast={showNetworkToast}
+            />
 
             {/* 담당 기숙사 정보 섹션 */}
             <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>

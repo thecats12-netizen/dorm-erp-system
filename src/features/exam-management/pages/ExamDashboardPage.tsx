@@ -273,6 +273,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
     return Array.from(m.entries()).map(([label, rs]) => ({ label, value: rs.length, rows: rs, kind })).sort((a, b) => b.value - a.value);
   };
   const acquiredApps = useMemo(() => fApps.filter(isAcquired), [fApps]);
+  const byProduct = useMemo(() => groupBy(fPersonnel.filter((r) => truthy(r.cert_level) || truthy(r.dm) || truthy(r.single_job)), (r) => str(r.product_group), "personnel"), [fPersonnel]);
   const byPart = useMemo(() => groupBy(fPersonnel.filter((r) => truthy(r.cert_level) || truthy(r.dm) || truthy(r.single_job)), (r) => str(r.part_name), "personnel"), [fPersonnel]);
   const byProcess = useMemo(() => groupBy(acquiredApps, (r) => str(r.process), "application"), [acquiredApps]);
   const byLevel = useMemo(() => groupBy(acquiredApps, (r) => levelLabel(r.level_id), "application"), [acquiredApps, levelLabel]);
@@ -369,6 +370,10 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
 
       {/* 차트 그리드 */}
       <div className="grid gap-6 lg:grid-cols-2">
+        <section className={sectionCls}>
+          <h3 className="mb-3 text-base font-semibold">제품군별 인증 현황</h3>
+          <BarList darkMode={darkMode} data={byProduct} onPick={(s) => openDetail(`제품군별 인증 · ${s.label}`, s)} empty="인증 보유 인원 데이터가 없습니다." />
+        </section>
         <section className={sectionCls}>
           <h3 className="mb-3 text-base font-semibold">파트별 인증 현황</h3>
           <BarList darkMode={darkMode} data={byPart} onPick={(s) => openDetail(`파트별 인증 · ${s.label}`, s)} empty="인증 보유 인원 데이터가 없습니다." />

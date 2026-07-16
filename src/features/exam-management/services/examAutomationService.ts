@@ -701,6 +701,185 @@ export function buildRetestCandidates(
 }
 
 // ─────────────────────────────────────────────────────────────
+// 응시 후보 자동계산(인력현황 + 인증 기준 → 후보 도출 · 순수 함수 · 실제 등록 아님)
+// ─────────────────────────────────────────────────────────────
+
+export type ExamCandidate = {
+  employee_no: string; name: string; group_name: string; product: string; process: string;
+  current_level: string; target_level: string;
+  employed: boolean; belowTarget: boolean; prereqMet: boolean; notInProgress: boolean;
+  retestOk: boolean; retestAvailableDate: string | null; needEquipment: boolean;
+  eligible: boolean; blockedReasons: string[];
+};
+
+// 재직 판정(값 없으면 통과, 있으면 "재직" 포함만).
+const candIsEmployed = (v: unknown): boolean => { const s = asText(v); return s === "" || /재직/.test(s); };
+// 진행 중 상태(취소/불합격/인증취득은 진행중 아님).
+const candInProgress = (status: string): boolean => /예정|진행|합격|승인|대기|후보|연기/.test(status) && !/불합격|취소|인증\s*취득/.test(status);
+// 응시행이 목표 단계(Single/M1~/Master)에 해당하는지 — pm_level 텍스트/구분 기준(느슨).
+const candMatchesLevel = (a: ExamApplicationRecord, level: string): boolean => {
+  const bag = `${asText(a.pm_level)} ${asText(a.category)} ${asText(a.category_code)} ${asText(a.level_id)}`;
+  return new RegExp(`(^|[^a-z0-9])${level.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`, "i").test(bag);
+};
+// exam_rules 에서 재시험 제한기간(개월) 추출. 없으면 null.
+function extractRetestGapMonths(rules?: ExamApplicationRecord[]): number | null {
+  if (!Array.isArray(rules)) return null;
+  for (const r of rules) {
+    const bag = JSON.stringify({ ...(r as Record<string, unknown>), ...((r?.criteria as Record<string, unknown>) || {}) });
+    if (!/재시험|retest/i.test(bag)) continue;
+    const m = bag.match(/(\d+)\s*개월/); if (m) return Number(m[1]);
+    const n = Number(pickField({ ...(r as Record<string, unknown>) }, "retest_gap_months", "retest_months", "재시험제한개월"));
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// 인력현황(personnel) × 인증 기준(rules) × 기존 응시(applications) → 응시 후보.
+//  조건: 재직 · 해당 공정 소속 · 목표 인증레벨 미달 · 선행 인증 충족 · 재시험 제한기간 경과 ·
+//        동일 시험 진행중 아님 · (설비 필요 여부 표기) · (공정 권한은 호출부에서 필터)
+export function buildExamCandidates(
+  personnel: ExamPersonnelRecord[],
+  applications: ExamApplicationRecord[],
+  rules?: ExamApplicationRecord[],
+  opts?: { retestGapMonths?: number }
+): ExamCandidate[] {
+  const today = new Date().toISOString().slice(0, 10);
+  const gap = opts?.retestGapMonths ?? extractRetestGapMonths(rules) ?? 3;
+  const apps = (Array.isArray(applications) ? applications : []).filter((a) => !isDeletedRec(a));
+  const out: ExamCandidate[] = [];
+
+  for (const p of Array.isArray(personnel) ? personnel : []) {
+    if (isDeletedRec(p)) continue;
+    const employed = candIsEmployed((p as Record<string, unknown>).employment_status ?? p.status);
+    // 현재 단계 = Single 부터 연속 취득한 최상위, 목표 = 다음 단계.
+    let curIdx = -1;
+    for (let i = 0; i < 5; i++) { if (stageAcquired(p, undefined, PM_STAGES[i])) curIdx = i; else break; }
+    const targetIdx = curIdx + 1;
+    if (targetIdx >= PM_STAGES.length) continue;               // Master 이상 → 후보 아님(목표 미달 아님)
+    const current_level = curIdx < 0 ? "미취득" : PM_STAGES[curIdx];
+    const target_level = PM_STAGES[targetIdx];
+
+    const empNo = asText(p.employee_no);
+    const process = asText(p.part_name) || asText(p.process);
+    const notInProgress = !apps.some((a) => asText(a.employee_no) === empNo && candMatchesLevel(a, target_level) && candInProgress(asText(a.status)));
+
+    // 재시험: 동일 사번+목표단계 최근 불합격/취소 → 가능일 = 발생 + gap개월
+    let retestAvailableDate: string | null = null; let retestOk = true;
+    const fails = apps.filter((a) => asText(a.employee_no) === empNo && candMatchesLevel(a, target_level) && /불합격|취소/.test(asText(a.status)));
+    if (fails.length) {
+      const last = fails.map((a) => toYmd(a.practical_pass_date) || toYmd(a.written_pass_date) || toYmd(a.updated_at) || today).sort().pop() || today;
+      retestAvailableDate = addMonthsYmd(last, gap);
+      retestOk = today >= retestAvailableDate;
+    }
+    const prereqMet = curIdx === targetIdx - 1;                // 연속 취득 → 선행 충족
+    const req = extractPmRequirements(rules, target_level);
+    const needEquipment = !!req.requireEquipment;
+
+    const blockedReasons: string[] = [];
+    if (!employed) blockedReasons.push("재직자 아님");
+    if (!process) blockedReasons.push("공정 정보 없음");
+    if (!prereqMet) blockedReasons.push("선행 인증 미충족");
+    if (!notInProgress) blockedReasons.push("동일 시험 진행 중");
+    if (!retestOk) blockedReasons.push(`재시험 제한(${retestAvailableDate} 이후)`);
+
+    const eligible = employed && !!process && prereqMet && notInProgress && retestOk;
+    out.push({
+      employee_no: empNo, name: asText(p.name), group_name: asText(p.group_name),
+      product: asText(p.product_group) || asText(p.product), process,
+      current_level, target_level, employed, belowTarget: true, prereqMet, notInProgress,
+      retestOk, retestAvailableDate, needEquipment, eligible, blockedReasons,
+    });
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────
+// D.M 인증 후보 자동계산(승인된 PM 인증 → 공정 조합 집계 · PM 원본 미수정 · 순수 함수)
+// ─────────────────────────────────────────────────────────────
+
+export type DmCandidate = {
+  employee_no: string; name: string; personnel_id: string | null;
+  process_count: number; equipment_count: number; process_combination: string;
+  single_job: boolean; dual_multi: boolean; master_candidate: boolean;
+  dm_stage: string; dm_level: string; acquirable: boolean;
+  currentStageIdx: number; targetStageIdx: number;
+};
+
+// 인증 공정 수 → D.M 단계 인덱스. 규칙(exam_rules)에 임계치가 있으면 우선, 없으면 기본 사다리.
+//  기본: 1→Single Job, 2→Multi Job 1, 3→Multi Job 2, 4→Multi Job 3, 5→Multi Job 4, 6+→Dual Multi.
+//  Master 는 자동 확정하지 않고 "후보"로만 표기(관리자 승인 필요).
+function dmStageIdxForCount(count: number, rules?: ExamApplicationRecord[]): number {
+  // 규칙 기반 임계치(있으면): {threshold/min_process, result_level/dm_level} 매칭.
+  if (Array.isArray(rules)) {
+    let best: { th: number; idx: number } | null = null;
+    for (const r of rules) {
+      const bag: Record<string, unknown> = { ...(r as Record<string, unknown>), ...((r?.criteria as Record<string, unknown>) || {}) };
+      const th = Number(pickField(bag, "threshold", "min_process", "process_count", "min_value"));
+      const label = asText(pickField(bag, "result_level", "dm_level", "level", "name", "code"));
+      const idx = DM_LEVELS.findIndex((s) => label && s.toLowerCase() === label.toLowerCase());
+      if (Number.isFinite(th) && th <= count && idx >= 0 && (!best || th > best.th)) best = { th, idx };
+    }
+    if (best) return best.idx;
+  }
+  if (count <= 0) return -1;
+  return Math.min(count - 1, DM_LEVELS.indexOf("Dual Multi")); // 1→0(Single Job) … 6+→Dual Multi
+}
+
+// 승인된 PM 인증(pmCerts)을 사번별로 집계해 D.M 후보를 도출. existingDm 로 이미 보유한 단계는 초과분만 후보.
+export function buildDmCandidates(
+  pmCerts: ExamApplicationRecord[],
+  personnel: ExamPersonnelRecord[],
+  rules?: ExamApplicationRecord[],
+  existingDm?: ExamApplicationRecord[],
+  labelOf?: { process?: (r: ExamApplicationRecord) => string; equipment?: (r: ExamApplicationRecord) => string }
+): DmCandidate[] {
+  const dmRules = Array.isArray(rules) ? rules.filter((r) => /d\.?m|dual|multi|single\s*job|master/i.test(JSON.stringify(r ?? {}))) : [];
+  const pById = new Map<string, ExamPersonnelRecord>();
+  (Array.isArray(personnel) ? personnel : []).forEach((p) => pById.set(asText(p.employee_no), p));
+
+  // 사번별 승인·활성 PM 인증 그룹.
+  const byEmp = new Map<string, ExamApplicationRecord[]>();
+  for (const c of Array.isArray(pmCerts) ? pmCerts : []) {
+    if (isDeletedRec(c)) continue;
+    if (asText(c.approval_status) !== "승인" || c.is_active === false) continue; // 승인 확정분만(미승인 집계 금지)
+    const e = asText(c.employee_no); if (!e) continue;
+    (byEmp.get(e) || byEmp.set(e, []).get(e)!).push(c);
+  }
+
+  // 사번별 기존 D.M 최고 단계 인덱스(반려/취소 제외).
+  const curIdxByEmp = new Map<string, number>();
+  for (const d of Array.isArray(existingDm) ? existingDm : []) {
+    if (isDeletedRec(d) || d.is_active === false || asText(d.approval_status) === "반려") continue;
+    const e = asText(d.employee_no); const idx = DM_LEVELS.indexOf(asText(d.dm_stage) as (typeof DM_LEVELS)[number]);
+    if (e && idx >= 0) curIdxByEmp.set(e, Math.max(curIdxByEmp.get(e) ?? -1, idx));
+  }
+
+  const out: DmCandidate[] = [];
+  for (const [emp, certs] of byEmp) {
+    const procs = Array.from(new Set(certs.map((c) => (labelOf?.process ? labelOf.process(c) : asText(c.process) || asText(c.part_name))).filter(Boolean)));
+    const equips = Array.from(new Set(certs.map((c) => (labelOf?.equipment ? labelOf.equipment(c) : asText(c.equipment_id) || asText(c.equipment_label))).filter(Boolean)));
+    const process_count = procs.length;
+    const equipment_count = equips.length;
+    const targetStageIdx = dmStageIdxForCount(process_count, dmRules);
+    if (targetStageIdx < 0) continue;
+    const currentStageIdx = curIdxByEmp.get(emp) ?? -1;
+    const person = pById.get(emp);
+    const dualIdx = DM_LEVELS.indexOf("Dual Multi");
+    const dm_stage = DM_LEVELS[targetStageIdx];
+    out.push({
+      employee_no: emp, name: asText(certs[0].name) || asText(person?.name), personnel_id: asText(person?.id) || null,
+      process_count, equipment_count, process_combination: procs.join(" + "),
+      single_job: process_count >= 1,
+      dual_multi: targetStageIdx >= dualIdx,
+      master_candidate: targetStageIdx >= dualIdx && process_count >= (DM_LEVELS.length), // Dual Multi 이상 + 충분한 공정 → Master 후보(승인 필요)
+      dm_stage, dm_level: dm_stage, acquirable: process_count >= 1,
+      currentStageIdx, targetStageIdx,
+    });
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────
 // 인증 만료 및 갱신 자동계산
 // ─────────────────────────────────────────────────────────────
 

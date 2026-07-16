@@ -188,6 +188,71 @@ export async function writeExamAudit(
   }
 }
 
+// ── Excel 인력현황 → exam_personnel 동기화(사번 기준 upsert · 변경필드만 · 빈값 덮어쓰기 금지) ──
+export type PersonnelSyncOutcome = { total: number; newCount: number; updateCount: number; unchangedCount: number; errors: Array<{ ref: string; reason: string }> };
+
+// exam_personnel 에 실제 존재하는 동기화 대상 필드(사번 제외). process_id/part_name 병행 저장.
+const PERSONNEL_SYNC_FIELDS = [
+  "name", "group_name", "product_group", "part_name", "process_id", "position", "hire_date",
+  "employment_status", "career_type", "current_pm_level", "pm_capable_rate",
+  "single_job", "m1", "m2", "m3", "m4", "dm", "cert_level", "dual_multi", "notes",
+] as const;
+
+const syncIsEmpty = (v: unknown) => v === null || v === undefined || String(v).trim() === "";
+
+// rows: 검증 완료된 인력행(process_id 는 호출부에서 공정 매핑으로 해석). canWrite: 공정 권한 판정(관리자=항상 true).
+export async function syncExamPersonnel(
+  rows: Array<ExamRow>,
+  tenantId: string,
+  userId: string,
+  canWrite: (processId: string | null | undefined, action: "create" | "update") => boolean
+): Promise<PersonnelSyncOutcome> {
+  if (!supabase) throw new Error("Supabase 미설정");
+  const out: PersonnelSyncOutcome = { total: rows.length, newCount: 0, updateCount: 0, unchangedCount: 0, errors: [] };
+
+  // 기존 인력(사번 기준). listExamRows 는 RLS 적용 → 접근 가능한 데이터만.
+  const existing = await listExamRows("exam_personnel", tenantId);
+  const byEmp = new Map<string, ExamRow>();
+  for (const r of existing) { const e = String(r.employee_no ?? "").trim(); if (e) byEmp.set(e, r); }
+
+  for (const row of rows) {
+    const emp = String(row.employee_no ?? "").trim(); // 앞자리 0 보존(문자열 그대로)
+    const ref = emp || String(row.name ?? "?");
+    try {
+      if (!emp) { out.errors.push({ ref, reason: "사번 없음" }); continue; }         // 이름만으로 판정 금지
+      const prev = byEmp.get(emp);
+      const incomingPid = (row.process_id ?? null) as string | null;
+
+      if (!prev) {
+        // 신규 등록
+        if (!canWrite(incomingPid, "create")) { out.errors.push({ ref, reason: "권한 없는 공정(신규 차단)" }); continue; }
+        const payload: ExamRow = { employee_no: emp };
+        for (const f of PERSONNEL_SYNC_FIELDS) if (!syncIsEmpty(row[f])) payload[f] = row[f]; // 빈값은 넣지 않음
+        const saved = await upsertExamRow("exam_personnel", payload, tenantId, userId);
+        await writeExamAudit(tenantId, userId, "exam_personnel", String(saved.id), "create", null, saved, "Excel 인력현황 동기화(신규)");
+        out.newCount++;
+      } else {
+        // 기존 → 변경된 "비어있지 않은" 필드만 수정. 퇴사=상태 변경(삭제 아님).
+        const scopePid = (prev.process_id ?? incomingPid) as string | null; // 타 공정 수정 금지: 기존 공정 기준
+        if (!canWrite(scopePid, "update")) { out.errors.push({ ref, reason: "권한 없는 공정(수정 차단)" }); continue; }
+        const patch: ExamRow = {};
+        for (const f of PERSONNEL_SYNC_FIELDS) {
+          if (syncIsEmpty(row[f])) continue;                                   // 빈값으로 기존 정상값 덮어쓰기 금지
+          if (String(row[f]) !== String(prev[f] ?? "")) patch[f] = row[f];      // 실제 변경분만
+        }
+        if (Object.keys(patch).length === 0) { out.unchangedCount++; continue; } // 변경 없음
+        const saved = await upsertExamRow("exam_personnel", { ...prev, ...patch, id: prev.id }, tenantId, userId);
+        await writeExamAudit(tenantId, userId, "exam_personnel", String(saved.id), "update", prev, saved, "Excel 인력현황 동기화(수정)");
+        out.updateCount++;
+      }
+    } catch (e) {
+      // 부분 실패: 한 행 오류가 다른 행 저장을 막지 않는다(오류 행 임의 저장도 하지 않음).
+      out.errors.push({ ref, reason: (e as { message?: string })?.message || "저장 실패" });
+    }
+  }
+  return out;
+}
+
 // 직원 상세: personnel_id 로 연결된 시험/인증 레코드 조회(미삭제, 최신순).
 export async function listByPersonnel(table: ExamPersonnelChildTable, tenantId: string, personnelId: string): Promise<ExamRow[]> {
   if (!supabase || !personnelId) return [];

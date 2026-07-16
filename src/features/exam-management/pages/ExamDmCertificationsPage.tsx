@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
-import { calculateDmLevel, calculateCertExpiry } from "../services/examAutomationService";
+import { calculateDmLevel, calculateCertExpiry, buildDmCandidates } from "../services/examAutomationService";
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import * as XLSX from "xlsx";
 import {
@@ -8,6 +8,11 @@ import {
   writeExamAudit, listExamAudit, isDuplicateDm, examSupabaseReady,
   type ExamRow,
 } from "../services/examMasterService";
+import { loadMyExamPermissions } from "../services/examPermissionService";
+
+const nowIso = () => new Date().toISOString();
+const genDmCertNo = (emp: string, stage: string, acquired: string): string =>
+  `DM-${(acquired || "").replace(/-/g, "") || "00000000"}-${emp || "NA"}-${(stage || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 4).toUpperCase() || "STG"}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
 
 type ColType = "text" | "date" | "number" | "select" | "bool" | "expiry";
 type Col = { key: string; label: string; type: ColType; options?: string[]; required?: boolean; filter?: boolean; hideable?: boolean };
@@ -84,6 +89,7 @@ export default function ExamDmCertificationsPage({
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [pmRows, setPmRows] = useState<ExamRow[]>([]);
   const [rules, setRules] = useState<ExamRow[]>([]);
+  const [autoInfo, setAutoInfo] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -122,15 +128,52 @@ export default function ExamDmCertificationsPage({
     setLoading(true); setError(null);
     try {
       // PM 인증은 참조용(읽기 전용) — 원본 미수정. exam_rules 는 D.M 계산 규칙.
-      const [data, pm, rule] = await Promise.all([
+      const [data, pm, people, rule] = await Promise.all([
         listExamRows("dm_certifications", tenantId),
         listExamRows("pm_certifications", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setRows(data); setPmRows(pm); setRules(rule.filter(isDmRule));
+      setPmRows(pm); setRules(rule.filter(isDmRule));
+
+      let finalRows = data;
+      if (canEdit) {
+        // 승인된 PM 인증 → D.M 후보 자동 도출(공정 수는 승인 PM 인증의 distinct level 기준 프록시). PM 원본은 수정하지 않음.
+        const cands = buildDmCandidates(
+          pm as Record<string, unknown>[], people as Record<string, unknown>[], rule as Record<string, unknown>[], data as Record<string, unknown>[],
+          { process: (c) => String((c as ExamRow).process ?? (c as ExamRow).part_name ?? (c as ExamRow).level_id ?? (c as ExamRow).pm_level ?? ""), equipment: (c) => String((c as ExamRow).equipment_id ?? "") }
+        );
+        // 공정별 권한: 공정 담당자는 허용 공정 후보만 생성(관리자/조회자 전체). RLS 서버 재차 강제.
+        let scopeOk: (personnelId: string | null) => boolean = () => true;
+        try {
+          const perms = await loadMyExamPermissions(tenantId);
+          if (!perms.isAdmin && !perms.isViewerAll) {
+            const procByPerson = new Map<string, string | null>();
+            people.forEach((p) => procByPerson.set(String(p.id ?? ""), (p.process_id ?? null) as string | null));
+            scopeOk = (pid) => perms.can(pid ? procByPerson.get(pid) ?? null : null, "create");
+          }
+        } catch { /* 권한 로드 실패 → 전체(관리자 가정) */ }
+        // 이미 대기/활성 후보가 있는 사번+단계는 제외(중복 방지).
+        const activeKey = new Set(data.filter((d) => d.is_active !== false && d.approval_status !== "반려").map((d) => `${String(d.employee_no ?? "")}|${String(d.dm_stage ?? "")}`));
+        const toCreate = cands.filter((c) => c.targetStageIdx > c.currentStageIdx && c.acquirable && scopeOk(c.personnel_id) && !activeKey.has(`${c.employee_no}|${c.dm_stage}`));
+        if (toCreate.length) {
+          for (const c of toCreate) {
+            await upsertExamRow("dm_certifications", {
+              employee_no: c.employee_no, name: c.name, personnel_id: c.personnel_id,
+              dm_stage: c.dm_stage, dm_level: c.dm_level,
+              process_count: c.process_count, equipment_count: c.equipment_count, process_combination: c.process_combination,
+              dual_multi: c.dual_multi, approval_status: "대기",
+              notes: c.master_candidate ? "Master 후보(관리자 승인 필요)" : null,
+            }, tenantId, userId);
+          }
+          setAutoInfo(`승인대기 D.M 후보 ${toCreate.length}건을 자동 생성했습니다(승인 전에는 확정 집계 제외).`);
+          finalRows = await listExamRows("dm_certifications", tenantId);
+        } else setAutoInfo("");
+      }
+      setRows(finalRows);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
-  }, [tenantId, refreshKey]);
+  }, [tenantId, refreshKey, canEdit, userId]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void reload(); }, [reload]);
@@ -185,15 +228,18 @@ export default function ExamDmCertificationsPage({
     return list;
   }, [rows, search, filters, sortKey, sortDir]);
 
+  // 확정 집계는 "승인 + 활성"만 포함(승인 전 후보는 제외). pending 은 별도로 표기.
+  const isConfirmed = (r: ExamRow) => String(r.approval_status ?? "대기") === "승인" && r.is_active !== false;
   const kpi = useMemo(() => {
     const cnt = (fn: (r: ExamRow) => boolean) => filtered.filter(fn).length;
+    const conf = (fn: (r: ExamRow) => boolean) => filtered.filter((r) => isConfirmed(r) && fn(r)).length;
     return {
       total: filtered.length,
-      master: cnt((r) => r.dm_stage === "Master"),
-      dual: cnt((r) => !!r.dual_multi || r.dm_stage === "Dual Multi"),
-      valid: cnt((r) => expiryOf(r).label === "유효"),
-      soon: cnt((r) => expiryOf(r).label.startsWith("임박")),
-      expired: cnt((r) => expiryOf(r).label === "만료"),
+      master: conf((r) => r.dm_stage === "Master"),
+      dual: conf((r) => !!r.dual_multi || r.dm_stage === "Dual Multi"),
+      valid: conf((r) => expiryOf(r).label === "유효"),
+      soon: conf((r) => expiryOf(r).label.startsWith("임박")),
+      expired: conf((r) => expiryOf(r).label === "만료"),
       pending: cnt((r) => (r.approval_status ?? "대기") === "대기"),
     };
   }, [filtered]);
@@ -230,11 +276,26 @@ export default function ExamDmCertificationsPage({
   };
 
   const decide = async (r: ExamRow, approve: boolean) => {
+    if (!canEdit) { setError("승인/반려 권한이 없습니다."); return; }
     if (!r.id) return; setError(null);
     try {
-      const saved = await upsertExamRow("dm_certifications", { ...r, approval_status: approve ? "승인" : "반려", approved_by: userId, approved_at: new Date().toISOString() }, tenantId, userId);
-      await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), approve ? "approve" : "reject", r, saved, approve ? "승인" : "반려");
-      onToast?.(approve ? "승인 처리했습니다." : "반려 처리했습니다."); setDetailRow(saved); await reload();
+      if (approve) {
+        // 승인 시 자동 확정: 취득일 → 만료일(유효기간) → 인증번호. 기존 값이 있으면 유지.
+        const acquired = ymd(r.acquired_date) || new Date().toISOString().slice(0, 10);
+        const expiry = ymd(r.expiry_date) || calculateCertExpiry({ ...r, acquired_date: acquired }, rules).value.expiryDate || null;
+        const certNo = String(r.cert_no ?? "").trim() || genDmCertNo(String(r.employee_no ?? ""), String(r.dm_stage ?? ""), acquired);
+        const saved = await upsertExamRow("dm_certifications", { ...r, approval_status: "승인", approved_by: userId, approved_at: nowIso(), acquired_date: acquired, expiry_date: expiry, cert_no: certNo, is_active: true }, tenantId, userId);
+        // 동일 사번+동일 단계의 다른 승인·활성 인증을 대체(비활성 · 이력 보존).
+        const supersede = rows.filter((x) => String(x.id) !== String(r.id) && String(x.employee_no ?? "") === String(r.employee_no ?? "") && String(x.dm_stage ?? "") === String(r.dm_stage ?? "") && String(x.approval_status ?? "") === "승인" && x.is_active !== false);
+        for (const old of supersede) { await upsertExamRow("dm_certifications", { ...old, is_active: false, notes: `${String(old.notes ?? "")} · 신규 인증(${certNo})으로 대체`.trim() }, tenantId, userId); await writeExamAudit(tenantId, userId, "dm_certifications", String(old.id), "update", old, null, `신규 인증(${certNo})으로 대체`); }
+        await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), "approve", r, saved, `승인 · 인증번호 ${certNo}`);
+        onToast?.("승인 완료: 취득일·만료일·인증번호·이력이 자동 처리되었습니다."); setDetailRow(saved);
+      } else {
+        const saved = await upsertExamRow("dm_certifications", { ...r, approval_status: "반려", approved_by: userId, approved_at: nowIso() }, tenantId, userId);
+        await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), "reject", r, saved, "반려");
+        onToast?.("반려 처리했습니다."); setDetailRow(saved);
+      }
+      await reload();
       onDataChanged?.(); // 승인/반려로 실적 변경 → 시험 통계(대시보드/연간/월간/보고서) 자동 갱신.
     } catch (e) { setError((e as { message?: string })?.message || "승인 처리 실패."); }
   };
@@ -318,6 +379,8 @@ export default function ExamDmCertificationsPage({
         {kpiCard("만료", String(kpi.expired), "text-rose-600")}
         {kpiCard("승인 대기", String(kpi.pending), "text-blue-600")}
       </div>
+
+      {autoInfo && <div className="mb-2 rounded-xl bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">{autoInfo}</div>}
 
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="검색(사원번호/성명/단계/Level/인증번호)" className={`${inputCls} min-w-[220px]`} />

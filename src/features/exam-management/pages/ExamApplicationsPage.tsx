@@ -7,14 +7,16 @@ import {
   writeExamAudit, listExamAudit, isDuplicateApplication, examSupabaseReady,
   type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
-import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES } from "../services/examAutomationService";
+import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, type ExamCandidate } from "../services/examAutomationService";
+import { loadMyExamPermissions, type MyExamPermissions } from "../services/examPermissionService";
 
 type RefOpt = { id: string; label: string };
 type ColType = "text" | "date" | "number" | "select" | "ref" | "cert";
 type Col = { key: string; label: string; type: ColType; options?: string[]; refTable?: ExamMasterTable; required?: boolean; filter?: boolean; hideable?: boolean };
 
 // 응시 상태(개발용 코드값 노출 금지 — 한글 라벨만 저장/표시)
-const STATUS_OPTIONS = ["예정", "필기 진행", "필기 합격", "필기 불합격", "실기 진행", "실기 합격", "실기 불합격", "인증 취득", "미취득", "취소", "재응시"];
+//  후보/승인대기 = 자동 후보→관리자 승인 흐름, 연기 = 일정 보류. (미취득/재응시는 기존 데이터 호환 유지)
+const STATUS_OPTIONS = ["후보", "승인대기", "예정", "필기 진행", "필기 합격", "필기 불합격", "실기 진행", "실기 합격", "실기 불합격", "인증 취득", "연기", "미취득", "취소", "재응시"];
 const TIMING_OPTIONS = ["조기취득", "정상취득", "지연취득"];
 const PAGE_SIZE = 20;
 
@@ -120,6 +122,13 @@ export default function ExamApplicationsPage({
   const [importPreview, setImportPreview] = useState<{ okRows: ExamRow[]; dup: number; err: Array<{ row: number; reason: string }> } | null>(null);
   const [showColMenu, setShowColMenu] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
+  // 응시 후보 자동계산
+  const [showCand, setShowCand] = useState(false);
+  const [cands, setCands] = useState<ExamCandidate[]>([]);
+  const [candLoading, setCandLoading] = useState(false);
+  const [candSel, setCandSel] = useState<Set<string>>(new Set());
+  const [candApplying, setCandApplying] = useState(false);
+  const candKey = (c: ExamCandidate) => `${c.employee_no}|${c.target_level}`;
 
   // 미저장 변경 보호 + 앱 공통 닫기(ESC·뒤로가기·최상위 우선) 연동.
   const [editBase, setEditBase] = useState("");
@@ -372,6 +381,12 @@ export default function ExamApplicationsPage({
       setError(`선행 인증 단계(${levelReq.prereqName || "-"})가 충족되지 않아 저장할 수 없습니다. 선행 단계 취득 후 등록해주세요.`);
       return;
     }
+    // 인증취득여부 수동 확정 시 사유 필수(변경 이력 기록용).
+    const manualReason = String((editRow as { cert_status_manual_reason?: string }).cert_status_manual_reason ?? "").trim();
+    if (editRow.cert_status_manual === true && !manualReason) {
+      setError("인증취득여부를 수동 확정하려면 확정 사유를 입력해야 합니다.");
+      return;
+    }
     setSaving(true); setError(null);
     try {
       const empNo = String(editRow.employee_no ?? "").trim(), code = String(editRow.category_code ?? "").trim();
@@ -380,9 +395,13 @@ export default function ExamApplicationsPage({
       }
       const isNew = !editRow.id;
       const before = isNew ? null : rows.find((r) => r.id === editRow.id) || null;
-      const payload = computeDerivedFields(editRow); // 저장 직전 자동계산(인증 취득일/취득여부/PM Level/D.M 공정)
+      // 사유는 전용 DB 컬럼이 아니므로 페이로드에서 제외하고 감사로그 memo 로만 기록(스키마 변경 없음).
+      const { cert_status_manual_reason: _omit, ...editForSave } = editRow as ExamRow & { cert_status_manual_reason?: string };
+      void _omit;
+      const payload = computeDerivedFields(editForSave); // 저장 직전 자동계산(인증 취득일/취득여부/PM Level/D.M 공정)
       const saved = await upsertExamRow("exam_applications", payload, tenantId, userId);
-      await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), isNew ? "create" : "update", before, saved);
+      const auditMemo = editRow.cert_status_manual === true ? `인증취득여부 수동 확정(${String(editRow.cert_status ?? "")}) 사유: ${manualReason}` : undefined;
+      await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), isNew ? "create" : "update", before, saved, auditMemo);
       setEditRow(null); onToast?.(isNew ? "응시 항목이 등록되었습니다." : "응시 항목이 수정되었습니다."); await reload();
     } catch (e) { setError((e as { message?: string })?.message || "저장하지 못했습니다."); }
     finally { setSaving(false); }
@@ -406,6 +425,48 @@ export default function ExamApplicationsPage({
       onToast?.(`${targets.length}건 상태를 '${bulkStatus}'(으)로 변경했습니다.`);
       setSelected(new Set()); setBulkStatus(""); await reload();
     } catch (e) { setError((e as { message?: string })?.message || "일괄 변경 실패."); }
+  };
+
+  // 응시 후보 자동계산(인력현황+인증기준). 공정 담당자는 허용 공정 후보만.
+  const openCandidates = async () => {
+    setShowCand(true); setCandLoading(true); setCandSel(new Set());
+    try {
+      const list = buildExamCandidates(personnel as Record<string, unknown>[], rows as Record<string, unknown>[], rules as Record<string, unknown>[]);
+      let filtered = list;
+      try {
+        const perms: MyExamPermissions = await loadMyExamPermissions(tenantId);
+        if (!perms.isAdmin && !perms.isViewerAll) {
+          const procOpts = await listExamRefOptions("exam_processes", tenantId);
+          const mapProc = (label: string) => { const hit = procOpts.find((o) => o.label === label || o.label.includes(label)); return hit ? hit.id : null; };
+          filtered = list.filter((c) => perms.can(c.process ? mapProc(c.process) : null, "create"));
+        }
+      } catch { /* 권한 로드 실패 시 전체 표시(관리자 가정) */ }
+      // 자동 선택: 응시 가능한 후보만 기본 체크
+      setCands(filtered);
+      setCandSel(new Set(filtered.filter((c) => c.eligible).map(candKey)));
+    } finally { setCandLoading(false); }
+  };
+
+  // 관리자 승인 → 응시 등록(상태 '승인대기'). 후보는 자동계산이지만 등록은 승인 필요.
+  const approveCandidates = async () => {
+    const chosen = cands.filter((c) => candSel.has(candKey(c)) && c.eligible);
+    if (candApplying || chosen.length === 0) return;
+    setCandApplying(true); setError(null);
+    try {
+      let ok = 0;
+      for (const c of chosen) {
+        const payload: ExamRow = {
+          employee_no: c.employee_no, name: c.name, group_name: c.group_name,
+          product: c.product, process: c.process, pm_level: c.current_level, status: "승인대기",
+        };
+        const saved = await upsertExamRow("exam_applications", payload, tenantId, userId);
+        await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), "create", null, saved, `자동 후보 승인 → 승인대기(목표 ${c.target_level})`);
+        ok++;
+      }
+      onToast?.(`${ok}건을 승인대기로 등록했습니다.`);
+      setShowCand(false); await reload();
+    } catch (e) { setError((e as { message?: string })?.message || "후보 승인 등록에 실패했습니다."); }
+    finally { setCandApplying(false); }
   };
 
   const openDetail = (r: ExamRow) => setDetailRow(r);
@@ -539,6 +600,7 @@ export default function ExamApplicationsPage({
           <button className={btn} onClick={exportCsv}>CSV</button>
           <button className={btn} onClick={printTable}>인쇄</button>
           {canEdit && <label className={`${btn} cursor-pointer`}>Excel 등록<input type="file" accept=".xlsx,.xls" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void buildImportPreview(f); e.currentTarget.value = ""; }} /></label>}
+          {canEdit && <button className={btn} onClick={() => void openCandidates()}>응시 후보 자동계산</button>}
           {canEdit && <button className="rounded-xl bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800" onClick={() => setEditRow({ status: "예정" })}>등록</button>}
         </span>
       </div>
@@ -611,6 +673,52 @@ export default function ExamApplicationsPage({
         <span className="flex items-center gap-2"><button className={btn} disabled={curPage <= 1} onClick={() => setPage(curPage - 1)}>이전</button><span>{curPage} / {pageCount}</span><button className={btn} disabled={curPage >= pageCount} onClick={() => setPage(curPage + 1)}>다음</button></span>
       </div>
 
+      {/* 응시 후보 자동계산 모달(후보=자동, 등록=관리자 승인) */}
+      {showCand && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !candApplying && setShowCand(false)}>
+          <div className={`max-h-[85vh] w-full max-w-4xl overflow-auto rounded-2xl p-5 shadow-xl ${darkMode ? "bg-slate-900" : "bg-white"}`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-lg font-semibold">응시 후보 자동계산</h3>
+              <button className={btn} onClick={() => setShowCand(false)} disabled={candApplying}>닫기</button>
+            </div>
+            <p className="mb-3 text-xs text-slate-500">인력현황·인증 기준으로 자동 도출한 후보입니다. <b>응시 가능</b> 후보만 선택해 관리자 승인(→ 승인대기)으로 등록됩니다.</p>
+            {candLoading ? <div className="py-8 text-center text-sm text-slate-500">계산 중…</div> : (
+              <>
+                <div className="mb-2 text-xs text-slate-500">총 {cands.length}명 · 응시 가능 {cands.filter((c) => c.eligible).length}명 · 선택 {candSel.size}명</div>
+                <div className="overflow-auto rounded-lg border border-slate-200 dark:border-slate-700">
+                  <table className="w-full text-left text-xs">
+                    <thead className={darkMode ? "bg-slate-800" : "bg-slate-100"}>
+                      <tr><th className="px-2 py-1.5">선택</th><th className="px-2 py-1.5">사번</th><th className="px-2 py-1.5">성명</th><th className="px-2 py-1.5">공정</th><th className="px-2 py-1.5">현재→목표</th><th className="px-2 py-1.5">설비</th><th className="px-2 py-1.5">재시험 가능일</th><th className="px-2 py-1.5">판정</th></tr>
+                    </thead>
+                    <tbody>
+                      {cands.length === 0 && <tr><td colSpan={8} className="px-2 py-6 text-center text-slate-400">후보가 없습니다.</td></tr>}
+                      {cands.map((c) => (
+                        <tr key={candKey(c)} className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"} ${c.eligible ? "" : "opacity-60"}`}>
+                          <td className="px-2 py-1.5"><input type="checkbox" disabled={!c.eligible || !canEdit} checked={candSel.has(candKey(c))} onChange={() => setCandSel((p) => { const n = new Set(p); const k = candKey(c); if (n.has(k)) n.delete(k); else n.add(k); return n; })} /></td>
+                          <td className="px-2 py-1.5">{c.employee_no}</td><td className="px-2 py-1.5">{c.name}</td><td className="px-2 py-1.5">{c.process || "-"}</td>
+                          <td className="px-2 py-1.5">{c.current_level} → <b>{c.target_level}</b></td>
+                          <td className="px-2 py-1.5">{c.needEquipment ? "필요" : "-"}</td>
+                          <td className="px-2 py-1.5">{c.retestAvailableDate || "-"}</td>
+                          <td className="px-2 py-1.5">{c.eligible ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">응시 가능</span> : <span className="text-rose-600">{c.blockedReasons.join(", ")}</span>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {canEdit && (
+                  <div className="mt-3 flex justify-end">
+                    <button onClick={() => void approveCandidates()} disabled={candApplying || candSel.size === 0}
+                      className={`rounded-2xl px-5 py-2 text-sm font-semibold text-white ${candApplying || candSel.size === 0 ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>
+                      {candApplying ? "등록 중…" : `승인하여 응시 등록 (${candSel.size}건)`}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 등록/수정 모달 */}
       {editRow && (
         <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={requestCloseEdit}>
@@ -644,13 +752,21 @@ export default function ExamApplicationsPage({
                   )}
                 </div>
               ))}
-              {/* 인증취득여부 수동 확정 */}
+              {/* 인증취득여부 수동 확정(사유 필수 · 변경이력 기록) */}
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">인증취득여부 (수동 확정)</label>
                 <div className="flex items-center gap-2">
                   <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={!!editRow.cert_status_manual} onChange={(e) => setEditRow((f) => ({ ...(f || {}), cert_status_manual: e.target.checked }))} />수동</label>
                   <select disabled={!editRow.cert_status_manual} className={`${inputCls} flex-1`} value={String(editRow.cert_status ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), cert_status: e.target.value || null }))}><option value="">자동({editRow.practical_pass_date ? "취득" : "미취득"})</option><option value="취득">취득</option><option value="미취득">미취득</option></select>
                 </div>
+                {!!editRow.cert_status_manual && (
+                  <input
+                    className={`${inputCls} mt-1.5 w-full`}
+                    placeholder="수동 확정 사유(필수) — 변경 이력에 기록됩니다"
+                    value={String((editRow as { cert_status_manual_reason?: string }).cert_status_manual_reason ?? "")}
+                    onChange={(e) => setEditRow((f) => ({ ...(f || {}), cert_status_manual_reason: e.target.value }))}
+                  />
+                )}
               </div>
             </div>
 

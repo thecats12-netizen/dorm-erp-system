@@ -8,6 +8,7 @@ import {
   writeExamAudit, listExamAudit, examSupabaseReady,
   type ExamRow,
 } from "../services/examMasterService";
+import { loadMyExamPermissions } from "../services/examPermissionService";
 
 type RefOpt = { id: string; label: string };
 
@@ -62,6 +63,48 @@ const stateTone = (s: string): string => ({
   "승인대기": "bg-slate-200 text-slate-500", "반려": "bg-rose-100 text-rose-700", "취소": "bg-slate-300 text-slate-600",
 }[s] || "bg-slate-200 text-slate-500");
 const approvalLabel = (r: ExamRow): string => { const ap = String(r.approval_status ?? "대기"); if (isCanceled(r)) return "취소"; return ap === "승인" ? "승인완료" : ap === "반려" ? "반려" : "승인대기"; };
+
+// 재직기간(개월). 유효 입사일 없으면 null.
+const tenureMonthsOf = (hire: unknown): number | null => {
+  const s = String(hire ?? "").trim(); const m = s.match(/^(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})/);
+  const iso = m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : s.slice(0, 10);
+  const d = new Date(iso); if (isNaN(d.getTime())) return null;
+  const n = new Date(); let mo = (n.getFullYear() - d.getFullYear()) * 12 + (n.getMonth() - d.getMonth()); if (n.getDate() < d.getDate()) mo--; return mo < 0 ? null : mo;
+};
+// 선행 Level 충족(연명부 플래그/현재레벨 느슨 매칭).
+const prereqHolds = (rule: ExamRow | null, person: ExamRow | null, levelOpts: RefOpt[]): boolean => {
+  const pr = String(rule?.prerequisite_level_id ?? ""); if (!pr) return true;
+  if (!person) return false;
+  const name = (levelOpts.find((o) => o.id === pr)?.label || "").toLowerCase(); if (!name) return true;
+  const flags: Record<string, unknown> = { single: person.single_job, m1: person.m1, m2: person.m2, m3: person.m3, m4: person.m4, "d.m": person.dm, dm: person.dm };
+  for (const [k, v] of Object.entries(flags)) if (name.includes(k) && truthyFlag(v)) return true;
+  return `${person.current_pm_level ?? ""} ${person.cert_level ?? ""}`.toLowerCase().includes(name);
+};
+// PM 인증 후보 조건 평가(충족/미충족 상세). 규칙(exam_rules)에서 요건을 읽어 판정.
+export type PmCond = { label: string; ok: boolean };
+const evalPmConditions = (app: ExamRow | null, rule: ExamRow | null, person: ExamRow | null, levelOpts: RefOpt[]): PmCond[] => {
+  const a = app || {};
+  const done = /인증\s*취득|완료/.test(String(a.status ?? ""));
+  const certOk = appCertOf(a) === "취득" || done;                                          // 인증취득 여부
+  const writtenOk = rule?.require_written !== true || !!ymd(a.written_pass_date);           // 필기 합격
+  const practicalOk = rule?.require_practical !== true || !!ymd(a.practical_pass_date);     // 실기 합격
+  const needEquip = Number(rule?.required_equipment_count ?? 0) > 0;                         // 필수 설비
+  const equipOk = !needEquip || !!(a.equipment_id || (person && (person.equipment_id || Number(person.equipment_count) > 0)));
+  const prereqOk = prereqHolds(rule, person, levelOpts);                                    // 선행 Level
+  const minTenure = Number(rule?.min_tenure_months ?? 0);                                   // 최소 재직기간
+  const t = tenureMonthsOf(person?.hire_date);
+  const tenureOk = !(minTenure > 0) || (t !== null && t >= minTenure);
+  const acquiredOk = !!(ymd(a.cert_acquired_date) || ymd(a.practical_pass_date));           // 인증 취득일 존재
+  return [
+    { label: "인증취득 여부", ok: certOk },
+    { label: "필기 합격", ok: writtenOk },
+    { label: "실기 합격", ok: practicalOk },
+    { label: "필수 설비 충족", ok: equipOk },
+    { label: "선행 Level 충족", ok: prereqOk },
+    { label: `최소 재직기간${minTenure > 0 ? `(${minTenure}개월)` : ""}`, ok: tenureOk },
+    { label: "인증 취득일 존재", ok: acquiredOk },
+  ];
+};
 
 const COLS: Array<{ key: string; label: string; date?: boolean }> = [
   { key: "employee_no", label: "사번" }, { key: "name", label: "성명" }, { key: "group_name", label: "그룹" },
@@ -154,25 +197,18 @@ export default function ExamPmCertificationsPage({
         // 동일 인증 중복 방지: 이미 활성(미취소·미반려) 인증이 있는 사번+단계는 제외.
         const activeKey = new Set(certs.filter((c) => c.is_active !== false && c.approval_status !== "반려").map((c) => `${String(c.employee_no ?? "")}|${String(c.level_id ?? "")}`));
         const ruleFor = (a: ExamRow) => rule.find((r) => String(r.level_id ?? "") === String(a.level_id ?? "")) || null;
-        const holds = (a: ExamRow): boolean => {
-          const pr = String(ruleFor(a)?.prerequisite_level_id ?? ""); if (!pr) return true;
-          const p = pById.get(String(a.employee_no ?? "")); if (!p) return false;
-          const name = (lv.find((o) => o.id === pr)?.label || "").toLowerCase(); if (!name) return true;
-          const flags: Record<string, unknown> = { single: p.single_job, m1: p.m1, m2: p.m2, m3: p.m3, m4: p.m4, "d.m": p.dm, dm: p.dm };
-          for (const [k, v] of Object.entries(flags)) if (name.includes(k) && truthyFlag(v)) return true;
-          return `${p.current_pm_level ?? ""} ${p.cert_level ?? ""}`.toLowerCase().includes(name);
-        };
+        // 후보 조건(7종): 인증취득/필기/실기/설비/선행Level/재직기간/취득일 — 전부 충족해야 후보(동일 PM 인증 중복은 아래에서 별도 제외).
         const q = (a: ExamRow): boolean => {
-          if (a.deleted_at || !a.id) return false;                                        // 삭제 제외
-          const done = /인증\s*취득|완료/.test(String(a.status ?? ""));
-          if (appCertOf(a) !== "취득" && !done) return false;                              // 인증취득 또는 자동 취득 후보
-          const rl = ruleFor(a);
-          if (rl?.require_written === true && !ymd(a.written_pass_date)) return false;     // 필기 필요 시 필기 합격
-          if (rl?.require_practical === true && !ymd(a.practical_pass_date)) return false; // 실기 필요 시 실기 합격
-          if (!rl && (!ymd(a.written_pass_date) || !ymd(a.practical_pass_date))) return false;
-          return holds(a);                                                                // 선행 인증 충족
+          if (a.deleted_at || !a.id) return false;
+          return evalPmConditions(a, ruleFor(a), pById.get(String(a.employee_no ?? "")) || null, lv).every((c) => c.ok);
         };
-        const toCreate = appRows.filter((a) => q(a) && !existingSrc.has(String(a.id)) && !activeKey.has(`${String(a.employee_no ?? "")}|${String(a.level_id ?? "")}`));
+        // 공정별 권한: 공정 담당자는 허용 공정 응시만 후보 생성(관리자/조회자는 전체). RLS 가 서버에서도 재차 강제.
+        let scopeAllows: (a: ExamRow) => boolean = () => true;
+        try {
+          const perms = await loadMyExamPermissions(tenantId);
+          if (!perms.isAdmin && !perms.isViewerAll) scopeAllows = (a) => perms.can((a.process_id ?? null) as string | null, "create");
+        } catch { /* 권한 로드 실패 → 전체(관리자 가정) */ }
+        const toCreate = appRows.filter((a) => q(a) && scopeAllows(a) && !existingSrc.has(String(a.id)) && !activeKey.has(`${String(a.employee_no ?? "")}|${String(a.level_id ?? "")}`));
         if (toCreate.length) {
           for (const a of toCreate) {
             const person = pById.get(String(a.employee_no ?? ""));
@@ -255,7 +291,10 @@ export default function ExamPmCertificationsPage({
     try {
       const isNew = !editRow.id;
       const before = isNew ? null : rows.find((r) => r.id === editRow.id) || null;
-      const saved = await upsertExamRow("pm_certifications", { approval_status: "대기", ...editRow }, tenantId, userId);
+      // 증빙파일은 컬럼 미적용 환경에서 저장 오류를 막기 위해 비어 있으면 payload 에서 제외(스키마 변경 전 무영향).
+      const { proof_file, ...restEdit } = editRow as ExamRow & { proof_file?: unknown };
+      const payload: ExamRow = { approval_status: "대기", ...restEdit, ...(String(proof_file ?? "").trim() ? { proof_file } : {}) };
+      const saved = await upsertExamRow("pm_certifications", payload, tenantId, userId);
       await writeExamAudit(tenantId, userId, "pm_certifications", String(saved.id), isNew ? "create" : "update", before, saved);
       setEditRow(null); onToast?.(isNew ? "등록되었습니다." : "수정되었습니다."); await reload(); onDataChanged?.();
     } catch (e) { setError((e as { message?: string })?.message || "저장하지 못했습니다."); }
@@ -442,7 +481,11 @@ export default function ExamPmCertificationsPage({
                 </div>
               ))}
             </div>
-            <p className="mt-3 text-xs text-slate-400">※ 만료일/인증번호는 승인 시 자동 계산·생성됩니다(입력값 있으면 유지).</p>
+            <div className="mt-3">
+              <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">증빙파일 (URL/파일명)</label>
+              <input type="text" className={`${inputCls} w-full`} placeholder="증빙 링크 또는 파일명(선택)" value={String((editRow as { proof_file?: unknown }).proof_file ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), proof_file: e.target.value || null }))} />
+            </div>
+            <p className="mt-3 text-xs text-slate-400">※ 만료일/인증번호는 승인 시 자동 계산·생성됩니다(입력값 있으면 유지). 증빙파일은 컬럼 적용(SQL) 후 저장됩니다.</p>
             <div className="mt-6 flex justify-end gap-2">
               <button type="button" onClick={requestCloseEdit} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
               <button type="button" data-modal-save onClick={() => void saveRow()} disabled={saving} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-semibold text-white ${saving ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{saving ? "저장 중…" : "저장"}</button>
@@ -470,6 +513,20 @@ export default function ExamPmCertificationsPage({
                 </dl>
               ))}
               {section("현재 PM Level", <div className="text-sm">{String(p?.current_pm_level ?? "") || "-"} <span className="text-xs text-slate-400">· 취득 예정: {String(detailRow.pm_level ?? "-")}</span></div>)}
+              {section("후보 조건 충족/미충족", (() => {
+                const srcApp = appById.get(String(detailRow.source_application_id ?? "")) || null;
+                const ruleForCert = rules.find((r) => String(r.level_id ?? "") === String(detailRow.level_id ?? srcApp?.level_id ?? "")) || null;
+                const conds = evalPmConditions(srcApp ?? detailRow, ruleForCert, p, levelOpts);
+                return (
+                  <div className="flex flex-wrap gap-1.5">
+                    {conds.map((c) => (
+                      <span key={c.label} className={`rounded-full px-2 py-0.5 text-[0.7rem] font-medium ${c.ok ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                        {c.ok ? "✓" : "✕"} {c.label}
+                      </span>
+                    ))}
+                  </div>
+                );
+              })())}
               {section("시험 응시이력", listBox(empApps(emp).map((a) => <div key={String(a.id)} className="py-0.5">{ymd(a.written_exam_date) || "-"} · {String(a.status ?? "-")} · {appCertOf(a)} {a.level_id ? `· ${levelLabel(a.level_id)}` : ""}</div>), "응시이력 없음"))}
               {section("인증 취득이력", listBox(certs.filter(isApproved).map((c) => <div key={String(c.id)} className="py-0.5">{String(c.cert_no ?? "-")} · {String(c.pm_level ?? "-")} · 취득 {ymd(c.acquired_date) || "-"} {c.expiry_date ? `~ ${ymd(c.expiry_date)}` : ""} {c.is_active === false ? "· (대체/취소)" : ""}</div>), "취득이력 없음"))}
               {section("갱신이력", listBox(certs.filter((c) => truthyFlag(c.renewal_date) || /갱신/.test(String(c.notes ?? ""))).map((c) => <div key={String(c.id)} className="py-0.5">{String(c.cert_no ?? c.notes ?? "-")} · {ymd(c.renewal_date) || ymd(c.updated_at) || "-"}</div>), "갱신이력 없음"))}

@@ -73,6 +73,15 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
 
   const filterCols = useMemo(() => cfg.cols.filter((c) => c.filter), [cfg.cols]);
   const formCols = useMemo(() => cfg.cols.filter((c) => c.type !== "computed"), [cfg.cols]);
+  // 수기 편집 정책: 목표/비고만 항상 편집 가능, 식별자(연도/그룹/제품/파트/레벨)는 신규 등록 시에만.
+  //  자동 실적값(현재인원/월별 m1~m12)은 승인 완료 인증에서 자동 집계되므로 사용자가 덮어쓸 수 없다.
+  const AUTO_ACTUAL_KEYS = useMemo(() => new Set(["current_count", ...MONTHS]), []);
+  const MANUAL_KEYS = useMemo(() => new Set(["target_count", "notes"]), []);
+  const isColEditable = useCallback((key: string, isNew: boolean) => {
+    if (AUTO_ACTUAL_KEYS.has(key)) return false;                 // 자동 실적값: 편집 불가
+    if (MANUAL_KEYS.has(key)) return true;                        // 목표/비고: 항상
+    return isNew && IDENTITY.includes(key);                       // 식별자: 신규 등록 시만
+  }, [AUTO_ACTUAL_KEYS, MANUAL_KEYS]);
   const hasLevel = useMemo(() => cfg.cols.some((c) => c.type === "ref"), [cfg.cols]);
 
   const reload = useCallback(async () => {
@@ -158,7 +167,10 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
       if (rows.some((r) => r.id !== editRow.id && identityKey(r) === key)) { setError("동일한 연도/그룹/제품군/파트/인증레벨 항목이 이미 있습니다."); setSaving(false); return; }
       const isNew = !editRow.id;
       const before = isNew ? null : rows.find((r) => r.id === editRow.id) || null;
-      const saved = await upsertExamRow(cfg.table, editRow, tenantId, userId);
+      // 자동 실적값(현재인원/월별)은 payload 에서 제외 → upsert 가 기존 자동값을 그대로 유지(수기 덮어쓰기 방지).
+      const payload: ExamRow = { ...editRow };
+      AUTO_ACTUAL_KEYS.forEach((k) => { delete payload[k]; });
+      const saved = await upsertExamRow(cfg.table, payload, tenantId, userId);
       await writeExamAudit(tenantId, userId, cfg.table, String(saved.id), isNew ? "create" : "update", before, saved);
       setEditRow(null); onToast?.(isNew ? "등록되었습니다." : "수정되었습니다."); await reload();
     } catch (e) { setError((e as { message?: string })?.message || "저장하지 못했습니다."); }
@@ -315,10 +327,17 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
           <div role="dialog" aria-modal="true" aria-labelledby="exam-target-edit-title" tabIndex={-1} className={`my-8 w-full max-w-3xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
             <h3 id="exam-target-edit-title" className="mb-4 text-lg font-semibold">{editRow.id ? `${cfg.title} 수정` : `${cfg.title} 등록`}</h3>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-              {formCols.map((c) => (
+              {formCols.map((c) => {
+                const editable = isColEditable(c.key, !editRow.id);
+                const autoActual = AUTO_ACTUAL_KEYS.has(c.key);
+                return (
                 <div key={c.key}>
-                  <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}</label>
-                  {c.type === "ref" ? (
+                  <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}{autoActual && <span className="ml-1 text-[0.65rem] font-normal text-slate-400">(자동 집계)</span>}</label>
+                  {!editable ? (
+                    <div className={`${inputCls} w-full ${darkMode ? "bg-slate-800/60 text-slate-400" : "bg-slate-100 text-slate-500"}`} title={autoActual ? "승인 완료 인증에서 자동 집계됩니다(수정 불가)" : "등록 후 변경할 수 없습니다"}>
+                      {c.type === "ref" ? (levels.find((o) => o.id === String(editRow[c.key] ?? ""))?.label || "-") : (String(editRow[c.key] ?? "") || "-")}
+                    </div>
+                  ) : c.type === "ref" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}><option value="">선택</option>{levels.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
                   ) : c.type === "select" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}><option value="">선택</option>{(c.options || []).map((o) => <option key={o} value={o}>{o}</option>)}</select>
@@ -326,7 +345,8 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
                     <input inputMode={c.type === "number" ? "numeric" : undefined} className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => { const v = c.type === "number" ? (e.target.value === "" ? null : Math.round(Number(e.target.value.replace(/[^0-9.-]/g, "")) || 0)) : (e.target.value || null); setEditRow((f) => ({ ...(f || {}), [c.key]: v })); }} />
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
             {/* 계산 미리보기 */}
             <div className="mt-3 flex flex-wrap gap-2 text-xs">
@@ -516,9 +536,10 @@ function AnnualAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode
       {error && <div className="mb-2 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</div>}
       {loading && <div className="mb-2 text-xs text-slate-500">불러오는 중…</div>}
 
-      <div className="grid grid-cols-3 gap-2 sm:max-w-md">
+      <div className="grid grid-cols-2 gap-2 sm:max-w-xl sm:grid-cols-4">
         {kpiCard("목표", String(target))}
         {kpiCard("실적", String(actual))}
+        {kpiCard("차이(목표-실적)", String(target - actual), target - actual > 0 ? "text-rose-600" : "text-emerald-600")}
         {kpiCard("달성률", `${rate}%`, rateTone)}
       </div>
       <p className="mt-2 text-[0.7rem] text-slate-400">※ 월별 실적: {months.map((m, i) => `${i + 1}월 ${m}`).join(" · ")} (합계 {actual}) — 월간실적 자동집계와 동일 기준. 조회 전용(DB 재저장 없음).</p>
