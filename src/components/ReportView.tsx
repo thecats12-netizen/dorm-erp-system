@@ -4,7 +4,7 @@ import { formatDateOnly } from "../utils/formatters";
 
 // 공통 보고서 뷰: 필터 + KPI + 차트 + 테이블 + Excel/CSV/PDF(A4 인쇄).
 // 9개 보고서가 rows/columns/차트/KPI 설정만 바꿔 재사용한다(기존 디자인 톤 유지).
-export type ReportColumn = { key: string; label: string };
+export type ReportColumn = { key: string; label: string; align?: "left" | "center" };
 export type ReportChart = { type: "bar" | "pie"; groupKey: string; valueKey?: string; label: string };
 export type ReportConfig = {
   title: string;
@@ -40,6 +40,8 @@ function GridSelect({ value, onChange, options, label, darkMode }: { value: stri
 export default function ReportView({ config, darkMode }: { config: ReportConfig; darkMode: boolean }) {
   const { title, subtitle, rows, columns, dateField, filterKeys = [], chart, extraKpis = [], centerAlign = false, totalRow, numericKeys = [] } = config;
   const alignCls = centerAlign ? "text-center" : "";
+  // 컬럼별 정렬 override(opt-in). col.align 이 지정되면 그 값이 우선, 없으면 보고서 공통(alignCls) 적용.
+  const cellAlignCls = (c: ReportColumn) => (c.align === "center" ? "text-center" : c.align === "left" ? "text-left" : alignCls);
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [fromDate, setFromDate] = useState("");
@@ -151,9 +153,11 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
   };
   const printPdf = () => {
     const w = window.open("", "_blank", "width=1000,height=760"); if (!w) return;
-    const th = columns.map((c) => `<th>${c.label}</th>`).join("");
-    const trs = filtered.map((r) => `<tr>${columns.map((c) => `<td>${String(r[c.key] ?? "")}</td>`).join("")}</tr>`).join("");
-    const totalTr = totalRow ? `<tr class="total">${columns.map((c) => `<td>${String(totalRow[c.key] ?? "")}</td>`).join("")}</tr>` : ""; // 총계 마지막 고정
+    // 컬럼별 정렬 override(화면 테이블과 동일 규칙): col.align 이 지정되면 그 값을 인라인으로 강제.
+    const alignStyle = (c: ReportColumn) => (c.align ? ` style="text-align:${c.align}"` : "");
+    const th = columns.map((c) => `<th${alignStyle(c)}>${c.label}</th>`).join("");
+    const trs = filtered.map((r) => `<tr>${columns.map((c) => `<td${alignStyle(c)}>${String(r[c.key] ?? "")}</td>`).join("")}</tr>`).join("");
+    const totalTr = totalRow ? `<tr class="total">${columns.map((c) => `<td${alignStyle(c)}>${String(totalRow[c.key] ?? "")}</td>`).join("")}</tr>` : ""; // 총계 마지막 고정
     const kpiHtml = kpis.map((k) => `<div class="kpi"><div class="kl">${k.label}</div><div class="kv">${k.value}</div></div>`).join("");
     w.document.write(`<!doctype html><meta charset="utf-8"><title>${title}</title>
       <style>
@@ -260,7 +264,7 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
         <table className="w-full text-left text-sm">
           <thead className={`sticky top-0 z-[1] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
             <tr>{columns.map((c) => (
-              <th key={c.key} onClick={() => toggleSort(c.key)} className={`cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:underline ${alignCls}`}>
+              <th key={c.key} onClick={() => toggleSort(c.key)} className={`cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:underline ${cellAlignCls(c)}`}>
                 {c.label}{sortKey === c.key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
               </th>
             ))}</tr>
@@ -268,14 +272,14 @@ export default function ReportView({ config, darkMode }: { config: ReportConfig;
           <tbody>
             {filtered.map((r, i) => (
               <tr key={i} className={`border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
-                {columns.map((c) => <td key={c.key} className={`whitespace-nowrap px-3 py-2 ${alignCls}`}>{r[c.key] === "" || r[c.key] == null ? "-" : r[c.key]}</td>)}
+                {columns.map((c) => <td key={c.key} className={`whitespace-nowrap px-3 py-2 ${cellAlignCls(c)}`}>{r[c.key] === "" || r[c.key] == null ? "-" : r[c.key]}</td>)}
               </tr>
             ))}
             {filtered.length === 0 && <tr><td colSpan={columns.length} className="px-3 py-8 text-center text-slate-500">데이터가 없습니다.</td></tr>}
             {totalRow && (
               // 총계 행: 항상 마지막 고정(필터/정렬과 무관) · Bold · 연한 회색 배경 · 상단 Border 강조.
               <tr className={`border-t-2 font-bold ${darkMode ? "border-slate-500 bg-slate-800/70" : "border-slate-300 bg-slate-100"}`}>
-                {columns.map((c) => <td key={c.key} className={`whitespace-nowrap px-3 py-2 ${alignCls}`}>{totalRow[c.key] === "" || totalRow[c.key] == null ? "-" : totalRow[c.key]}</td>)}
+                {columns.map((c) => <td key={c.key} className={`whitespace-nowrap px-3 py-2 ${cellAlignCls(c)}`}>{totalRow[c.key] === "" || totalRow[c.key] == null ? "-" : totalRow[c.key]}</td>)}
               </tr>
             )}
           </tbody>

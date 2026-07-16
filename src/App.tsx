@@ -15503,11 +15503,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         입주율: `${overallTotalCap ? Math.round((overallResidents / overallTotalCap) * 100) : 0}%`,
       },
     };
-    // ② 기숙사별 입주 현황
+    // ② 기숙사별 입주 현황 — 표시 라벨만 "잔여"(내부 key 공실 유지). 잔여 = 정원 - 현재인원(기존 정책과 동일 0 하한).
+    //   기숙사 컬럼만 좌측 정렬, 나머지(지역/성별/정원/현재인원/잔여/상태)는 가운데 정렬(컬럼별 align override).
     const dormOcc: ReportConfig = {
       title: "기숙사별 입주 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
       rows: operationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 지역: d.site, 성별: d.gender, 기숙사: dormLabel(d), 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
-      columns: [{ key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "기숙사", label: "기숙사" }, { key: "현재인원", label: "현재인원" }, { key: "정원", label: "정원" }, { key: "공실", label: "공실" }, { key: "상태", label: "상태" }],
+      columns: [{ key: "지역", label: "지역", align: "center" }, { key: "성별", label: "성별", align: "center" }, { key: "기숙사", label: "기숙사", align: "left" }, { key: "정원", label: "정원", align: "center" }, { key: "현재인원", label: "현재인원", align: "center" }, { key: "공실", label: "잔여", align: "center" }, { key: "상태", label: "상태", align: "center" }],
       filterKeys: ["지역", "성별", "상태"], chart: { type: "pie", groupKey: "상태", label: "입주 상태 분포" },
     };
     // ③ 계약 만료 예정
