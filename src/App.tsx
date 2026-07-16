@@ -2243,6 +2243,9 @@ export default function App() {
   const lastAppSettingsSnapshotRef = useRef<string>("");
   // 군대 모듈: 로드/Realtime 로 적용된 변경(사용자 수정 아님)을 dirty 에서 제외하기 위한 플래그.
   const militarySyncSnapshotRef = useRef<boolean>(false);
+  // 군대 모듈 로드 경쟁 상태 방지: 최초/탭진입/45초주기/수동 새로고침이 동시에 실행될 수 있으므로
+  // 요청마다 seq 를 부여하고, 응답 반영 직전 최신 seq 가 아니면(늦게 끝난 이전 요청) 결과를 버린다.
+  const militaryLoadSeqRef = useRef<number>(0);
   // 동기화 실패 alert 중복 방지(동일 오류 메시지는 1회만 표시)
   const lastDormAlertRef = useRef<string>("");
   const lastOperationalAlertRef = useRef<string>("");
@@ -3880,11 +3883,15 @@ export default function App() {
     // silent=true(주기적 fallback 재조회)일 때는 상태 텍스트/로딩 표시를 바꾸지 않아 화면 깜빡임 없음.
     if (!silent) { setIsSupabaseSyncing(true); setSupabaseSyncStatus("Supabase에서 군대 모듈 데이터를 불러오는 중입니다..."); }
 
+    // 경쟁 상태 방지: 이 요청의 seq. 응답이 도착했을 때 최신 요청이 아니면 결과를 반영하지 않는다.
+    const reqSeq = ++militaryLoadSeqRef.current;
     try {
       const remote = await loadMilitaryModule(tenantId);
+      // 늦게 끝난 이전 요청이 최신 데이터를 덮어쓰지 않도록 stale 응답은 무시(가장 최근 요청 결과만 반영).
+      if (reqSeq !== militaryLoadSeqRef.current) return;
       if (remote) {
         militarySyncSnapshotRef.current = true; // 로드 반영분은 dirty 로 잡지 않음
-        console.log("Military JSON", remote); // 진단 로그(요청): 실제 로드된 blob 확인
+        if (import.meta.env.DEV) console.log("Military JSON", remote); // 진단 로그(개발 환경에서만): 실제 로드된 blob 확인
         // ★ DB blob 의 key 가 영문(militaryPersonnel 등) 또는 한글(군인/군사공지/"군사 훈련 기록" 등) 어느 쪽이든
         //   읽을 수 있도록 fallback 매핑. (기존 key 는 저장 시 병합 보존하므로 삭제되지 않음)
         const r = remote as any;
@@ -3911,8 +3918,8 @@ export default function App() {
           departments: normalizeMilitaryDepartments((rCodeValues as any)?.departments || []),
         });
         setMilitaryTrainingAutoConfig((rAutoConfig && (rAutoConfig as any).targetStatuses) ? (rAutoConfig as any) : { enabled: true, targetStatuses: ["재직"] });
-        // 진단 로그(요청): 실제 로드된 인원/훈련/공지 건수.
-        console.log("Personnel Count", rPersonnel.length, "| Training", rTraining.length, "| Notices", rNotices.length);
+        // 진단 로그(개발 환경에서만): 실제 로드된 인원/훈련/공지 건수. + 필터 결과와 원본 건수 구분용.
+        if (import.meta.env.DEV) console.log("Personnel Count", rPersonnel.length, "| Training", rTraining.length, "| Notices", rNotices.length);
         // Supabase 군대 모듈 로드는 isLoading 전환 이후 완료될 수 있으므로, 로드 값으로 스냅샷 재시드.
         lastMilitarySnapshotRef.current = JSON.stringify({
           tenantId,
@@ -3998,7 +4005,9 @@ export default function App() {
   // [5] Realtime 실패/끊김 대비 fallback: 군대 메뉴에 있을 때 진입 시 1회 + 45초 간격으로 조용히 재조회.
   //     (다른 기기 저장분을 realtime 이 놓쳐도 최대 45초 내 자동 반영. 상태 텍스트/로딩 표시 없음 → 화면 깜빡임 없음)
   useEffect(() => {
-    const MILITARY_TABS = ["personnelManagement", "militaryTraining", "militaryNotices", "militaryReports", "militarySettings"];
+    // 군대 메뉴 탭 키(실제 activeTab 값 기준). 과거 "militaryTraining" 로 잘못 표기되어 훈련기록 탭이
+    // fallback 재조회 대상에서 빠져 있었다 → 실제 키 "trainingRecords"(및 대시보드) 로 교정.
+    const MILITARY_TABS = ["militaryDashboard", "personnelManagement", "trainingRecords", "militaryNotices", "militaryReports", "militarySettings"];
     if (!MILITARY_TABS.includes(activeTab)) return;
     if (!isSupabaseAvailable() || !currentUser?.id) return;
     void loadSupabaseMilitaryModule(true);
