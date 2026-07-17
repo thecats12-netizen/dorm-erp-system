@@ -3,6 +3,7 @@
 //  - 로그인 사용자의 유효 범위 병합을 위해 "내 배정 역할들의 활성 범위"를 읽는다.
 import { supabase, isSupabaseAvailable } from "../../services/supabaseService";
 import { writeAudit } from "./customRoleService";
+import { arePermissionTablesMissing, markPermissionTablesMissing } from "./permissionSchemaState";
 import type { ScopeRow, ScopeType } from "./scopeCatalog";
 
 const nowIso = () => new Date().toISOString();
@@ -17,6 +18,7 @@ export type ScopeLoad = { rows: ScopeRow[]; tableMissing: boolean; error?: strin
 
 export async function loadRoleScopes(roleId: string, tenantId: string): Promise<ScopeLoad> {
   if (!isSupabaseAvailable() || !supabase || !roleId) return { rows: [], tableMissing: false };
+  if (arePermissionTablesMissing()) return { rows: [], tableMissing: true };
   const { data, error } = await supabase
     .from("custom_role_scopes")
     .select("id, scope_type, scope_value, action_scope, is_active, valid_from, valid_until")
@@ -24,7 +26,7 @@ export async function loadRoleScopes(roleId: string, tenantId: string): Promise<
     .eq("custom_role_id", roleId)
     .eq("is_active", true);
   if (error) {
-    if (isMissingTable(error)) return { rows: [], tableMissing: true };
+    if (isMissingTable(error)) { markPermissionTablesMissing(); return { rows: [], tableMissing: true }; }
     return { rows: [], tableMissing: false, error: error.message };
   }
   return { rows: (data as ScopeRow[]) || [], tableMissing: false };
@@ -85,6 +87,21 @@ export async function saveRoleScopes(
       { scopes: Array.from(beforeActive.keys()) }, { scopes: Array.from(nextKeys), added, removed });
   }
   return { added, removed, partialError };
+}
+
+// 여러 역할의 활성 데이터 범위를 한 번에 조회(역할별 미리보기용). role_id → ScopeRow[].
+export async function loadRolesScopesMap(roleIds: string[], tenantId: string): Promise<Record<string, ScopeRow[]>> {
+  const out: Record<string, ScopeRow[]> = {};
+  if (!isSupabaseAvailable() || !supabase || roleIds.length === 0) return out;
+  const { data, error } = await supabase
+    .from("custom_role_scopes")
+    .select("custom_role_id, scope_type, scope_value, action_scope, is_active, valid_from, valid_until")
+    .eq("tenant_id", tenantId).in("custom_role_id", roleIds).eq("is_active", true);
+  if (error) return out;
+  ((data as Array<ScopeRow & { custom_role_id: string }>) || []).forEach((r) => {
+    (out[r.custom_role_id] ||= []).push(r);
+  });
+  return out;
 }
 
 export type MyScopeRow = ScopeRow & { source_role_id: string };

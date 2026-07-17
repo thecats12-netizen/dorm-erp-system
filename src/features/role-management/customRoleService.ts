@@ -5,7 +5,8 @@
 //  - 마이그레이션 미적용 환경에서도 오류로 죽지 않고 tableMissing 신호를 돌려준다(무회귀).
 import { supabase, isSupabaseAvailable } from "../../services/supabaseService";
 import { isSystemRoleCode } from "./systemRoles";
-import type { CustomRole, CustomRoleInput, CustomRoleAuditAction } from "./types";
+import { arePermissionTablesMissing, markPermissionTablesMissing } from "./permissionSchemaState";
+import type { CustomRole, CustomRoleInput, CustomRoleAuditAction, PermissionMode } from "./types";
 
 const nowIso = () => new Date().toISOString();
 
@@ -33,13 +34,14 @@ export function validateRoleCode(code: string): string | null {
 
 export async function loadCustomRoles(tenantId: string): Promise<LoadResult> {
   if (!isSupabaseAvailable() || !supabase) return { roles: [], tableMissing: false, error: "Supabase 미설정" };
+  if (arePermissionTablesMissing()) return { roles: [], tableMissing: true }; // 반복 404 방지(미적용 확정)
   const { data, error } = await supabase
     .from("custom_roles")
     .select("*")
     .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false });
   if (error) {
-    if (isMissingTable(error)) return { roles: [], tableMissing: true };
+    if (isMissingTable(error)) { markPermissionTablesMissing(); return { roles: [], tableMissing: true }; }
     return { roles: [], tableMissing: false, error: error.message };
   }
   return { roles: (data as CustomRole[]) || [], tableMissing: false };
@@ -73,6 +75,7 @@ export async function createCustomRole(
     description: input.description?.trim() || null,
     base_system_role: input.base_system_role || null,
     role_type: "custom" as const,
+    permission_mode: input.permission_mode || "additive",
     is_active: input.is_active,
     is_deleted: false,
     cloned_from_role_code: input.cloned_from_role_code || null,
@@ -96,6 +99,7 @@ export async function updateCustomRole(
     name: input.name.trim(),
     description: input.description?.trim() || null,
     base_system_role: input.base_system_role || null,
+    permission_mode: input.permission_mode || "additive",
     is_active: input.is_active,
     notes: input.notes?.trim() || null,
     updated_by: actorId || null,
@@ -111,7 +115,8 @@ export async function updateCustomRole(
 // 복제: System Role 또는 Custom Role 을 출처로 새 Custom Role 생성(출처 원본은 변경하지 않음).
 export async function cloneRole(
   sourceCode: string, sourceBaseSystemRole: string | null,
-  newCode: string, newName: string, tenantId: string, actorId: string
+  newCode: string, newName: string, tenantId: string, actorId: string,
+  permissionMode: PermissionMode = "additive"
 ): Promise<CustomRole> {
   return createCustomRole(
     {
@@ -119,6 +124,7 @@ export async function cloneRole(
       name: newName,
       // System Role 복제 시 그 자신이 기준, Custom 복제 시 원본의 기준을 승계.
       base_system_role: isSystemRoleCode(sourceCode) ? sourceCode : (sourceBaseSystemRole || null),
+      permission_mode: permissionMode,
       is_active: true,
       cloned_from_role_code: sourceCode,
     },

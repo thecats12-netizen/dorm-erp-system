@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import {
   Bell,
@@ -124,8 +124,9 @@ import RoleManagementPage from "./features/role-management/pages/RoleManagementP
 import UserCustomRolesEditor from "./features/role-management/UserCustomRolesEditor";
 import { getAssignmentSummary } from "./features/role-management/userCustomRoleService";
 import { loadCustomRoles as loadCustomRolesSvc } from "./features/role-management/customRoleService";
-import { loadMyGrantedPermissionKeys } from "./features/role-management/customRolePermissionService";
+import { loadMyMenuAccess, type MyMenuAccess } from "./features/role-management/customRolePermissionService";
 import { buildEffectivePermissions } from "./features/role-management/permissionModel";
+import { buildDataScopeAccess } from "./features/role-management/dataScopeModel";
 import { writeSecurityAudit } from "./features/role-management/securityAuditService";
 import ExamRulesPage from "./features/exam-management/pages/ExamRulesPage";
 import ExamProcessScopeEditor from "./features/exam-management/pages/ExamProcessScopeEditor";
@@ -7465,9 +7466,61 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operationalDorms, occupants, newHires]);
 
+  // ── 권한/데이터 범위 계산 (파생 목록·핸들러보다 먼저 선언) ────────────────────
+  const EMPTY_MENU_ACCESS: MyMenuAccess = { allKeys: new Set(), restrictiveActive: false, restrictiveTabs: new Set(), restrictiveKeys: new Set(), restrictiveScopeRows: [] };
+  const [myMenuAccess, setMyMenuAccess] = useState<MyMenuAccess>(EMPTY_MENU_ACCESS);
+  useEffect(() => {
+    const role = currentUser?.role;
+    const uid = currentUser?.id;
+    if (!uid || role === "maintenance_reporter" || role === "dorm_manager") { setMyMenuAccess(EMPTY_MENU_ACCESS); return; }
+    let alive = true;
+    (async () => {
+      const access = await loadMyMenuAccess(uid, tenantId);
+      if (alive) setMyMenuAccess(access);
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id, currentUser?.role, tenantId]);
+  const myPerms = useMemo(() => buildEffectivePermissions(myMenuAccess.allKeys), [myMenuAccess]);
+  // 데이터 범위(9단계): restrictive 역할의 활성 범위로 접근 판정. restrictive 없음 → active=false(전부 허용, 무회귀).
+  const dataScope = useMemo(
+    () => buildDataScopeAccess(myMenuAccess.restrictiveActive, myMenuAccess.restrictiveScopeRows, { assignedDormId: currentUser?.dormId }),
+    [myMenuAccess, currentUser]
+  );
+  // 대시보드·통계 집계용 스코프 적용 배열. 데이터 범위 없는 계정(dataScope.active=false)은 원본을 그대로
+  //  반환하므로 기존 동작 100% 동일(무회귀). 목록과 동일한 dataScope 함수 재사용(별도 계산 없음).
+  const scopedOccupants = useMemo(
+    () => dataScope.active ? occupants.filter((o) => dataScope.canOccupant({ dormId: o.dormId, site: o.site, gender: o.gender })) : occupants,
+    [occupants, dataScope]
+  );
+  const scopedOperationalDorms = useMemo(
+    () => dataScope.active ? operationalDorms.filter((d) => dataScope.canDorm({ id: d.id, site: d.site, gender: d.gender })) : operationalDorms,
+    [operationalDorms, dataScope]
+  );
+  const scopedNormalizedOccupants = useMemo(
+    () => dataScope.active ? normalizedOccupants.filter((o) => dataScope.canOccupant({ dormId: o.dormId, site: o.site, gender: o.gender })) : normalizedOccupants,
+    [normalizedOccupants, dataScope]
+  );
+  // 공통 권한 판정(회귀 방지: 호출부 기존 게이트 baseGate 를 전달, 사용자 정의 권한 없으면 기존과 100% 동일).
+  const hasPermission = useCallback((tab: TabKey | string, action: string, baseGate = false): boolean => {
+    const key = `${tab}.${action}`;
+    if (myMenuAccess.restrictiveActive) return myMenuAccess.restrictiveKeys.has(key); // restrictive 우선
+    return baseGate || myMenuAccess.allKeys.has(key);                                  // additive(기존 OR 추가)
+  }, [myMenuAccess]);
+  const DELETE_TAB_BY_TYPE: Partial<Record<AuditLog["targetType"], TabKey>> = {
+    dorm: "dorms", dormContract: "dormContracts", newHire: "newHires", occupant: "occupants",
+  };
+  const canWriteTab = useCallback((tab: TabKey | string): boolean => {
+    if (myMenuAccess.restrictiveActive) {
+      return myMenuAccess.restrictiveKeys.has(`${tab}.create`) || myMenuAccess.restrictiveKeys.has(`${tab}.update`);
+    }
+    return currentUser?.role === "admin" || myMenuAccess.allKeys.has(`${tab}.create`) || myMenuAccess.allKeys.has(`${tab}.update`);
+  }, [myMenuAccess, currentUser]);
+
   const visibleDorms = useMemo(() => {
     return operationalDorms.filter((dorm) => {
       if (!hasAccessToDorm(currentUser, dorm.id)) return false;
+      if (!dataScope.canDorm({ id: dorm.id, site: dorm.site, gender: dorm.gender })) return false; // 데이터 범위(9단계)
       if (dormSiteFilter !== "전체" && dorm.site !== dormSiteFilter) return false;
       if (dormGenderFilter !== "전체" && dorm.gender !== dormGenderFilter) return false;
       if (dormStatusFilter !== "전체") {
@@ -7482,7 +7535,7 @@ export default function App() {
       return true;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operationalDorms, normalizedOccupants, currentUser, dormSearch, dormSiteFilter, dormGenderFilter, dormStatusFilter]);
+  }, [operationalDorms, normalizedOccupants, currentUser, dormSearch, dormSiteFilter, dormGenderFilter, dormStatusFilter, dataScope]);
 
   // 기숙사/입주자 데이터가 "안 보이는" 사유를 사용자에게 안내. (담당 기숙사 미지정/불일치 등)
   // 관리자/뷰어는 전체 표시되므로 안내 대상이 아니다.
@@ -7638,6 +7691,7 @@ export default function App() {
         dorms.find((d) => d.id === o.dormId) ||
         null;
       const site = dorm?.site || o.site;
+      if (!dataScope.canOccupant({ dormId: o.dormId, site, gender: o.gender })) return false; // 데이터 범위(9단계)
       if (occupantSiteFilter !== "전체" && site !== occupantSiteFilter) return false;
       if (occupantGenderFilter !== "전체" && o.gender !== occupantGenderFilter) return false;
       if (occupantStatusFilter !== "전체") {
@@ -7652,9 +7706,14 @@ export default function App() {
     });
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [normalizedOccupants, dorms, operationalDorms, occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter, currentUser]);
+  }, [normalizedOccupants, dorms, operationalDorms, occupantSearch, occupantSiteFilter, occupantGenderFilter, occupantStatusFilter, currentUser, dataScope]);
 
-  const selectedDetailDorm = operationalDorms.find((dorm) => dorm.id === selectedDormDetailId) || null;
+  // 상세 접근도 데이터 범위 적용: 범위 밖 기숙사는 상세 URL/직접 열기 차단(민감 데이터 미렌더).
+  const selectedDetailDorm = (() => {
+    const d = operationalDorms.find((dorm) => dorm.id === selectedDormDetailId) || null;
+    if (d && !dataScope.canDorm({ id: d.id, site: d.site, gender: d.gender })) return null;
+    return d;
+  })();
   // 상세보기 입주자: 현재 거주자 먼저, 퇴실/과거거주는 아래로 정렬(현재 인원 계산은 별도로 퇴실 제외).
   const selectedDetailOccupants = selectedDetailDorm
     ? visibleOccupants
@@ -9221,8 +9280,8 @@ export default function App() {
       return days >= 0 && days <= 30;
     }).length;
 
-    // 3. 공실률 (정원 기준, 활성 기숙사 operationalDorms 기준 — 보고서와 동일 공통 함수 사용)
-    const vacancyRate = computeVacancyStats(operationalDorms, occupants).vacancyRate;
+    // 3. 공실률 (정원 기준, 활성 기숙사 기준 — 데이터 범위 적용 배열 사용)
+    const vacancyRate = computeVacancyStats(scopedOperationalDorms, scopedOccupants).vacancyRate;
 
     // 4. 미처리 하자 수
     const unprocessedDefects = defects.filter(d =>
@@ -9241,7 +9300,7 @@ export default function App() {
     const activeReports = cleaningReports.filter((r) => !r.isDeleted && !r.isPermanentDeleted);
     const dormKeyOf = (s: string, b: string, dg: string, h: string) =>
       `${(s || "").trim().toLowerCase()}|${(b || "").trim().toLowerCase()}|${stripDongHoSuffix(dg).toLowerCase()}|${stripDongHoSuffix(h).toLowerCase()}`;
-    const unreportedCleaning = operationalDorms.filter((dorm) => {
+    const unreportedCleaning = scopedOperationalDorms.filter((dorm) => {
       const key = dormKeyOf(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
       const reported = activeReports.some((r) => {
         const d = parseSafeDate(r.reportDate);
@@ -9264,7 +9323,7 @@ export default function App() {
       unreportedCleaning,
       outdatedInventory,
     };
-  }, [newHires, dormContracts, dorms, occupants, defects, cleaningReports, inventory, operationalDorms]);
+  }, [newHires, dormContracts, defects, cleaningReports, inventory, scopedOperationalDorms, scopedOccupants]);
 
   // 대시보드: 오늘의 일정(입주/퇴실) + 미배정 신입사원 목록
   const dashboardOpsData = useMemo(() => {
@@ -9863,7 +9922,12 @@ export default function App() {
   }, [currentUser?.id]);
 
   const saveDorm = () => {
-    if (!canEditData(currentUser)) return;
+    if (!canWriteTab("dorms")) { void appAlert("권한 안내", "이 작업을 수행할 권한이 없습니다."); return; }
+    // 데이터 범위(9단계): 수정 대상 기숙사가 허용 범위 밖이면 차단.
+    if (editingDormId) {
+      const td = dorms.find((d) => d.id === editingDormId);
+      if (td && !dataScope.canDorm({ id: td.id, site: td.site, gender: td.gender })) { void appAlert("권한 안내", "이 데이터에 접근할 권한이 없습니다."); return; }
+    }
     if (!dormForm.address.trim() || !dormForm.buildingName.trim()) {
       void appAlert("알림", "기숙사명과 주소는 필수입니다.");
       return;
@@ -9893,7 +9957,12 @@ export default function App() {
   };
 
   const saveOccupant = async () => {
-    if (!canEditData(currentUser)) return;
+    if (!canWriteTab("occupants")) { void appAlert("권한 안내", "이 작업을 수행할 권한이 없습니다."); return; }
+    // 데이터 범위(9단계): 대상 입주자의 기숙사가 허용 범위 밖이면 차단(함수 실행 전 서버 전 검증).
+    if (occupantForm.dormId) {
+      const td = dorms.find((d) => d.id === occupantForm.dormId);
+      if (td && !dataScope.canDorm({ id: td.id, site: td.site, gender: td.gender })) { void appAlert("권한 안내", "이 데이터에 접근할 권한이 없습니다."); return; }
+    }
     if (!occupantForm.employeeName.trim()) {
       void appAlert("알림", "이름은 필수입니다.");
       return;
@@ -10023,7 +10092,7 @@ export default function App() {
   };
 
   const saveDormContract = () => {
-    if (!canEditData(currentUser)) return;
+    if (!canWriteTab("dormContracts")) { void appAlert("권한 안내", "이 작업을 수행할 권한이 없습니다."); return; }
     if (!dormContractForm.buildingName.trim() || !dormContractForm.address.trim()) {
       void appAlert("알림", "건물명과 도로명주소는 필수입니다.");
       return;
@@ -10149,7 +10218,7 @@ export default function App() {
   };
 
   const saveNewHire = async () => {
-    if (!canEditData(currentUser)) return;
+    if (!canWriteTab("newHires")) { void appAlert("권한 안내", "이 작업을 수행할 권한이 없습니다."); return; }
     if (!newHireForm.name.trim()) {
       void appAlert("알림", "이름은 필수입니다.");
       return;
@@ -13435,8 +13504,9 @@ export default function App() {
   };
 
 const exportExcel = () => {
-  if (!canEditData(currentUser)) {
-    void appAlert("알림", "엑셀 다운로드는 관리자 권한이 필요합니다.");
+  // 기존 게이트(admin) 유지 + 해당 메뉴에 excel_download 사용자 정의 권한이 있으면 추가 허용(restrictive 우선).
+  if (!hasPermission(activeTab, "excel_download", canEditData(currentUser))) {
+    void appAlert("알림", "엑셀 다운로드 권한이 없습니다.");
     return;
   }
   let rows: Record<string, unknown>[] = [];
@@ -15059,6 +15129,23 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     targetType: AuditLog["targetType"]
   ) => {
     if (ids.length === 0) return false;
+    // [권한] 기숙사관리 대상은 삭제 권한 검사(함수 실행 전). 그 외 타입은 기존 동작 유지.
+    const guardTab = DELETE_TAB_BY_TYPE[targetType];
+    if (guardTab && !hasPermission(guardTab, "delete", canEditData(currentUser))) {
+      void appAlert("권한 안내", "삭제 권한이 없습니다.");
+      return false;
+    }
+    // 데이터 범위(9단계): 대상 행이 허용 범위 밖이면 차단(입주자/기숙사). URL/직접 호출 우회 방지.
+    if (dataScope.active && (targetType === "occupant" || targetType === "dorm")) {
+      const targets = items.filter((entry) => ids.includes(entry.id));
+      const outOfScope = targets.some((t) => {
+        const rec = t as unknown as { dormId?: string; site?: string; gender?: string; id?: string };
+        return targetType === "occupant"
+          ? !dataScope.canOccupant({ dormId: rec.dormId, site: rec.site, gender: rec.gender })
+          : !dataScope.canDorm({ id: rec.id, site: rec.site, gender: rec.gender });
+      });
+      if (outOfScope) { void appAlert("권한 안내", "이 데이터에 접근할 권한이 없습니다."); return false; }
+    }
     if (!(await appConfirm("삭제 확인", "삭제할까요?", { confirmText: "삭제", tone: "danger" }))) return false;
     const now = new Date().toISOString();
     const deletedBy = currentUser?.id || currentUser?.username || currentUser?.displayName || "";
@@ -15113,6 +15200,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   // 계약과 dorms 레코드를 함께 soft-delete 해야 목록/통계에 삭제가 반영됨.
   const softDeleteDormsCascade = async (operationalDormIds: string[]) => {
     if (operationalDormIds.length === 0) return false;
+    if (!hasPermission("dorms", "delete", canEditData(currentUser))) { void appAlert("권한 안내", "삭제 권한이 없습니다."); return false; }
+    if (dataScope.active && operationalDormIds.some((id) => { const d = dorms.find((x) => x.id === id); return d && !dataScope.canDorm({ id: d.id, site: d.site, gender: d.gender }); })) {
+      void appAlert("권한 안내", "이 데이터에 접근할 권한이 없습니다."); return false;
+    }
     if (!(await appConfirm("삭제 확인", "삭제할까요?", { confirmText: "삭제", tone: "danger" }))) return false;
     const now = new Date().toISOString();
     const deletedBy = currentUser?.id || currentUser?.username || currentUser?.displayName || "";
@@ -15338,19 +15429,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   // 로그인 사용자의 유효 권한 병합 재료: 배정된 사용자 정의 권한들의 활성 permission_key 합집합.
   //  - add-only: 기존 role 허용 위에 "추가"만. 하자접수/기숙사 담당은 배정 자체가 없어 항상 빈 집합(보호).
   //  - 로그인/사용자 변경 시 1회 조회(메뉴마다 반복 조회 금지).
-  const [myGrantedKeys, setMyGrantedKeys] = useState<Set<string>>(new Set());
-  useEffect(() => {
-    const role = currentUser?.role;
-    const uid = currentUser?.id;
-    if (!uid || role === "maintenance_reporter" || role === "dorm_manager") { setMyGrantedKeys(new Set()); return; }
-    let alive = true;
-    (async () => {
-      const keys = await loadMyGrantedPermissionKeys(uid, tenantId);
-      if (alive) setMyGrantedKeys(keys);
-    })();
-    return () => { alive = false; };
-  }, [currentUser?.id, currentUser?.role, tenantId]);
-  const myPerms = useMemo(() => buildEffectivePermissions(myGrantedKeys), [myGrantedKeys]);
+  // (myMenuAccess / dataScope / hasPermission / canWriteTab 는 파생 목록·핸들러보다 먼저 선언되어야 하므로
+  //  visibleDorms 앞으로 이동했다.)
 
   // 권한관리 데이터 범위(기숙사 직접선택)용 옵션. 기존 dorms 를 읽기만 한다.
   const roleDormOptions = useMemo(
@@ -15371,7 +15451,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           if (isMaintenanceAccessUser) {
             return menu.tabKey === "cleaningReports" || menu.tabKey === "defects";
           }
-          // add-only: 기존 role 허용 OR 사용자 정의 권한(menu_view) 추가 허용.
+          // restrictive 우선: 활성 restrictive 권한이 하나라도 있으면 그 권한들이 허용한 메뉴만 표시
+          //  (기존 role/additive 무시). 관리자 전용 시스템 탭은 restrictive 로도 부여 불가(부여 대상 제외).
+          if (myMenuAccess.restrictiveActive) {
+            return !ADMIN_ONLY_TABS.has(menu.tabKey) && myMenuAccess.restrictiveTabs.has(menu.tabKey);
+          }
+          // additive: 기존 role 허용 OR 사용자 정의 권한(menu_view) 추가 허용.
           //  단, 관리자 전용 시스템 탭은 사용자 정의 권한으로 노출하지 않는다(admin 렌더 가드와 일치).
           const adminOnly = ADMIN_ONLY_TABS.has(menu.tabKey);
           return menu.requiredRoles.includes(currentRole) || (!adminOnly && myPerms.grantsMenu(menu.tabKey));
@@ -15401,7 +15486,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         }))
         .sort((a, b) => a.order - b.order);
     },
-    [systemSettings.menus, currentUser, myPerms]
+    [systemSettings.menus, currentUser, myPerms, myMenuAccess]
   );
 
   const filteredMenuGroups = useMemo(() => {
@@ -15440,6 +15525,33 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       setActiveTab(isMaintenanceAccessUser ? "cleaningReports" : "dashboard");
     }
   }, [isMaintenanceAccessUser, activeTab, currentUser]);
+
+  // 라우트 가드: Sidebar 와 "동일한" 허용 계산(visibleMenuGroups)을 재사용(중복 구현 없음).
+  //  허용 목록 = 사이드바에 실제 표시되는 탭 집합.
+  const allowedTabSet = useMemo(() => {
+    const s = new Set<string>();
+    visibleMenuGroups.forEach((g) => g.children.forEach((c) => s.add(c.tab)));
+    return s;
+  }, [visibleMenuGroups]);
+  const firstAllowedTab = useMemo<TabKey | null>(
+    () => (visibleMenuGroups[0]?.children[0]?.tab as TabKey) ?? null,
+    [visibleMenuGroups]
+  );
+  // 실제 메뉴 탭 집합(메뉴가 아닌 화면은 라우트 가드 대상 아님 → 기존 404/기존 동작 유지).
+  const menuTabSet = useMemo(() => new Set<string>(systemSettings.menus.map((m) => m.tabKey)), [systemSettings.menus]);
+  // 권한 없는 라우트 접근 판정: admin 은 전체 허용, 그 외는 Sidebar 미노출 메뉴 접근 시 차단.
+  const routeAccessDenied =
+    !!currentUser && currentUser.role !== "admin" && menuTabSet.has(activeTab) && !allowedTabSet.has(activeTab);
+  // useLayoutEffect: 화면 그리기(및 하위 페이지의 데이터 조회 useEffect) 전에 실행 → 권한 없는 페이지가
+  //  API 를 먼저 호출하기 전에 첫 허용 메뉴로 이동(URL 직접/새 탭/뒤로가기 모두 상태 기반). 첫 허용 메뉴가
+  //  없으면(허용 메뉴 0개) 아래 403 화면을 표시. admin 무영향.
+  useLayoutEffect(() => {
+    if (!routeAccessDenied) return;
+    if (firstAllowedTab) {
+      setActiveTab(firstAllowedTab);
+      showNetworkToast("이 메뉴에 접근할 권한이 없습니다.");
+    }
+  }, [routeAccessDenied, firstAllowedTab]);
 
   const isGroupOpen = (group: string) => group === currentMenuGroup || group === expandedMenu || group === hoveredMenu;
   const isMenuActive = (group: string) => group === currentMenuGroup;
@@ -15717,7 +15829,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
     // 1) 지역별 기숙사 현황 (평택/천안 × 남/여): 총/사용중/공실
     const regionStatus = siteGenderStats.map((s) => {
-      const regionDorms = operationalDorms.filter((d) => d.site === s.site && d.gender === s.gender);
+      const regionDorms = scopedOperationalDorms.filter((d) => d.site === s.site && d.gender === s.gender);
       const total = regionDorms.length;
       const inUse = regionDorms.filter((d) => (occupancyCountByDorm.get(d.id) || 0) > 0).length;
       return { label: `${s.site} ${s.gender}`, total, inUse, vacant: Math.max(total - inUse, 0) };
@@ -15729,7 +15841,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       const d = new Date(now.getFullYear(), now.getMonth() - (5 - idx), 1);
       return { label: `${d.getMonth() + 1}월`, end: new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59) };
     });
-    const totalCapacity = operationalDorms.reduce((sum, d) => sum + (d.capacity || 0), 0);
+    const totalCapacity = scopedOperationalDorms.reduce((sum, d) => sum + (d.capacity || 0), 0);
     // 해당 월 말일 기준 거주 여부: 입실일 ≤ 월말, (실제퇴실일 없음 또는 월말 이후), 기숙사 배정됨, 퇴실 아님.
     const isResidentActiveInMonth = (o: Occupant, monthEnd: Date): boolean => {
       if (o.isDeleted) return false;
@@ -15742,7 +15854,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       return true;
     };
     const occupancyTrend = occMonths.map((m) => {
-      const residents = normalizedOccupants.filter((o) => isResidentActiveInMonth(o, m.end)).length;
+      const residents = scopedNormalizedOccupants.filter((o) => isResidentActiveInMonth(o, m.end)).length;
       return { label: m.label, rate: safeRate(residents, totalCapacity), residents, capacity: totalCapacity };
     });
 
@@ -15750,7 +15862,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     const expiryTrend = futureMonths.map((m) => ({
       label: m.label,
       ym: m.ym,
-      count: operationalDorms.filter((d) => (d.contractEnd || "").slice(0, 7) === m.ym).length,
+      count: scopedOperationalDorms.filter((d) => (d.contractEnd || "").slice(0, 7) === m.ym).length,
     }));
 
     // 4) 하자 발생 추이 (최근 6개월): 접수/진행중/완료
@@ -15776,7 +15888,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
     return { regionStatus, occupancyTrend, expiryTrend, defectTrend, cleaningTrend };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [siteGenderStats, operationalDorms, occupants, normalizedOccupants, defects, cleaningReports, occupancyCountByDorm]);
+  }, [siteGenderStats, scopedOperationalDorms, occupants, scopedNormalizedOccupants, defects, cleaningReports, occupancyCountByDorm]);
 
   // 월 필터 옵션 (데이터 내 실제 월 + 차트 표시 구간 합집합, 오름차순)
   const dormContractMonthOptions = useMemo(() => {
@@ -16658,6 +16770,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           </section>
         )}
 
+        {/* 라우트 가드 403 화면: 권한 없는 메뉴 접근 + 이동할 허용 메뉴가 없을 때(허용 메뉴 0개) 표시.
+            허용 메뉴가 있으면 위 useLayoutEffect 가 페인트 전에 첫 허용 메뉴로 이동하므로 이 화면은 나타나지 않는다. */}
+        {routeAccessDenied && !firstAllowedTab && (
+          <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+            <div className={`flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed px-6 py-16 text-center ${theme.darkMode ? "border-slate-700 text-slate-400" : "border-slate-300 text-slate-500"}`}>
+              <span className="text-3xl">🔒</span>
+              <div className="text-sm font-medium">이 메뉴에 접근할 권한이 없습니다.</div>
+              <div className="text-xs text-slate-400">접근 가능한 메뉴가 없습니다. 관리자에게 권한을 요청하세요.</div>
+            </div>
+          </section>
+        )}
+
         {activeTab === "dashboard" && (
           <div className="space-y-6">
             {/* 운영 요약 카드 */}
@@ -17095,7 +17219,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examRules" ? (
             <ExamRulesPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examRules")}
+              canEdit={canWriteTab("examRules")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17103,7 +17227,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examPersonnel" ? (
             <ExamPersonnelPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examPersonnel")}
+              canEdit={canWriteTab("examPersonnel")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17112,7 +17236,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examApplications" ? (
             <ExamApplicationsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examApplications")}
+              canEdit={canWriteTab("examApplications")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17121,7 +17245,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examPmCertifications" ? (
             <ExamPmCertificationsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examPmCertifications")}
+              canEdit={canWriteTab("examPmCertifications")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17131,7 +17255,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examDmCertifications" ? (
             <ExamDmCertificationsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examDmCertifications")}
+              canEdit={canWriteTab("examDmCertifications")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17141,7 +17265,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examAnnualTargets" ? (
             <ExamAnnualTargetsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examAnnualTargets")}
+              canEdit={canWriteTab("examAnnualTargets")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17150,7 +17274,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examMonthlyResults" ? (
             <ExamMonthlyResultsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examMonthlyResults")}
+              canEdit={canWriteTab("examMonthlyResults")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -18457,7 +18581,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 />
               </div>
               <div className="flex flex-wrap gap-2">
-                {canEditData(currentUser) && (
+                {hasPermission("dormContracts", "create", canEditData(currentUser)) && (
                   <button
                     onClick={() => {
                       setDormContractForm(dormContractTemplate());
@@ -18469,7 +18593,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <Plus className="h-4 w-4" /> 기숙사 추가
                   </button>
                 )}
-                {canEditData(currentUser) && selectedDormContractIds.length === 1 && (
+                {hasPermission("dormContracts", "create", canEditData(currentUser)) && selectedDormContractIds.length === 1 && (
                   <button
                     onClick={() => {
                       const selected = dormContracts.find((c) => c.id === selectedDormContractIds[0]);
@@ -18512,7 +18636,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     계약 갱신 등록
                   </button>
                 )}
-                {canEditData(currentUser) && selectedDormContractIds.length > 0 && (
+                {hasPermission("dormContracts", "delete", canEditData(currentUser)) && selectedDormContractIds.length > 0 && (
                   <button
                     onClick={async () => {
                       const idsToDelete = selectedDormContractIds;
@@ -18702,7 +18826,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 />
               </div>
               <div className="flex flex-wrap gap-2">
-                {canEditData(currentUser) && (
+                {hasPermission("newHires", "create", canEditData(currentUser)) && (
                   <button
                     onClick={() => {
                       setNewHireForm(newHireTemplate());
@@ -18724,7 +18848,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     거주상태 자동선택 전환
                   </button>
                 )}
-                {canEditData(currentUser) && selectedNewHireIds.length === 1 && (
+                {hasPermission("newHires", "create", canEditData(currentUser)) && selectedNewHireIds.length === 1 && (
                   <button
                     onClick={() => {
                       const selected = newHires.find((h) => h.id === selectedNewHireIds[0]);
@@ -18763,7 +18887,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     거주 갱신 등록
                   </button>
                 )}
-                {canEditData(currentUser) && selectedNewHireIds.length > 0 && (
+                {hasPermission("newHires", "delete", canEditData(currentUser)) && selectedNewHireIds.length > 0 && (
                   <button
                     onClick={async () => {
                       const idsToDelete = selectedNewHireIds;
@@ -19009,7 +19133,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 />
               </div>
               <div className="flex items-center gap-2 flex-wrap">
-                {canEditData(currentUser) && (
+                {hasPermission("dorms", "update", canEditData(currentUser)) && (
                   <>
                     <label className="inline-flex items-center gap-2 text-sm font-medium">
                       <input
@@ -19035,7 +19159,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     </button>
                   </>
                 )}
-                {canEditData(currentUser) && selectedDormIds.length > 0 && (
+                {hasPermission("dorms", "delete", canEditData(currentUser)) && selectedDormIds.length > 0 && (
                   <button
                     onClick={async () => {
                       if (await softDeleteDormsCascade(selectedDormIds)) {
@@ -19150,7 +19274,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </div>
                 )}
               </div>
-              {canEditData(currentUser) && (
+              {hasPermission("occupants", "create", canEditData(currentUser)) && (
                 <button
                   type="button"
                   onClick={() => setShowNewHireAssignmentModal(true)}
@@ -26485,6 +26609,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               actingUserId={currentUser?.id || ""}
               canManage={currentUser?.role === "admin"}
               darkMode={theme.darkMode}
+              menus={systemSettings.menus}
               onToast={showNetworkToast}
               appConfirm={appConfirm}
               onSaved={refreshUserCustomRoleSummary}

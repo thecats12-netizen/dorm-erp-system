@@ -129,6 +129,7 @@ export default function PermissionTreeEditor({ roleId, roleName, menus, tenantId
         <button type="button" onClick={() => bulkByActionGroup("write", true)} className={`rounded-lg px-2 py-1 text-xs ${chipBtn}`}>쓰기 일괄</button>
         <button type="button" onClick={() => bulkByActionGroup("download", true)} className={`rounded-lg px-2 py-1 text-xs ${chipBtn}`}>다운로드 일괄</button>
         <button type="button" onClick={() => bulkByActionGroup("approve", true)} className={`rounded-lg px-2 py-1 text-xs ${chipBtn}`}>승인 일괄</button>
+        <button type="button" onClick={() => setMany(allKeys, true)} className={`rounded-lg px-2 py-1 text-xs ${chipBtn}`}>전체 선택</button>
         <button type="button" onClick={() => setMany(allKeys, false)} className={`rounded-lg px-2 py-1 text-xs ${chipBtn}`}>전체 해제</button>
         {dirty && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">변경사항 있음</span>}
       </div>

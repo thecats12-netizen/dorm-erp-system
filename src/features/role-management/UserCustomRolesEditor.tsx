@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { loadCustomRoles } from "./customRoleService";
 import { getUserCustomRoles, saveUserCustomRoles, computeAssignable } from "./userCustomRoleService";
+import { loadRolesPermissionsMap } from "./customRolePermissionService";
+import { loadRolesScopesMap } from "./customRoleScopeService";
+import { ACTION_LABEL, type ActionKey } from "./permissionCatalog";
+import { PERMISSION_MODE_LABELS } from "./permissionMode";
+import type { ScopeRow } from "./scopeCatalog";
 import type { CustomRole } from "./types";
+import type { MenuItem } from "../../types";
 
 // 계정 등록/수정 모달의 "추가 권한(사용자 정의 권한)" 편집기.
 //  - ExamProcessScopeEditor 와 동일하게 자체 저장 + 감사로그(saveUser 흐름 무수정).
@@ -17,6 +23,7 @@ type Props = {
   actingUserId: string;
   canManage: boolean;               // 시스템 admin 만 관리
   darkMode: boolean;
+  menus: MenuItem[];                // 최종 권한 미리보기(메뉴 라벨/기준 역할 메뉴 계산)용
   onToast?: (m: string) => void;
   appConfirm: (title: string, message: string, opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger" }) => Promise<boolean>;
   onSaved?: () => void;             // 저장 후 목록 요약 갱신용
@@ -26,12 +33,14 @@ type Props = {
 const PROTECTED_ROLES = new Set(["maintenance_reporter", "dorm_manager"]);
 
 export default function UserCustomRolesEditor({
-  userId, userLabel, baseRole, tenantId, actingUserId, canManage, darkMode, onToast, appConfirm, onSaved,
+  userId, userLabel, baseRole, tenantId, actingUserId, canManage, darkMode, menus, onToast, appConfirm, onSaved,
 }: Props) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [tableMissing, setTableMissing] = useState(false);
   const [allRoles, setAllRoles] = useState<CustomRole[]>([]);
+  const [roleKeys, setRoleKeys] = useState<Record<string, string[]>>({});          // role_id → permission_key[](미리보기)
+  const [roleScopes, setRoleScopes] = useState<Record<string, ScopeRow[]>>({});     // role_id → 데이터 범위(미리보기)
   const [assignedActive, setAssignedActive] = useState<Set<string>>(new Set());   // 저장된 활성 배정
   const [assignedInactive, setAssignedInactive] = useState<CustomRole[]>([]);      // 배정됐으나 사용중지/삭제된 권한(읽기전용 배지)
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -66,6 +75,13 @@ export default function UserCustomRolesEditor({
         .map((r) => byId.get(r.custom_role_id))
         .filter((r): r is CustomRole => !!r && (!r.is_active || r.is_deleted));
       setAssignedInactive(inactive);
+      // 미리보기용: 선택 가능한 활성 역할들의 permission_key 일괄 로드(선택 변경 시 즉시 계산).
+      const activeRoleIds = rolesRes.roles.filter((r) => r.is_active && !r.is_deleted).map((r) => r.id);
+      const [keysMap, scopesMap] = await Promise.all([
+        loadRolesPermissionsMap(activeRoleIds, tenantId),
+        loadRolesScopesMap(activeRoleIds, tenantId),
+      ]);
+      if (alive) { setRoleKeys(keysMap); setRoleScopes(scopesMap); }
       setLoading(false);
     })();
     return () => { alive = false; };
@@ -82,8 +98,81 @@ export default function UserCustomRolesEditor({
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return selectableRoles;
-    return selectableRoles.filter((r) => r.name.toLowerCase().includes(q) || r.code.toLowerCase().includes(q));
+    // 권한명·코드·설명 검색.
+    return selectableRoles.filter((r) =>
+      r.name.toLowerCase().includes(q) || r.code.toLowerCase().includes(q) || (r.description || "").toLowerCase().includes(q));
   }, [selectableRoles, search]);
+
+  // ── 최종 권한 실시간 미리보기(선택 역할 + 기준 역할 + permission_mode 병합) ──────
+  const tabInfo = useMemo(() => {
+    const m = new Map<string, { group: string; menu: string }>();
+    menus.forEach((menu) => m.set(menu.tabKey, { group: menu.groupName, menu: menu.menuName }));
+    return m;
+  }, [menus]);
+
+  const preview = useMemo(() => {
+    const sel = Array.from(selected).map((id) => roleById.get(id)).filter((r): r is CustomRole => !!r);
+    const restrictiveRoles = sel.filter((r) => (r.permission_mode ?? "additive") === "restrictive");
+    const isRestrictive = restrictiveRoles.length > 0;
+
+    const menuTabs = new Set<string>();
+    const actionsByTab = new Map<string, Set<string>>();
+    const addKeys = (roles: CustomRole[]) => roles.forEach((r) => (roleKeys[r.id] || []).forEach((k) => {
+      const i = k.lastIndexOf("."); if (i < 0) return;
+      const tab = k.slice(0, i); const action = k.slice(i + 1);
+      menuTabs.add(tab);
+      (actionsByTab.get(tab) ?? (actionsByTab.set(tab, new Set()).get(tab)!)).add(action);
+    }));
+
+    if (isRestrictive) {
+      addKeys(restrictiveRoles);                       // restrictive 우선: 기존 role/additive 무시
+    } else {
+      // additive: 기준 역할(baseRole)의 메뉴 + 선택 역할들의 메뉴 합집합
+      menus.forEach((mn) => { if (mn.isVisible && mn.requiredRoles.includes(baseRole as never)) menuTabs.add(mn.tabKey); });
+      addKeys(sel);
+    }
+
+    const menuList = Array.from(menuTabs)
+      .map((t) => tabInfo.get(t))
+      .filter((v): v is { group: string; menu: string } => !!v)
+      .sort((a, b) => (a.group + a.menu).localeCompare(b.group + b.menu));
+
+    // 기능 요약: 액션별 부여 메뉴 수(menu_view 제외).
+    const funcCount = new Map<string, number>();
+    actionsByTab.forEach((acts) => acts.forEach((a) => { if (a !== "menu_view") funcCount.set(a, (funcCount.get(a) || 0) + 1); }));
+
+    return { isRestrictive, menuList, funcCount };
+  }, [selected, roleById, roleKeys, menus, baseRole, tabInfo]);
+
+  // 데이터 범위 미리보기: restrictive 역할이 있으면 그 역할들의 범위, 아니면 additive → 제한 없음.
+  //  개발 코드값(region/dorm UUID 등) 미노출 — 한글 라벨 + 개수로 요약.
+  const scopePreview = useMemo(() => {
+    const sel = Array.from(selected).map((id) => roleById.get(id)).filter((r): r is CustomRole => !!r);
+    const restrictiveRoles = sel.filter((r) => (r.permission_mode ?? "additive") === "restrictive");
+    if (restrictiveRoles.length === 0) return { restricted: false, lines: [] as string[] };
+    const rows: ScopeRow[] = restrictiveRoles.flatMap((r) => roleScopes[r.id] || []);
+    const valuesOf = (t: string) => Array.from(new Set(rows.filter((s) => s.scope_type === t).map((s) => s.scope_value)));
+    const genderLabel = (v: string) => (v === "남" ? "남성" : v === "여" ? "여성" : v === "all" ? "전체" : v);
+    const lines: string[] = [];
+    const org = valuesOf("organization");
+    if (org.includes("all")) lines.push("전체 데이터");
+    const region = valuesOf("region"); if (region.length) lines.push(`지역: ${region.map((v) => v === "all" ? "전체" : v).join(", ")}`);
+    const gender = valuesOf("gender"); if (gender.length) lines.push(`성별: ${gender.map(genderLabel).join(", ")}`);
+    const dorm = valuesOf("dorm");
+    if (dorm.length) {
+      const ids = dorm.filter((v) => !["all", "assigned"].includes(v));
+      lines.push(dorm.includes("all") ? "기숙사: 전체" : dorm.includes("assigned") ? "기숙사: 담당 기숙사" : `기숙사: 특정 ${ids.length}곳`);
+    }
+    const proc = valuesOf("process");
+    if (proc.length) {
+      const ids = proc.filter((v) => !["all", "assigned"].includes(v));
+      lines.push(proc.includes("all") ? "시험 공정: 전체" : proc.includes("assigned") ? "시험 공정: 담당 공정" : `시험 공정: 특정 ${ids.length}개`);
+    }
+    const owner = valuesOf("owner");
+    if (owner.length) lines.push("본인이 등록한 데이터만");
+    if (lines.length === 0) lines.push("설정된 데이터 범위 없음(해당 메뉴 0건)");
+    return { restricted: true, lines };
+  }, [selected, roleById, roleScopes]);
 
   const save = async () => {
     if (saving || !userId) return;
@@ -165,10 +254,55 @@ export default function UserCustomRolesEditor({
               <label key={r.id} className={`flex cursor-pointer items-center gap-2 px-3 py-2 text-sm ${darkMode ? "hover:bg-slate-800" : "hover:bg-white"}`}>
                 <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggle(r.id)} className="h-4 w-4" />
                 <span className="font-medium">{r.name}</span>
-                <span className="font-mono text-xs text-slate-400">({r.code})</span>
-                {r.base_system_role && <span className="text-xs text-slate-400">· 기준 {r.base_system_role}</span>}
+                <span className={`rounded-full px-2 py-0.5 text-[0.65rem] font-medium ${(r.permission_mode ?? "additive") === "restrictive" ? "bg-violet-100 text-violet-700" : "bg-slate-100 text-slate-600"}`}>
+                  {PERMISSION_MODE_LABELS[(r.permission_mode ?? "additive")]}
+                </span>
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[0.65rem] text-emerald-700">사용중</span>
+                {r.description && <span className="truncate text-xs text-slate-400" title={r.description}>· {r.description}</span>}
               </label>
             ))}
+          </div>
+
+          {/* 최종 권한 실시간 미리보기(선택 변경 시 즉시 반영, permission_mode 적용) */}
+          <div className={`mt-3 rounded-xl border p-3 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+            <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-slate-500">
+              최종 권한 미리보기
+              <span className={`rounded-full px-2 py-0.5 text-[0.65rem] font-medium ${preview.isRestrictive ? "bg-violet-100 text-violet-700" : "bg-slate-100 text-slate-600"}`}>
+                {preview.isRestrictive ? PERMISSION_MODE_LABELS.restrictive : PERMISSION_MODE_LABELS.additive}
+              </span>
+            </div>
+            <div className="text-xs text-slate-500">
+              <div className="mt-1 font-semibold">보이는 메뉴 ({preview.menuList.length})</div>
+              {preview.menuList.length === 0 ? (
+                <div className="text-slate-400">{preview.isRestrictive ? "선택한 권한이 부여한 메뉴가 없습니다." : "기준 역할 메뉴만 적용됩니다."}</div>
+              ) : (
+                <ul className="ml-4 max-h-28 list-disc overflow-y-auto">
+                  {preview.menuList.map((v, i) => <li key={i}>{v.group} &gt; {v.menu}</li>)}
+                </ul>
+              )}
+              {preview.funcCount.size > 0 && (
+                <>
+                  <div className="mt-2 font-semibold">기능</div>
+                  <div className="flex flex-wrap gap-1">
+                    {Array.from(preview.funcCount.entries()).map(([a, n]) => (
+                      <span key={a} className={`rounded-full px-2 py-0.5 text-[0.65rem] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-600"}`}>
+                        {ACTION_LABEL[a as ActionKey] || a} {n}
+                      </span>
+                    ))}
+                  </div>
+                </>
+              )}
+              {/* 데이터 범위 미리보기 */}
+              <div className="mt-2 border-t border-slate-100 pt-2">
+                <div className="font-semibold">데이터 범위</div>
+                {scopePreview.restricted ? (
+                  <ul className="ml-4 list-disc">{scopePreview.lines.map((l, i) => <li key={i}>{l}</li>)}</ul>
+                ) : (
+                  <div className="text-slate-400">제한 없음(기존 역할 데이터 범위 유지)</div>
+                )}
+              </div>
+              <p className="mt-2 text-[0.7rem] text-slate-400">{preview.isRestrictive ? "선택한 메뉴만 허용(기존 role 무시). " : "기존 역할 권한 + 선택 권한 합집합. "}적용은 다음 로그인/새로고침 후.</p>
+            </div>
           </div>
           <div className="mt-3 flex items-center justify-between gap-2">
             <span className={note}>선택 {selected.size}개 · 저장된 배정 {assignedActive.size}개</span>

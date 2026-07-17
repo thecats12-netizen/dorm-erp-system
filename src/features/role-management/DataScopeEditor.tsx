@@ -121,7 +121,12 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
   return (
     <div className="space-y-3 text-sm">
       <label className="block"><span className="mb-1 block text-slate-500">조직 범위</span>
-        <select value={org} onChange={(e) => setOrg(e.target.value)} className={`w-full rounded-xl border px-3 py-2 ${inputCls}`}>
+        <select value={org} onChange={(e) => {
+          const v = e.target.value;
+          setOrg(v);
+          // [충돌 방지] 전체 조직(all) 선택 시 조건별 범위(지역/성별/기숙사/공정/본인)를 자동 해제.
+          if (v === "all") { setRegions(new Set()); setGenders(new Set()); setDormMode("all"); setDormIds(new Set()); setProcessMode("all"); setProcessIds(new Set()); setOwner("all"); }
+        }} className={`w-full rounded-xl border px-3 py-2 ${inputCls}`}>
           {ORG_VALUES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </label>

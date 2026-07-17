@@ -5,6 +5,7 @@
 //  - 마이그레이션 미적용 환경에서도 죽지 않고 tableMissing 신호를 돌려준다.
 import { supabase, isSupabaseAvailable } from "../../services/supabaseService";
 import { writeAudit } from "./customRoleService";
+import { arePermissionTablesMissing, markPermissionTablesMissing } from "./permissionSchemaState";
 import type { CustomRole } from "./types";
 
 const nowIso = () => new Date().toISOString();
@@ -39,13 +40,14 @@ function isMissingTable(err: unknown): boolean {
 // 특정 계정에 배정된 연결 행(활성/비활성 모두 — 비활성은 읽기전용 배지 표시용).
 export async function getUserCustomRoles(userId: string, tenantId: string): Promise<UserAssignments> {
   if (!isSupabaseAvailable() || !supabase || !userId) return { rows: [], tableMissing: false };
+  if (arePermissionTablesMissing()) return { rows: [], tableMissing: true };
   const { data, error } = await supabase
     .from("user_custom_roles")
     .select("*")
     .eq("tenant_id", tenantId)
     .eq("user_id", userId);
   if (error) {
-    if (isMissingTable(error)) return { rows: [], tableMissing: true };
+    if (isMissingTable(error)) { markPermissionTablesMissing(); return { rows: [], tableMissing: true }; }
     return { rows: [], tableMissing: false, error: error.message };
   }
   return { rows: (data as UserCustomRoleRow[]) || [], tableMissing: false };
@@ -54,13 +56,14 @@ export async function getUserCustomRoles(userId: string, tenantId: string): Prom
 // 전체 계정의 활성 배정을 (user_id → custom_role_id[]) 로 집계(목록 요약용).
 export async function getAssignmentSummary(tenantId: string): Promise<{ map: Record<string, string[]>; tableMissing: boolean }> {
   if (!isSupabaseAvailable() || !supabase) return { map: {}, tableMissing: false };
+  if (arePermissionTablesMissing()) return { map: {}, tableMissing: true };
   const { data, error } = await supabase
     .from("user_custom_roles")
     .select("user_id, custom_role_id, is_active")
     .eq("tenant_id", tenantId)
     .eq("is_active", true);
   if (error) {
-    if (isMissingTable(error)) return { map: {}, tableMissing: true };
+    if (isMissingTable(error)) { markPermissionTablesMissing(); return { map: {}, tableMissing: true }; }
     return { map: {}, tableMissing: false };
   }
   const map: Record<string, string[]> = {};

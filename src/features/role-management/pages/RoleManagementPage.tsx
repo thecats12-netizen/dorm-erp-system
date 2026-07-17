@@ -5,14 +5,16 @@ import {
   loadCustomRoles, createCustomRole, updateCustomRole, cloneRole,
   setRoleActive, softDeleteRole, restoreRole, countAssignedUsers, validateRoleCode,
 } from "../customRoleService";
-import type { CustomRole, RoleKindFilter, RoleStatusFilter } from "../types";
+import type { CustomRole, RoleKindFilter, RoleStatusFilter, PermissionMode } from "../types";
+import { PERMISSION_MODES, PERMISSION_MODE_LABELS, PERMISSION_MODE_DESCRIPTIONS, permissionModeLabel, isValidPermissionMode } from "../permissionMode";
 import PermissionTreeEditor from "../PermissionTreeEditor";
 import DataScopeEditor from "../DataScopeEditor";
-import { loadRolePermissions } from "../customRolePermissionService";
+import { loadRolePermissions, copyRolePermissions } from "../customRolePermissionService";
 import { loadRoleScopes } from "../customRoleScopeService";
 import { countUsersForRole } from "../userCustomRoleService";
 import { ACTION_LABEL, DANGER_ACTIONS, parsePermKey, buildPermissionTree } from "../permissionCatalog";
 import { SCOPE_TYPE_LABEL, type ScopeRow } from "../scopeCatalog";
+import { resetPermissionSchemaState } from "../permissionSchemaState";
 
 // 시스템 > 권한관리 화면.
 //  - 기존 System Role(4종)은 읽기 전용·잠금(복제/상세만). custom_roles 만 CRUD.
@@ -31,7 +33,7 @@ type Props = {
   dormOptions?: Array<{ id: string; label: string }>;   // 데이터 범위(기숙사 직접선택)용
 };
 
-type FormMode = { kind: "create" } | { kind: "edit"; role: CustomRole } | { kind: "clone"; sourceCode: string; sourceName: string; sourceBase: string | null };
+type FormMode = { kind: "create" } | { kind: "edit"; role: CustomRole } | { kind: "clone"; sourceCode: string; sourceName: string; sourceBase: string | null; sourceRoleId?: string | null };
 
 const fmtDate = (v?: string | null) => (v ? new Date(v).toLocaleDateString("ko-KR") : "-");
 
@@ -55,6 +57,7 @@ export default function RoleManagementPage({
   const reload = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
+    resetPermissionSchemaState(); // 수동 새로고침 시 미적용 캐시 해제 → Migration 적용 후 재확인
     const res = await loadCustomRoles(tenantId);
     setRoles(res.roles);
     setTableMissing(res.tableMissing);
@@ -68,6 +71,7 @@ export default function RoleManagementPage({
   type Row = {
     key: string; name: string; code: string; kind: "system" | "custom";
     base: string; status: "active" | "inactive" | "deleted"; users: number;
+    mode?: PermissionMode;
     createdBy: string; createdAt: string; updatedBy: string; updatedAt: string;
     system?: UserRole; custom?: CustomRole;
   };
@@ -88,6 +92,7 @@ export default function RoleManagementPage({
         key: `cust-${r.id}`, name: r.name, code: r.code, kind: "custom",
         base: r.base_system_role || "-",
         status: r.is_deleted ? "deleted" : r.is_active ? "active" : "inactive",
+        mode: r.permission_mode ?? "additive",
         users: 0, createdBy: nameOf(r.created_by), createdAt: fmtDate(r.created_at),
         updatedBy: nameOf(r.updated_by), updatedAt: fmtDate(r.updated_at), custom: r,
       });
@@ -106,27 +111,30 @@ export default function RoleManagementPage({
   }, [rows, search, kindFilter, statusFilter]);
 
   // ── 액션 ─────────────────────────────────────────────────────────────────────
-  const handleSave = useCallback(async (values: { code: string; name: string; description: string; base: string | null; isActive: boolean; notes: string }) => {
+  const handleSave = useCallback(async (values: { code: string; name: string; description: string; base: string | null; permissionMode: PermissionMode; isActive: boolean; notes: string }) => {
     try {
       if (!form) return;
       if (!values.name.trim()) { await appAlert("권한관리", "권한명을 입력해주세요."); return; }
+      if (!isValidPermissionMode(values.permissionMode)) { await appAlert("권한관리", "유효하지 않은 권한 적용 방식입니다."); return; }
       if (form.kind === "edit") {
         await updateCustomRole(form.role.id, {
           name: values.name, description: values.description, base_system_role: values.base,
-          is_active: values.isActive, notes: values.notes,
+          permission_mode: values.permissionMode, is_active: values.isActive, notes: values.notes,
         }, tenantId, userId, form.role);
         onToast("사용자 정의 권한을 수정했습니다.");
       } else if (form.kind === "clone") {
         const codeErr = validateRoleCode(values.code);
         if (codeErr) { await appAlert("권한관리", codeErr); return; }
-        await cloneRole(form.sourceCode, form.sourceBase, values.code, values.name, tenantId, userId);
+        const cloned = await cloneRole(form.sourceCode, form.sourceBase, values.code, values.name, tenantId, userId, values.permissionMode);
+        // 출처가 사용자 정의 권한이면 메뉴·기능 권한도 함께 복제(시스템 권한 출처는 DB 권한이 없어 생략).
+        if (form.sourceRoleId) await copyRolePermissions(form.sourceRoleId, cloned.id, tenantId, userId);
         onToast(`'${form.sourceName}' 권한을 복제했습니다.`);
       } else {
         const codeErr = validateRoleCode(values.code);
         if (codeErr) { await appAlert("권한관리", codeErr); return; }
         await createCustomRole({
           code: values.code, name: values.name, description: values.description,
-          base_system_role: values.base, is_active: values.isActive, notes: values.notes,
+          base_system_role: values.base, permission_mode: values.permissionMode, is_active: values.isActive, notes: values.notes,
         }, tenantId, userId);
         onToast("사용자 정의 권한을 생성했습니다.");
       }
@@ -210,8 +218,9 @@ export default function RoleManagementPage({
       </div>
 
       {tableMissing && (
-        <div className="mb-4 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          권한관리 저장소(custom_roles)가 아직 적용되지 않았습니다. Supabase SQL Editor 에서 <b>20260718000000_custom_roles.sql</b> 실행 후 사용자 정의 권한 기능이 활성화됩니다. (시스템 기본 권한은 아래에서 확인 가능)
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <span>권한관리 저장소(custom_roles)가 아직 적용되지 않았습니다. Supabase SQL Editor 에서 <b>권한 복구 Migration</b> 실행 후 <b>다시 확인</b>을 눌러주세요. (시스템 기본 권한은 아래에서 확인 가능)</span>
+          <button type="button" onClick={() => void reload()} className="shrink-0 rounded-xl border border-amber-400 px-3 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-100">다시 확인</button>
         </div>
       )}
       {loadError && !tableMissing && (
@@ -251,7 +260,14 @@ export default function RoleManagementPage({
               <tr><td colSpan={11} className="px-3 py-8 text-center text-slate-400">표시할 권한이 없습니다.</td></tr>
             ) : filtered.map((r) => (
               <tr key={r.key} className={darkMode ? "hover:bg-slate-800/50" : "hover:bg-slate-50"}>
-                <td className="whitespace-nowrap px-3 py-2 font-medium">{r.kind === "system" ? "🔒 " : ""}{r.name}</td>
+                <td className="whitespace-nowrap px-3 py-2 font-medium">
+                  {r.kind === "system" ? "🔒 " : ""}{r.name}
+                  {r.mode && (
+                    <span className={`ml-2 whitespace-nowrap rounded-full px-2 py-0.5 text-[0.65rem] font-medium ${r.mode === "restrictive" ? "bg-violet-100 text-violet-700" : "bg-slate-100 text-slate-600"}`} title={PERMISSION_MODE_LABELS[r.mode]}>
+                      {PERMISSION_MODE_LABELS[r.mode]}
+                    </span>
+                  )}
+                </td>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-500">{r.code}</td>
                 <td className="whitespace-nowrap px-3 py-2">{r.kind === "system" ? "시스템 기본" : "사용자 정의"}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-slate-500">{r.base}</td>
@@ -276,7 +292,7 @@ export default function RoleManagementPage({
                         ) : (
                           <>
                             <button type="button" onClick={() => setForm({ kind: "edit", role: r.custom! })} className={`rounded-lg px-2 py-1 text-xs ${btnGhost}`}>수정</button>
-                            <button type="button" onClick={() => setForm({ kind: "clone", sourceCode: r.code, sourceName: r.name, sourceBase: r.custom!.base_system_role || null })} className={`rounded-lg px-2 py-1 text-xs ${btnGhost}`}>복제</button>
+                            <button type="button" onClick={() => setForm({ kind: "clone", sourceCode: r.code, sourceName: r.name, sourceBase: r.custom!.base_system_role || null, sourceRoleId: r.custom!.id })} className={`rounded-lg px-2 py-1 text-xs ${btnGhost}`}>복제</button>
                             <button type="button" onClick={() => handleToggleActive(r.custom!)} className={`rounded-lg px-2 py-1 text-xs ${btnGhost}`}>{r.status === "active" ? "사용중지" : "사용"}</button>
                             <button type="button" onClick={() => handleDelete(r.custom!)} className="rounded-lg px-2 py-1 text-xs text-rose-600 hover:bg-rose-50">삭제</button>
                           </>
@@ -319,13 +335,14 @@ function RoleFormModal({
   onToast: (m: string) => void;
   appConfirm: (title: string, message: string, opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger" }) => Promise<boolean>;
   onClose: () => void;
-  onSubmit: (v: { code: string; name: string; description: string; base: string | null; isActive: boolean; notes: string }) => void;
+  onSubmit: (v: { code: string; name: string; description: string; base: string | null; permissionMode: PermissionMode; isActive: boolean; notes: string }) => void;
 }) {
   const editRole = mode.kind === "edit" ? mode.role : null;
   const [code, setCode] = useState(editRole?.code || "");
   const [name, setName] = useState(mode.kind === "clone" ? `${mode.sourceName} 복제` : editRole?.name || "");
   const [description, setDescription] = useState(editRole?.description || "");
   const [base, setBase] = useState<string>(mode.kind === "clone" ? (mode.sourceBase || "") : (editRole?.base_system_role || ""));
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(editRole?.permission_mode ?? "additive");
   const [isActive, setIsActive] = useState(editRole ? editRole.is_active : true);
   const [notes, setNotes] = useState(editRole?.notes || "");
   const [saving, setSaving] = useState(false);
@@ -338,7 +355,7 @@ function RoleFormModal({
   const submit = async () => {
     if (saving) return;
     setSaving(true);
-    try { await onSubmit({ code, name, description, base: base || null, isActive, notes }); }
+    try { await onSubmit({ code, name, description, base: base || null, permissionMode, isActive, notes }); }
     finally { setSaving(false); }
   };
 
@@ -369,6 +386,20 @@ function RoleFormModal({
             </select>
             <span className="mt-1 block text-xs text-slate-400">선택한 시스템 권한 자체는 변경되지 않습니다(초기 설정 참고용).</span>
           </label>
+          <fieldset className="text-sm">
+            <legend className="mb-1 block text-slate-500">권한 적용 방식</legend>
+            <div className="space-y-2" role="radiogroup" aria-label="권한 적용 방식">
+              {PERMISSION_MODES.map((mode) => (
+                <label key={mode} className={`flex cursor-pointer items-start gap-2 rounded-2xl border px-3 py-2.5 ${permissionMode === mode ? (darkMode ? "border-slate-400 bg-slate-800" : "border-slate-900 bg-slate-50") : (darkMode ? "border-slate-700" : "border-slate-200")}`}>
+                  <input type="radio" name="permission_mode" value={mode} checked={permissionMode === mode} onChange={() => setPermissionMode(mode)} aria-label={PERMISSION_MODE_LABELS[mode]} className="mt-0.5 h-4 w-4" />
+                  <span>
+                    <span className="block font-medium">{PERMISSION_MODE_LABELS[mode]}</span>
+                    <span className="mt-0.5 block break-keep text-xs text-slate-400">{PERMISSION_MODE_DESCRIPTIONS[mode]}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} className="h-4 w-4" />
             <span>사용 여부(사용중)</span>
@@ -484,6 +515,10 @@ function RoleDetailModal({
                   {scope!.hiddenGroups.length === 0 ? <li>없음</li> : scope!.hiddenGroups.map((g, i) => <li key={i}>{g}</li>)}
                 </ul>
               </div>
+              <div className="flex justify-between gap-4 border-t border-slate-100 pt-2">
+                <span className="text-slate-500">적용 방식</span>
+                <span className="text-right">시스템 기본 정책</span>
+              </div>
               <p className="text-xs text-slate-400">이 화면은 기존 권한을 수정하지 않습니다. 분석 결과를 읽기 전용으로 표시합니다.</p>
             </div>
           </>
@@ -500,6 +535,7 @@ function RoleDetailModal({
                 <div className="text-sm">
                   {row("설명", c.description || "")}
                   {row("기준 시스템 권한", c.base_system_role || "")}
+                  {row("권한 적용 방식", permissionModeLabel(c.permission_mode))}
                   {row("상태", c.is_deleted ? "삭제됨" : c.is_active ? "사용중" : "사용중지")}
                   {row("복제 출처", c.cloned_from_role_code || "")}
                   {row("비고", c.notes || "")}
