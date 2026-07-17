@@ -16043,6 +16043,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <h1 className="text-2xl font-bold">기숙사 운영관리 로그인</h1>
             <p className="mt-2 text-sm text-slate-500">관리자, 조회전용, 기숙사관리자, 하자접수 전용 계정 지원</p>
           </div>
+          {/* 연결 설정 안내: Supabase 환경변수 미설정 시(오프라인) 흰 화면/오진 대신 명확한 안내 표시.
+              환경변수가 정상이면(=대부분의 경우) 렌더되지 않아 기존 로그인 UX 그대로 유지된다. */}
+          {!isSupabaseAvailable() && (
+            <div className="mb-4 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              <div className="font-semibold">서버 연결 설정이 필요합니다</div>
+              <p className="mt-1 text-xs leading-relaxed">
+                Supabase 환경변수(<b>VITE_SUPABASE_URL</b> / <b>VITE_SUPABASE_ANON_KEY</b>)가 설정되지 않아 로그인할 수 없습니다.
+                운영 환경(Vercel)은 <b>Settings → Environment Variables</b> 에 등록 후 <b>재배포</b>하고,
+                로컬은 <b>.env.local</b> 설정 후 개발 서버를 재시작해주세요.
+              </p>
+            </div>
+          )}
           <div className="space-y-4">
             <Input label="아이디" value={loginForm.username} onChange={(v) => setLoginForm((f) => ({ ...f, username: v }))} onKeyDown={handleLoginKeyDown} placeholder="아이디를 입력하세요" />
             <Input label="비밀번호" type="password" value={loginForm.password} onChange={(v) => setLoginForm((f) => ({ ...f, password: v }))} onKeyDown={handleLoginKeyDown} placeholder="비밀번호를 입력하세요" />
