@@ -12,11 +12,7 @@
       "Bash(awk 'NR>=15803 && NR<=15920' src/App.tsx)",
       "Bash(awk 'NR>=15803 && NR<=15960 && /}, \\\\[/' src/App.tsx)",
       "Bash(grep -viE \"//|\\\\*|미사용|서버에서만\")",
-      "Bash(grep -iE \"service_role|password\\\\s*=|secret\\\\s*=|private_key|access_token|refresh_token|eyJ[A-Za-z0-9_-]{20,}\")",
-      "Bash(awk -F= '/^VITE_/{print $1\"=\" \\(length\\($2\\)>10 ? \"<set,len=\"length\\($2\\)\">\" : \"<EMPTY/SHORT: [\"$2\"]>\"\\)}' .env)",
-      "Bash(awk -F= '/^VITE_SUPABASE_URL/{print \"URL prefix: \" substr\\($2,1,12\\) \"...\\(len \" length\\($2\\) \"\\)\"} /^VITE_SUPABASE_ANON_KEY/{print \"KEY prefix: \" substr\\($2,1,10\\) \"...\\(len \" length\\($2\\) \"\\)\"}' .env)",
-      "Bash(awk -F= '/^VITE_SUPABASE_URL/{print \\($2 ~ /^https:\\\\/\\\\// ? \"URL https OK\" : \"URL NOT https !!\"\\)} /^VITE_SUPABASE_ANON_KEY/{print \\($2 ~ /^eyJ/ ? \"KEY=legacy JWT \\(eyJ\\)\" : \\($2 ~ /^sb_publishable_/ ? \"KEY=new publishable \\(valid\\)\" : \\($2 ~ /^sb_secret_/ ? \"KEY=SECRET KEY!! \\(wrong\\)\" : \"KEY=UNKNOWN FORMAT\"\\)\\)\\)}' .env)",
-      "Bash(git ls-tree *)"
+      "Bash(grep -iE \"service_role|password\\\\s*=|secret\\\\s*=|private_key|access_token|refresh_token|eyJ[A-Za-z0-9_-]{20,}\")"
     ]
   }
 }
