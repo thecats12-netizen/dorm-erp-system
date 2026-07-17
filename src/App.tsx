@@ -9679,10 +9679,6 @@ export default function App() {
         const message = translateSupabaseError((error && (error as any).message) || String(error));
         console.error("Supabase sign-in failed:", error);
         setLoginError(message);
-        // Supabase 사용 가능 상태의 인증 실패는 여기서 종료한다. (return 이 없으면 아래 오프라인 전용
-        //  로컬 users 매칭으로 흘러가 실패 → "아이디 또는 비밀번호가 맞지 않거나 비활성 계정입니다."
-        //  로 실제 원인(비밀번호 불일치/미인증/네트워크 등)을 덮어써 오진을 유발했다.)
-        return;
       } else if (session?.user?.id) {
         const profile = await getProfile(session.user.id);
         const authUser = await getCurrentAuthUser();
