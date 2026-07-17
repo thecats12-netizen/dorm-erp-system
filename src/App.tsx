@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import {
   Bell,
@@ -120,6 +120,13 @@ import FilteredDormSelector from "./components/FilteredDormSelector";
 import SimMemberGridModal, { type SimMemberRow } from "./components/SimMemberGridModal";
 import ReportView, { type ReportConfig } from "./components/ReportView";
 import ExamManagementPage from "./features/exam-management/pages/ExamManagementPage";
+import RoleManagementPage from "./features/role-management/pages/RoleManagementPage";
+import UserCustomRolesEditor from "./features/role-management/UserCustomRolesEditor";
+import { getAssignmentSummary } from "./features/role-management/userCustomRoleService";
+import { loadCustomRoles as loadCustomRolesSvc } from "./features/role-management/customRoleService";
+import { loadMyGrantedPermissionKeys } from "./features/role-management/customRolePermissionService";
+import { buildEffectivePermissions } from "./features/role-management/permissionModel";
+import { writeSecurityAudit } from "./features/role-management/securityAuditService";
 import ExamRulesPage from "./features/exam-management/pages/ExamRulesPage";
 import ExamProcessScopeEditor from "./features/exam-management/pages/ExamProcessScopeEditor";
 import ExamPersonnelPage from "./features/exam-management/pages/ExamPersonnelPage";
@@ -510,6 +517,7 @@ const getTabLabel = (tabKey: TabKey) => {
     case "preMoveInInspection": return "입주전 점검";
     case "reportManagement": return "보고서";
     case "settings": return "시스템설정";
+    case "permissions": return "권한관리";
     case "defects": return "하자접수";
     case "users": return "사용자관리";
     case "militaryDashboard": return "군인대시보드";
@@ -2025,6 +2033,9 @@ function canManageUsers(user: LoginUser | null) {
 function canFileDefect(user: LoginUser | null) {
   return !!user && ["admin", "maintenance_reporter"].includes(user.role);
 }
+
+// 관리자 전용 시스템 탭(사용자 정의 권한으로도 노출/우회 불가). 렌더 가드/리다이렉트와 동일 집합.
+const ADMIN_ONLY_TABS = new Set<string>(["settings", "permissions", "recycleBin", "users", "militarySettings"]);
 
 // 감사로그 최대 보관 건수 — 최근 N건만 유지(localStorage 용량 초과 방지)
 const MAX_AUDIT_LOGS = 5000;
@@ -12018,6 +12029,21 @@ export default function App() {
       return;
     }
 
+    // [보안] 마지막 활성 관리자 보호: 유일한 활성 admin 을 admin 이 아닌 권한으로 변경하거나 비활성화 차단.
+    //  (서버 트리거 protect_last_admin 과 동일 기준. 프론트에서 먼저 안내해 401/500 노출을 막는다.)
+    if (editingUserId) {
+      const target = users.find((u) => u.id === editingUserId);
+      const activeAdmins = users.filter((u) => u.role === "admin" && u.isActive !== false && !u.isDeleted);
+      const isLastActiveAdmin = !!target && target.role === "admin" && target.isActive !== false && !target.isDeleted && activeAdmins.length <= 1;
+      const willDemote = (userForm.role as string) !== "admin";
+      const willDeactivate = (userForm.isActive ?? true) === false;
+      if (isLastActiveAdmin && (willDemote || willDeactivate)) {
+        void appAlert("사용자 관리", "마지막 관리자 계정은 비활성화하거나 권한을 변경할 수 없습니다.\n다른 관리자 계정을 먼저 지정해주세요.");
+        void writeSecurityAudit({ tenantId, actorUserId: currentUser?.id || "", action: "last_admin_blocked", result: "blocked", targetUserId: editingUserId, resourceType: "profiles", resourceId: editingUserId, reason: willDemote ? "role change" : "deactivate" });
+        return;
+      }
+    }
+
     // 기숙사 담당자 1명 제한(SoT: profiles.dorm_id). dorm_manager/maintenance_reporter 모두 1명.
     // 동일 기숙사에 다른 활성 담당자가 있으면 경고 후 교체.
     let releasePrevManagerId: string | null = null;
@@ -15227,6 +15253,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
   const fallbackMenuGroupForTab: Record<TabKey, string> = {
     dashboard: "dashboard",
+    permissions: "시스템",
     dorms: "dormManagement",
     occupants: "occupantManagement",
     simulation: "simulation",
@@ -15277,17 +15304,77 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   //  버튼 숨김뿐 아니라 렌더/직접 activeTab 접근도 차단(아래 가드 useEffect + 렌더 조건).
   const canAccessExam = !!currentUser && (currentUser.role === "admin" || currentUser.role === "viewer");
 
+  // 권한관리 화면용: System Role 별 사용자 수(활성·미삭제) + 사용자 id→이름 변환. 기존 role 값은 읽기만 한다.
+  const systemRoleUserCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    users.forEach((u) => {
+      if (u.isDeleted || u.isActive === false) return;
+      counts[u.role] = (counts[u.role] || 0) + 1;
+    });
+    return counts;
+  }, [users]);
+  const resolveUserName = useCallback(
+    (id?: string | null) => {
+      if (!id) return "-";
+      const u = users.find((x) => x.id === id);
+      return u ? (u.displayName || u.username) : id;
+    },
+    [users]
+  );
+
+  // 사용자관리 목록의 "추가 권한 요약"용: user_id → custom_role_id[] + custom_role_id → 이름.
+  //  기존 계정 데이터는 건드리지 않고 별도 조회만 한다(자동 배정 없음).
+  const [userCustomRoleSummary, setUserCustomRoleSummary] = useState<Record<string, string[]>>({});
+  const [customRoleNameById, setCustomRoleNameById] = useState<Record<string, string>>({});
+  const refreshUserCustomRoleSummary = useCallback(async () => {
+    const [summary, roles] = await Promise.all([getAssignmentSummary(tenantId), loadCustomRolesSvc(tenantId)]);
+    setUserCustomRoleSummary(summary.map);
+    setCustomRoleNameById(Object.fromEntries(roles.roles.map((r) => [r.id, r.name])));
+  }, [tenantId]);
+  useEffect(() => {
+    if (activeTab === "users" && canManageUsers(currentUser)) void refreshUserCustomRoleSummary();
+  }, [activeTab, currentUser, refreshUserCustomRoleSummary]);
+
+  // 로그인 사용자의 유효 권한 병합 재료: 배정된 사용자 정의 권한들의 활성 permission_key 합집합.
+  //  - add-only: 기존 role 허용 위에 "추가"만. 하자접수/기숙사 담당은 배정 자체가 없어 항상 빈 집합(보호).
+  //  - 로그인/사용자 변경 시 1회 조회(메뉴마다 반복 조회 금지).
+  const [myGrantedKeys, setMyGrantedKeys] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const role = currentUser?.role;
+    const uid = currentUser?.id;
+    if (!uid || role === "maintenance_reporter" || role === "dorm_manager") { setMyGrantedKeys(new Set()); return; }
+    let alive = true;
+    (async () => {
+      const keys = await loadMyGrantedPermissionKeys(uid, tenantId);
+      if (alive) setMyGrantedKeys(keys);
+    })();
+    return () => { alive = false; };
+  }, [currentUser?.id, currentUser?.role, tenantId]);
+  const myPerms = useMemo(() => buildEffectivePermissions(myGrantedKeys), [myGrantedKeys]);
+
+  // 권한관리 데이터 범위(기숙사 직접선택)용 옵션. 기존 dorms 를 읽기만 한다.
+  const roleDormOptions = useMemo(
+    () => dorms
+      .filter((d) => !d.isDeleted)
+      .map((d) => ({ id: d.id, label: `${d.buildingName} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`.trim() })),
+    [dorms]
+  );
+
   const visibleMenuGroups = useMemo(
     () => {
       const groups: Record<string, { groupKey: string; label: string; order: number; children: Array<{ tab: TabKey; label: string; order: number }> }> = {};
       const currentRole = currentUser?.role || "viewer";
       systemSettings.menus
         .filter((menu) => {
-          if (!menu.isVisible || !menu.requiredRoles.includes(currentRole)) return false;
+          if (!menu.isVisible) return false;
+          // 하자접수/기숙사 담당 보호 최우선: 청소/하자 2메뉴만. 사용자 정의 권한으로도 확장 불가.
           if (isMaintenanceAccessUser) {
             return menu.tabKey === "cleaningReports" || menu.tabKey === "defects";
           }
-          return true;
+          // add-only: 기존 role 허용 OR 사용자 정의 권한(menu_view) 추가 허용.
+          //  단, 관리자 전용 시스템 탭은 사용자 정의 권한으로 노출하지 않는다(admin 렌더 가드와 일치).
+          const adminOnly = ADMIN_ONLY_TABS.has(menu.tabKey);
+          return menu.requiredRoles.includes(currentRole) || (!adminOnly && myPerms.grantsMenu(menu.tabKey));
         })
         .sort((a, b) => a.order - b.order)
         .forEach((menu) => {
@@ -15314,7 +15401,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         }))
         .sort((a, b) => a.order - b.order);
     },
-    [systemSettings.menus, currentUser]
+    [systemSettings.menus, currentUser, myPerms]
   );
 
   const filteredMenuGroups = useMemo(() => {
@@ -15348,7 +15435,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       return;
     }
     // 관리자 전용 탭(시스템설정/휴지통·백업/사용자관리)에 비관리자가 진입하면 허용 메뉴로 자동 이동
-    const adminOnlyTabs: TabKey[] = ["settings", "recycleBin", "users", "militarySettings"];
+    const adminOnlyTabs: TabKey[] = ["settings", "permissions", "recycleBin", "users", "militarySettings"];
     if (currentUser && currentUser.role !== "admin" && adminOnlyTabs.includes(activeTab)) {
       setActiveTab(isMaintenanceAccessUser ? "cleaningReports" : "dashboard");
     }
@@ -17008,7 +17095,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examRules" ? (
             <ExamRulesPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin"}
+              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examRules")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17016,7 +17103,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examPersonnel" ? (
             <ExamPersonnelPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin"}
+              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examPersonnel")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17025,7 +17112,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examApplications" ? (
             <ExamApplicationsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin"}
+              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examApplications")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17034,7 +17121,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examPmCertifications" ? (
             <ExamPmCertificationsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin"}
+              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examPmCertifications")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17044,7 +17131,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examDmCertifications" ? (
             <ExamDmCertificationsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin"}
+              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examDmCertifications")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17054,7 +17141,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examAnnualTargets" ? (
             <ExamAnnualTargetsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin"}
+              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examAnnualTargets")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17063,7 +17150,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           ) : activeTab === "examMonthlyResults" ? (
             <ExamMonthlyResultsPage
               darkMode={theme.darkMode}
-              canEdit={currentUser?.role === "admin"}
+              canEdit={currentUser?.role === "admin" || myPerms.canWrite("examMonthlyResults")}
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
@@ -17100,6 +17187,22 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
           </section>
         ))}
+
+        {/* 시스템 > 권한관리 (admin 전용 · 사용자 정의 권한만 관리, 기존 System Role 은 읽기 전용 잠금) */}
+        {activeTab === "permissions" && canManageUsers(currentUser) && (
+          <RoleManagementPage
+            darkMode={theme.darkMode}
+            tenantId={tenantId}
+            userId={currentUser?.id || ""}
+            menus={systemSettings.menus}
+            userCountsBySystemRole={systemRoleUserCounts}
+            onToast={showNetworkToast}
+            appAlert={appAlert}
+            appConfirm={appConfirm}
+            resolveUserName={resolveUserName}
+            dormOptions={roleDormOptions}
+          />
+        )}
 
         {activeTab === "militaryDashboard" && (
           <div className="space-y-6">
@@ -24972,7 +25075,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3 font-medium">{idx + 1}</td>
                         <td className="px-3 py-3">{u.displayName}</td>
                         <td className="px-3 py-3">{u.username}</td>
-                        <td className="px-3 py-3">{getRoleLabel(u.role)}</td>
+                        <td className="px-3 py-3">
+                          <div>{getRoleLabel(u.role)}</div>
+                          {(() => {
+                            const ids = userCustomRoleSummary[u.id] || [];
+                            if (ids.length === 0) return null;
+                            const names = ids.map((id) => customRoleNameById[id]).filter(Boolean);
+                            const summary = names.length === 0 ? `추가 ${ids.length}개`
+                              : names.length === 1 ? names[0]
+                              : `${names[0]} 외 ${names.length - 1}개`;
+                            return <div className="mt-0.5 text-xs text-indigo-500" title={names.join(", ")}>+ {summary}</div>;
+                          })()}
+                        </td>
                         <td className="px-3 py-3">{u.siteAccess}</td>
                         <td className="px-3 py-3">{dorm ? `${dorm.buildingName} ${formatDong(dorm.dong)} ${formatRoomHo(dorm.roomHo)}` : "-"}</td>
                         <td className="px-3 py-3">{u.isActive ? "활성" : "비활성"}</td>
@@ -26360,6 +26474,20 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               darkMode={theme.darkMode}
               canManage={currentUser?.role === "admin"}
               onToast={showNetworkToast}
+            />
+
+            {/* 추가 권한(사용자 정의 권한) — 자체 저장·감사로그. System Role 무변경 add-only. 하자/기숙사 담당은 보호. */}
+            <UserCustomRolesEditor
+              userId={editingUserId}
+              userLabel={userForm.displayName || userForm.username || ""}
+              baseRole={userForm.role as string}
+              tenantId={tenantId}
+              actingUserId={currentUser?.id || ""}
+              canManage={currentUser?.role === "admin"}
+              darkMode={theme.darkMode}
+              onToast={showNetworkToast}
+              appConfirm={appConfirm}
+              onSaved={refreshUserCustomRoleSummary}
             />
 
             {/* 담당 기숙사 정보 섹션 */}

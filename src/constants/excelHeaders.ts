@@ -182,6 +182,7 @@ export const HEADER_ALIASES: Record<TableType, Record<string, string>> = {
 
 export const TABLE_TYPE_BY_TAB: Record<TabKey, TableType | null> = {
   dashboard: null,
+  permissions: null,
   dorms: "dorm",
   occupants: "occupant",
   simulation: null,

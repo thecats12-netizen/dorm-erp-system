@@ -70,7 +70,8 @@ export function getDefaultSystemSettings(): SystemSettings {
       { id: "24", groupName: "군대관리", menuName: "군대설정", tabKey: "militarySettings", isVisible: true, order: 6, requiredRoles: ["admin"] },
       { id: "21", groupName: "시스템", menuName: "사용자관리", tabKey: "users", isVisible: true, order: 1, requiredRoles: ["admin"] },
       { id: "22", groupName: "시스템", menuName: "시스템설정", tabKey: "settings", isVisible: true, order: 2, requiredRoles: ["admin"] },
-      { id: "23", groupName: "시스템", menuName: "휴지통관리", tabKey: "recycleBin", isVisible: true, order: 3, requiredRoles: ["admin"] },
+      { id: "36", groupName: "시스템", menuName: "권한관리", tabKey: "permissions", isVisible: true, order: 3, requiredRoles: ["admin"] },
+      { id: "23", groupName: "시스템", menuName: "휴지통관리", tabKey: "recycleBin", isVisible: true, order: 4, requiredRoles: ["admin"] },
     ],
     fields: [
       { id: "f1", tabKey: "dorms", fieldName: "건물명", fieldKey: "buildingName", isVisible: true, isRequired: true, isReadOnly: false, adminOnlyEdit: false, order: 1 },
