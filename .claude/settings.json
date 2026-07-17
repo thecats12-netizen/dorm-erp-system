@@ -1,18 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(echo \"EXIT:$?\")",
-      "Bash(grep -v '^$')",
-      "Bash(echo \"TSC_EXIT:$?\")",
-      "Bash(echo \"LINT_EXIT:$?\")",
-      "Read(//tmp/**)",
-      "Bash(echo \"STEP_FILES_EXIT:$?\")",
-      "Bash(echo \"BUILD_EXIT:$?\")",
-      "Bash(awk 'NR>=16400 && NR<=16660 && /operationalDorms|occupants\\\\.|occupantScopedList|visibleDorms|currentResidents/' src/App.tsx)",
-      "Bash(awk 'NR>=15803 && NR<=15920' src/App.tsx)",
-      "Bash(awk 'NR>=15803 && NR<=15960 && /}, \\\\[/' src/App.tsx)",
-      "Bash(grep -viE \"//|\\\\*|미사용|서버에서만\")",
-      "Bash(grep -iE \"service_role|password\\\\s*=|secret\\\\s*=|private_key|access_token|refresh_token|eyJ[A-Za-z0-9_-]{20,}\")"
+      "Bash(echo \"EXIT:$?\")"
     ]
   }
 }
