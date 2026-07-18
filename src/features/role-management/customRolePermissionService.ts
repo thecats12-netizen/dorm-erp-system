@@ -118,10 +118,16 @@ export type MyMenuAccess = {
   allKeys: Set<string>; restrictiveActive: boolean; restrictiveTabs: Set<string>; restrictiveKeys: Set<string>;
   // 데이터 범위(9단계): restrictive 역할들의 활성 범위. restrictiveActive=false 면 빈 배열(범위 강제 없음).
   restrictiveScopeRows: ScopeRow[];
+  // 배타(exclusive) 메뉴/기능 판정 — restrictive 역할 ∪ "단일 대표 사용자 정의 권한"(통합 권한 선택 모델).
+  //  restrictive* 와 분리한 이유: 데이터 범위 강제(restrictiveActive/restrictiveScopeRows)는 그대로 두고,
+  //  계정이 사용자 정의 권한 1개만 배정된 경우 메뉴·기능만 그 역할로 한정한다(뷰어 등 기존 base 합집합 제거).
+  //  → additive 역할이어도 "그 역할이 허용한 메뉴·기능만" 보이게 하여 #5(뷰어 전체조회 합쳐짐) 해결.
+  //  → 데이터 범위는 여전히 restrictive 역할에만 강제되므로 단일 additive 역할 계정의 데이터 잠김(무범위→0건) 회귀 없음.
+  exclusiveActive: boolean; exclusiveTabs: Set<string>; exclusiveKeys: Set<string>;
 };
 
 export async function loadMyMenuAccess(userId: string, tenantId: string): Promise<MyMenuAccess> {
-  const empty: MyMenuAccess = { allKeys: new Set(), restrictiveActive: false, restrictiveTabs: new Set(), restrictiveKeys: new Set(), restrictiveScopeRows: [] };
+  const empty: MyMenuAccess = { allKeys: new Set(), restrictiveActive: false, restrictiveTabs: new Set(), restrictiveKeys: new Set(), restrictiveScopeRows: [], exclusiveActive: false, exclusiveTabs: new Set(), exclusiveKeys: new Set() };
   if (!isSupabaseAvailable() || !supabase || !userId) return empty;
   if (arePermissionTablesMissing()) return empty;
   try {
@@ -142,6 +148,11 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     const activeRoleIds = roles.map((r) => r.id);
     if (activeRoleIds.length === 0) return empty;
     const restrictiveRoleIds = new Set(roles.filter((r) => (r.permission_mode ?? "additive") === "restrictive").map((r) => r.id));
+    // 배타 판정 대상: restrictive 역할 전부 ∪ "활성 배정이 정확히 1개일 때 그 대표 역할".
+    //  통합 권한 선택 모델에서는 계정당 사용자 정의 권한 1개만 배정하므로, 그 1개는 additive 여도 배타 적용.
+    //  (레거시 다중 배정 계정은 exclusive 미적용 → 기존 additive 동작 유지, 관리자 재저장 시 1개로 정리됨.)
+    const exclusiveRoleIds = new Set(restrictiveRoleIds);
+    if (activeRoleIds.length === 1) exclusiveRoleIds.add(activeRoleIds[0]);
 
     const { data: perms, error: e3 } = await supabase
       .from("custom_role_permissions").select("custom_role_id, permission_key")
@@ -152,11 +163,19 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     const allKeys = new Set(rows.map((r) => r.permission_key));
     const restrictiveTabs = new Set<string>();
     const restrictiveKeys = new Set<string>();
+    const exclusiveTabs = new Set<string>();
+    const exclusiveKeys = new Set<string>();
     rows.forEach((r) => {
-      if (!restrictiveRoleIds.has(r.custom_role_id)) return;
-      restrictiveKeys.add(r.permission_key);
       const i = r.permission_key.lastIndexOf(".");
-      if (i > 0) restrictiveTabs.add(r.permission_key.slice(0, i)); // 어떤 기능이든 부여되면 해당 메뉴 표시
+      const tab = i > 0 ? r.permission_key.slice(0, i) : "";
+      if (restrictiveRoleIds.has(r.custom_role_id)) {
+        restrictiveKeys.add(r.permission_key);
+        if (tab) restrictiveTabs.add(tab); // 어떤 기능이든 부여되면 해당 메뉴 표시
+      }
+      if (exclusiveRoleIds.has(r.custom_role_id)) {
+        exclusiveKeys.add(r.permission_key);
+        if (tab) exclusiveTabs.add(tab);
+      }
     });
     // 데이터 범위: restrictive 역할이 있을 때만 그 역할들의 활성 범위를 로드(restrictive 우선 병합).
     let restrictiveScopeRows: ScopeRow[] = [];
@@ -171,7 +190,8 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
           .filter((s) => (!s.valid_from || Date.parse(s.valid_from) <= now) && (!s.valid_until || Date.parse(s.valid_until) >= now));
       }
     }
-    return { allKeys, restrictiveActive: restrictiveRoleIds.size > 0, restrictiveTabs, restrictiveKeys, restrictiveScopeRows };
+    return { allKeys, restrictiveActive: restrictiveRoleIds.size > 0, restrictiveTabs, restrictiveKeys, restrictiveScopeRows,
+      exclusiveActive: exclusiveRoleIds.size > 0, exclusiveTabs, exclusiveKeys };
   } catch {
     return empty;
   }

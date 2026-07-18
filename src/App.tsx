@@ -121,15 +121,15 @@ import SimMemberGridModal, { type SimMemberRow } from "./components/SimMemberGri
 import ReportView, { type ReportConfig } from "./components/ReportView";
 import ExamManagementPage from "./features/exam-management/pages/ExamManagementPage";
 import RoleManagementPage from "./features/role-management/pages/RoleManagementPage";
-import UserCustomRolesEditor from "./features/role-management/UserCustomRolesEditor";
-import { getAssignmentSummary } from "./features/role-management/userCustomRoleService";
+import { getAssignmentSummary, saveUserCustomRoles, computeAssignable, getUserCustomRoles } from "./features/role-management/userCustomRoleService";
 import { loadCustomRoles as loadCustomRolesSvc } from "./features/role-management/customRoleService";
-import { loadMyMenuAccess, type MyMenuAccess } from "./features/role-management/customRolePermissionService";
+import { loadMyMenuAccess, loadRolePermissions, type MyMenuAccess } from "./features/role-management/customRolePermissionService";
+import type { CustomRole } from "./features/role-management/types";
+import { permissionModeLabel } from "./features/role-management/permissionMode";
 import { buildEffectivePermissions } from "./features/role-management/permissionModel";
 import { buildDataScopeAccess } from "./features/role-management/dataScopeModel";
 import { writeSecurityAudit } from "./features/role-management/securityAuditService";
 import ExamRulesPage from "./features/exam-management/pages/ExamRulesPage";
-import ExamProcessScopeEditor from "./features/exam-management/pages/ExamProcessScopeEditor";
 import ExamPersonnelPage from "./features/exam-management/pages/ExamPersonnelPage";
 import ExamApplicationsPage from "./features/exam-management/pages/ExamApplicationsPage";
 import ExamDmCertificationsPage from "./features/exam-management/pages/ExamDmCertificationsPage";
@@ -3322,6 +3322,11 @@ export default function App() {
   const [editingSaleId, setEditingSaleId] = useState<string | null>(null);
   const [editingDefectId, setEditingDefectId] = useState<string | null>(null);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  // 통합 권한 선택(계정 등록/수정): 선택된 "대표 사용자 정의 권한" id("" = 시스템 기본 권한 사용).
+  //  - 시스템 역할과 상호 배타. 커스텀 선택 시 저장 시점에 user_custom_roles 를 1개로 동기화(나머지 soft 해제).
+  //  - accountRolePreviewKeys: 선택된 커스텀 권한의 permission_key 미리보기(메뉴/기능 미리보기용, 읽기전용).
+  const [accountCustomRoleId, setAccountCustomRoleId] = useState<string>("");
+  const [accountRolePreviewKeys, setAccountRolePreviewKeys] = useState<string[]>([]);
 
   const [dormForm, setDormForm] = useState(dormTemplate());
   const [occupantForm, setOccupantForm] = useState(() => occupantTemplate());
@@ -7467,7 +7472,7 @@ export default function App() {
   }, [operationalDorms, occupants, newHires]);
 
   // ── 권한/데이터 범위 계산 (파생 목록·핸들러보다 먼저 선언) ────────────────────
-  const EMPTY_MENU_ACCESS: MyMenuAccess = { allKeys: new Set(), restrictiveActive: false, restrictiveTabs: new Set(), restrictiveKeys: new Set(), restrictiveScopeRows: [] };
+  const EMPTY_MENU_ACCESS: MyMenuAccess = { allKeys: new Set(), restrictiveActive: false, restrictiveTabs: new Set(), restrictiveKeys: new Set(), restrictiveScopeRows: [], exclusiveActive: false, exclusiveTabs: new Set(), exclusiveKeys: new Set() };
   const [myMenuAccess, setMyMenuAccess] = useState<MyMenuAccess>(EMPTY_MENU_ACCESS);
   useEffect(() => {
     const role = currentUser?.role;
@@ -7504,15 +7509,15 @@ export default function App() {
   // 공통 권한 판정(회귀 방지: 호출부 기존 게이트 baseGate 를 전달, 사용자 정의 권한 없으면 기존과 100% 동일).
   const hasPermission = useCallback((tab: TabKey | string, action: string, baseGate = false): boolean => {
     const key = `${tab}.${action}`;
-    if (myMenuAccess.restrictiveActive) return myMenuAccess.restrictiveKeys.has(key); // restrictive 우선
-    return baseGate || myMenuAccess.allKeys.has(key);                                  // additive(기존 OR 추가)
+    if (myMenuAccess.exclusiveActive) return myMenuAccess.exclusiveKeys.has(key); // 배타(단일 대표/restrictive) 우선 — base 합집합 제거
+    return baseGate || myMenuAccess.allKeys.has(key);                              // additive(기존 OR 추가, 레거시 다중배정)
   }, [myMenuAccess]);
   const DELETE_TAB_BY_TYPE: Partial<Record<AuditLog["targetType"], TabKey>> = {
     dorm: "dorms", dormContract: "dormContracts", newHire: "newHires", occupant: "occupants",
   };
   const canWriteTab = useCallback((tab: TabKey | string): boolean => {
-    if (myMenuAccess.restrictiveActive) {
-      return myMenuAccess.restrictiveKeys.has(`${tab}.create`) || myMenuAccess.restrictiveKeys.has(`${tab}.update`);
+    if (myMenuAccess.exclusiveActive) {
+      return myMenuAccess.exclusiveKeys.has(`${tab}.create`) || myMenuAccess.exclusiveKeys.has(`${tab}.update`);
     }
     return currentUser?.role === "admin" || myMenuAccess.allKeys.has(`${tab}.create`) || myMenuAccess.allKeys.has(`${tab}.update`);
   }, [myMenuAccess, currentUser]);
@@ -12215,6 +12220,24 @@ export default function App() {
       setUsers((prev) => prev.map((u) => (u.id === releasePrevManagerId ? { ...u, dormId: undefined } : u)));
     }
 
+    // ── 통합 권한 선택: 대표 사용자 정의 권한 동기화(시스템 역할 ↔ 커스텀 상호 배타) ──
+    //  커스텀 선택 → 그 1개만 활성(나머지 soft 해제). 시스템 역할 선택 → 전부 해제(is_active=false soft, 데이터 보존).
+    //  계정 저장이 성공한 뒤에만 실행. 실패해도 계정 저장 자체는 유지(2차 토스트 안내).
+    //  service_role 미사용 · 배정 가능 화이트리스트 + 서버 RLS(admin·동일 tenant)가 최종 방어.
+    if (isSupabaseAvailable()) {
+      try {
+        const rolesLoad = await loadCustomRolesSvc(tenantId);
+        const assignable = computeAssignable(rolesLoad.roles);
+        const selected = accountCustomRoleId ? [accountCustomRoleId] : [];
+        const res = await saveUserCustomRoles(payload.id, tenantId, currentUser?.id || "", selected, assignable);
+        if (res.partialError) showNetworkToast(`권한 배정 일부 실패: ${res.partialError}`);
+        void refreshUserCustomRoleSummary();
+      } catch (err) {
+        console.error("[saveUser] 사용자 정의 권한 동기화 실패", err);
+        showNetworkToast("권한 배정 저장에 실패했습니다. 시스템 설정 > 권한관리에서 확인해주세요.");
+      }
+    }
+
     // 로컬 상태 업데이트 (비밀번호는 저장하지 않음)
     setUsers((prev) =>
       editingUserId
@@ -15417,14 +15440,44 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   //  기존 계정 데이터는 건드리지 않고 별도 조회만 한다(자동 배정 없음).
   const [userCustomRoleSummary, setUserCustomRoleSummary] = useState<Record<string, string[]>>({});
   const [customRoleNameById, setCustomRoleNameById] = useState<Record<string, string>>({});
+  // 통합 권한 선택 드롭다운(계정 모달)용: 현재 tenant 의 활성·미삭제 사용자 정의 권한 목록.
+  //  다른 tenant 는 loadCustomRolesSvc(tenantId) 가 tenant 로 제한(RLS 최종 방어)하므로 노출되지 않는다.
+  const [activeCustomRoles, setActiveCustomRoles] = useState<CustomRole[]>([]);
   const refreshUserCustomRoleSummary = useCallback(async () => {
     const [summary, roles] = await Promise.all([getAssignmentSummary(tenantId), loadCustomRolesSvc(tenantId)]);
     setUserCustomRoleSummary(summary.map);
     setCustomRoleNameById(Object.fromEntries(roles.roles.map((r) => [r.id, r.name])));
+    setActiveCustomRoles(roles.roles.filter((r) => r.is_active && !r.is_deleted)); // is_active=true 만 선택 목록 노출
   }, [tenantId]);
   useEffect(() => {
     if (activeTab === "users" && canManageUsers(currentUser)) void refreshUserCustomRoleSummary();
   }, [activeTab, currentUser, refreshUserCustomRoleSummary]);
+
+  // 계정 편집 모달 열림: 현재 계정의 "대표 사용자 정의 권한"(활성 배정이 정확히 1개일 때)을 초기 선택값으로 로드.
+  //  활성 배정이 0개면 시스템 역할("") 표시, 2개 이상(레거시 다중 배정)이면 대표를 특정할 수 없어 "" 로 두고
+  //  관리자 재저장 시 단일화(관리자 검토 대상). 신규 계정은 항상 "".
+  useEffect(() => {
+    if (!showUserForm) return;
+    if (!editingUserId) { setAccountCustomRoleId(""); return; }
+    let alive = true;
+    (async () => {
+      const { rows } = await getUserCustomRoles(editingUserId, tenantId);
+      const active = rows.filter((r) => r.is_active).map((r) => r.custom_role_id);
+      if (alive) setAccountCustomRoleId(active.length === 1 ? active[0] : "");
+    })();
+    return () => { alive = false; };
+  }, [showUserForm, editingUserId, tenantId]);
+
+  // 선택된 사용자 정의 권한의 permission_key 미리보기 로드(메뉴/기능 미리보기용). "" 이면 비움.
+  useEffect(() => {
+    if (!accountCustomRoleId) { setAccountRolePreviewKeys([]); return; }
+    let alive = true;
+    (async () => {
+      const { keys } = await loadRolePermissions(accountCustomRoleId, tenantId);
+      if (alive) setAccountRolePreviewKeys(keys);
+    })();
+    return () => { alive = false; };
+  }, [accountCustomRoleId, tenantId]);
 
   // 로그인 사용자의 유효 권한 병합 재료: 배정된 사용자 정의 권한들의 활성 permission_key 합집합.
   //  - add-only: 기존 role 허용 위에 "추가"만. 하자접수/기숙사 담당은 배정 자체가 없어 항상 빈 집합(보호).
@@ -15453,8 +15506,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           }
           // restrictive 우선: 활성 restrictive 권한이 하나라도 있으면 그 권한들이 허용한 메뉴만 표시
           //  (기존 role/additive 무시). 관리자 전용 시스템 탭은 restrictive 로도 부여 불가(부여 대상 제외).
-          if (myMenuAccess.restrictiveActive) {
-            return !ADMIN_ONLY_TABS.has(menu.tabKey) && myMenuAccess.restrictiveTabs.has(menu.tabKey);
+          if (myMenuAccess.exclusiveActive) {
+            return !ADMIN_ONLY_TABS.has(menu.tabKey) && myMenuAccess.exclusiveTabs.has(menu.tabKey);
           }
           // additive: 기존 role 허용 OR 사용자 정의 권한(menu_view) 추가 허용.
           //  단, 관리자 전용 시스템 탭은 사용자 정의 권한으로 노출하지 않는다(admin 렌더 가드와 일치).
@@ -26594,38 +26647,85 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
               <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>권한정보</h4>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                <SelectInput label="권한" value={getRoleLabel(userForm.role)} onChange={(v) => setUserForm((f) => ({ ...f, role: getRoleValue(v) }))} options={["관리자", "뷰어", "기숙사 관리자", "하자접수 담당자"]} />
+                {/* 통합 권한 선택: 시스템 기본 권한 + 사용자 정의 권한(그룹 구분). 시스템 역할 ↔ 커스텀 상호 배타.
+                    - sys:<role> 선택 → 시스템 역할 사용(커스텀 해제). cus:<id> 선택 → 그 커스텀 1개를 대표 권한으로.
+                    - 커스텀 선택 시 base role 은 안전한 최소(뷰어)로 정리(비활성/삭제 시 뷰어로 안전 폴백). */}
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">권한</label>
+                  <select
+                    translate="no" lang="en"
+                    value={accountCustomRoleId ? `cus:${accountCustomRoleId}` : `sys:${userForm.role}`}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v.startsWith("cus:")) {
+                        setAccountCustomRoleId(v.slice(4));
+                        setUserForm((f) => ({ ...f, role: "viewer" as UserRole }));
+                      } else {
+                        setAccountCustomRoleId("");
+                        setUserForm((f) => ({ ...f, role: v.slice(4) as UserRole }));
+                      }
+                    }}
+                    className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400 notranslate"
+                  >
+                    <optgroup label="시스템 기본 권한">
+                      <option value="sys:admin">관리자</option>
+                      <option value="sys:viewer">뷰어</option>
+                      <option value="sys:dorm_manager">기숙사 관리자</option>
+                      <option value="sys:maintenance_reporter">하자접수 담당자</option>
+                    </optgroup>
+                    {activeCustomRoles.length > 0 && (
+                      <optgroup label="사용자 정의 권한">
+                        {activeCustomRoles.map((r) => (
+                          <option key={r.id} value={`cus:${r.id}`}>{r.name}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {/* 현재 배정된 권한이 비활성/삭제된 경우에도 옵션으로 노출(item 21·22): 첫 옵션으로 잘못 튀지 않게 하고
+                        관리자가 다른 권한으로 재지정하도록 안내. 저장 없이 두면 로그인 시 안전 폴백(뷰어)로 처리된다. */}
+                    {accountCustomRoleId && !activeCustomRoles.some((r) => r.id === accountCustomRoleId) && (
+                      <optgroup label="현재 배정(비활성)">
+                        <option value={`cus:${accountCustomRoleId}`}>{(customRoleNameById[accountCustomRoleId] || "알 수 없는 권한") + " (비활성)"}</option>
+                      </optgroup>
+                    )}
+                  </select>
+                </div>
                 <SelectInput label="지역 권한" value={userForm.siteAccess} onChange={(v) => setUserForm((f) => ({ ...f, siteAccess: v as Site | "전체" }))} options={["전체", "평택", "천안"]} />
                 <SelectInput label="성별 권한" value={userForm.genderAccess || "전체"} onChange={(v) => setUserForm((f) => ({ ...f, genderAccess: v as "남" | "여" | "전체" }))} options={["전체", "남", "여"]} />
               </div>
             </div>
 
-            {/* 시험관리 공정 권한(자체 저장 · 감사로그). 시험 총관리자=시스템 admin 만 편집. 신규 계정은 저장 후 지정. */}
-            <ExamProcessScopeEditor
-              userId={editingUserId}
-              userLabel={userForm.displayName || userForm.username || ""}
-              baseRole={userForm.role as string}
-              tenantId={tenantId}
-              actingUserId={currentUser?.id || ""}
-              darkMode={theme.darkMode}
-              canManage={currentUser?.role === "admin"}
-              onToast={showNetworkToast}
-            />
-
-            {/* 추가 권한(사용자 정의 권한) — 자체 저장·감사로그. System Role 무변경 add-only. 하자/기숙사 담당은 보호. */}
-            <UserCustomRolesEditor
-              userId={editingUserId}
-              userLabel={userForm.displayName || userForm.username || ""}
-              baseRole={userForm.role as string}
-              tenantId={tenantId}
-              actingUserId={currentUser?.id || ""}
-              canManage={currentUser?.role === "admin"}
-              darkMode={theme.darkMode}
-              menus={systemSettings.menus}
-              onToast={showNetworkToast}
-              appConfirm={appConfirm}
-              onSaved={refreshUserCustomRoleSummary}
-            />
+            {/* 선택된 권한 미리보기(읽기전용) — 계정 화면에서는 권한 항목을 직접 편집하지 않는다.
+                권한(메뉴·기능·데이터 범위) 수정은 시스템 설정 > 권한관리에서만 가능(요구사항 통합). */}
+            <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
+              <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>선택된 권한</h4>
+              {(() => {
+                const selCustom = accountCustomRoleId ? activeCustomRoles.find((r) => r.id === accountCustomRoleId) : undefined;
+                // 메뉴 미리보기: permission_key 의 첫 세그먼트(모듈) 라벨 distinct. 매칭 실패 시 원문 표시.
+                const menuPreview = Array.from(new Set(accountRolePreviewKeys.map((k) => k.split(".")[0])))
+                  .map((seg) => getTabLabel(seg as TabKey) || seg);
+                const sysDesc: Record<string, string> = {
+                  admin: "전체 메뉴·기능 관리 권한",
+                  viewer: "전체 조회 전용(등록/수정/삭제 불가)",
+                  dorm_manager: "담당 기숙사 청소관리 전용",
+                  maintenance_reporter: "하자접수·청소관리 전용",
+                };
+                return (
+                  <div className={`rounded-xl border p-3 text-sm ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-300" : "border-slate-200 bg-white text-slate-700"}`}>
+                    {selCustom ? (
+                      <div className="space-y-1.5">
+                        <div><span className="font-semibold">{selCustom.name}</span> <span className="ml-1 rounded bg-indigo-100 px-1.5 py-0.5 text-xs text-indigo-700">사용자 정의</span></div>
+                        {selCustom.description && <p className="text-xs text-slate-500">{selCustom.description}</p>}
+                        <p className="text-xs">적용 방식: <b>{permissionModeLabel(selCustom.permission_mode)}</b> · 계정에는 단일 대표 권한으로 <b>배타 적용</b>(뷰어 등 기본 권한과 합쳐지지 않음)</p>
+                        <p className="text-xs">메뉴 미리보기: {menuPreview.length ? menuPreview.join(", ") : "부여된 권한 없음"}</p>
+                        <p className="text-xs">기능 권한 <b>{accountRolePreviewKeys.length}</b>개 부여됨. 권한 항목 수정은 <b>시스템 설정 &gt; 권한관리</b>에서만 가능합니다.</p>
+                      </div>
+                    ) : (
+                      <div><span className="font-semibold">{getRoleLabel(userForm.role)}</span> · {sysDesc[userForm.role as string] || ""}</div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
 
             {/* 담당 기숙사 정보 섹션 */}
             <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
