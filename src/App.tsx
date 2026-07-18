@@ -25269,15 +25269,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <td className="px-3 py-3">{u.displayName}</td>
                         <td className="px-3 py-3">{u.username}</td>
                         <td className="px-3 py-3">
-                          <div>{getRoleLabel(u.role)}</div>
                           {(() => {
                             const ids = userCustomRoleSummary[u.id] || [];
-                            if (ids.length === 0) return null;
+                            if (ids.length === 0) return <div>{getRoleLabel(u.role)}</div>; // 사용자 정의 권한 없음: 기본 역할만
                             const names = ids.map((id) => customRoleNameById[id]).filter(Boolean);
-                            const summary = names.length === 0 ? `추가 ${ids.length}개`
+                            const summary = names.length === 0 ? `사용자 정의 ${ids.length}개`
                               : names.length === 1 ? names[0]
                               : `${names[0]} 외 ${names.length - 1}개`;
-                            return <div className="mt-0.5 text-xs text-indigo-500" title={names.join(", ")}>+ {summary}</div>;
+                            // "선택한 메뉴만 허용"(restrictive) 역할이 하나라도 있으면 기본 역할 메뉴는 합산되지 않음(배타) → 오해 방지 표기.
+                            const restrictive = ids.some((id) => activeCustomRoles.find((r) => r.id === id)?.permission_mode === "restrictive");
+                            return restrictive ? (
+                              <div title={names.join(", ")}>
+                                <div className="font-medium text-indigo-600 dark:text-indigo-400">{summary}</div>
+                                <div className="mt-0.5 text-[0.7rem] text-slate-400">사용자 정의 · 선택 메뉴만 · 기반 {getRoleLabel(u.role)}(미합산)</div>
+                              </div>
+                            ) : (
+                              <div title={names.join(", ")}>
+                                <div>{getRoleLabel(u.role)}</div>
+                                <div className="mt-0.5 text-xs text-indigo-500">+ {summary}</div>
+                              </div>
+                            );
                           })()}
                         </td>
                         <td className="px-3 py-3">{u.siteAccess}</td>
