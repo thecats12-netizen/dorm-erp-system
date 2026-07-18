@@ -487,13 +487,22 @@ export default function ExamApplicationsPage({
   };
 
   // 관리자 승인 → 응시 등록(상태 '승인대기'). 후보는 자동계산이지만 등록은 승인 필요.
+  //  · 다건을 개별 처리하고 성공/실패를 분리 집계한다(한 건 실패로 전체를 성공/실패 처리하지 않음).
+  //  · 저장 전 필수값(사번·성명)을 검증해 잘못된 요청을 Supabase 로 보내지 않는다.
   const approveCandidates = async () => {
     const chosen = cands.filter((c) => candSel.has(candKey(c)) && c.eligible);
     if (candApplying || chosen.length === 0) return;
+    // 회사 정보(tenant) 미확정 상태 저장 차단.
+    if (!tenantId) { setError("회사 정보가 확인되지 않았습니다.\n다시 로그인한 후 시도해주세요."); return; }
     setCandApplying(true); setError(null);
-    try {
-      let ok = 0;
-      for (const c of chosen) {
+    let ok = 0;
+    const failures: Array<{ ref: string; reason: string }> = [];
+    for (const c of chosen) {
+      const ref = `${c.employee_no || "?"} ${c.name || ""}`.trim();
+      try {
+        // 필수값 검증(요청 전 차단).
+        if (!String(c.employee_no || "").trim()) { failures.push({ ref, reason: "대상자 사번이 없습니다." }); continue; }
+        if (!String(c.name || "").trim()) { failures.push({ ref, reason: "대상자 성명이 없습니다." }); continue; }
         const payload: ExamRow = {
           employee_no: c.employee_no, name: c.name, group_name: c.group_name,
           product: c.product, process: c.process, pm_level: c.current_level, status: "승인대기",
@@ -501,11 +510,22 @@ export default function ExamApplicationsPage({
         const saved = await upsertExamRow("exam_applications", payload, tenantId, userId);
         await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), "create", null, saved, `자동 후보 승인 → 승인대기(목표 ${c.target_level})`);
         ok++;
+      } catch (e) {
+        failures.push({ ref, reason: (e as { message?: string })?.message || "저장 실패" });
       }
-      onToast?.(`${ok}건을 승인대기로 등록했습니다.`);
+    }
+    setCandApplying(false);
+    // 결과 UX: 전체 성공 / 부분 성공 / 전체 실패 구분.
+    if (ok > 0 && failures.length === 0) {
+      onToast?.(`응시 대상 ${ok}건을 승인대기로 등록했습니다.`);
       setShowCand(false); await reload();
-    } catch (e) { setError((e as { message?: string })?.message || "후보 승인 등록에 실패했습니다."); }
-    finally { setCandApplying(false); }
+    } else if (ok > 0 && failures.length > 0) {
+      onToast?.(`응시 대상 ${ok}건 등록, ${failures.length}건 실패했습니다.`);
+      setError(`일부 등록 실패(${failures.length}건):\n` + failures.map((f) => `· ${f.ref}: ${f.reason}`).join("\n"));
+      await reload();
+    } else {
+      setError(`응시 등록에 실패했습니다(${failures.length}건):\n` + failures.map((f) => `· ${f.ref}: ${f.reason}`).join("\n"));
+    }
   };
 
   const openDetail = (r: ExamRow) => setDetailRow(r);
@@ -665,7 +685,7 @@ export default function ExamApplicationsPage({
             {paged.map((r, ri) => {
               const k = rowKey(r); const sel = selected.has(k); const activeRow = ri === activeIdx;
               return (
-                <tr key={k} aria-selected={activeRow} onClick={() => setActiveIdx(ri)} onDoubleClick={() => openDetail(r)} className={`${activeRow ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : sel ? (darkMode ? "bg-blue-950/40" : "bg-blue-50") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+                <tr key={k} aria-selected={activeRow} onClick={() => { setActiveIdx(ri); openDetail(r); }} onDoubleClick={() => openDetail(r)} className={`${activeRow ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : sel ? (darkMode ? "bg-blue-950/40" : "bg-blue-50") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                   <td className={`px-2 py-2 ${pinFirst ? "sticky left-0 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}><input type="checkbox" checked={sel} onChange={() => toggleSel(k)} onClick={(e) => e.stopPropagation()} /></td>
                   {visibleCols.map((c) => (
                     <td key={c.key} className={`whitespace-nowrap px-2.5 py-2 ${pinFirst && c.key === "employee_no" ? "sticky left-9 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}>
@@ -934,7 +954,12 @@ export default function ExamApplicationsPage({
             <div className="mb-3 flex items-start justify-between">
               <div><h3 className="text-lg font-semibold">{String(detailRow.name || "-")} <span className="text-sm font-normal text-slate-500">시험 응시 상세</span></h3>
                 <p className="text-sm text-slate-500">사번 {String(detailRow.employee_no || "-")} · 구분코드 {String(detailRow.category_code || "-")}</p></div>
-              <button onClick={() => setDetailRow(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+              {/* 빠른 액션: 상세 → 기존 등록/수정 폼(edit 모드) 재사용. 수정 권한 없으면 미표시(§19·§24). */}
+              <div className="flex items-center gap-1">
+                {canEdit && <button onClick={() => { const r = detailRow; setDetailRow(null); setEditRow({ ...r }); }} className="rounded-lg border border-blue-500 px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40">수정</button>}
+                <button onClick={() => { const r = detailRow; void openHistory(r); }} className="rounded-lg border px-2.5 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800">이력</button>
+                <button onClick={() => setDetailRow(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+              </div>
             </div>
             {[
               ["직원 기본정보", ["employee_no", "name", "group_name", "product", "process"]],

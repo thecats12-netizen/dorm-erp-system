@@ -142,6 +142,22 @@ export function translateExamWriteError(error: unknown): string {
   if (status === 403 || code === "42501" || /row-level security|permission denied|insufficient privilege|not authorized/.test(msg)) {
     return "인증 기준정보를 저장할 권한이 없습니다.\n로그인 상태와 관리자 권한을 확인해주세요.";
   }
+  // 중복(23505 unique_violation)
+  if (code === "23505" || /duplicate key|unique constraint/.test(msg)) {
+    return "이미 같은 응시 신청이 등록되어 있습니다.\n중복 등록은 할 수 없습니다.";
+  }
+  // 필수값 누락(23502 not_null_violation) — DB 컬럼 설정 문제일 수 있어 관리자 안내를 함께 제공.
+  if (code === "23502" || /not-null constraint|null value in column/.test(msg)) {
+    return "시험 응시 데이터를 저장할 수 없습니다.\n필수 항목이 누락되었거나 데이터베이스 설정을 확인해야 합니다.\n관리자에게 문의해주세요.";
+  }
+  // 참조 무결성(23503 foreign_key_violation)
+  if (code === "23503" || /foreign key constraint/.test(msg)) {
+    return "연결된 기준 정보를 찾을 수 없습니다.\n대상자·공정·설비 정보를 확인해주세요.";
+  }
+  // 존재하지 않는 컬럼/스키마 캐시(PGRST204) — 마이그레이션 미적용 가능성.
+  if (code === "PGRST204" || /could not find the .* column|schema cache/.test(msg)) {
+    return "시험 응시 데이터를 저장할 수 없습니다.\n데이터베이스 설정(컬럼)이 최신이 아닐 수 있습니다.\n관리자에게 확인을 요청해주세요.";
+  }
   return `시험관리 데이터를 저장하지 못했습니다.\n잠시 후 다시 시도해주세요.\n(${translateSupabaseError(e?.message || String(error))})`;
 }
 
