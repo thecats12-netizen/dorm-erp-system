@@ -7482,6 +7482,13 @@ export default function App() {
     (async () => {
       const access = await loadMyMenuAccess(uid, tenantId);
       if (alive) setMyMenuAccess(access);
+      // [진단] 개발 환경 전용: 로그인 사용자의 시스템 역할 + 배타모드 적용 결과를 확인(운영 build 미노출, userId 마스킹).
+      //  exclusiveActive=false 인데 커스텀 역할이 있으면 = additive(union)로 기본 역할 메뉴가 합쳐짐 → 원인.
+      if (import.meta.env.DEV) console.debug("[perm/app] 로그인 권한 계산", {
+        user: (uid || "").slice(0, 8) + "…", systemRole: role,
+        exclusiveActive: access.exclusiveActive, exclusiveTabs: Array.from(access.exclusiveTabs),
+        restrictiveActive: access.restrictiveActive, permissionKeyCount: access.allKeys.size,
+      });
     })();
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps

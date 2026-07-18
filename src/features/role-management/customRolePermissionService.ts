@@ -128,15 +128,20 @@ export type MyMenuAccess = {
 
 export async function loadMyMenuAccess(userId: string, tenantId: string): Promise<MyMenuAccess> {
   const empty: MyMenuAccess = { allKeys: new Set(), restrictiveActive: false, restrictiveTabs: new Set(), restrictiveKeys: new Set(), restrictiveScopeRows: [], exclusiveActive: false, exclusiveTabs: new Set(), exclusiveKeys: new Set() };
-  if (!isSupabaseAvailable() || !supabase || !userId) return empty;
-  if (arePermissionTablesMissing()) return empty;
+  // [진단] 개발 환경(import.meta.env.DEV)에서만 각 분기 이유를 콘솔에 출력(운영 build 에는 미노출). userId 는 앞 8자만 마스킹.
+  //  → "선택한 메뉴만 허용" 계정이 전체 메뉴로 보이는 원인(모드 미적용/조회오류/배정 없음)을 실제 값으로 증명하기 위함.
+  const dbg = (stage: string, extra?: Record<string, unknown>) => {
+    if (import.meta.env.DEV) console.debug("[perm/menuAccess]", stage, { user: (userId || "").slice(0, 8) + "…", tenant: tenantId, ...extra });
+  };
+  if (!isSupabaseAvailable() || !supabase || !userId) { dbg("EARLY: Supabase/userId 없음 → empty(기본 역할 메뉴 표시)"); return empty; }
+  if (arePermissionTablesMissing()) { dbg("EARLY: 권한 테이블 미적용 플래그 set 상태 → empty(모든 커스텀 권한 무시 → 기본 역할 메뉴)"); return empty; }
   try {
     const { data: ucr, error: e1 } = await supabase
       .from("user_custom_roles").select("custom_role_id")
       .eq("tenant_id", tenantId).eq("user_id", userId).eq("is_active", true);
-    if (e1) { if (isMissingTable(e1)) markPermissionTablesMissing(); return empty; }
+    if (e1) { if (isMissingTable(e1)) markPermissionTablesMissing(); dbg("EARLY: user_custom_roles 조회 오류 → empty", { code: (e1 as { code?: string }).code, message: e1.message }); return empty; }
     const roleIds = ((ucr as { custom_role_id: string }[]) || []).map((r) => r.custom_role_id);
-    if (roleIds.length === 0) return empty;
+    if (roleIds.length === 0) { dbg("EARLY: 활성 배정 커스텀 권한 0건(user_custom_roles) → empty(기본 역할 메뉴)"); return empty; }
 
     // 배정 역할 중 활성·미삭제만 인정 + 모드 확인.
     //  select("*") 로 조회한다: permission_mode 컬럼(20260724 마이그레이션)이 미적용인 환경에서
@@ -144,12 +149,20 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     const { data: rolesRaw, error: e2 } = await supabase
       .from("custom_roles").select("*")
       .eq("tenant_id", tenantId).in("id", roleIds);
-    if (e2) { if (isMissingTable(e2)) markPermissionTablesMissing(); return empty; }
+    if (e2) { if (isMissingTable(e2)) markPermissionTablesMissing(); dbg("EARLY: custom_roles 조회 오류 → empty", { code: (e2 as { code?: string }).code, message: e2.message }); return empty; }
     const roles = ((rolesRaw as { id: string; permission_mode?: string; is_active: boolean; is_deleted: boolean }[]) || [])
       .filter((r) => r.is_active && !r.is_deleted);
     const activeRoleIds = roles.map((r) => r.id);
-    if (activeRoleIds.length === 0) return empty;
+    if (activeRoleIds.length === 0) { dbg("EARLY: 활성·미삭제 custom_roles 0건 → empty(기본 역할 메뉴)", { assigned: roleIds.length }); return empty; }
     const restrictiveRoleIds = new Set(roles.filter((r) => (r.permission_mode ?? "additive") === "restrictive").map((r) => r.id));
+    // [진단 핵심] 여기서 permission_mode 실제 값과 exclusiveActive 여부를 확인한다.
+    //  permission_mode 가 '(null→additive)' 로 찍히면 = 20260724 마이그레이션 미적용/역할이 additive → union(전체 메뉴).
+    //  'restrictive' 로 찍히고 exclusiveActive=true 면 = 배타 정상(선택 메뉴만).
+    dbg("MODE 판정", {
+      assigned: roleIds.length, active: activeRoleIds.length,
+      permission_modes: roles.map((r) => r.permission_mode ?? "(null→additive)"),
+      restrictiveCount: restrictiveRoleIds.size, exclusiveActive: restrictiveRoleIds.size > 0,
+    });
     // 배타(exclusive) = "선택한 메뉴만 허용"(restrictive) 모드 역할만. 기본 역할 메뉴/기능과 합산하지 않는다.
     //  · restrictive 역할 1개라도 있으면 exclusiveActive=true → 그 역할들이 선택한 메뉴/기능만 표시(뷰어 등 base 무합산).
     //  · additive 모드 역할은 배타가 아님 → 아래 allKeys 로 기본 역할과 합산(union). (스펙: 두 모드 구분 유지)
@@ -159,7 +172,7 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     const { data: perms, error: e3 } = await supabase
       .from("custom_role_permissions").select("custom_role_id, permission_key")
       .eq("tenant_id", tenantId).in("custom_role_id", activeRoleIds).eq("is_active", true);
-    if (e3) return empty;
+    if (e3) { dbg("EARLY: custom_role_permissions 조회 오류 → empty", { code: (e3 as { code?: string }).code, message: e3.message }); return empty; }
     const rows = (perms as { custom_role_id: string; permission_key: string }[]) || [];
 
     const allKeys = new Set(rows.map((r) => r.permission_key));
@@ -192,9 +205,17 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
           .filter((s) => (!s.valid_from || Date.parse(s.valid_from) <= now) && (!s.valid_until || Date.parse(s.valid_until) >= now));
       }
     }
+    // [진단 결과] exclusiveActive=true 면 Sidebar 는 exclusiveTabs 만 표시(선택 메뉴만). false 면 additive(기본 역할과 union).
+    dbg("RESULT", {
+      exclusiveActive: exclusiveRoleIds.size > 0,
+      exclusiveTabs: Array.from(exclusiveTabs),
+      selectedPermissionRows: rows.length,
+      sampleKeys: Array.from(allKeys).slice(0, 10),
+    });
     return { allKeys, restrictiveActive: restrictiveRoleIds.size > 0, restrictiveTabs, restrictiveKeys, restrictiveScopeRows,
       exclusiveActive: exclusiveRoleIds.size > 0, exclusiveTabs, exclusiveKeys };
-  } catch {
+  } catch (err) {
+    dbg("EARLY: 예외 → empty(기본 역할 메뉴)", { message: (err as { message?: string })?.message });
     return empty;
   }
 }
