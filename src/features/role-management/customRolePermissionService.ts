@@ -139,8 +139,10 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     if (roleIds.length === 0) return empty;
 
     // 배정 역할 중 활성·미삭제만 인정 + 모드 확인.
+    //  select("*") 로 조회한다: permission_mode 컬럼(20260724 마이그레이션)이 미적용인 환경에서
+    //  컬럼명을 명시하면 42703 오류 → 전체 empty(=뷰어 메뉴로 폴백)로 커스텀 권한이 통째로 무시되는 회귀를 방지.
     const { data: rolesRaw, error: e2 } = await supabase
-      .from("custom_roles").select("id, permission_mode, is_active, is_deleted")
+      .from("custom_roles").select("*")
       .eq("tenant_id", tenantId).in("id", roleIds);
     if (e2) { if (isMissingTable(e2)) markPermissionTablesMissing(); return empty; }
     const roles = ((rolesRaw as { id: string; permission_mode?: string; is_active: boolean; is_deleted: boolean }[]) || [])
@@ -148,9 +150,6 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     const activeRoleIds = roles.map((r) => r.id);
     if (activeRoleIds.length === 0) return empty;
     const restrictiveRoleIds = new Set(roles.filter((r) => (r.permission_mode ?? "additive") === "restrictive").map((r) => r.id));
-    // 배타 판정 대상: restrictive 역할 전부 ∪ "활성 배정이 정확히 1개일 때 그 대표 역할".
-    //  통합 권한 선택 모델에서는 계정당 사용자 정의 권한 1개만 배정하므로, 그 1개는 additive 여도 배타 적용.
-    //  (레거시 다중 배정 계정은 exclusive 미적용 → 기존 additive 동작 유지, 관리자 재저장 시 1개로 정리됨.)
     // 배타(exclusive) = "선택한 메뉴만 허용"(restrictive) 모드 역할만. 기본 역할 메뉴/기능과 합산하지 않는다.
     //  · restrictive 역할 1개라도 있으면 exclusiveActive=true → 그 역할들이 선택한 메뉴/기능만 표시(뷰어 등 base 무합산).
     //  · additive 모드 역할은 배타가 아님 → 아래 allKeys 로 기본 역할과 합산(union). (스펙: 두 모드 구분 유지)
