@@ -9,6 +9,8 @@ import {
   type ExamRow,
 } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
+// [자동 라이선스] DM 승인 시 라이선스 마지막 단계 완료 처리(추가 전용·비차단).
+import { completeStageByLevelId } from "../services/licensePlanService";
 
 const nowIso = () => new Date().toISOString();
 const genDmCertNo = (emp: string, stage: string, acquired: string): string =>
@@ -289,6 +291,10 @@ export default function ExamDmCertificationsPage({
         const supersede = rows.filter((x) => String(x.id) !== String(r.id) && String(x.employee_no ?? "") === String(r.employee_no ?? "") && String(x.dm_stage ?? "") === String(r.dm_stage ?? "") && String(x.approval_status ?? "") === "승인" && x.is_active !== false);
         for (const old of supersede) { await upsertExamRow("dm_certifications", { ...old, is_active: false, notes: `${String(old.notes ?? "")} · 신규 인증(${certNo})으로 대체`.trim() }, tenantId, userId); await writeExamAudit(tenantId, userId, "dm_certifications", String(old.id), "update", old, null, `신규 인증(${certNo})으로 대체`); }
         await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), "approve", r, saved, `승인 · 인증번호 ${certNo}`);
+        // [자동 라이선스] DM 승인 → 라이선스 마지막 단계(DM) 완료 처리(비차단). level_id 가 사다리 단계와 매칭될 때만 반영(미매칭 시 무동작).
+        try {
+          await completeStageByLevelId({ personnelId: saved.personnel_id as string, employeeNo: saved.employee_no as string }, tenantId, saved.level_id, acquired, userId);
+        } catch (err) { console.warn("[licensePlan] DM 승인 단계전환 실패(무시)", err); }
         onToast?.("승인 완료: 취득일·만료일·인증번호·이력이 자동 처리되었습니다."); setDetailRow(saved);
       } else {
         const saved = await upsertExamRow("dm_certifications", { ...r, approval_status: "반려", approved_by: userId, approved_at: nowIso() }, tenantId, userId);

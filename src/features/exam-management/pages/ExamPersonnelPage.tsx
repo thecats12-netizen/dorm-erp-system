@@ -7,6 +7,8 @@ import {
   isDuplicateEmployeeNo, listByPersonnel, examSupabaseReady, type ExamRow, type ExamPersonnelChildTable,
 } from "../services/examMasterService";
 import { calculatePmLevel } from "../services/examAutomationService";
+// [자동 라이선스 관리] 인력 저장 후 employee_license_plan 자동 생성(추가 전용·비차단). 기존 저장 흐름 무변경.
+import { generatePlanForEmployeeAuto, generatePlanForEmployee, loadLadder } from "../services/licensePlanService";
 
 type ColType = "text" | "date" | "number" | "select" | "boolean";
 type Col = { key: string; label: string; type: ColType; options?: string[]; required?: boolean; filter?: boolean };
@@ -165,6 +167,18 @@ export default function ExamPersonnelPage({
       const before = isNew ? null : rows.find((r) => r.id === editRow.id) || null;
       const saved = await upsertExamRow("exam_personnel", editRow, tenantId, userId);
       await writeExamAudit(tenantId, userId, "exam_personnel", String(saved.id), isNew ? "create" : "update", before, saved);
+      // [자동 라이선스] 신규 등록에만 계획 자동 생성(수정 시 중복 실행/불필요 쿼리 방지). 비활성(퇴사) 직원은 제외.
+      //  생성 자체도 idempotent(기존 단계 skip). 실패해도 인력 저장은 유지(비차단).
+      if (isNew) {
+        const empStatus = String(saved.employment_status ?? "").trim();
+        const inactive = /퇴사|퇴직|비활성|중지|해지/.test(empStatus);
+        if (!inactive) {
+          try {
+            const res = await generatePlanForEmployeeAuto(String(saved.id), tenantId, saved.hire_date, userId);
+            if (res.created > 0) onToast?.(`라이선스 계획 ${res.created}단계가 자동 생성되었습니다.`);
+          } catch (e) { console.warn("[licensePlan] 계획 생성 실패(무시)", e); }
+        }
+      }
       setEditRow(null);
       onToast?.(isNew ? "인력현황 항목이 등록되었습니다." : "인력현황 항목이 수정되었습니다.");
       await reload();
@@ -221,6 +235,8 @@ export default function ExamPersonnelPage({
       const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
       const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]], { defval: "" });
       let ok = 0, skipped = 0;
+      // [자동 라이선스] 업로드 사원별 계획 생성을 위해 사다리를 1회만 로드(반복 쿼리 방지). 실패 시 빈 배열→생성 skip.
+      const ladder = await loadLadder(tenantId).catch(() => []);
       for (const r of raw) {
         const row: ExamRow = {};
         for (const c of COLS) {
@@ -235,6 +251,11 @@ export default function ExamPersonnelPage({
         if (await isDuplicateEmployeeNo(tenantId, empNo)) { skipped++; continue; } // 중복 사번 스킵
         const saved = await upsertExamRow("exam_personnel", row, tenantId, userId);
         await writeExamAudit(tenantId, userId, "exam_personnel", String(saved.id), "import", null, saved);
+        // [자동 라이선스] 신규 사원 계획 자동 생성(idempotent·비차단). 실패해도 Excel 등록은 유지.
+        if (ladder.length > 0) {
+          try { await generatePlanForEmployee(String(saved.id), tenantId, saved.hire_date, ladder, userId); }
+          catch (e) { console.warn("[licensePlan] Excel 계획 생성 실패(무시)", e); }
+        }
         ok++;
       }
       onToast?.(`인력현황 Excel ${ok}건 등록${skipped ? ` · ${skipped}건 제외(사번 누락/중복)` : ""}`);

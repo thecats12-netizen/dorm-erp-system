@@ -83,6 +83,7 @@ export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
       { key: "require_written", label: "필기 합격 필요", type: "boolean" },
       { key: "require_practical", label: "실기 합격 필요", type: "boolean" },
       { key: "required_equipment_count", label: "필수 설비 수", type: "number" },
+      { key: "required_months", label: "취득 기한(개월)", type: "number" },
       { key: "min_tenure_months", label: "최소 재직기간(개월)", type: "number" },
       { key: "valid_months", label: "유효기간(개월)", type: "number" },
       { key: "expiry_notice_days", label: "만료 예정 기준일(일)", type: "number" },

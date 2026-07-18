@@ -9,6 +9,8 @@ import {
   type ExamRow,
 } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
+// [자동 라이선스] PM 승인 시 해당 단계 완료 + 다음 단계 자동 활성화(추가 전용·비차단).
+import { completeStageByLevelId } from "../services/licensePlanService";
 
 type RefOpt = { id: string; label: string };
 
@@ -335,6 +337,10 @@ export default function ExamPmCertificationsPage({
         if (person && String(r.pm_level ?? "").trim()) { const up = await upsertExamRow("exam_personnel", { ...person, current_pm_level: r.pm_level }, tenantId, userId); await writeExamAudit(tenantId, userId, "exam_personnel", String(up.id), "update", { current_pm_level: person.current_pm_level }, { current_pm_level: r.pm_level }, "PM Level 갱신(PM 인증 승인)"); }
         // ⑫ 감사로그
         await writeExamAudit(tenantId, userId, "pm_certifications", String(saved.id), "approve", r, saved, `승인 · 인증번호 ${certNo}`);
+        // [자동 라이선스] PM 승인 → 해당 단계 completed + 다음 단계 자동 active(선행 취득일 기준). 비차단 — 실패해도 승인 유지.
+        try {
+          await completeStageByLevelId({ personnelId: saved.personnel_id as string, employeeNo: saved.employee_no as string }, tenantId, saved.level_id, acquired, userId);
+        } catch (err) { console.warn("[licensePlan] PM 승인 단계전환 실패(무시)", err); }
         onToast?.("승인 완료: 인증번호·취득일·만료일·PM Level·이력·응시반영·통계갱신 처리되었습니다.");
         setDetailRow(enrich(saved));
       } else {
