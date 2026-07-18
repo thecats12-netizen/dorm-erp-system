@@ -15564,6 +15564,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   const isMaintenanceReporter = currentUser?.role === "maintenance_reporter";
   const canDownloadFiles = !isMaintenanceReporter; // 이미지/PDF/엑셀/보고서 다운로드 가능 여부
   const canViewOperationStats = !isMaintenanceReporter; // 대시보드 통계/지역별 통계 표시 여부
+  // [수정] 군대관리·시험관리 모듈에서는 일반 기숙사 운영 KPI/지역별 상세 통계를 렌더하지 않는다(모듈=현재 메뉴 그룹).
+  //  일반 기숙사 운영관리(그 외 그룹)에서는 기존대로 유지. 헤더 KPI·지역별통계 두 영역에만 적용.
+  const isDormOperationModule = currentMenuGroup !== "군대관리" && currentMenuGroup !== "시험관리";
+  const showDormOperationStats = canViewOperationStats && isDormOperationModule;
   const canEditDefectManagerName = currentUser?.role === "admin"; // 하자접수 관리자명 수정 가능(admin만)
 
   useEffect(() => {
@@ -16465,7 +16469,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
               </div>
             )}
-            {canViewOperationStats && (
+            {showDormOperationStats && (
             <div className="mt-6 grid gap-4 sm:grid-cols-2 md:landscape:grid-cols-4 xl:grid-cols-5">
               <button type="button" onClick={() => { setDormStatusFilter("사용중"); setDormSiteFilter("전체"); setDormGenderFilter("전체"); setDormSearch(""); setActiveTab("dorms"); }} className={`w-full text-left rounded-3xl border p-4 hover:shadow-lg transition-shadow ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-slate-50 text-slate-900"}`}>
                 <div className="text-sm font-medium text-slate-500">기숙사 수(현재 사용중인 기숙사 수)</div>
@@ -16491,7 +16495,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             )}
           </header>
 
-          {canViewOperationStats && (
+          {showDormOperationStats && (
           <section className={`mb-6 rounded-3xl ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"} p-5 shadow-sm ring-1`}>
             <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
