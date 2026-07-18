@@ -124,12 +124,30 @@ export default function ExamMasterGrid({
     onEnter: (i) => { if (canEdit && filtered[i]) openEdit(filtered[i]); },
   });
 
+  // [8단계] 기준정보 등록 편의: 코드 자동제안 · 코드/이름 중복 검사 · 정렬순서 자동제안(기존 rows 재사용, 추가 조회 없음).
+  const hasCol = (k: string) => config.columns.some((c) => c.key === k);
+  const suggestCode = (name: string) => String(name).trim().toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  const nextSort = () => rows.reduce((mx, r) => Math.max(mx, Number(r.sort_order) || 0), 0) + 1;
+  const codeDup = useMemo(() => {
+    if (!editRow || !hasCol("code")) return false;
+    const v = String(editRow.code ?? "").trim().toUpperCase(); if (!v) return false;
+    return rows.some((r) => r.id !== editRow.id && String(r.code ?? "").trim().toUpperCase() === v);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editRow, rows, config.columns]);
+  const nameDup = useMemo(() => {
+    if (!editRow || !hasCol("name")) return false;
+    const v = String(editRow.name ?? "").trim(); if (!v) return false;
+    return rows.some((r) => r.id !== editRow.id && String(r.name ?? "").trim() === v);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editRow, rows, config.columns]);
+
   const saveRow = async () => {
     if (!editRow) return;
     if (saving) return; // 재진입 차단: disabled={saving} 는 리렌더 후에만 적용되어 빠른 연속 클릭이 2회 발송될 수 있음.
     for (const c of config.columns) {
       if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
     }
+    if (codeDup) { setError("동일한 코드가 이미 있습니다. 다른 코드를 사용하세요."); return; } // 저장 차단(코드 중복)
     setSaving(true); setError(null);
     try {
       const isNew = !editRow.id;
@@ -319,6 +337,27 @@ export default function ExamMasterGrid({
                       <option value="">선택</option>
                       {(c.options || []).map((o) => <option key={o} value={o}>{o}</option>)}
                     </select>
+                  ) : c.key === "code" ? (
+                    <div>
+                      <div className="flex items-center gap-1">
+                        <input type="text" className={`${inputCls} w-full`} value={String(editRow.code ?? "")}
+                          onChange={(e) => setEditRow((f) => ({ ...(f || {}), code: e.target.value || null }))} />
+                        {String(editRow.name ?? "").trim() && <button type="button" className="shrink-0 rounded-lg bg-blue-100 px-2 py-2 text-xs font-medium text-blue-700 hover:bg-blue-200" title="이름 기준 코드 제안(확인 후 저장)" onClick={() => setEditRow((f) => ({ ...(f || {}), code: suggestCode(String(f?.name ?? "")) || f?.code || null }))}>제안</button>}
+                      </div>
+                      {codeDup && <p className="mt-1 text-xs text-rose-600">동일한 코드가 이미 있습니다.</p>}
+                    </div>
+                  ) : c.key === "sort_order" ? (
+                    <div className="flex items-center gap-1">
+                      <input type="text" inputMode="numeric" className={`${inputCls} w-full`} value={String(editRow.sort_order ?? "")}
+                        onChange={(e) => setEditRow((f) => ({ ...(f || {}), sort_order: e.target.value === "" ? null : Number(e.target.value.replace(/[^0-9.-]/g, "")) }))} />
+                      <button type="button" className="shrink-0 rounded-lg bg-slate-100 px-2 py-2 text-xs font-medium text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-200" title="다음 정렬순서 제안" onClick={() => setEditRow((f) => ({ ...(f || {}), sort_order: nextSort() }))}>다음</button>
+                    </div>
+                  ) : c.key === "name" ? (
+                    <div>
+                      <input type="text" className={`${inputCls} w-full`} value={String(editRow.name ?? "")}
+                        onChange={(e) => setEditRow((f) => ({ ...(f || {}), name: e.target.value || null }))} />
+                      {nameDup && <p className="mt-1 text-xs text-amber-600">같은 이름이 이미 있습니다(중복 가능성 확인).</p>}
+                    </div>
                   ) : (
                     <input type={c.type === "number" ? "text" : c.type === "date" ? "date" : "text"} inputMode={c.type === "number" ? "numeric" : undefined}
                       className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "").slice(0, c.type === "date" ? 10 : undefined)}

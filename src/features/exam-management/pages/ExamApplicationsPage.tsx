@@ -9,6 +9,10 @@ import {
 } from "../services/examMasterService";
 import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, type ExamCandidate } from "../services/examAutomationService";
 import { loadMyExamPermissions, type MyExamPermissions } from "../services/examPermissionService";
+// [4단계] 공통 사원선택 + 라이선스 요약(조회 전용, 추가 UI). 기존 사번 select/필드/저장은 그대로 유지.
+import EmployeeSelector from "../components/EmployeeSelector";
+import { loadEmployeeAutofill } from "../services/employeeAutofillService";
+import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 
 type RefOpt = { id: string; label: string };
 type ColType = "text" | "date" | "number" | "select" | "ref" | "cert";
@@ -116,6 +120,7 @@ export default function ExamApplicationsPage({
   const [bulkStatus, setBulkStatus] = useState("");
   const [editRow, setEditRow] = useState<ExamRow | null>(null);
   const [saving, setSaving] = useState(false);
+  const [autofill, setAutofill] = useState<EmployeeAutofill | null>(null); // [4단계] 라이선스 요약(읽기전용)
   const [detailRow, setDetailRow] = useState<ExamRow | null>(null);
   const [historyRow, setHistoryRow] = useState<ExamRow | null>(null);
   const [historyList, setHistoryList] = useState<ExamRow[]>([]);
@@ -214,6 +219,36 @@ export default function ExamApplicationsPage({
   const selectedPerson = useMemo(
     () => personnel.find((p) => String(p.employee_no ?? "") === String(editRow?.employee_no ?? "")) || null,
     [personnel, editRow?.employee_no]
+  );
+
+  // [4단계] 공통 EmployeeSelector 표시값(선택된 연명부 → EmployeeLite). 기존 사번 select 와 동기화.
+  const selectorValue = useMemo<EmployeeLite | null>(() => {
+    const p = selectedPerson; if (!p) return null;
+    return {
+      id: String(p.id), employeeNo: String(p.employee_no ?? ""), name: String(p.name ?? ""),
+      group: (p.group_name as string) ?? null, productFamily: (p.product_group as string) ?? null,
+      part: (p.part_name as string) ?? null, processId: (p.process_id as string) ?? null,
+      position: (p.position as string) ?? null,
+      joinDate: p.hire_date ? String(p.hire_date).slice(0, 10) : null,
+      employmentStatus: (p.employment_status as string) ?? null,
+    };
+  }, [selectedPerson]);
+
+  // 사번(연명부) 변경 시 라이선스 요약 1회 로드(기존 사번 select/신규 EmployeeSelector 공용 · 중복조회 방지).
+  useEffect(() => {
+    const id = selectedPerson ? String(selectedPerson.id) : "";
+    if (!id) { setAutofill(null); return; }
+    let alive = true;
+    loadEmployeeAutofill(id, tenantId).then((af) => { if (alive) setAutofill(af); }).catch(() => {});
+    return () => { alive = false; };
+  }, [selectedPerson, tenantId]);
+
+  // 읽기전용 요약 셀(자동입력/추천 카드 공용).
+  const sumItem = (label: string, val: string | number | null, danger?: boolean) => (
+    <div className={`rounded-lg border px-2 py-1.5 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+      <div className="text-[0.6rem] uppercase tracking-wide text-slate-400">{label}</div>
+      <div className={`mt-0.5 text-sm ${danger ? "font-semibold text-rose-600" : ""}`}>{val ?? "-"}</div>
+    </div>
   );
   // 기존 인증 이력 요약(연명부 단계 플래그 기준).
   const certHistorySummary = useMemo(() => {
@@ -394,6 +429,10 @@ export default function ExamApplicationsPage({
         setError(`이미 등록된 응시입니다(사원번호+구분코드 중복): ${empNo} / ${code}`); setSaving(false); return;
       }
       const isNew = !editRow.id;
+      // [P1] 퇴사(퇴직) 사원의 "신규" 응시 등록 하드 차단(데이터 정합성). 기존 응시 수정/재직자·미확인은 영향 없음.
+      if (isNew && selectedPerson && /퇴직|퇴사/.test(String(selectedPerson.employment_status ?? ""))) {
+        setError("퇴사(퇴직) 사원은 신규 응시를 등록할 수 없습니다. 관리자에게 문의해 주세요."); setSaving(false); return;
+      }
       const before = isNew ? null : rows.find((r) => r.id === editRow.id) || null;
       // 사유는 전용 DB 컬럼이 아니므로 페이로드에서 제외하고 감사로그 memo 로만 기록(스키마 변경 없음).
       const { cert_status_manual_reason: _omit, ...editForSave } = editRow as ExamRow & { cert_status_manual_reason?: string };
@@ -724,6 +763,59 @@ export default function ExamApplicationsPage({
         <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={requestCloseEdit}>
           <div role="dialog" aria-modal="true" aria-labelledby="exam-app-edit-title" tabIndex={-1} className={`my-8 w-full max-w-3xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
             <h3 id="exam-app-edit-title" className="mb-4 text-lg font-semibold">{editRow.id ? "시험 응시 수정" : "시험 응시 등록"}</h3>
+
+            {/* [4단계] 공통 사원선택 + 라이선스 요약/추천(추가 전용 · 아래 기존 사번 select/필드/저장은 그대로 유지) */}
+            <div className="mb-4 space-y-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">사원 빠른 선택 <span className="text-slate-400">(사번/이름 검색 · 자동입력)</span></label>
+                <EmployeeSelector value={selectorValue} onChange={(emp) => applyPersonnel(emp?.employeeNo || "")} tenantId={tenantId} darkMode={darkMode}
+                  helperText="선택 시 성명·그룹·제품·공정·PM Level 이 자동 입력되고, 아래 라이선스 요약이 표시됩니다." />
+              </div>
+              {autofill && (
+                <>
+                  {/* 사원 기본정보(읽기전용) */}
+                  <div className={`rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+                    <div className="mb-2 text-xs font-semibold text-slate-500">사원 기본정보 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">자동</span></div>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      {sumItem("이름", autofill.employee.name)}
+                      {sumItem("그룹", autofill.employee.group)}
+                      {sumItem("제품군", autofill.employee.productFamily)}
+                      {sumItem("파트", autofill.employee.part)}
+                      {sumItem("현재 PM", autofill.pmSummary.currentLevel)}
+                      {sumItem("현재 D.M", autofill.dmSummary.currentLevel)}
+                      {sumItem("재직", autofill.employee.employmentStatus)}
+                    </div>
+                  </div>
+                  {/* 응시 가능 단계 추천(읽기전용 안내 — 기존 등록 흐름은 유지, 하드 차단 아님) */}
+                  {(() => {
+                    const ls = autofill.licenseSummary;
+                    const inactiveEmp = /퇴직|퇴사/.test(String(autofill.employee.employmentStatus ?? ""));
+                    const canApply = !!ls.activePlanId && !inactiveEmp;
+                    const reason = inactiveEmp ? "퇴사자는 신규 응시 등록 대상이 아닙니다(관리자 예외 등록)."
+                      : !ls.activePlanId ? "진행 중(ACTIVE)인 라이선스 단계가 없습니다. 선행 단계 완료/승인이 필요할 수 있습니다."
+                      : ls.overdue ? "목표취득일이 경과했습니다(기한 초과) — 우선 응시 권장." : "응시 가능";
+                    return (
+                      <div className={`rounded-2xl border p-3 ${canApply ? (darkMode ? "border-emerald-700 bg-emerald-950/30" : "border-emerald-200 bg-emerald-50") : (darkMode ? "border-amber-700 bg-amber-950/30" : "border-amber-200 bg-amber-50")}`}>
+                        <div className="mb-2 flex items-center justify-between">
+                          <div className="text-xs font-semibold text-slate-500">응시 가능 단계(추천)</div>
+                          <span className={`rounded px-2 py-0.5 text-xs font-semibold ${canApply ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{canApply ? "응시 가능" : "확인 필요"}</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                          {sumItem("현재 단계", ls.currentStage)}
+                          {sumItem("다음 추천 단계", ls.nextStage)}
+                          {sumItem("목표취득일", ls.targetDate)}
+                          {sumItem("남은개월", ls.remainingMonths != null ? `${ls.remainingMonths}개월` : null, ls.overdue)}
+                          {sumItem("기한초과", ls.overdue ? "초과" : "정상", ls.overdue)}
+                          {sumItem("재시험 가능일", ls.retestAvailableDate)}
+                        </div>
+                        {!canApply && <div className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-400">{reason}</div>}
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {COLS.filter((c) => c.type !== "cert").map((c) => (
                 <div key={c.key}>

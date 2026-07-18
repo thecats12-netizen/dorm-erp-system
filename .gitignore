@@ -26,3 +26,6 @@ dist-ssr
 # 로컬 환경변수(비밀값 아님이나 커밋 제외)
 .env
 .env.local
+.env.staging
+.env.production
+# 단, *.example 템플릿은 추적한다(값 없음).

@@ -11,6 +11,10 @@ import {
 import { loadMyExamPermissions } from "../services/examPermissionService";
 // [자동 라이선스] PM 승인 시 해당 단계 완료 + 다음 단계 자동 활성화(추가 전용·비차단).
 import { completeStageByLevelId } from "../services/licensePlanService";
+// [5단계] 공통 사원선택 + PM 추천(조회 전용 UI). 기존 목록/필드/저장/승인은 그대로 유지.
+import EmployeeSelector from "../components/EmployeeSelector";
+import { loadEmployeeAutofill } from "../services/employeeAutofillService";
+import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 
 type RefOpt = { id: string; label: string };
 
@@ -401,6 +405,52 @@ export default function ExamPmCertificationsPage({
   const empCerts = (emp: string) => enriched.filter((x) => String(x.employee_no ?? "") === emp);
   const empApps = (emp: string) => apps.filter((a) => String(a.employee_no ?? "") === emp && !a.deleted_at);
 
+  // ── [5단계] 공통 사원선택 + PM 인증 추천(추가 전용 · 조회) ──
+  const [autofill, setAutofill] = useState<EmployeeAutofill | null>(null);
+  const selectorValue = useMemo<EmployeeLite | null>(() => {
+    const emp = String(editRow?.employee_no ?? ""); if (!emp) return null;
+    const p = personByEmp.get(emp);
+    if (!p) return { id: "", employeeNo: emp, name: String(editRow?.name ?? "") };
+    return {
+      id: String(p.id), employeeNo: emp, name: String(p.name ?? editRow?.name ?? ""),
+      group: (p.group_name as string) ?? null, productFamily: (p.product_group as string) ?? null,
+      part: (p.part_name as string) ?? null, processId: (p.process_id as string) ?? null,
+      position: (p.position as string) ?? null,
+      joinDate: p.hire_date ? String(p.hire_date).slice(0, 10) : null,
+      employmentStatus: (p.employment_status as string) ?? null,
+    };
+  }, [editRow?.employee_no, editRow?.name, personByEmp]);
+
+  // 사번 변경 시 라이선스/PM 요약 1회 로드(기존 사번 필드/신규 EmployeeSelector 공용 · 중복조회 방지).
+  useEffect(() => {
+    const emp = String(editRow?.employee_no ?? "");
+    const p = emp ? personByEmp.get(emp) : null;
+    const id = p ? String(p.id) : "";
+    if (!id) { setAutofill(null); return; }
+    let alive = true;
+    loadEmployeeAutofill(id, tenantId).then((af) => { if (alive) setAutofill(af); }).catch(() => {});
+    return () => { alive = false; };
+  }, [editRow?.employee_no, personByEmp, tenantId]);
+
+  const applyEmployee = (emp: EmployeeLite | null) => {
+    setEditRow((f) => ({ ...(f || {}), employee_no: emp?.employeeNo || "", ...(emp ? { name: emp.name } : {}) }));
+  };
+  // 추천값(다음 PM Level·취득일) 적용 — 빈 값만 채움(사용자 입력 보존). 만료일/인증번호는 승인 시 자동.
+  const applyRecommended = () => {
+    if (!autofill) return;
+    setEditRow((f) => ({
+      ...(f || {}),
+      pm_level: String(f?.pm_level ?? "").trim() ? f?.pm_level : (autofill.pmSummary.eligibleLevel || autofill.licenseSummary.nextStage || f?.pm_level || null),
+      acquired_date: ymd(f?.acquired_date) ? f?.acquired_date : new Date().toISOString().slice(0, 10),
+    }));
+  };
+  const sumItem = (label: string, val: string | number | null, danger?: boolean) => (
+    <div className={`rounded-lg border px-2 py-1.5 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+      <div className="text-[0.6rem] uppercase tracking-wide text-slate-400">{label}</div>
+      <div className={`mt-0.5 text-sm ${danger ? "font-semibold text-rose-600" : ""}`}>{val ?? "-"}</div>
+    </div>
+  );
+
   return (
     <section className={`rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
       <div className="mb-4">
@@ -479,6 +529,59 @@ export default function ExamPmCertificationsPage({
         <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={requestCloseEdit}>
           <div role="dialog" aria-modal="true" tabIndex={-1} className={`my-8 w-full max-w-xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
             <h3 className="mb-4 text-lg font-semibold">{editRow.id ? "PM 인증 수정" : "PM 인증 등록"}</h3>
+
+            {/* [5단계] 공통 사원선택 + 기본정보/PM 추천(추가 전용 · 아래 기존 입력/저장/승인은 그대로) */}
+            <div className="mb-4 space-y-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">사원 빠른 선택 <span className="text-slate-400">(사번/이름 검색 · 자동입력)</span></label>
+                <EmployeeSelector value={selectorValue} onChange={applyEmployee} tenantId={tenantId} darkMode={darkMode}
+                  helperText="선택 시 사번·성명이 채워지고 아래 PM 인증 추천 정보가 표시됩니다." />
+              </div>
+              {autofill && (
+                <>
+                  <div className={`rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+                    <div className="mb-2 text-xs font-semibold text-slate-500">사원 기본정보 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">자동</span></div>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      {sumItem("이름", autofill.employee.name)}
+                      {sumItem("그룹", autofill.employee.group)}
+                      {sumItem("제품군", autofill.employee.productFamily)}
+                      {sumItem("파트", autofill.employee.part)}
+                      {sumItem("현재 PM", autofill.pmSummary.currentLevel)}
+                      {sumItem("재직", autofill.employee.employmentStatus)}
+                    </div>
+                  </div>
+                  {(() => {
+                    const ls = autofill.licenseSummary; const pm = autofill.pmSummary;
+                    const inactiveEmp = /퇴직|퇴사/.test(String(autofill.employee.employmentStatus ?? ""));
+                    const recommend = pm.eligibleLevel || ls.nextStage || null;
+                    const canCert = !!recommend && !inactiveEmp;
+                    const reason = inactiveEmp ? "퇴사자는 신규 인증 대상이 아닙니다(관리자 예외 등록)."
+                      : !recommend ? "추천 PM Level 을 계산할 수 없습니다(선행 단계 완료/인증 규칙 확인)." : "인증 가능";
+                    return (
+                      <div className={`rounded-2xl border p-3 ${canCert ? (darkMode ? "border-emerald-700 bg-emerald-950/30" : "border-emerald-200 bg-emerald-50") : (darkMode ? "border-amber-700 bg-amber-950/30" : "border-amber-200 bg-amber-50")}`}>
+                        <div className="mb-2 flex items-center justify-between">
+                          <div className="text-xs font-semibold text-slate-500">PM 인증 추천</div>
+                          <div className="flex items-center gap-2">
+                            <span className={`rounded px-2 py-0.5 text-xs font-semibold ${canCert ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{canCert ? "인증 가능" : "확인 필요"}</span>
+                            {canEdit && recommend && <button type="button" className={btn} onClick={applyRecommended}>추천값 적용</button>}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                          {sumItem("현재 PM Level", pm.currentLevel)}
+                          {sumItem("추천 PM Level", recommend)}
+                          {sumItem("현재 라이선스 단계", ls.currentStage)}
+                          {sumItem("목표취득일", ls.targetDate)}
+                          {sumItem("남은개월", ls.remainingMonths != null ? `${ls.remainingMonths}개월` : null, ls.overdue)}
+                          {sumItem("현재 만료일", pm.expiryDate)}
+                        </div>
+                        {!canCert && <div className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-400">{reason}</div>}
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {([["employee_no", "사번", "text"], ["name", "성명", "text"], ["pm_level", "PM Level", "text"], ["acquired_date", "취득일", "date"], ["expiry_date", "만료일", "date"], ["cert_no", "인증번호", "text"], ["notes", "비고", "text"]] as const).map(([k, label, type]) => (
                 <div key={k}>

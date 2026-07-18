@@ -3,6 +3,8 @@ import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } fro
 import { buildRetestCandidates, summarizeCertExpiry, buildExamNotifications, runRecalculation, type ExamNotification, type RecalcResult, type RecalcScope } from "../services/examAutomationService";
 import { listRetestCandidates, generateRetestCandidates, setRetestCandidateStatus, type RetestCandidateRow, type RetestStatus } from "../services/examRetestService";
 import { writeAutomationLog, listAutomationLogs, type AutomationLogRow } from "../services/examAutomationLogService";
+// [9단계] 라이선스 계획 기반 공통 분석(대시보드·보고서 정본). licensePlanService 재사용(중복 계산식 없음).
+import { loadLicenseAnalytics, type LicenseAnalytics } from "../services/examAnalyticsService";
 import { useRegisteredOverlay } from "../../../hooks/overlayA11y";
 
 type RefOpt = { id: string; label: string };
@@ -80,10 +82,13 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   );
   const [detail, setDetail] = useState<{ title: string; kind: Kind; rows: ExamRow[] } | null>(null);
   const [notiOpen, setNotiOpen] = useState(false);
+  const [licAnalytics, setLicAnalytics] = useState<LicenseAnalytics | null>(null); // [9단계] 라이선스 계획 통계/자동화 오류
+  const [issuesOpen, setIssuesOpen] = useState(false);
   // 상세 목록 모달을 앱 공통 닫기 시스템에 등록(ESC·뒤로가기로 닫기).
   useRegisteredOverlay(!!detail, () => setDetail(null));
   useRegisteredOverlay(retestOpen, () => setRetestOpen(false));
   useRegisteredOverlay(notiOpen, () => setNotiOpen(false));
+  useRegisteredOverlay(issuesOpen, () => setIssuesOpen(false));
 
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
@@ -99,6 +104,8 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
         listRetestCandidates(tenantId).catch(() => [] as RetestCandidateRow[]),
       ]);
       setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv); setRules(ru); setRetest(rc);
+      // [9단계] 라이선스 계획 통계/자동화 오류(공통 정본). 계획 테이블 미적용 환경에서도 안전(빈 결과).
+      try { setLicAnalytics(await loadLicenseAnalytics(tenantId, p)); } catch { /* 무시 */ }
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId, refreshKey]);
@@ -368,6 +375,25 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
         })}
       </div>
 
+      {/* [9단계] 라이선스 자동화 현황 — employee_license_plan 기준(대시보드·보고서 공통 정본) */}
+      {licAnalytics && (
+        <section className={sectionCls}>
+          <div className="mb-3 flex items-center justify-between">
+            <div><h3 className="text-base font-semibold">라이선스 자동화 현황</h3><p className="text-sm text-slate-500">라이선스 계획(단계별 진행) 집계 · 자동화 오류/확인필요를 함께 표시합니다.</p></div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
+            <KpiCard darkMode={darkMode} label="전체 계획" value={String(licAnalytics.total)} color="slate" />
+            <KpiCard darkMode={darkMode} label="진행중" value={String(licAnalytics.summary.active)} color="blue" />
+            <KpiCard darkMode={darkMode} label="대기" value={String(licAnalytics.summary.waiting)} color="slate" />
+            <KpiCard darkMode={darkMode} label="완료" value={String(licAnalytics.summary.completed)} color="emerald" />
+            <KpiCard darkMode={darkMode} label="1개월 이내" value={String(licAnalytics.summary.within1m)} color="amber" />
+            <KpiCard darkMode={darkMode} label="기한 초과" value={String(licAnalytics.summary.overdue)} color="rose" />
+            <KpiCard darkMode={darkMode} label="자동화 확인 필요" value={String(licAnalytics.issues.length)} color="rose" onClick={licAnalytics.issues.length ? () => setIssuesOpen(true) : undefined} />
+          </div>
+          {licAnalytics.total === 0 && <p className="mt-3 text-xs text-slate-400">라이선스 계획 데이터가 없습니다. (마이그레이션 적용 후 인력 등록 시 자동 생성됩니다.)</p>}
+        </section>
+      )}
+
       {/* 차트 그리드 */}
       <div className="grid gap-6 lg:grid-cols-2">
         <section className={sectionCls}>
@@ -449,6 +475,37 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
                     </tr>
                   ))}
                   {detail.rows.length === 0 && <tr><td colSpan={DETAIL_COLS[detail.kind].length} className="px-3 py-10 text-center text-slate-400">해당 데이터가 없습니다.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* [9단계] 자동화 확인 필요 목록 모달 */}
+      {issuesOpen && licAnalytics && (
+        <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={() => setIssuesOpen(false)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="issues-title" tabIndex={-1} className={`my-8 w-full max-w-3xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <div><h3 id="issues-title" className="text-lg font-semibold">자동화 확인 필요 <span className="text-sm font-normal text-slate-500">· {licAnalytics.issues.length}건</span></h3><p className="text-sm text-slate-500">라이선스 계획 자동화 점검 결과입니다. 재처리는 인력/인증 화면에서 수정·재저장으로 반영됩니다.</p></div>
+              <button type="button" aria-label="닫기" onClick={() => setIssuesOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+            </div>
+            <div className="max-h-[60vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
+              <table className="w-full text-left text-xs">
+                <thead className={`sticky top-0 ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
+                  <tr>{["사번", "성명", "유형", "단계", "원인"].map((h) => <th key={h} className="whitespace-nowrap px-2.5 py-2">{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {licAnalytics.issues.map((it, i) => (
+                    <tr key={`${it.employeeId}-${it.type}-${i}`} className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+                      <td className="whitespace-nowrap px-2.5 py-2">{it.employeeNo || "-"}</td>
+                      <td className="whitespace-nowrap px-2.5 py-2">{it.name || "-"}</td>
+                      <td className="whitespace-nowrap px-2.5 py-2"><span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">{it.type}</span></td>
+                      <td className="whitespace-nowrap px-2.5 py-2">{it.stage || "-"}</td>
+                      <td className="px-2.5 py-2">{it.detail}</td>
+                    </tr>
+                  ))}
+                  {licAnalytics.issues.length === 0 && <tr><td colSpan={5} className="px-3 py-10 text-center text-slate-400">확인이 필요한 항목이 없습니다.</td></tr>}
                 </tbody>
               </table>
             </div>

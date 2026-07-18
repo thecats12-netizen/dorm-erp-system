@@ -9,6 +9,11 @@ import {
 import { calculatePmLevel } from "../services/examAutomationService";
 // [자동 라이선스 관리] 인력 저장 후 employee_license_plan 자동 생성(추가 전용·비차단). 기존 저장 흐름 무변경.
 import { generatePlanForEmployeeAuto, generatePlanForEmployee, loadLadder } from "../services/licensePlanService";
+// [3단계] 인력현황 등록 UX: 공통 사원선택 + 자동입력(조회 전용 기반). 다른 화면 미변경.
+import EmployeeSelector from "../components/EmployeeSelector";
+import { loadEmployeeAutofill } from "../services/employeeAutofillService";
+import { loadMyExamPermissions } from "../services/examPermissionService";
+import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 
 type ColType = "text" | "date" | "number" | "select" | "boolean";
 type Col = { key: string; label: string; type: ColType; options?: string[]; required?: boolean; filter?: boolean };
@@ -36,6 +41,10 @@ const COLS: Col[] = [
   { key: "notes", label: "비고", type: "text" },
 ];
 const FILTERS = COLS.filter((c) => c.filter);
+// [3단계] 자동계산 필드(읽기전용 카드로 이동) vs 직접입력 필드. 목록/상세 테이블은 COLS 전체 그대로 사용(무변경).
+const AUTO_KEYS = new Set(["current_pm_level", "pm_capable_rate", "single_job", "m1", "m2", "m3", "m4", "dm", "cert_level", "dual_multi"]);
+const DIRECT_COLS = COLS.filter((c) => !AUTO_KEYS.has(c.key));
+const AUTO_COLS = COLS.filter((c) => AUTO_KEYS.has(c.key));
 const PAGE_SIZE = 20;
 
 const ymd = (v: unknown) => {
@@ -266,6 +275,77 @@ export default function ExamPersonnelPage({
   const inputCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
   const btn = darkMode ? "rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800" : "rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100";
 
+  // ── [3단계] 사원 자동입력/자동계산 카드 상태(신규 · 인력현황 등록 UX만) ──
+  const [selectedEmp, setSelectedEmp] = useState<EmployeeLite | null>(null);
+  const [autofill, setAutofill] = useState<EmployeeAutofill | null>(null);
+  const [advancedEdit, setAdvancedEdit] = useState(false);
+  const [isExamAdmin, setIsExamAdmin] = useState(false);
+
+  // 고급 수정 권한(관리자) 판정 — 기존 시험 권한 서비스 재사용(버튼 숨김만이 아닌 권한 기반). App.tsx 미변경.
+  useEffect(() => {
+    let alive = true;
+    loadMyExamPermissions(tenantId).then((p) => { if (alive) setIsExamAdmin(!!p.isAdmin); }).catch(() => {});
+    return () => { alive = false; };
+  }, [tenantId]);
+
+  // 모달이 닫히면 선택 사원 초기화.
+  useEffect(() => { if (!editRow) setSelectedEmp(null); }, [editRow]);
+
+  // 편집 대상(기존 사원 id)이 정해지면 자동입력/요약 1회 로드(중복 조회 방지). 신규(id 없음)면 초기화.
+  useEffect(() => {
+    const id = editRow?.id ? String(editRow.id) : "";
+    if (!id) { setAutofill(null); setAdvancedEdit(false); return; }
+    let alive = true;
+    loadEmployeeAutofill(id, tenantId).then((af) => { if (alive) setAutofill(af); }).catch(() => {});
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editRow?.id, tenantId]);
+
+  // 기존 사원 빠른 선택 → 기본정보 자동입력(자동계산은 위 effect 가 로드). 신규 사원은 직접 입력.
+  const applyEmployee = (emp: EmployeeLite | null) => {
+    setSelectedEmp(emp);
+    if (!emp) return;
+    setEditRow((f) => ({
+      ...(f || {}),
+      id: emp.id, // 기존 사원 → 수정 대상(중복검사 self 제외 · 기존 저장 로직 그대로)
+      employee_no: emp.employeeNo, name: emp.name,
+      group_name: emp.group ?? f?.group_name ?? null,
+      product_group: emp.productFamily ?? f?.product_group ?? null,
+      part_name: emp.part ?? f?.part_name ?? null,
+      process_id: emp.processId ?? f?.process_id ?? null,
+      position: emp.position ?? f?.position ?? null,
+      hire_date: emp.joinDate ?? f?.hire_date ?? null,
+      employment_status: emp.employmentStatus ?? f?.employment_status ?? null,
+    }));
+  };
+
+  // 입력 필드 렌더(기존 모달 입력과 동일 규칙 — 직접입력/고급수정 공용).
+  const renderField = (c: Col) => (
+    <div key={c.key}>
+      <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}</label>
+      {c.type === "select" ? (
+        <select className={`${inputCls} w-full`} value={String(editRow?.[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}>
+          <option value="">선택</option>
+          {(c.options || []).map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+      ) : c.type === "boolean" ? (
+        <select className={`${inputCls} w-full`} value={editRow?.[c.key] === true ? "O" : editRow?.[c.key] === false ? "X" : ""} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value === "" ? null : e.target.value === "O" }))}>
+          <option value="">선택</option><option value="O">O</option><option value="X">X</option>
+        </select>
+      ) : (
+        <input type={c.type === "date" ? "date" : "text"} inputMode={c.type === "number" ? "numeric" : undefined}
+          className={`${inputCls} w-full`} value={c.type === "date" ? ymd(editRow?.[c.key]) : String(editRow?.[c.key] ?? "")}
+          onChange={(e) => { const v = c.type === "number" ? (e.target.value === "" ? null : Number(e.target.value.replace(/[^0-9.-]/g, ""))) : (e.target.value || null); setEditRow((f) => ({ ...(f || {}), [c.key]: v })); }} />
+      )}
+    </div>
+  );
+  const sumItem = (label: string, val: string | number | null, danger?: boolean) => (
+    <div className={`rounded-lg border px-2 py-1.5 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+      <div className="text-[0.6rem] uppercase tracking-wide text-slate-400">{label}</div>
+      <div className={`mt-0.5 text-sm ${danger ? "font-semibold text-rose-600" : ""}`}>{val ?? "-"}</div>
+    </div>
+  );
+
   return (
     <section className={`rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
       <div className="mb-4">
@@ -359,26 +439,53 @@ export default function ExamPersonnelPage({
         <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/50 p-4" onClick={requestCloseEdit}>
           <div role="dialog" aria-modal="true" aria-labelledby="exam-personnel-edit-title" tabIndex={-1} className={`my-8 w-full max-w-2xl rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
             <h3 id="exam-personnel-edit-title" className="mb-4 text-lg font-semibold">{editRow.id ? "인력현황 수정" : "인력현황 등록"}</h3>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {COLS.map((c) => (
-                <div key={c.key}>
-                  <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}</label>
-                  {c.type === "select" ? (
-                    <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}>
-                      <option value="">선택</option>
-                      {(c.options || []).map((o) => <option key={o} value={o}>{o}</option>)}
-                    </select>
-                  ) : c.type === "boolean" ? (
-                    <select className={`${inputCls} w-full`} value={editRow[c.key] === true ? "O" : editRow[c.key] === false ? "X" : ""} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value === "" ? null : e.target.value === "O" }))}>
-                      <option value="">선택</option><option value="O">O</option><option value="X">X</option>
-                    </select>
-                  ) : (
-                    <input type={c.type === "date" ? "date" : "text"} inputMode={c.type === "number" ? "numeric" : undefined}
-                      className={`${inputCls} w-full`} value={c.type === "date" ? ymd(editRow[c.key]) : String(editRow[c.key] ?? "")}
-                      onChange={(e) => { const v = c.type === "number" ? (e.target.value === "" ? null : Number(e.target.value.replace(/[^0-9.-]/g, ""))) : (e.target.value || null); setEditRow((f) => ({ ...(f || {}), [c.key]: v })); }} />
-                  )}
+            {/* 사원 빠른 선택 → 기존 사원 자동입력(EmployeeSelector + employeeAutofillService) */}
+            <div className="mb-4">
+              <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">사원 빠른 선택 <span className="text-slate-400">(기존 사원 검색 · 자동입력)</span></label>
+              <EmployeeSelector value={selectedEmp} onChange={applyEmployee} tenantId={tenantId} darkMode={darkMode} includeInactive
+                helperText="기존 사원을 선택하면 기본정보·자동계산·라이선스 정보가 채워집니다. 신규 사원은 아래에 직접 입력하세요." />
+            </div>
+
+            {/* 라이선스 요약 카드(읽기전용) */}
+            {autofill && (
+              <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+                <div className="mb-2 text-xs font-semibold text-slate-500">라이선스 요약 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">자동</span></div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {sumItem("현재 단계", autofill.licenseSummary.currentStage)}
+                  {sumItem("다음 단계", autofill.licenseSummary.nextStage)}
+                  {sumItem("목표취득일", autofill.licenseSummary.targetDate)}
+                  {sumItem("남은개월", autofill.licenseSummary.remainingMonths != null ? `${autofill.licenseSummary.remainingMonths}개월` : null, autofill.licenseSummary.overdue)}
+                  {sumItem("현재 PM", autofill.pmSummary.currentLevel)}
+                  {sumItem("현재 DM", autofill.dmSummary.currentLevel)}
                 </div>
-              ))}
+                {autofill.licenseSummary.overdue && <div className="mt-2 text-xs font-medium text-rose-600">⚠ 목표취득일이 경과했습니다(기한 초과).</div>}
+              </div>
+            )}
+
+            {/* 자동 계산 카드(읽기전용 · 관리자만 고급 수정) */}
+            <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-xs font-semibold text-slate-500">자동 계산 정보 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">자동 입력</span></div>
+                {isExamAdmin && <button type="button" className={btn} onClick={() => setAdvancedEdit((v) => !v)}>{advancedEdit ? "고급 수정 닫기" : "고급 수정"}</button>}
+              </div>
+              {advancedEdit ? (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{AUTO_COLS.map((c) => renderField(c))}</div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {AUTO_COLS.map((c) => (
+                    <div key={c.key} className={`rounded-lg border px-2 py-1.5 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                      <div className="text-[0.6rem] uppercase tracking-wide text-slate-400">{c.label}</div>
+                      <div className="mt-0.5 text-sm">{cellText(c, editRow) || "-"}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!isExamAdmin && <p className="mt-2 text-[0.7rem] text-slate-400">자동 계산 값은 조회 전용입니다. 수정은 관리자만 가능합니다.</p>}
+            </div>
+
+            {/* 직접 입력 필드 */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {DIRECT_COLS.map((c) => renderField(c))}
             </div>
             <div className="mt-6 flex justify-end gap-2">
               <button type="button" onClick={requestCloseEdit} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>

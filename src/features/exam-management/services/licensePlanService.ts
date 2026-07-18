@@ -299,11 +299,10 @@ export async function completeStageAndActivateNext(
 //  - 매칭 실패/미확정은 비차단(오류 반환만) — 기존 승인 저장 흐름을 막지 않는다.
 export async function completeStageByLevelId(
   employeeRef: { personnelId?: string | null; employeeNo?: string | null },
-  tenantId: string, levelId: unknown, completedDate: unknown, actorId?: string
+  tenantId: string, levelId: unknown, completedDate: unknown, actorId?: string,
+  opts?: { fallbackFinal?: boolean }   // [P1] DM 전용: level_id 미매칭 시 "최종 단계" 완료로 폴백
 ): Promise<AdvanceResult> {
   if (!isSupabaseAvailable() || !supabase) return { completed: false, error: "Supabase 미설정" };
-  const lid = asText(levelId);
-  if (!lid) return { completed: false, error: "인증 단계(level_id)가 없습니다." };
 
   // 1) employee_id 확정(personnel_id 우선, 없으면 사번으로 조회)
   let employeeId = asText(employeeRef.personnelId);
@@ -314,14 +313,29 @@ export async function completeStageByLevelId(
   }
   if (!employeeId) return { completed: false, error: "사원 정보를 찾을 수 없습니다." };
 
-  // 2) level_id → license_level 코드(buildLadder 와 동일: code || name)
-  const { data: lv } = await supabase.from("exam_levels").select("id, code, name")
-    .eq("tenant_id", tenantId).eq("id", lid).limit(1);
-  const row = (lv as Array<{ code?: string; name?: string }> | null)?.[0];
-  const code = asText(row?.code) || asText(row?.name);
-  if (!code) return { completed: false, error: "인증 단계 코드를 찾을 수 없습니다." };
+  // 2) level_id → license_level 코드(buildLadder 와 동일: code || name). level_id 없으면 폴백 경로로.
+  const lid = asText(levelId);
+  let code = "";
+  if (lid) {
+    const { data: lv } = await supabase.from("exam_levels").select("id, code, name")
+      .eq("tenant_id", tenantId).eq("id", lid).limit(1);
+    const row = (lv as Array<{ code?: string; name?: string }> | null)?.[0];
+    code = asText(row?.code) || asText(row?.name);
+  }
+  if (code) {
+    const res = await completeStageAndActivateNext(employeeId, tenantId, code, completedDate, actorId);
+    if (res.completed || !opts?.fallbackFinal) return res;   // 매칭 성공 or 폴백 불필요 → 그대로 반환
+  }
 
-  return completeStageAndActivateNext(employeeId, tenantId, code, completedDate, actorId);
+  // 3) [P1] DM 완료 확실화: 코드 미매칭/미확정 시 "다음 단계 없는 최종 단계"(active/waiting)를 완료 처리.
+  //    본 프로젝트에서 라이선스 마지막 단계(DM)는 next_license 가 null 이므로 이를 완료로 확정한다.
+  if (opts?.fallbackFinal) {
+    const plans = await loadPlansForEmployee(employeeId, tenantId);
+    const final = plans.find((p) => !p.next_license && (p.status === "active" || p.status === "waiting"));
+    if (final) return completeStageAndActivateNext(employeeId, tenantId, final.license_level, completedDate, actorId);
+    return { completed: false, error: "완료할 최종 단계가 없습니다." };
+  }
+  return { completed: false, error: code ? "해당 단계 계획이 없습니다." : "인증 단계 코드를 찾을 수 없습니다." };
 }
 
 // 매일 자동 계산(요구사항 17): 미완료 + 목표취득일 경과 → 'expired'. (남은개월은 조회 시 파생계산)

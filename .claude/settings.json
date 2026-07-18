@@ -12,7 +12,15 @@
       "Bash(awk 'NR>=15803 && NR<=15920' src/App.tsx)",
       "Bash(awk 'NR>=15803 && NR<=15960 && /}, \\\\[/' src/App.tsx)",
       "Bash(grep -viE \"//|\\\\*|미사용|서버에서만\")",
-      "Bash(grep -iE \"service_role|password\\\\s*=|secret\\\\s*=|private_key|access_token|refresh_token|eyJ[A-Za-z0-9_-]{20,}\")"
+      "Bash(grep -iE \"service_role|password\\\\s*=|secret\\\\s*=|private_key|access_token|refresh_token|eyJ[A-Za-z0-9_-]{20,}\")",
+      "Bash(grep -viE \"//|comment|주석|미사용|없\")",
+      "Bash(sed -n '/tables text\\\\[\\\\]/,/];/p' supabase/migrations/20260712010000_exam_master_extra.sql)",
+      "Bash(sed -n '/tables text\\\\[\\\\]/,/];/p' supabase/migrations/20260716000000_fix_exam_all_tables_rls.sql)",
+      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\(Object.keys\\(p.scripts||{}\\).join\\(', '\\)\\)\")",
+      "Bash(echo \"BUILD:$?\")",
+      "Bash(node -e \"console.log\\(Object.keys\\(require\\('./package.json'\\).scripts||{}\\).join\\(', '\\)\\)\")",
+      "Bash(git status *)",
+      "Bash(grep -viE \"supabaseService|import\\\\.meta\\\\.env|주석|//|comment\")"
     ]
   }
 }

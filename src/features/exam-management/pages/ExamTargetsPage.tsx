@@ -57,6 +57,8 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   const [showColMenu, setShowColMenu] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [activeIdx, setActiveIdx] = useState(-1);
+  const [records, setRecords] = useState<ExamRow[]>([]);   // [7단계] 실시간 자동집계용(승인 확정 인증)
+  const [recordsLoaded, setRecordsLoaded] = useState(false);
 
   // 미저장 변경 보호 + 앱 공통 닫기(ESC·뒤로가기·최상위 우선) 연동.
   const [editBase, setEditBase] = useState("");
@@ -99,6 +101,18 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void reload(); }, [reload]);
+
+  // [7단계] 편집 모달 최초 열림 시 인증 레코드 1회 로드(목록 조회와 분리 · 실시간 자동집계 카드용, 중복조회 방지).
+  useEffect(() => {
+    if (!editRow || recordsLoaded || !examSupabaseReady()) return;
+    let alive = true;
+    Promise.all([
+      listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
+      listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
+    ]).then(([apps, dm]) => { if (alive) { setRecords([...apps, ...dm]); setRecordsLoaded(true); } });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editRow, recordsLoaded, tenantId]);
 
   const levelLabel = (id: unknown) => (!id ? "-" : (levels.find((o) => o.id === String(id))?.label || "-"));
   const cellText = (c: Col, r: ExamRow) => {
@@ -151,6 +165,24 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
     const below = filtered.filter((r) => pct(cfg.actualOf(r), cfg.targetOf(r)) < 100).length;
     return { count: filtered.length, target, actual, rate: pct(actual, target), below };
   }, [filtered, cfg]);
+
+  // [7단계] 편집 행의 "실시간 자동집계"(대시보드·보고서와 동일 함수). 저장하지 않고 표시만.
+  const liveAgg = useMemo(() => {
+    if (!editRow) return null;
+    const year = String(editRow.year ?? new Date().getFullYear());
+    const filters = {
+      group: editRow.group_name ? String(editRow.group_name) : undefined,
+      product: editRow.product_group ? String(editRow.product_group) : undefined,
+      part: editRow.part_name ? String(editRow.part_name) : undefined,
+      level: editRow.level_id ? String(editRow.level_id) : undefined,
+    };
+    if (cfg.table === "exam_monthly_results") {
+      const r = calculateMonthlyPerformanceYear(records, year, filters);
+      return { actual: r.total, months: r.months, target: cfg.targetOf(editRow) };
+    }
+    const r = calculateAnnualPerformance(records, year, { target: cfg.targetOf(editRow), filters });
+    return { actual: r.value.actual, months: r.value.months, target: r.value.target };
+  }, [editRow, records, cfg]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const curPage = Math.min(page, pageCount);
@@ -354,6 +386,20 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
               <span className={`rounded-lg px-3 py-1 ${darkMode ? "bg-slate-800" : "bg-slate-100"}`}>목표: <b>{cfg.targetOf(editRow)}</b></span>
               <span className={`rounded-lg px-3 py-1 ${darkMode ? "bg-slate-800" : "bg-slate-100"}`}>달성률: <b className={rateTone(pct(cfg.actualOf(editRow), cfg.targetOf(editRow)))}>{pct(cfg.actualOf(editRow), cfg.targetOf(editRow))}%</b></span>
             </div>
+            {/* [7단계] 실시간 자동집계(대시보드·보고서와 동일 함수 · 승인 확정 인증 기준). 저장 시 자동값은 덮어쓰지 않음. */}
+            {liveAgg && (
+              <div className={`mt-3 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+                <div className="mb-2 text-xs font-semibold text-slate-500">자동 집계(실시간) <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">대시보드·보고서와 동일 기준</span></div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className={`rounded-lg px-3 py-1 ${darkMode ? "bg-slate-800" : "bg-white"}`}>{cfg.actualLabel}(자동): <b>{liveAgg.actual}</b></span>
+                  <span className={`rounded-lg px-3 py-1 ${darkMode ? "bg-slate-800" : "bg-white"}`}>목표: <b>{liveAgg.target}</b></span>
+                  <span className={`rounded-lg px-3 py-1 ${darkMode ? "bg-slate-800" : "bg-white"}`}>달성률: <b className={rateTone(pct(liveAgg.actual, liveAgg.target))}>{pct(liveAgg.actual, liveAgg.target)}%</b></span>
+                  <span className={`rounded-lg px-3 py-1 ${darkMode ? "bg-slate-800" : "bg-white"}`}>부족: <b>{Math.max(liveAgg.target - liveAgg.actual, 0)}</b></span>
+                </div>
+                {cfg.table === "exam_monthly_results" && <p className="mt-1.5 text-[0.7rem] text-slate-400">월별: {liveAgg.months.map((m, i) => `${i + 1}월 ${m}`).join(" · ")}</p>}
+                <p className="mt-1.5 text-[0.7rem] text-slate-400">※ 승인 확정 인증 기준 실시간 집계(취소·삭제·중복·자동 후보 제외). 저장 시 자동값은 덮어쓰지 않습니다.</p>
+              </div>
+            )}
             <div className="mt-6 flex justify-end gap-2">
               <button type="button" onClick={requestCloseEdit} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
               <button type="button" data-modal-save onClick={() => void saveRow()} disabled={saving} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-semibold text-white ${saving ? "bg-slate-400" : "bg-blue-600 hover:bg-blue-500"}`}>{saving ? "저장 중…" : "저장"}</button>

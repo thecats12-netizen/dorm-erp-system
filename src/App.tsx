@@ -16295,7 +16295,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           <header className={`mb-6 rounded-3xl ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"} p-5 shadow-sm ring-1`}>
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-500"><Building2 className="h-4 w-4" /> 기숙사 운영 통합 시스템</div>
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-500"><Building2 className="h-4 w-4" /> 에이치티솔루션 운영 통합 시스템</div>
                 <h1 className="text-2xl font-bold tracking-tight md:text-3xl">HTS 운영관리 v4</h1>
                 <p className="mt-1 text-sm text-slate-500">기숙사, 입주배정, 비품, 계약, 매각, 하자접수, 운영시뮬레이션까지 한 번에</p>
               </div>

@@ -152,7 +152,10 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     //  통합 권한 선택 모델에서는 계정당 사용자 정의 권한 1개만 배정하므로, 그 1개는 additive 여도 배타 적용.
     //  (레거시 다중 배정 계정은 exclusive 미적용 → 기존 additive 동작 유지, 관리자 재저장 시 1개로 정리됨.)
     const exclusiveRoleIds = new Set(restrictiveRoleIds);
-    if (activeRoleIds.length === 1) exclusiveRoleIds.add(activeRoleIds[0]);
+    // [수정] 활성 사용자 정의 권한이 하나라도 있으면 배타 적용 → 기본 역할 메뉴가 새지 않고 "선택한 메뉴만" 표시.
+    //  (기존: 정확히 1개일 때만 배타 → 그 외에는 additive 로 기본 역할 메뉴가 전부 노출되는 버그.)
+    //  배타는 항상 "좁히기"만 하므로 사용자 정의 권한이 없는 admin/일반 역할 계정에는 영향 없음(무회귀).
+    activeRoleIds.forEach((id) => exclusiveRoleIds.add(id));
 
     const { data: perms, error: e3 } = await supabase
       .from("custom_role_permissions").select("custom_role_id, permission_key")
