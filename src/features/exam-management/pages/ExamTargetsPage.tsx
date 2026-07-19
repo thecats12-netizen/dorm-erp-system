@@ -328,7 +328,9 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
           </thead>
           <tbody>
             {paged.map((r, ri) => (
-              <tr key={String(r.id)} aria-selected={ri === activeIdx} onClick={() => setActiveIdx(ri)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+              <tr key={String(r.id)} aria-selected={ri === activeIdx} title={canEdit ? "클릭하여 수정" : undefined}
+                onClick={() => { setActiveIdx(ri); if (canEdit) setEditRow({ ...r }); }}
+                className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} border-t ${canEdit ? "cursor-pointer" : ""} ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                 {visibleCols.map((c) => (
                   <td key={c.key} className="whitespace-nowrap px-2.5 py-2">
                     {c.type === "computed" && c.tone ? <span className={`font-semibold ${rateTone(c.compute!(r))}`}>{c.compute!(r)}%</span> : cellText(c, r)}
@@ -336,9 +338,10 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
                 ))}
                 {canEdit && (
                   <td className="whitespace-nowrap px-2.5 py-2">
-                    <button className="text-blue-600 hover:underline" onClick={() => setEditRow({ ...r })}>수정</button>
+                    {/* 행 클릭(=수정)과 충돌 방지: 각 버튼 전파 차단(§34) */}
+                    <button className="text-blue-600 hover:underline" onClick={(e) => { e.stopPropagation(); setEditRow({ ...r }); }}>수정</button>
                     <span className="mx-1 text-slate-300">·</span>
-                    <button className="text-rose-600 hover:underline" onClick={() => void removeRow(r)}>삭제</button>
+                    <button className="text-rose-600 hover:underline" onClick={(e) => { e.stopPropagation(); void removeRow(r); }}>삭제</button>
                   </td>
                 )}
               </tr>

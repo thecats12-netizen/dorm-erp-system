@@ -685,7 +685,7 @@ export default function ExamApplicationsPage({
             {paged.map((r, ri) => {
               const k = rowKey(r); const sel = selected.has(k); const activeRow = ri === activeIdx;
               return (
-                <tr key={k} aria-selected={activeRow} onClick={() => { setActiveIdx(ri); openDetail(r); }} onDoubleClick={() => openDetail(r)} className={`${activeRow ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : sel ? (darkMode ? "bg-blue-950/40" : "bg-blue-50") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+                <tr key={k} aria-selected={activeRow} title={canEdit ? "클릭하여 수정" : "클릭하여 상세"} onClick={() => { setActiveIdx(ri); if (canEdit) setEditRow({ ...r }); else openDetail(r); }} onDoubleClick={() => openDetail(r)} className={`${activeRow ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : sel ? (darkMode ? "bg-blue-950/40" : "bg-blue-50") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                   <td className={`px-2 py-2 ${pinFirst ? "sticky left-0 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}><input type="checkbox" checked={sel} onChange={() => toggleSel(k)} onClick={(e) => e.stopPropagation()} /></td>
                   {visibleCols.map((c) => (
                     <td key={c.key} className={`whitespace-nowrap px-2.5 py-2 ${pinFirst && c.key === "employee_no" ? "sticky left-9 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}>

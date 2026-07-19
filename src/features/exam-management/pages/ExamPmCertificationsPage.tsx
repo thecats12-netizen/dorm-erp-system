@@ -501,7 +501,7 @@ export default function ExamPmCertificationsPage({
           </thead>
           <tbody>
             {paged.map((r, ri) => (
-              <tr key={String(r.id)} aria-selected={ri === activeIdx} onClick={() => setActiveIdx(ri)} onDoubleClick={() => void openDetail(r)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+              <tr key={String(r.id)} aria-selected={ri === activeIdx} title={canEdit && !isApproved(r) ? "클릭하여 수정" : "클릭하여 상세"} onClick={() => { setActiveIdx(ri); if (canEdit && !isApproved(r)) setEditRow({ ...r }); else void openDetail(r); }} onDoubleClick={() => void openDetail(r)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                 {COLS.map((c) => (
                   <td key={c.key} className="whitespace-nowrap px-2.5 py-2">
                     {c.key === "cert_state" ? <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${stateTone(String(r.cert_state))}`}>{String(r.cert_state)}</span>

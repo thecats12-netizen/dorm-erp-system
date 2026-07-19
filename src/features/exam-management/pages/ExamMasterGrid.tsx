@@ -288,19 +288,22 @@ export default function ExamMasterGrid({
           </thead>
           <tbody>
             {filtered.map((r, ri) => (
-              <tr key={String(r.id)} aria-selected={ri === activeIdx} onClick={() => setActiveIdx(ri)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+              <tr key={String(r.id)} aria-selected={ri === activeIdx} title={canEdit ? "클릭하여 수정" : undefined}
+                onClick={() => { setActiveIdx(ri); if (canEdit) openEdit(r); }}
+                className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} border-t ${canEdit ? "cursor-pointer" : ""} ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                 {config.columns.map((c) => <td key={c.key} className="whitespace-nowrap px-3 py-2">{cellText(c, r)}</td>)}
                 <td className="px-3 py-2">
                   <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${r.is_active === false ? "bg-slate-200 text-slate-500" : "bg-emerald-100 text-emerald-700"}`}>{r.is_active === false ? "미사용" : "사용"}</span>
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 text-xs">
-                  <button className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-200" onClick={() => void openHistory(r)}>이력</button>
+                  {/* 행 클릭(=수정)과 충돌하지 않도록 각 액션 버튼은 전파를 차단한다(§16·§34). */}
+                  <button className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-200" onClick={(e) => { e.stopPropagation(); void openHistory(r); }}>이력</button>
                   {canEdit && <><span className="mx-1 text-slate-300">·</span>
-                    <button className="text-blue-600 hover:underline" onClick={() => openEdit(r)}>수정</button>
+                    <button className="text-blue-600 hover:underline" onClick={(e) => { e.stopPropagation(); openEdit(r); }}>수정</button>
                     <span className="mx-1 text-slate-300">·</span>
-                    <button className="text-slate-500 hover:underline" onClick={() => void toggleActive(r)}>{r.is_active === false ? "사용" : "미사용"}</button>
+                    <button className="text-slate-500 hover:underline" onClick={(e) => { e.stopPropagation(); void toggleActive(r); }}>{r.is_active === false ? "사용" : "미사용"}</button>
                     <span className="mx-1 text-slate-300">·</span>
-                    <button className="text-rose-600 hover:underline" onClick={() => void removeRow(r)}>삭제</button>
+                    <button className="text-rose-600 hover:underline" onClick={(e) => { e.stopPropagation(); void removeRow(r); }}>삭제</button>
                   </>}
                 </td>
               </tr>

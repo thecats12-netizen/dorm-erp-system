@@ -461,7 +461,24 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
           <div role="dialog" aria-modal="true" aria-labelledby="exam-dash-detail-title" tabIndex={-1} className={`my-8 w-full max-w-3xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-center justify-between">
               <h3 id="exam-dash-detail-title" className="text-lg font-semibold">{detail.title} <span className="text-sm font-normal text-slate-500">· {detail.rows.length}건</span></h3>
-              <button type="button" aria-label="닫기" onClick={() => setDetail(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+              <div className="flex items-center gap-1">
+                {/* 표시된 목록을 CSV(Excel)로 내보내기 — 화면과 동일한 컬럼/필터 기준(§14). 외부 의존성 없음. */}
+                <button type="button" disabled={detail.rows.length === 0}
+                  onClick={() => {
+                    const cols = DETAIL_COLS[detail.kind];
+                    const esc = (v: string) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+                    const csv = [cols.map(([h]) => esc(h)).join(",")]
+                      .concat(detail.rows.map((r) => cols.map(([, get]) => esc(get(r) || "")).join(",")))
+                      .join("\r\n");
+                    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url; a.download = `${detail.title}_${new Date().toISOString().slice(0, 10)}.csv`;
+                    a.click(); URL.revokeObjectURL(url);
+                  }}
+                  className={`rounded-lg border px-2.5 py-1 text-xs font-medium ${detail.rows.length === 0 ? "cursor-not-allowed text-slate-300 dark:border-slate-700" : "text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"}`}>Excel</button>
+                <button type="button" aria-label="닫기" onClick={() => setDetail(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
+              </div>
             </div>
             <div className="max-h-[60vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
               <table className="w-full text-left text-xs">

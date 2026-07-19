@@ -479,7 +479,7 @@ export default function ExamDmCertificationsPage({
           </thead>
           <tbody>
             {paged.map((r, ri) => (
-              <tr key={String(r.id)} aria-selected={ri === activeIdx} onClick={() => setActiveIdx(ri)} onDoubleClick={() => setDetailRow(r)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+              <tr key={String(r.id)} aria-selected={ri === activeIdx} title={canEdit ? "클릭하여 수정" : "클릭하여 상세"} onClick={() => { setActiveIdx(ri); if (canEdit) setEditRow({ ...r }); else setDetailRow(r); }} onDoubleClick={() => setDetailRow(r)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                 {visibleCols.map((c) => (
                   <td key={c.key} className="whitespace-nowrap px-2.5 py-2">
                     {c.type === "expiry" ? <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${expiryOf(r).tone}`}>{expiryOf(r).label}</span>
