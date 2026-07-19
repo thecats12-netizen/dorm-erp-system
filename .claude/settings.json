@@ -21,7 +21,8 @@
       "Bash(node -e \"console.log\\(Object.keys\\(require\\('./package.json'\\).scripts||{}\\).join\\(', '\\)\\)\")",
       "Bash(git status *)",
       "Bash(grep -viE \"supabaseService|import\\\\.meta\\\\.env|주석|//|comment\")",
-      "Bash(npx supabase *)"
+      "Bash(npx supabase *)",
+      "Bash(head-20)"
     ]
   }
 }

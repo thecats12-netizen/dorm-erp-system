@@ -281,21 +281,6 @@ export async function generatePlanForEmployee(
   return { created, skipped, ladder: ladder.length, error: firstError };
 }
 
-// exam_levels + exam_rules 를 읽어 데이터 기반 사다리를 만든다(하드코딩 금지). 페이지 훅에서 재사용.
-export async function loadLadder(tenantId: string): Promise<LadderStep[]> {
-  if (!isSupabaseAvailable() || !supabase) return [];
-  const [lv, ru] = await Promise.all([
-    supabase.from("exam_levels")
-      .select("id, code, name, rank_order, is_active, deleted_at")
-      .eq("tenant_id", tenantId).is("deleted_at", null),
-    supabase.from("exam_rules")
-      .select("id, level_id, prerequisite_level_id, required_months, effective_date, is_active, deleted_at, created_at")
-      .eq("tenant_id", tenantId).is("deleted_at", null),
-  ]);
-  if (lv.error || ru.error) return [];
-  return buildLadder((lv.data as Row[]) || [], (ru.data as Row[]) || []);
-}
-
 // 직원 1명의 공정 범위에 맞는 사다리 로드(요구사항 4). 직원 process_id 미연결 → 빈 사다리(계획 생성 안 함).
 export async function loadScopedLadder(employeeId: string, tenantId: string): Promise<{ ladder: LadderStep[]; scope: EmployeeScope | null }> {
   if (!isSupabaseAvailable() || !supabase || !employeeId) return { ladder: [], scope: null };
@@ -415,6 +400,27 @@ export async function updatePlanStatus(
   if (status === "completed") patch.completed_date = toYmd(completedDate) || todayYmd();
   const { error } = await supabase.from(TABLE).update(patch).eq("tenant_id", tenantId).eq("id", planId);
   return error ? { ok: false, error: error.message } : { ok: true };
+}
+
+// 시험 결과 → 계획 완료 연동(코드 기반). category_code(=license_level 코드)로 완료 처리.
+//  · 사원은 personnel_id 우선, 없으면 tenant + employee_no 로 확정(이름 매칭 금지).
+//  · 조건 불확실(사원/코드 미확정)이면 완료하지 않고 오류 반환(비차단 — 호출부에서 경고만).
+//  · completeStageAndActivateNext 재사용(멱등: active 아닐 때/이미 완료면 안전).
+export async function completeStageByCode(
+  employeeRef: { personnelId?: string | null; employeeNo?: string | null },
+  tenantId: string, levelCode: unknown, completedDate: unknown, actorId?: string
+): Promise<AdvanceResult> {
+  if (!isSupabaseAvailable() || !supabase) return { completed: false, error: "Supabase 미설정" };
+  const code = asText(levelCode);
+  if (!code) return { completed: false, error: "인증 단계 코드를 확인할 수 없습니다." };
+  let employeeId = asText(employeeRef.personnelId);
+  if (!employeeId && asText(employeeRef.employeeNo)) {
+    const { data } = await supabase.from("exam_personnel").select("id")
+      .eq("tenant_id", tenantId).eq("employee_no", asText(employeeRef.employeeNo)).is("deleted_at", null).limit(1);
+    employeeId = asText((data as Array<{ id?: string }> | null)?.[0]?.id);
+  }
+  if (!employeeId) return { completed: false, error: "사원 정보를 찾을 수 없습니다." };
+  return completeStageAndActivateNext(employeeId, tenantId, code, completedDate, actorId);
 }
 
 // 매일 자동 계산(요구사항 17): 미완료 + 목표취득일 경과 → 'expired'. (남은개월은 조회 시 파생계산)

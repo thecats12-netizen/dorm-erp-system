@@ -565,11 +565,15 @@ export default function ExamDmCertificationsPage({
                           {sumItem("인증 공정 수", dm.processCount)}
                           {sumItem("인증 장비 수", dm.equipmentCount)}
                           {sumItem("Dual Multi", dm.dualMulti)}
-                          {sumItem("현재 라이선스 단계", ls.currentStage)}
-                          {sumItem("목표취득일", ls.targetDate)}
-                          {sumItem("남은개월", ls.remainingMonths != null ? `${ls.remainingMonths}개월` : null, ls.overdue)}
-                          {sumItem("기한초과", ls.overdue ? "초과" : "정상", ls.overdue)}
+                          {sumItem("현재 취득 단계", ls.acquiredStageCode ? (ls.acquiredStageName && ls.acquiredStageName !== ls.acquiredStageCode ? `${ls.acquiredStageCode} · ${ls.acquiredStageName}` : ls.acquiredStageCode) : "없음")}
+                          {sumItem("진행 중 단계", ls.activeStageCode ? (ls.activeStageName ?? ls.activeStageCode) : "없음")}
+                          {sumItem("다음 추천 단계", ls.nextRecommendedStageCode ? (ls.nextRecommendedStageName ?? ls.nextRecommendedStageCode) : "없음")}
+                          {sumItem("목표취득일", ls.activeTargetDate)}
+                          {sumItem("기한초과", ls.isOverdue ? "초과" : "정상", ls.isOverdue)}
                         </div>
+                        {ls.recommendationReason && <div className="mt-2 text-xs text-slate-500">추천 사유: {ls.recommendationReason}</div>}
+                        {ls.source && ls.source !== "none" && <div className="mt-1 text-xs text-slate-500">데이터 출처: {ls.source === "license_plan" ? "라이선스 계획" : ls.source === "exam_application" ? "시험 응시 이력" : "계획 및 시험 이력"}</div>}
+                        {ls.warnings?.length ? <div className="mt-1 text-xs text-amber-600">{ls.warnings.join(" · ")}</div> : null}
                         {!canCert && <div className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-400">{reason}</div>}
                       </div>
                     );

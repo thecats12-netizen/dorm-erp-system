@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listExamRows, type ExamRow } from "../services/examMasterService";
+import { loadEmployeeLicenseSummaries } from "../services/employeeAutofillService";
+import type { EmployeeAutofill } from "../types/employeeLookup";
 import {
   loadAllPlans, generatePlanForEmployee, completeStageAndActivateNext,
   updatePlanStatus, recomputeExpiredPlans, decoratePlans, summarizePlans,
@@ -36,6 +38,7 @@ export default function ExamLicensePlanBoard({
   const [processF, setProcessF] = useState("");
   const [planStatusF, setPlanStatusF] = useState<"" | "active" | "waiting" | "completed" | "expired" | "cancel">("");
   const [candF, setCandF] = useState<"" | "delay" | "unlinked" | "mismatch" | "pm" | "dm">("");
+  const [summaries, setSummaries] = useState<Map<string, EmployeeAutofill["licenseSummary"]>>(new Map());
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +56,8 @@ export default function ExamLicensePlanBoard({
         listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
       ]);
       setPersonnel(ppl); setPlans(all); setMaster({ levels, rules, processes, parts, groups });
+      // 공통 요약 배치 계산(N+1 없음): 계획 없어도 시험 취득 이력으로 현재 취득 단계를 확인.
+      loadEmployeeLicenseSummaries(tenantId, ppl.map((p) => str(p.id))).then(setSummaries).catch(() => setSummaries(new Map()));
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId]);
@@ -233,6 +238,27 @@ export default function ExamLicensePlanBoard({
                       </button>
                     )}
                   </div>
+                  {/* 공통 요약: 계획이 없어도 시험 취득 이력 기준 현재 취득 단계를 표시(가짜 plan 생성 없음). */}
+                  {(() => {
+                    const s = summaries.get(selId); if (!s) return null;
+                    const stage = (c: string | null, n: string | null) => c ? (n && n !== c ? `${c} · ${n}` : c) : "없음";
+                    const srcLabel = s.source === "license_plan" ? "라이선스 계획" : s.source === "exam_application" ? "시험 응시 이력" : s.source === "mixed" ? "계획 및 시험 이력" : "확인 가능한 데이터 없음";
+                    const cell = (label: string, val: string, tone?: string) => (
+                      <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}><div className="text-[0.6rem] uppercase tracking-wide text-slate-400">{label}</div><div className={`mt-0.5 ${tone ?? ""}`}>{val}</div></div>
+                    );
+                    return (
+                      <div className="mb-3">
+                        <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
+                          {cell("현재 취득 단계", stage(s.acquiredStageCode, s.acquiredStageName), "font-medium text-emerald-600")}
+                          {cell("진행 중 단계", stage(s.activeStageCode, s.activeStageName), "text-blue-600")}
+                          {cell("다음 추천 단계", stage(s.nextRecommendedStageCode, s.nextRecommendedStageName))}
+                          {cell("계획 상태", selPlans.length ? "계획 있음" : "라이선스 계획 미생성", selPlans.length ? "" : "text-slate-500")}
+                          {cell("데이터 출처", srcLabel)}
+                        </div>
+                        {s.warnings?.length ? <div className="mt-1 text-xs text-amber-600">{s.warnings.join(" · ")}</div> : null}
+                      </div>
+                    );
+                  })()}
                   {/* 공정 미연결(legacy) / 규칙 없음 안내 */}
                   {!selScope?.resolved && (
                     <div className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">

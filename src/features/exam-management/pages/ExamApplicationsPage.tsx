@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
@@ -12,6 +12,8 @@ import { loadMyExamPermissions, type MyExamPermissions } from "../services/examP
 // [4단계] 공통 사원선택 + 라이선스 요약(조회 전용, 추가 UI). 기존 사번 select/필드/저장은 그대로 유지.
 import EmployeeSelector from "../components/EmployeeSelector";
 import { loadEmployeeAutofill } from "../services/employeeAutofillService";
+import { completeStageByCode } from "../services/licensePlanService";
+import PracticalEvalTab from "./PracticalEvalTab";
 import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 
 type RefOpt = { id: string; label: string };
@@ -128,6 +130,7 @@ export default function ExamApplicationsPage({
   const [showColMenu, setShowColMenu] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   // 응시 후보 자동계산
+  const [subTab, setSubTab] = useState<"status" | "practical">("status");
   const [showCand, setShowCand] = useState(false);
   const [cands, setCands] = useState<ExamCandidate[]>([]);
   const [candLoading, setCandLoading] = useState(false);
@@ -234,12 +237,29 @@ export default function ExamApplicationsPage({
     };
   }, [selectedPerson]);
 
-  // 사번(연명부) 변경 시 라이선스 요약 1회 로드(기존 사번 select/신규 EmployeeSelector 공용 · 중복조회 방지).
+  // 최신 editRow 참조(효과 deps 에 editRow 를 넣지 않고도 최신값을 읽어 자동추천 판단 — 재로딩 방지).
+  const editRowRef = useRef<ExamRow | null>(null);
+  editRowRef.current = editRow;
+
+  // 사번(연명부) 변경 시 라이선스 요약 1회 로드. 직원 변경 즉시 이전 요약 제거(stale 방지) + 최신 요청만 반영.
   useEffect(() => {
     const id = selectedPerson ? String(selectedPerson.id) : "";
-    if (!id) { setAutofill(null); return; }
+    setAutofill(null); // 이전 직원 요약/추천 즉시 제거
+    if (!id) return;
     let alive = true;
-    loadEmployeeAutofill(id, tenantId).then((af) => { if (alive) setAutofill(af); }).catch(() => {});
+    loadEmployeeAutofill(id, tenantId).then((af) => {
+      if (!alive) return;
+      setAutofill(af);
+      // [신규 등록 자동 추천] 신규 모드 + 인증단계 비어있음 + 추천 정확 1건(isEligible) 일 때만 category_code 자동 입력.
+      //  · 기존값이 있으면(사용자 입력/수정 모드) 건드리지 않는다(덮어쓰기 금지). 효과는 직원 변경 시에만 재실행.
+      const er = editRowRef.current;
+      const ls = af?.licenseSummary;
+      if (er && !er.id && ls?.isEligibleForNextStage && ls.nextRecommendedStageCode
+        && !String(er.category_code ?? "").trim() && !String(er.level_id ?? "").trim()) {
+        setEditRow((f) => (f && !f.id && !String(f.category_code ?? "").trim() && !String(f.level_id ?? "").trim()
+          ? { ...f, category_code: ls.nextRecommendedStageCode } : f));
+      }
+    }).catch(() => { if (alive) setAutofill(null); });
     return () => { alive = false; };
   }, [selectedPerson, tenantId]);
 
@@ -442,6 +462,18 @@ export default function ExamApplicationsPage({
       const auditMemo = editRow.cert_status_manual === true ? `인증취득여부 수동 확정(${String(editRow.cert_status ?? "")}) 사유: ${manualReason}` : undefined;
       await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), isNew ? "create" : "update", before, saved, auditMemo);
       setEditRow(null); onToast?.(isNew ? "응시 항목이 등록되었습니다." : "응시 항목이 수정되었습니다."); await reload();
+      // [결과→계획 연동] 최종 취득 상태면 라이선스 계획을 완료 처리(비차단·멱등). 저장은 이미 성공했으므로 실패해도 롤백/삭제하지 않는다.
+      const finalAcquired = /인증\s*취득|실기\s*합격/.test(String(saved.status ?? "")) || String(saved.cert_status ?? "") === "취득" || !!String(saved.cert_acquired_date ?? "").trim();
+      if (finalAcquired) {
+        const levelCode = String(saved.category_code ?? saved.pm_level ?? "").trim();
+        try {
+          const rr = await completeStageByCode(
+            { personnelId: (saved.personnel_id as string) ?? null, employeeNo: String(saved.employee_no ?? "") },
+            tenantId, levelCode, saved.cert_acquired_date ?? saved.practical_pass_date, userId);
+          if (rr.completed) onToast?.(`라이선스 단계 완료 처리${rr.activatedNext ? ` · 다음 단계(${rr.activatedNext}) 활성화` : ""}`);
+          else setError("시험 결과는 저장되었지만 라이선스 계획 자동 완료 처리에 실패했습니다. 라이선스 계획과 단계 연결을 확인해 주세요.");
+        } catch { setError("시험 결과는 저장되었으나 라이선스 계획 연동 중 오류가 발생했습니다."); }
+      }
     } catch (e) { setError((e as { message?: string })?.message || "저장하지 못했습니다."); }
     finally { setSaving(false); }
   };
@@ -609,6 +641,18 @@ export default function ExamApplicationsPage({
         <p className="text-sm text-slate-500">시험관리 · 인증시험 응시데이터를 관리합니다.</p>
       </div>
 
+      {/* 하위 탭(신규 라우트 없음 · 페이지 내부 상태). 실기 평가는 조회 중심(1차). */}
+      <div className="mb-4 flex flex-wrap gap-1">
+        {([["status", "응시 현황"], ["practical", "실기 평가"]] as const).map(([k, l]) => (
+          <button key={k} type="button" onClick={() => setSubTab(k)}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium ${subTab === k ? "bg-blue-600 text-white" : (darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200")}`}>{l}</button>
+        ))}
+      </div>
+
+      {subTab === "practical" ? (
+        <PracticalEvalTab darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} />
+      ) : (<>
+
       {/* KPI */}
       <div className="mb-4 grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-9">
         {kpiCard("전체 응시", String(kpi.total))}
@@ -732,6 +776,7 @@ export default function ExamApplicationsPage({
         <span>총 {filtered.length}건{selected.size ? ` · 선택 ${selected.size}` : ""}</span>
         <span className="flex items-center gap-2"><button className={btn} disabled={curPage <= 1} onClick={() => setPage(curPage - 1)}>이전</button><span>{curPage} / {pageCount}</span><button className={btn} disabled={curPage >= pageCount} onClick={() => setPage(curPage + 1)}>다음</button></span>
       </div>
+      </>)}
 
       {/* 응시 후보 자동계산 모달(후보=자동, 등록=관리자 승인) */}
       {showCand && (
@@ -822,13 +867,18 @@ export default function ExamApplicationsPage({
                           <span className={`rounded px-2 py-0.5 text-xs font-semibold ${canApply ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{canApply ? "응시 가능" : "확인 필요"}</span>
                         </div>
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                          {sumItem("현재 단계", ls.currentStage)}
-                          {sumItem("다음 추천 단계", ls.nextStage)}
-                          {sumItem("목표취득일", ls.targetDate)}
-                          {sumItem("남은개월", ls.remainingMonths != null ? `${ls.remainingMonths}개월` : null, ls.overdue)}
-                          {sumItem("기한초과", ls.overdue ? "초과" : "정상", ls.overdue)}
-                          {sumItem("재시험 가능일", ls.retestAvailableDate)}
+                          {sumItem("현재 취득 단계", ls.acquiredStageCode ? (ls.acquiredStageName && ls.acquiredStageName !== ls.acquiredStageCode ? `${ls.acquiredStageCode} · ${ls.acquiredStageName}` : ls.acquiredStageCode) : "없음")}
+                          {sumItem("진행 중 단계", ls.activeStageCode ? (ls.activeStageName ?? ls.activeStageCode) : "없음")}
+                          {sumItem("다음 추천 단계", ls.nextRecommendedStageCode ? (ls.nextRecommendedStageName ?? ls.nextRecommendedStageCode) : "없음")}
+                          {sumItem("목표취득일", ls.activeTargetDate)}
+                          {sumItem("남은기간", ls.activeStageCode ? (ls.remainingDays != null ? `${ls.remainingDays}일` : (ls.remainingMonths != null ? `${ls.remainingMonths}개월` : null)) : null, ls.isOverdue)}
+                          {sumItem("기한초과", ls.isOverdue ? "초과" : "정상", ls.isOverdue)}
                         </div>
+                        {ls.recommendationReason && <div className="mt-2 text-xs text-slate-500">추천 사유: {ls.recommendationReason}</div>}
+                        {ls.source === "exam_application" && <div className="mt-1 text-xs text-slate-500">데이터 출처: <b>시험 응시 이력</b>(라이선스 계획 미생성)</div>}
+                        {ls.warnings?.length ? <div className="mt-1 text-xs text-amber-600">{ls.warnings.join(" · ")}</div> : null}
+                        {/* 수정 모드: 저장된 단계와 추천 단계 불일치 경고(자동 변경 안 함) */}
+                        {!!editRow?.id && !!String(editRow.category_code ?? "").trim() && ls.nextRecommendedStageCode && String(editRow.category_code ?? "").trim() !== ls.nextRecommendedStageCode && <div className="mt-1 text-xs text-amber-600">현재 저장된 인증단계와 추천 단계가 다릅니다(저장값 유지).</div>}
                         {!canApply && <div className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-400">{reason}</div>}
                       </div>
                     );

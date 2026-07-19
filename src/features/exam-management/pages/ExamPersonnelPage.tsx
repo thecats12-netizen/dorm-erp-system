@@ -528,14 +528,18 @@ export default function ExamPersonnelPage({
               <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
                 <div className="mb-2 text-xs font-semibold text-slate-500">라이선스 요약 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">자동</span></div>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {sumItem("현재 단계", autofill.licenseSummary.currentStage)}
-                  {sumItem("다음 단계", autofill.licenseSummary.nextStage)}
-                  {sumItem("목표취득일", autofill.licenseSummary.targetDate)}
-                  {sumItem("남은개월", autofill.licenseSummary.remainingMonths != null ? `${autofill.licenseSummary.remainingMonths}개월` : null, autofill.licenseSummary.overdue)}
+                  {sumItem("현재 취득 단계", autofill.licenseSummary.acquiredStageCode ? (autofill.licenseSummary.acquiredStageName && autofill.licenseSummary.acquiredStageName !== autofill.licenseSummary.acquiredStageCode ? `${autofill.licenseSummary.acquiredStageCode} · ${autofill.licenseSummary.acquiredStageName}` : autofill.licenseSummary.acquiredStageCode) : "없음")}
+                  {sumItem("진행 중 단계", autofill.licenseSummary.activeStageCode ? (autofill.licenseSummary.activeStageName ?? autofill.licenseSummary.activeStageCode) : "없음")}
+                  {sumItem("다음 추천 단계", autofill.licenseSummary.nextRecommendedStageCode ? (autofill.licenseSummary.nextRecommendedStageName ?? autofill.licenseSummary.nextRecommendedStageCode) : "없음")}
+                  {sumItem("목표취득일", autofill.licenseSummary.activeTargetDate)}
+                  {sumItem("남은기간", autofill.licenseSummary.activeStageCode ? (autofill.licenseSummary.remainingDays != null ? `${autofill.licenseSummary.remainingDays}일` : (autofill.licenseSummary.remainingMonths != null ? `${autofill.licenseSummary.remainingMonths}개월` : null)) : null, autofill.licenseSummary.isOverdue)}
                   {sumItem("현재 PM", autofill.pmSummary.currentLevel)}
                   {sumItem("현재 DM", autofill.dmSummary.currentLevel)}
                 </div>
                 {autofill.licenseSummary.overdue && <div className="mt-2 text-xs font-medium text-rose-600">⚠ 목표취득일이 경과했습니다(기한 초과).</div>}
+                {autofill.licenseSummary.recommendationReason && <div className="mt-2 text-xs text-slate-500">추천 사유: {autofill.licenseSummary.recommendationReason}</div>}
+                {autofill.licenseSummary.source === "exam_application" && <div className="mt-1 text-xs text-slate-500">데이터 출처: <b>시험 응시 이력</b>(라이선스 계획 미생성)</div>}
+                {autofill.licenseSummary.warnings?.length ? <div className="mt-1 text-xs text-amber-600">{autofill.licenseSummary.warnings.join(" · ")}</div> : null}
               </div>
             )}
 

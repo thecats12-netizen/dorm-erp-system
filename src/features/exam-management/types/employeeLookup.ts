@@ -35,13 +35,38 @@ export type EmployeeAutofill = {
     employmentStatus: string | null;
   };
   licenseSummary: {
-    currentStage: string | null;   // 진행중 단계(없으면 마지막 완료)
-    nextStage: string | null;      // 다음 단계 코드
-    activePlanId: string | null;   // active employee_license_plan.id
-    targetDate: string | null;     // active.target_date
+    // 하위호환 alias(기존 컴포넌트) — 신규 UI 는 아래 3분리 필드를 사용한다.
+    currentStage: string | null;   // = acquiredStageCode || activeStageCode
+    nextStage: string | null;      // = nextRecommendedStageCode
+    activePlanId: string | null;
+    targetDate: string | null;
     remainingMonths: number | null;
     overdue: boolean;
-    retestAvailableDate: string | null; // 응시이력 기반(다음 단계에서 연결)
+    retestAvailableDate: string | null;
+    // 3분리(취득/진행/추천)
+    acquiredStageCode: string | null;
+    acquiredStageName: string | null;
+    acquiredDate: string | null;
+    activeStageCode: string | null;
+    activeStageName: string | null;
+    activeTargetDate: string | null;
+    remainingDays: number | null;
+    isOverdue: boolean;
+    nextRecommendedStageCode: string | null;
+    nextRecommendedStageName: string | null;
+    recommendationReason: string | null;
+    isEligibleForNextStage: boolean;
+    source: "license_plan" | "exam_application" | "mixed" | "none";
+    warnings: string[];
+    planStatus: string | null;
+    applicationStatus: string | null;
+    // PM/DM 후속 재사용 준비(§14)
+    highestAcquiredSortOrder: number | null;
+    completedLevelCodes: string[];
+    activeLevelCodes: string[];
+    nextEligibleLevelCodes: string[];
+    // 하위호환 alias
+    acquiredStage?: string | null;
   };
   pmSummary: {
     currentLevel: string | null;

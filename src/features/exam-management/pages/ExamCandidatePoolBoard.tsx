@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listExamRows, upsertExamRow, writeExamAudit, type ExamRow } from "../services/examMasterService";
 import { loadAllPlans, decoratePlans, todayYmd, toYmd, type EmployeeLicensePlan } from "../services/licensePlanService";
+import { loadEmployeeLicenseSummaries } from "../services/employeeAutofillService";
+import type { EmployeeAutofill } from "../types/employeeLookup";
 
 // 시험관리 · 응시 후보관리(Candidate Pool). 라이선스 계획(active·목표 임박·미접수) → 이번 달 응시 대상 자동 선별.
 //  · 기존 employee_license_plan / exam_applications 만 사용. 신규 마이그레이션/라우팅 없음. 대시보드 하위 섹션 임베드.
@@ -37,6 +39,7 @@ export default function ExamCandidatePoolBoard({
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [summaries, setSummaries] = useState<Map<string, EmployeeAutofill["licenseSummary"]>>(new Map());
 
   const reload = useCallback(async () => {
     setLoading(true); setError(null);
@@ -47,6 +50,8 @@ export default function ExamCandidatePoolBoard({
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
       ]);
       setPersonnel(ppl); setPlans(pl); setApps(ap); setChecked(new Set());
+      // 공통 요약 배치(N+1 없음) — 후보 상세에서 취득/진행/추천을 공통 서비스 기준으로 표시.
+      loadEmployeeLicenseSummaries(tenantId, ppl.map((p) => str(p.id))).then(setSummaries).catch(() => setSummaries(new Map()));
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId]);
@@ -214,6 +219,21 @@ export default function ExamCandidatePoolBoard({
                     <div className="text-base font-semibold">{sel.name} <span className="text-xs font-normal text-slate-400">{sel.empNo}</span></div>
                     <div className="text-xs text-slate-500">{[sel.productGroup, sel.group, sel.process].filter(Boolean).join(" · ") || "-"}</div>
                   </div>
+                  {/* 공통 요약(취득/진행/추천) — 후보 선정 기준과 별개로 공통 서비스 값 표시. */}
+                  {(() => {
+                    const s = summaries.get(sel.empId); if (!s) return null;
+                    const stage = (c: string | null, n: string | null) => c ? (n && n !== c ? `${c} · ${n}` : c) : "없음";
+                    const cell = (label: string, val: string, tone?: string) => (
+                      <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}><div className="text-[0.65rem] uppercase tracking-wide text-slate-400">{label}</div><div className={`mt-0.5 ${tone ?? ""}`}>{val}</div></div>
+                    );
+                    return (
+                      <div className="mb-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
+                        {cell("현재 취득 단계", stage(s.acquiredStageCode, s.acquiredStageName), "font-medium text-emerald-600")}
+                        {cell("진행 중 단계", stage(s.activeStageCode, s.activeStageName), "text-blue-600")}
+                        {cell("다음 추천 단계", stage(s.nextRecommendedStageCode, s.nextRecommendedStageName))}
+                      </div>
+                    );
+                  })()}
                   <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
                     {[["현재/응시 단계", sel.level], ["목표취득일", sel.targetDate],
                       ["남은 기간", sel.overdue ? "초과" : sel.remaining != null ? `${sel.remaining}개월` : (sel.days != null ? `${sel.days}일` : "-")],
