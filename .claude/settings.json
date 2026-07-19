@@ -22,7 +22,9 @@
       "Bash(git status *)",
       "Bash(grep -viE \"supabaseService|import\\\\.meta\\\\.env|주석|//|comment\")",
       "Bash(npx supabase *)",
-      "Bash(head-20)"
+      "Bash(head-20)",
+      "Bash(perl -0pi -e 's/\\\\.trim\\\\\\(\\\\\\) \\\\}, tenantId, userId\\\\\\)/.trim\\(\\) }\\), tenantId, userId\\)/g' src/features/exam-management/pages/ExamPmCertificationsPage.tsx)",
+      "Bash(perl -0pi -e 's/\\(?<!DEV && \\)console\\\\.log\\\\\\(\"\\\\[청소사진 디버그\\\\]/import.meta.env.DEV \\\\&\\\\& console.log\\(\"[청소사진 디버그]/g' src/App.tsx src/services/operationalSupabaseService.ts)"
     ]
   }
 }

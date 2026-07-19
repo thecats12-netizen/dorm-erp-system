@@ -288,6 +288,18 @@ export default function ExamPmCertificationsPage({
   // 실제 함수 레벨 권한 검증(버튼 숨김만이 아님). viewer/manager 는 canEdit=false + RLS(admin=ALL/viewer=SELECT) 로도 차단.
   const guard = (): boolean => { if (!canEdit) { setError("승인/수정 권한이 없습니다."); return false; } return true; };
 
+  // pm_certifications 실제 컬럼만 저장한다. 화면 파생값(approval_label/cert_state/level_label/equipment_label/
+  //  current_pm_level/group_name/product/part_name/process 등)을 upsert payload 에 그대로 넣으면 PGRST204
+  //  (Could not find the 'approval_label' column …)가 발생하므로 저장 직전 화이트리스트로 정제한다.
+  const PM_SAVE_COLS = ["id", "tenant_id", "organization_id", "personnel_id", "level_id", "part_id", "process_id",
+    "cert_no", "acquired_date", "expiry_date", "notes", "is_active", "deleted_at", "created_by", "updated_by",
+    "employee_no", "name", "pm_level", "approval_status", "approved_by", "approved_at", "source_application_id", "proof_file"];
+  const sanitizePmCert = (o: ExamRow): ExamRow => {
+    const out: ExamRow = {};
+    for (const k of PM_SAVE_COLS) if (k in o) out[k] = (o as Record<string, unknown>)[k];
+    return out;
+  };
+
   const saveRow = async () => {
     if (!editRow || !guard()) return;
     if (isApproved(editRow)) { setError("승인된 인증은 일반 필드를 수정할 수 없습니다(취소/갱신으로 처리)."); return; }
@@ -300,7 +312,7 @@ export default function ExamPmCertificationsPage({
       // 증빙파일은 컬럼 미적용 환경에서 저장 오류를 막기 위해 비어 있으면 payload 에서 제외(스키마 변경 전 무영향).
       const { proof_file, ...restEdit } = editRow as ExamRow & { proof_file?: unknown };
       const payload: ExamRow = { approval_status: "대기", ...restEdit, ...(String(proof_file ?? "").trim() ? { proof_file } : {}) };
-      const saved = await upsertExamRow("pm_certifications", payload, tenantId, userId);
+      const saved = await upsertExamRow("pm_certifications", sanitizePmCert(payload), tenantId, userId);
       await writeExamAudit(tenantId, userId, "pm_certifications", String(saved.id), isNew ? "create" : "update", before, saved);
       setEditRow(null); onToast?.(isNew ? "등록되었습니다." : "수정되었습니다."); await reload(); onDataChanged?.();
     } catch (e) { setError((e as { message?: string })?.message || "저장하지 못했습니다."); }
@@ -324,11 +336,11 @@ export default function ExamPmCertificationsPage({
         const certNo = String(r.cert_no ?? "").trim() || genCertNo(r, acquired);                                     // ① 인증번호 생성
         const expiry = ymd(r.expiry_date) || calculateCertExpiry({ ...r, acquired_date: acquired }, rules).value.expiryDate || null; // ③ 만료일 계산
         const payload: ExamRow = { ...r, approval_status: "승인", approved_by: userId, approved_at: nowIso(), cert_no: certNo, acquired_date: acquired, expiry_date: expiry, is_active: true };
-        const saved = await upsertExamRow("pm_certifications", payload, tenantId, userId);                            // ⑤ pm_certifications 이력(승인 기록)
+        const saved = await upsertExamRow("pm_certifications", sanitizePmCert(payload), tenantId, userId);                            // ⑤ pm_certifications 이력(승인 기록)
         // ⑥ 기존 유효 인증 정리: 동일 사번+동일 단계의 다른 승인·활성 인증을 비활성(대체/취소 이력화, 승인 기록은 덮어쓰지 않음).
         const supersede = rows.filter((x) => String(x.id) !== String(r.id) && String(x.employee_no ?? "") === String(r.employee_no ?? "") && String(x.level_id ?? "") === String(r.level_id ?? "") && isApproved(x) && x.is_active !== false);
         for (const old of supersede) {
-          await upsertExamRow("pm_certifications", { ...old, is_active: false, notes: `${String(old.notes ?? "")} · 신규 인증(${certNo})으로 대체`.trim() }, tenantId, userId);
+          await upsertExamRow("pm_certifications", sanitizePmCert({ ...old, is_active: false, notes: `${String(old.notes ?? "")} · 신규 인증(${certNo})으로 대체`.trim() }), tenantId, userId);
           await writeExamAudit(tenantId, userId, "pm_certifications", String(old.id), "update", old, null, `신규 인증(${certNo})으로 대체`);
         }
         // ⑦ 시험 응시관리 승인상태 반영: 원본 응시의 인증취득 확정(cert_status_manual=true).
@@ -348,7 +360,7 @@ export default function ExamPmCertificationsPage({
         onToast?.("승인 완료: 인증번호·취득일·만료일·PM Level·이력·응시반영·통계갱신 처리되었습니다.");
         setDetailRow(enrich(saved));
       } else {
-        const saved = await upsertExamRow("pm_certifications", { ...r, approval_status: "반려", approved_by: userId, approved_at: nowIso() }, tenantId, userId);
+        const saved = await upsertExamRow("pm_certifications", sanitizePmCert({ ...r, approval_status: "반려", approved_by: userId, approved_at: nowIso() }), tenantId, userId);
         await writeExamAudit(tenantId, userId, "pm_certifications", String(saved.id), "reject", r, saved, "반려");
         onToast?.("반려 처리했습니다."); setDetailRow(enrich(saved));
       }
@@ -360,7 +372,7 @@ export default function ExamPmCertificationsPage({
   const cancelCert = async (r: ExamRow) => {
     if (!guard() || !r.id || !isApproved(r)) return;
     try {
-      const up = await upsertExamRow("pm_certifications", { ...r, is_active: false, notes: `${String(r.notes ?? "")} · 취소(${nowIso().slice(0, 10)})`.trim() }, tenantId, userId);
+      const up = await upsertExamRow("pm_certifications", sanitizePmCert({ ...r, is_active: false, notes: `${String(r.notes ?? "")} · 취소(${nowIso().slice(0, 10)})`.trim() }), tenantId, userId);
       await writeExamAudit(tenantId, userId, "pm_certifications", String(up.id), "update", r, up, "인증 취소");
       // 취소 시 원본 응시의 "인증취득 확정"을 해제 → 공통 집계(연간목표/월간실적)에서 제외되도록 단일 기준 유지.
       if (r.source_application_id) {

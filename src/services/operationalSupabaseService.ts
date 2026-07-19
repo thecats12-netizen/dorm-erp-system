@@ -516,7 +516,7 @@ export const loadCleaningReportsPhotosModule = async (
             photoish[k] = typeof v === "string" && v.length > 100 ? `${v.slice(0, 100)}…(len=${v.length})` : v;
           }
         });
-        console.log("[청소사진 디버그] 사진 0장 report:", {
+        import.meta.env.DEV && console.log("[청소사진 디버그] 사진 0장 report:", {
           id: r.id,
           photo_count: r.photo_count,
           allColumns: Object.keys(r),
@@ -557,7 +557,7 @@ export const loadCleaningReportsPhotosByIds = async (
               photoish[k] = typeof v === "string" && v.length > 100 ? `${v.slice(0, 100)}…(len=${v.length})` : v;
             }
           });
-          console.log("[청소사진 디버그] 리스트 사진 0장 report:", { id: r.id, allColumns: Object.keys(r), photoColumns: photoish });
+          import.meta.env.DEV && console.log("[청소사진 디버그] 리스트 사진 0장 report:", { id: r.id, allColumns: Object.keys(r), photoColumns: photoish });
         }
         out.push({ id: r.id, ...photos });
       });
@@ -597,7 +597,7 @@ export const loadCleaningReportPhotos = async (
           photoish[k] = typeof v === "string" && v.length > 100 ? `${v.slice(0, 100)}…(len=${v.length})` : v;
         }
       });
-      console.log("[청소사진 디버그] 수정 조회 0장 report:", {
+      import.meta.env.DEV && console.log("[청소사진 디버그] 수정 조회 0장 report:", {
         id: (data as any).id,
         photo_count: (data as any).photo_count,
         allColumns: Object.keys(data),

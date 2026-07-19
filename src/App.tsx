@@ -10909,7 +10909,7 @@ export default function App() {
               console.log("[청소사진 복구] 백업에서 복원:", { id: r.id, before: before.length, after: after.length });
             } else {
               // 디버그: DB·백업 모두 0장인 보고서 → 원인 확인용
-              console.log("[청소사진 디버그] 사진 0장(DB+백업 없음):", { id: r.id, report_date: r.reportDate, building: r.buildingName });
+              import.meta.env.DEV && console.log("[청소사진 디버그] 사진 0장(DB+백업 없음):", { id: r.id, report_date: r.reportDate, building: r.buildingName });
             }
           }
           return { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
