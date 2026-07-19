@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import * as XLSX from "xlsx";
@@ -8,7 +8,7 @@ import {
 } from "../services/examMasterService";
 import { calculatePmLevel } from "../services/examAutomationService";
 // [자동 라이선스 관리] 인력 저장 후 employee_license_plan 자동 생성(추가 전용·비차단). 기존 저장 흐름 무변경.
-import { generatePlanForEmployeeAuto, generatePlanForEmployee, loadLadder } from "../services/licensePlanService";
+import { generatePlanForEmployeeAuto } from "../services/licensePlanService";
 // [3단계] 인력현황 등록 UX: 공통 사원선택 + 자동입력(조회 전용 기반). 다른 화면 미변경.
 import EmployeeSelector from "../components/EmployeeSelector";
 import { loadEmployeeAutofill } from "../services/employeeAutofillService";
@@ -17,6 +17,8 @@ import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 
 type ColType = "text" | "date" | "number" | "select" | "boolean";
 type Col = { key: string; label: string; type: ColType; options?: string[]; required?: boolean; filter?: boolean };
+// 인증 기준관리 참조 옵션(부모 FK 포함) — 인력현황 기준정보 연동(cascade)용.
+type MRef = { id: string; label: string; name: string; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null };
 
 const COLS: Col[] = [
   { key: "employee_no", label: "사번", type: "text", required: true },
@@ -93,6 +95,25 @@ export default function ExamPersonnelPage({
   const [historyList, setHistoryList] = useState<ExamRow[]>([]);
   const [confirmClose, setConfirmClose] = useState(false);
   const [activeIdx, setActiveIdx] = useState(-1);
+  // 인증 기준관리 마스터(제품군/그룹/제품·파트/공정) — 기준정보 연동 cascade 옵션.
+  const [master, setMaster] = useState<{ categories: MRef[]; groups: MRef[]; parts: MRef[]; processes: MRef[] }>({ categories: [], groups: [], parts: [], processes: [] });
+  useEffect(() => {
+    let alive = true;
+    const toOpt = (r: ExamRow): MRef => ({
+      id: String(r.id), name: String(r.name ?? ""), label: [r.code, r.name].filter(Boolean).join(" · ") || String(r.name ?? r.id),
+      is_active: r.is_active !== false, category_id: (r.category_id ?? null) as string | null, group_id: (r.group_id ?? null) as string | null, part_id: (r.part_id ?? null) as string | null,
+    });
+    (async () => {
+      const [categories, groups, parts, processes] = await Promise.all([
+        listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
+      ]);
+      if (alive) setMaster({ categories: categories.map(toOpt), groups: groups.map(toOpt), parts: parts.map(toOpt), processes: processes.map(toOpt) });
+    })();
+    return () => { alive = false; };
+  }, [tenantId]);
 
   // 미저장 변경 보호 + 앱 공통 닫기(ESC·뒤로가기·최상위 우선) 연동.
   const [editBase, setEditBase] = useState("");
@@ -166,6 +187,14 @@ export default function ExamPersonnelPage({
   const saveRow = async () => {
     if (!editRow) return;
     for (const c of COLS) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
+    // 기준정보 연동 무결성: 마스터 FK 조합이 선택된 경우에만 검증(legacy 텍스트-only 저장은 통과).
+    {
+      const selPart = master.parts.find((o) => o.id === String(editRow.part_id ?? ""));
+      const selProc = master.processes.find((o) => o.id === String(editRow.process_id ?? ""));
+      if (selProc && selPart && selProc.part_id != null && String(selProc.part_id) !== selPart.id) { setError("선택한 공정은 해당 제품/파트에 속하지 않습니다."); return; }
+      const gId = String(editRow._group_id ?? "");
+      if (selPart && gId && selPart.group_id != null && String(selPart.group_id) !== gId) { setError("선택한 제품/파트는 해당 그룹에 속하지 않습니다."); return; }
+    }
     setSaving(true); setError(null);
     try {
       const empNo = String(editRow.employee_no ?? "").trim();
@@ -174,7 +203,10 @@ export default function ExamPersonnelPage({
       }
       const isNew = !editRow.id;
       const before = isNew ? null : rows.find((r) => r.id === editRow.id) || null;
-      const saved = await upsertExamRow("exam_personnel", editRow, tenantId, userId);
+      // 연동용 transient 필드(_cat_id/_group_id)는 exam_personnel 컬럼이 아니므로 저장 전 제거(400 방지).
+      const payload: ExamRow = { ...editRow };
+      delete payload._cat_id; delete payload._group_id;
+      const saved = await upsertExamRow("exam_personnel", payload, tenantId, userId);
       await writeExamAudit(tenantId, userId, "exam_personnel", String(saved.id), isNew ? "create" : "update", before, saved);
       // [자동 라이선스] 신규 등록에만 계획 자동 생성(수정 시 중복 실행/불필요 쿼리 방지). 비활성(퇴사) 직원은 제외.
       //  생성 자체도 idempotent(기존 단계 skip). 실패해도 인력 저장은 유지(비차단).
@@ -245,7 +277,6 @@ export default function ExamPersonnelPage({
       const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]], { defval: "" });
       let ok = 0, skipped = 0;
       // [자동 라이선스] 업로드 사원별 계획 생성을 위해 사다리를 1회만 로드(반복 쿼리 방지). 실패 시 빈 배열→생성 skip.
-      const ladder = await loadLadder(tenantId).catch(() => []);
       for (const r of raw) {
         const row: ExamRow = {};
         for (const c of COLS) {
@@ -260,11 +291,9 @@ export default function ExamPersonnelPage({
         if (await isDuplicateEmployeeNo(tenantId, empNo)) { skipped++; continue; } // 중복 사번 스킵
         const saved = await upsertExamRow("exam_personnel", row, tenantId, userId);
         await writeExamAudit(tenantId, userId, "exam_personnel", String(saved.id), "import", null, saved);
-        // [자동 라이선스] 신규 사원 계획 자동 생성(idempotent·비차단). 실패해도 Excel 등록은 유지.
-        if (ladder.length > 0) {
-          try { await generatePlanForEmployee(String(saved.id), tenantId, saved.hire_date, ladder, userId); }
-          catch (e) { console.warn("[licensePlan] Excel 계획 생성 실패(무시)", e); }
-        }
+        // [자동 라이선스] 신규 사원 계획 자동 생성(공정 범위 기준·idempotent·비차단). 공정 미연결이면 생성 없음.
+        try { await generatePlanForEmployeeAuto(String(saved.id), tenantId, saved.hire_date, userId); }
+        catch (e) { console.warn("[licensePlan] Excel 계획 생성 실패(무시)", e); }
         ok++;
       }
       onToast?.(`인력현황 Excel ${ok}건 등록${skipped ? ` · ${skipped}건 제외(사번 누락/중복)` : ""}`);
@@ -339,6 +368,54 @@ export default function ExamPersonnelPage({
       )}
     </div>
   );
+  // 기준정보 연동(cascade): 제품군→그룹→제품/파트→공정. 선택 시 텍스트(product_group/group_name/part_name)+FK(part_id/process_id) 채움.
+  //  기존 텍스트 입력은 아래 그대로 유지(legacy 조회/직접입력 호환) — 이 블록은 추가형이며 상위 변경 시 하위를 초기화한다.
+  const renderCascade = () => {
+    if (!editRow) return null;
+    const e = editRow;
+    const byId = (arr: MRef[], id: unknown) => arr.find((o) => o.id === String(id ?? ""));
+    const byName = (arr: MRef[], nm: unknown) => { const s = String(nm ?? "").trim(); return s ? arr.find((o) => o.name.trim() === s) : undefined; };
+    // 현재 선택 id 역추적: transient → FK(part_id/process_id) → 이름 매칭
+    const proc = byId(master.processes, e.process_id);
+    const partId = String(e.part_id ?? "") || String(proc?.part_id ?? "");
+    const part = byId(master.parts, partId);
+    const groupId = String(e._group_id ?? "") || String(part?.group_id ?? "") || String(byName(master.groups, e.group_name)?.id ?? "");
+    const group = byId(master.groups, groupId);
+    const catId = String(e._cat_id ?? "") || String(group?.category_id ?? "") || String(part?.category_id ?? "") || String(byName(master.categories, e.product_group)?.id ?? "");
+
+    const catOpts = master.categories.filter((o) => o.is_active || o.id === catId);
+    const groupOpts = master.groups.filter((o) => (o.is_active || o.id === groupId) && (!catId || String(o.category_id ?? "") === catId));
+    const partOpts = master.parts.filter((o) => {
+      if (!(o.is_active || o.id === partId)) return false;
+      if (groupId) { if (o.group_id != null) return String(o.group_id) === groupId; if (catId) return String(o.category_id ?? "") === catId; return true; }
+      if (catId) return String(o.category_id ?? "") === catId;
+      return true;
+    });
+    const procOpts = master.processes.filter((o) => (o.is_active || o.id === String(e.process_id ?? "")) && (!partId || String(o.part_id ?? "") === partId));
+
+    const set = (patch: Partial<ExamRow>) => setEditRow((f) => ({ ...(f || {}), ...patch }));
+    const onCat = (id: string) => { const c = byId(master.categories, id); set({ _cat_id: id || null, product_group: c ? c.name : e.product_group, _group_id: null, group_name: null, part_id: null, part_name: null, process_id: null }); };
+    const onGroup = (id: string) => { const g = byId(master.groups, id); set({ _group_id: id || null, group_name: g ? g.name : null, _cat_id: g?.category_id ?? e._cat_id ?? null, part_id: null, part_name: null, process_id: null }); };
+    const onPart = (id: string) => { const p = byId(master.parts, id); set({ part_id: id || null, part_name: p ? p.name : null, _group_id: p?.group_id ?? e._group_id ?? null, _cat_id: p?.category_id ?? e._cat_id ?? null, process_id: null }); };
+    const onProc = (id: string) => set({ process_id: id || null });
+
+    const box = (label: string, hint: string, node: ReactNode) => (
+      <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{label}</label>{node}{hint && <p className="mt-0.5 text-[0.65rem] text-slate-400">{hint}</p>}</div>
+    );
+    const opt = (o: MRef) => <option key={o.id} value={o.id}>{o.label}{o.is_active ? "" : " (미사용)"}</option>;
+    return (
+      <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+        <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">선택 시 그룹·제품군·파트·공정 자동 반영</span></div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {box("제품군", "", <select className={`${inputCls} w-full`} value={catId} onChange={(ev) => onCat(ev.target.value)}><option value="">선택</option>{catOpts.map(opt)}</select>)}
+          {box("그룹", !catId ? "제품군을 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={groupId} onChange={(ev) => onGroup(ev.target.value)}><option value="">선택</option>{groupOpts.map(opt)}</select>)}
+          {box("제품/파트", "", <select className={`${inputCls} w-full`} value={partId} onChange={(ev) => onPart(ev.target.value)}><option value="">선택</option>{partOpts.map(opt)}</select>)}
+          {box("공정", !partId ? "제품/파트를 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={String(e.process_id ?? "")} onChange={(ev) => onProc(ev.target.value)}><option value="">선택</option>{procOpts.map(opt)}</select>)}
+        </div>
+      </div>
+    );
+  };
+
   const sumItem = (label: string, val: string | number | null, danger?: boolean) => (
     <div className={`rounded-lg border px-2 py-1.5 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
       <div className="text-[0.6rem] uppercase tracking-wide text-slate-400">{label}</div>
@@ -483,7 +560,10 @@ export default function ExamPersonnelPage({
               {!isExamAdmin && <p className="mt-2 text-[0.7rem] text-slate-400">자동 계산 값은 조회 전용입니다. 수정은 관리자만 가능합니다.</p>}
             </div>
 
-            {/* 직접 입력 필드 */}
+            {/* 기준정보 연동(cascade) — 제품군→그룹→제품/파트→공정. 선택 시 아래 텍스트 필드 자동 반영. */}
+            {renderCascade()}
+
+            {/* 직접 입력 필드(기존 텍스트 — legacy 조회/직접입력 호환 유지) */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {DIRECT_COLS.map((c) => renderField(c))}
             </div>

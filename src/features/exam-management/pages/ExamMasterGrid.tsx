@@ -4,11 +4,12 @@ import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overla
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import type { ExamColumn, ExamEntityConfig } from "../examMasterConfigs";
 import {
-  listExamRows, listExamRefOptions, upsertExamRow, softDeleteExamRow, setExamRowActive,
+  listExamRows, upsertExamRow, softDeleteExamRow, setExamRowActive,
   writeExamAudit, listExamAudit, examSupabaseReady, type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 
-type RefOpt = { id: string; label: string };
+// 참조 옵션은 라벨뿐 아니라 상위 FK(category_id/group_id/part_id/process_id)와 활성여부를 함께 싣는다(종속 선택용).
+type RefOpt = { id: string; label: string; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null; process_id?: string | null };
 
 export default function ExamMasterGrid({
   config, darkMode, canEdit, tenantId, userId, onToast,
@@ -49,14 +50,29 @@ export default function ExamMasterGrid({
   useRegisteredOverlay(!!topClose, () => topClose && topClose());
 
   const refColumns = useMemo(() => config.columns.filter((c) => c.type === "ref"), [config]);
+  // 목록/Excel/검색에 쓰는 컬럼(필터 전용 transient 제외). 폼(등록/수정)은 transient 포함 전체를 렌더.
+  const tableColumns = useMemo(() => config.columns.filter((c) => !c.transient), [config]);
 
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
+      const refTables = Array.from(new Set(refColumns.map((c) => c.refTable as ExamMasterTable)));
       const [data, refs] = await Promise.all([
         listExamRows(config.table, tenantId),
-        Promise.all(refColumns.map(async (c) => [c.refTable as string, await listExamRefOptions(c.refTable as ExamMasterTable, tenantId)] as const)),
+        Promise.all(refTables.map(async (t) => {
+          const refRows = await listExamRows(t, tenantId); // RLS 로 현재 tenant·권한 범위만. 비활성 포함(수정 화면 표시용).
+          const opts: RefOpt[] = refRows.map((r) => ({
+            id: String(r.id),
+            label: [r.code, r.name].filter(Boolean).join(" · ") || String(r.name ?? r.id),
+            is_active: r.is_active !== false,
+            category_id: (r.category_id ?? null) as string | null,
+            group_id: (r.group_id ?? null) as string | null,
+            part_id: (r.part_id ?? null) as string | null,
+            process_id: (r.process_id ?? null) as string | null,
+          }));
+          return [t as string, opts] as const;
+        })),
       ]);
       setRows(data);
       setRefMap(Object.fromEntries(refs));
@@ -85,20 +101,69 @@ export default function ExamMasterGrid({
     return String(v);
   };
 
+  // 한 옵션이 상위 폼 선택에 부합하는지 판정(기본 FK → null 이면 fallback 상위로 역추적).
+  const matchesFilter = (col: ExamColumn, opt: RefOpt, edit: ExamRow | null): boolean => {
+    const fb = col.filterBy;
+    if (!fb) return true;
+    const pv = String(edit?.[fb.formKey] ?? "");
+    if (!pv) return true; // 상위 미선택 → 전체 허용
+    const all = refMap[col.refTable as string] || [];
+    const refPresent = all.some((o) => (o as Record<string, unknown>)[fb.refField] != null);
+    if (!refPresent) return true; // 참조 FK 컬럼 없음(미적용) → 필터 우회(무회귀)
+    const primary = (opt as Record<string, unknown>)[fb.refField];
+    if (primary != null) return String(primary) === pv;
+    // 기본 FK 가 null 인 기존 데이터 → fallback 상위 단계(예: group_id 없으면 category_id)로 판정
+    if (fb.fallback) {
+      const fpv = String(edit?.[fb.fallback.formKey] ?? "");
+      if (fpv) return String((opt as Record<string, unknown>)[fb.fallback.refField] ?? "") === fpv;
+    }
+    return false; // 상위 판정 불가 → 신규 선택에서 제외(저장된 값은 optionsFor 에서 별도 표시)
+  };
+
+  // 종속 선택: 상위 폼 값 기준으로 옵션을 필터한다(신규 선택은 활성만 · 저장된 값은 비활성/필터밖이어도 표시).
+  const optionsFor = (col: ExamColumn, edit: ExamRow | null): RefOpt[] => {
+    const all = refMap[col.refTable as string] || [];
+    let list = all.filter((o) => o.is_active && matchesFilter(col, o, edit));
+    const savedId = String(edit?.[col.key] ?? "");
+    if (savedId && !list.some((o) => o.id === savedId)) {
+      const saved = all.find((o) => o.id === savedId);
+      if (saved) list = [saved, ...list];
+    }
+    return list;
+  };
+
+  // 참조 값 변경 시 하위 종속 필드를 연쇄 초기화(상위 변경 → 잘못된 하위 선택 제거).
+  const changeRef = (colKey: string, value: string) => {
+    setEditRow((f) => {
+      const next: ExamRow = { ...(f || {}), [colKey]: value || null };
+      const cleared = [colKey];
+      let progress = true;
+      while (progress) {
+        progress = false;
+        for (const cc of refColumns) {
+          if (cc.filterBy && cleared.includes(cc.filterBy.formKey) && next[cc.key] != null) {
+            next[cc.key] = null; cleared.push(cc.key); progress = true;
+          }
+        }
+      }
+      return next;
+    });
+  };
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = rows.filter((r) => {
       if (activeFilter === "사용" && r.is_active === false) return false;
       if (activeFilter === "미사용" && r.is_active !== false) return false;
       if (q) {
-        const text = config.columns.map((c) => cellText(c, r)).join(" ").toLowerCase();
+        const text = tableColumns.map((c) => cellText(c, r)).join(" ").toLowerCase();
         if (!text.includes(q)) return false;
       }
       return true;
     });
     if (sortKey) {
       const dir = sortDir === "asc" ? 1 : -1;
-      const col = config.columns.find((c) => c.key === sortKey);
+      const col = tableColumns.find((c) => c.key === sortKey);
       list.sort((a, b) => {
         const av = col ? cellText(col, a) : String(a[sortKey] ?? "");
         const bv = col ? cellText(col, b) : String(b[sortKey] ?? "");
@@ -145,14 +210,25 @@ export default function ExamMasterGrid({
     if (!editRow) return;
     if (saving) return; // 재진입 차단: disabled={saving} 는 리렌더 후에만 적용되어 빠른 연속 클릭이 2회 발송될 수 있음.
     for (const c of config.columns) {
+      if (c.transient) continue; // 필터 전용 필드는 저장/필수 대상 아님
       if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
+    }
+    // 종속 무결성: 하위 선택이 상위에 속하는지 검증(참조 FK 가 있을 때만 — 없으면 텍스트/레거시 호환으로 통과).
+    for (const c of refColumns) {
+      if (!c.filterBy) continue;
+      const childId = String(editRow[c.key] ?? ""); if (!childId) continue;
+      const opt = (refMap[c.refTable as string] || []).find((o) => o.id === childId);
+      if (opt && !matchesFilter(c, opt, editRow)) { setError(`선택한 ${c.label}은(는) 상위 항목에 속하지 않습니다.`); return; }
     }
     if (codeDup) { setError("동일한 코드가 이미 있습니다. 다른 코드를 사용하세요."); return; } // 저장 차단(코드 중복)
     setSaving(true); setError(null);
     try {
       const isNew = !editRow.id;
       const before = isNew ? null : rows.find((r) => r.id === editRow.id) || null;
-      const saved = await upsertExamRow(config.table, editRow, tenantId, userId);
+      // 필터 전용(transient) 필드는 DB 로 보내지 않는다(없는 컬럼 강제 저장 방지).
+      const payload: ExamRow = { ...editRow };
+      for (const c of config.columns) if (c.transient) delete payload[c.key];
+      const saved = await upsertExamRow(config.table, payload, tenantId, userId);
       await writeExamAudit(tenantId, userId, config.table, String(saved.id), isNew ? "create" : "update", before, saved);
       setEditRow(null);
       onToast?.(isNew ? `${config.title} 항목이 등록되었습니다.` : `${config.title} 항목이 수정되었습니다.`);
@@ -197,7 +273,7 @@ export default function ExamMasterGrid({
   const exportExcel = () => {
     const data = filtered.map((r) => {
       const o: Record<string, string> = {};
-      config.columns.forEach((c) => { o[c.label] = cellText(c, r); });
+      tableColumns.forEach((c) => { o[c.label] = cellText(c, r); });
       o["사용여부"] = r.is_active === false ? "미사용" : "사용";
       return o;
     });
@@ -218,10 +294,11 @@ export default function ExamMasterGrid({
       for (const r of raw) {
         const row: ExamRow = {};
         let hasRequired = true;
-        for (const c of config.columns) {
+        for (const c of tableColumns) {
           const v = String(r[c.label] ?? "").trim();
           if (c.type === "ref") {
-            const opt = (refMap[c.refTable as string] || []).find((o) => o.label === v || o.label.startsWith(v));
+            // 빈 셀은 참조 미지정(null). (v==="" 일 때 startsWith 가 항상 참이 되어 첫 옵션이 잘못 배정되는 것을 방지)
+            const opt = v ? (refMap[c.refTable as string] || []).find((o) => o.label === v || o.label.startsWith(v)) : undefined;
             row[c.key] = opt?.id ?? null;
           } else if (c.type === "number") {
             row[c.key] = v === "" ? null : Number(v.replace(/[^0-9.-]/g, ""));
@@ -277,7 +354,7 @@ export default function ExamMasterGrid({
         <table className="w-full text-left text-sm">
           <thead className={`sticky top-0 z-[1] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
             <tr>
-              {config.columns.map((c) => (
+              {tableColumns.map((c) => (
                 <th key={c.key} onClick={() => toggleSort(c.key)} className="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:underline">
                   {c.label}{sortKey === c.key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
                 </th>
@@ -291,7 +368,7 @@ export default function ExamMasterGrid({
               <tr key={String(r.id)} aria-selected={ri === activeIdx} title={canEdit ? "클릭하여 수정" : undefined}
                 onClick={() => { setActiveIdx(ri); if (canEdit) openEdit(r); }}
                 className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} border-t ${canEdit ? "cursor-pointer" : ""} ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
-                {config.columns.map((c) => <td key={c.key} className="whitespace-nowrap px-3 py-2">{cellText(c, r)}</td>)}
+                {tableColumns.map((c) => <td key={c.key} className="whitespace-nowrap px-3 py-2">{cellText(c, r)}</td>)}
                 <td className="px-3 py-2">
                   <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${r.is_active === false ? "bg-slate-200 text-slate-500" : "bg-emerald-100 text-emerald-700"}`}>{r.is_active === false ? "미사용" : "사용"}</span>
                 </td>
@@ -309,7 +386,7 @@ export default function ExamMasterGrid({
               </tr>
             ))}
             {!loading && filtered.length === 0 && (
-              <tr><td colSpan={config.columns.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>
+              <tr><td colSpan={tableColumns.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>
             )}
           </tbody>
         </table>
@@ -325,12 +402,20 @@ export default function ExamMasterGrid({
               {config.columns.map((c) => (
                 <div key={c.key}>
                   <label className="mb-1 block text-sm font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}</label>
-                  {c.type === "ref" ? (
-                    <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}>
-                      <option value="">선택 안 함</option>
-                      {(refMap[c.refTable as string] || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-                    </select>
-                  ) : c.type === "boolean" ? (
+                  {c.type === "ref" ? (() => {
+                    const opts = optionsFor(c, editRow);
+                    const parentMissing = !!c.filterBy && !String(editRow[c.filterBy.formKey] ?? "");
+                    return (
+                      <>
+                        <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => changeRef(c.key, e.target.value)}>
+                          <option value="">선택 안 함</option>
+                          {opts.map((o) => <option key={o.id} value={o.id}>{o.label}{o.is_active ? "" : " (미사용)"}</option>)}
+                        </select>
+                        {parentMissing && <p className="mt-1 text-xs text-slate-400">상위 항목을 먼저 선택하면 목록이 좁혀집니다.</p>}
+                        {!parentMissing && opts.length === 0 && <p className="mt-1 text-xs text-amber-600">선택 가능한 항목이 없습니다.</p>}
+                      </>
+                    );
+                  })() : c.type === "boolean" ? (
                     <select className={`${inputCls} w-full`} value={editRow[c.key] === true ? "true" : "false"} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value === "true" }))}>
                       <option value="false">아니오</option>
                       <option value="true">예</option>

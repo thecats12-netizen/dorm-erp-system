@@ -392,7 +392,7 @@ export default function ExamApplicationsPage({
     const acquired = filtered.filter((r) => certOf(r) === "취득").length;
     const total = filtered.length;
     return {
-      total, w진행: byStatus("필기 진행"), w합격: byStatus("필기 합격"), s진행: byStatus("실기 진행"), s합격: byStatus("실기 합격"),
+      total, pending: byStatus("승인대기"), w진행: byStatus("필기 진행"), w합격: byStatus("필기 합격"), s진행: byStatus("실기 진행"), s합격: byStatus("실기 합격"),
       acquired, notAcquired: total - acquired, re: byStatus("재응시"), rate: total ? Math.round((acquired / total) * 100) : 0,
     };
   }, [filtered]);
@@ -612,6 +612,7 @@ export default function ExamApplicationsPage({
       {/* KPI */}
       <div className="mb-4 grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-9">
         {kpiCard("전체 응시", String(kpi.total))}
+        {kpiCard("승인대기", String(kpi.pending))}
         {kpiCard("필기 진행", String(kpi.w진행))}
         {kpiCard("필기 합격", String(kpi.w합격))}
         {kpiCard("실기 진행", String(kpi.s진행))}

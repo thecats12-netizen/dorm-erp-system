@@ -154,6 +154,55 @@ export function buildLadder(levels: Row[], rules: Row[]): LadderStep[] {
   return steps;
 }
 
+// ── 공정별 인증 규칙 정밀 연동(요구사항 4) ────────────────────────────
+// 직원 범위: process_id → part_id → group_id/category_id 역추적(마스터 행에서).
+export type EmployeeScope = { processId: string; partId: string; groupId: string; categoryId: string; resolved: boolean };
+export function resolveEmployeeScope(emp: Row, processes: Row[], parts: Row[], groups: Row[]): EmployeeScope {
+  const processId = asText(emp.process_id);
+  const proc = processes.find((p) => asText(p.id) === processId);
+  const partId = asText(emp.part_id) || asText(proc?.part_id);
+  const part = parts.find((p) => asText(p.id) === partId);
+  const groupId = asText(part?.group_id);
+  const group = groups.find((g) => asText(g.id) === groupId);
+  const categoryId = asText(group?.category_id) || asText(part?.category_id);
+  return { processId, partId, groupId, categoryId, resolved: !!processId };
+}
+
+// 직원 범위에 맞는 규칙만으로 사다리 구성. 규칙 매칭 우선순위(요구사항 4):
+//   3순위(가장 구체) rule.process_id === 직원 process_id
+//   2순위           rule.process_id 없음 & rule.group_id === 직원 group_id
+//   1순위           rule.process_id/group_id 없음 & rule.category_id === 직원 category_id
+//  ※ 범위가 전혀 지정되지 않은 규칙(process/group/category 모두 없음)은 tenant 전체이므로 계획 생성에 사용하지 않는다.
+//    processId 가 없으면(legacy 미연결) 빈 사다리 → 계획 생성 안 함.
+export function buildLadderForScope(levels: Row[], rules: Row[], scope: EmployeeScope): LadderStep[] {
+  if (!scope.resolved) return [];
+  const key = (x: Row) => toYmd(x.effective_date) || asText(x.created_at);
+  const bestByLevel = new Map<string, { rule: Row; rank: number }>();
+  for (const r of (Array.isArray(rules) ? rules : []).filter(activeRow)) {
+    const lid = asText(r.level_id); if (!lid) continue;
+    const rp = asText(r.process_id), rg = asText(r.group_id), rc = asText(r.category_id);
+    let rank = -1;
+    if (rp && rp === scope.processId) rank = 3;
+    else if (!rp && rg && scope.groupId && rg === scope.groupId) rank = 2;
+    else if (!rp && !rg && rc && scope.categoryId && rc === scope.categoryId) rank = 1;
+    if (rank < 0) continue; // 범위 밖 or 완전 공통(tenant 전체) 규칙 → 제외
+    const prev = bestByLevel.get(lid);
+    if (!prev || rank > prev.rank || (rank === prev.rank && key(r) >= key(prev.rule))) bestByLevel.set(lid, { rule: r, rank });
+  }
+  return (Array.isArray(levels) ? levels : []).filter(activeRow)
+    .filter((lv) => bestByLevel.has(asText(lv.id)))
+    .map((lv) => {
+      const rule = bestByLevel.get(asText(lv.id))!.rule;
+      const rm = Number(rule.required_months);
+      return {
+        level_id: asText(lv.id), level_code: asText(lv.code) || asText(lv.name), level_name: asText(lv.name) || asText(lv.code),
+        rank_order: Number(lv.rank_order) || 0, required_months: Number.isFinite(rm) ? rm : null,
+        rule_id: asText(rule.id) || null, prerequisite_level_id: asText(rule.prerequisite_level_id) || null,
+      };
+    })
+    .sort((a, b) => a.rank_order - b.rank_order);
+}
+
 // ── Supabase 영속 계층 ────────────────────────────────────────────────
 const TABLE = "employee_license_plan";
 
@@ -247,11 +296,29 @@ export async function loadLadder(tenantId: string): Promise<LadderStep[]> {
   return buildLadder((lv.data as Row[]) || [], (ru.data as Row[]) || []);
 }
 
-// 편의: 사다리 로드 + 계획 생성을 한 번에(인력현황 단건 저장 훅용). 비차단 호출을 전제로 한다.
+// 직원 1명의 공정 범위에 맞는 사다리 로드(요구사항 4). 직원 process_id 미연결 → 빈 사다리(계획 생성 안 함).
+export async function loadScopedLadder(employeeId: string, tenantId: string): Promise<{ ladder: LadderStep[]; scope: EmployeeScope | null }> {
+  if (!isSupabaseAvailable() || !supabase || !employeeId) return { ladder: [], scope: null };
+  const [emp, lv, ru, pr, pa, gr] = await Promise.all([
+    supabase.from("exam_personnel").select("id, process_id, part_id").eq("tenant_id", tenantId).eq("id", employeeId).is("deleted_at", null).limit(1),
+    supabase.from("exam_levels").select("id, code, name, rank_order, is_active, deleted_at").eq("tenant_id", tenantId).is("deleted_at", null),
+    supabase.from("exam_rules").select("id, level_id, prerequisite_level_id, required_months, process_id, group_id, category_id, effective_date, is_active, deleted_at, created_at").eq("tenant_id", tenantId).is("deleted_at", null),
+    supabase.from("exam_processes").select("id, part_id").eq("tenant_id", tenantId).is("deleted_at", null),
+    supabase.from("exam_parts").select("id, group_id, category_id").eq("tenant_id", tenantId).is("deleted_at", null),
+    supabase.from("exam_groups").select("id, category_id").eq("tenant_id", tenantId).is("deleted_at", null),
+  ]);
+  const empRow = (emp.data as Row[] | null)?.[0];
+  if (!empRow) return { ladder: [], scope: null };
+  const scope = resolveEmployeeScope(empRow, (pr.data as Row[]) || [], (pa.data as Row[]) || [], (gr.data as Row[]) || []);
+  return { ladder: buildLadderForScope((lv.data as Row[]) || [], (ru.data as Row[]) || [], scope), scope };
+}
+
+// 편의: 공정 범위 사다리 로드 + 계획 생성을 한 번에(인력현황 단건 저장 훅용). 비차단 호출을 전제로 한다.
+//  ※ 공정 미연결/공정에 맞는 규칙 없음 → 사다리 0 → 계획 생성 없음(tenant 전체 무차별 생성 방지).
 export async function generatePlanForEmployeeAuto(
   employeeId: string, tenantId: string, hireDate: unknown, actorId?: string, organizationId?: string | null
 ): Promise<GeneratePlanResult> {
-  const ladder = await loadLadder(tenantId);
+  const { ladder } = await loadScopedLadder(employeeId, tenantId);
   return generatePlanForEmployee(employeeId, tenantId, hireDate, ladder, actorId, organizationId);
 }
 
@@ -336,6 +403,18 @@ export async function completeStageByLevelId(
     return { completed: false, error: "완료할 최종 단계가 없습니다." };
   }
   return { completed: false, error: code ? "해당 단계 계획이 없습니다." : "인증 단계 코드를 찾을 수 없습니다." };
+}
+
+// 계획 상태 수동 변경(라이선스 계획 화면). status 는 DB CHECK(waiting/active/completed/expired/cancel) 만 허용.
+//  completed 로 바꾸면 completed_date 를 오늘로 채운다(비면). tenant + id 스코프, RLS 최종 방어.
+export async function updatePlanStatus(
+  planId: string, tenantId: string, status: LicensePlanStatus, actorId?: string, completedDate?: unknown
+): Promise<{ ok: boolean; error?: string }> {
+  if (!isSupabaseAvailable() || !supabase || !planId) return { ok: false, error: "Supabase 미설정" };
+  const patch: Record<string, unknown> = { status, updated_by: actorId || null, updated_at: nowIso() };
+  if (status === "completed") patch.completed_date = toYmd(completedDate) || todayYmd();
+  const { error } = await supabase.from(TABLE).update(patch).eq("tenant_id", tenantId).eq("id", planId);
+  return error ? { ok: false, error: error.message } : { ok: true };
 }
 
 // 매일 자동 계산(요구사항 17): 미완료 + 목표취득일 경과 → 'expired'. (남은개월은 조회 시 파생계산)

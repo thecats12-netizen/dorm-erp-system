@@ -5,6 +5,8 @@ import { listRetestCandidates, generateRetestCandidates, setRetestCandidateStatu
 import { writeAutomationLog, listAutomationLogs, type AutomationLogRow } from "../services/examAutomationLogService";
 // [9단계] 라이선스 계획 기반 공통 분석(대시보드·보고서 정본). licensePlanService 재사용(중복 계산식 없음).
 import { loadLicenseAnalytics, type LicenseAnalytics } from "../services/examAnalyticsService";
+import ExamLicensePlanBoard from "./ExamLicensePlanBoard";
+import ExamCandidatePoolBoard from "./ExamCandidatePoolBoard";
 import { useRegisteredOverlay } from "../../../hooks/overlayA11y";
 
 type RefOpt = { id: string; label: string };
@@ -453,6 +455,11 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
             </div>
           </div>
         </section>
+
+        {/* 라이선스 계획(직원별) — 신규 라우팅/메뉴 없이 대시보드 하위 섹션으로 임베드 */}
+        <ExamLicensePlanBoard darkMode={darkMode} canEdit={!!canEdit} tenantId={tenantId} userId={userId} onToast={onToast} />
+        {/* 응시 후보관리(Candidate Pool) — 라이선스 계획 기반 자동 선별 */}
+        <ExamCandidatePoolBoard darkMode={darkMode} canEdit={!!canEdit} tenantId={tenantId} userId={userId} onToast={onToast} />
       </div>
 
       {/* 상세 목록 모달 */}
