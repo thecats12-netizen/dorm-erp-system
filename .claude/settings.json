@@ -24,7 +24,14 @@
       "Bash(npx supabase *)",
       "Bash(head-20)",
       "Bash(perl -0pi -e 's/\\\\.trim\\\\\\(\\\\\\) \\\\}, tenantId, userId\\\\\\)/.trim\\(\\) }\\), tenantId, userId\\)/g' src/features/exam-management/pages/ExamPmCertificationsPage.tsx)",
-      "Bash(perl -0pi -e 's/\\(?<!DEV && \\)console\\\\.log\\\\\\(\"\\\\[청소사진 디버그\\\\]/import.meta.env.DEV \\\\&\\\\& console.log\\(\"[청소사진 디버그]/g' src/App.tsx src/services/operationalSupabaseService.ts)"
+      "Bash(perl -0pi -e 's/\\(?<!DEV && \\)console\\\\.log\\\\\\(\"\\\\[청소사진 디버그\\\\]/import.meta.env.DEV \\\\&\\\\& console.log\\(\"[청소사진 디버그]/g' src/App.tsx src/services/operationalSupabaseService.ts)",
+      "Bash(git diff *)",
+      "Bash(git show *)",
+      "Bash(echo \"---rc=$?---\")",
+      "Bash(git show 0e7d08a:src/App.tsx | sed -n '10397,10425p' > /tmp/op.txt; sed -n '10510,10538p' src/App.tsx > /tmp/np.txt; if diff -q /tmp/op.txt /tmp/np.txt >/dev/null; then echo \"OK canEditCleaningReport 무변경\"; else diff -u /tmp/op.txt /tmp/np.txt; fi *)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
     ]
   }
 }

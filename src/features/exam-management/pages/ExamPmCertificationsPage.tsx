@@ -148,6 +148,7 @@ export default function ExamPmCertificationsPage({
   const [detailRow, setDetailRow] = useState<ExamRow | null>(null);
   const [detailAudit, setDetailAudit] = useState<ExamRow[]>([]);
   const [confirmClose, setConfirmClose] = useState(false);
+  const [unapproveTarget, setUnapproveTarget] = useState<ExamRow | null>(null); // 승인취소 확인 대상
   const [activeIdx, setActiveIdx] = useState(-1);
 
   const [editBase, setEditBase] = useState("");
@@ -156,7 +157,7 @@ export default function ExamPmCertificationsPage({
   useEffect(() => { if (editRow) setEditBase(JSON.stringify(editRow)); }, [editKey]);
   const editDirty = !!editRow && JSON.stringify(editRow) !== editBase;
   const requestCloseEdit = () => { if (saving) return; if (editDirty) setConfirmClose(true); else setEditRow(null); };
-  const topClose = confirmClose ? undefined : detailRow ? () => setDetailRow(null) : editRow ? requestCloseEdit : undefined;
+  const topClose = confirmClose || unapproveTarget ? undefined : detailRow ? () => setDetailRow(null) : editRow ? requestCloseEdit : undefined;
   useRegisteredOverlay(!!topClose, () => topClose && topClose());
 
   const personByEmp = useMemo(() => { const m = new Map<string, ExamRow>(); personnel.forEach((p) => m.set(String(p.employee_no ?? ""), p)); return m; }, [personnel]);
@@ -398,6 +399,24 @@ export default function ExamPmCertificationsPage({
     } catch (e) { setError((e as { message?: string })?.message || "갱신 요청 실패."); }
   };
 
+  // 승인취소: 승인 결정 자체를 되돌림(approval_status 승인 → 대기, approved_by/at 해제). 인증취소(cancelCert)와 구분 — is_active 는 유지.
+  const unapproveCert = async (r: ExamRow) => {
+    if (!guard() || !r.id || !isApproved(r)) return;
+    try {
+      const up = await upsertExamRow("pm_certifications", sanitizePmCert({ ...r, approval_status: "대기", approved_by: null, approved_at: null }), tenantId, userId);
+      await writeExamAudit(tenantId, userId, "pm_certifications", String(up.id), "update", r, up, "PM 인증 승인취소(승인 → 대기)");
+      // 승인취소 시 원본 응시의 인증취득 확정 해제 → 공통 집계(연간목표/월간실적)에서 제외되도록 단일 기준 유지.
+      if (r.source_application_id) {
+        const app = appById.get(String(r.source_application_id));
+        if (app && app.cert_status_manual === true) {
+          const upApp = await upsertExamRow("exam_applications", { ...app, cert_status_manual: false }, tenantId, userId);
+          await writeExamAudit(tenantId, userId, "exam_applications", String(upApp.id), "update", app, upApp, "PM 인증 승인취소 반영(확정 해제)");
+        }
+      }
+      onToast?.("PM 인증 승인을 취소했습니다(승인대기로 되돌림)."); setUnapproveTarget(null); setDetailRow(enrich(up)); await reload(); onDataChanged?.();
+    } catch (e) { setError((e as { message?: string })?.message || "승인취소 실패."); }
+  };
+
   const openDetail = async (r: ExamRow) => { setDetailRow(enrich(r)); try { setDetailAudit(await listExamAudit(tenantId, "pm_certifications", String(r.id))); } catch { setDetailAudit([]); } };
   const tableKeyDown = useTableKeyboardNav({ count: paged.length, active: activeIdx, setActive: setActiveIdx, pageSize: 10, onEnter: (i) => paged[i] && void openDetail(paged[i]) });
 
@@ -513,7 +532,7 @@ export default function ExamPmCertificationsPage({
           </thead>
           <tbody>
             {paged.map((r, ri) => (
-              <tr key={String(r.id)} aria-selected={ri === activeIdx} title={canEdit && !isApproved(r) ? "클릭하여 수정" : "클릭하여 상세"} onClick={() => { setActiveIdx(ri); if (canEdit && !isApproved(r)) setEditRow({ ...r }); else void openDetail(r); }} onDoubleClick={() => void openDetail(r)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+              <tr key={String(r.id)} aria-selected={ri === activeIdx} title="클릭하여 상세" onClick={() => { setActiveIdx(ri); void openDetail(r); }} onDoubleClick={() => void openDetail(r)} className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
                 {COLS.map((c) => (
                   <td key={c.key} className="whitespace-nowrap px-2.5 py-2">
                     {c.key === "cert_state" ? <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${stateTone(String(r.cert_state))}`}>{String(r.cert_state)}</span>
@@ -661,21 +680,27 @@ export default function ExamPmCertificationsPage({
               {section("관련 설비", listBox([detailRow.equipment_label, ...empApps(emp).map((a) => equipLabel(a.equipment_id))].filter(Boolean).filter((v, i, arr) => arr.indexOf(v) === i).map((e, i) => <div key={i} className="py-0.5">{String(e)}</div>), "관련 설비 없음"))}
               {section("감사로그", listBox(detailAudit.map((h) => <div key={String(h.id)} className="py-0.5"><span className="font-semibold">{String(h.action_type)}</span>{h.memo ? <span className="ml-2 text-slate-500">{String(h.memo)}</span> : null}<span className="ml-2 text-slate-400">{String(h.created_at || "").slice(0, 19).replace("T", " ")}</span></div>), "감사로그 없음"))}
 
-              {canEdit && (
-                <div className="mt-4 flex flex-wrap justify-end gap-2">
-                  {!isApproved(detailRow) ? (
-                    <>
-                      <button onClick={() => void decide(detailRow, false)} className="rounded-2xl border border-rose-300 px-4 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50">반려</button>
-                      <button onClick={() => void decide(detailRow, true)} className="rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500">승인</button>
-                    </>
-                  ) : !isCanceled(detailRow) ? (
-                    <>
-                      <button onClick={() => void renewCert(detailRow)} className="rounded-2xl border border-blue-300 px-4 py-2 text-sm font-semibold text-blue-600 hover:bg-blue-50">갱신</button>
-                      <button onClick={() => void cancelCert(detailRow)} className="rounded-2xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100">취소</button>
-                    </>
-                  ) : <span className="rounded-xl bg-slate-200 px-3 py-2 text-xs font-medium text-slate-600">취소된 인증(읽기전용)</span>}
-                </div>
-              )}
+              <div className="mt-4 flex flex-wrap justify-end gap-2">
+                {/* 수정: 편집 권한이 있을 때만 노출. 상세(읽기전용) → 수정 폼 전환. */}
+                {canEdit && !isCanceled(detailRow) && (
+                  <button onClick={() => { const r = detailRow; setDetailRow(null); setEditRow({ ...r }); }} className="rounded-2xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800">수정</button>
+                )}
+                {canEdit && !isApproved(detailRow) && (
+                  <>
+                    <button onClick={() => void decide(detailRow, false)} className="rounded-2xl border border-rose-300 px-4 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50">반려</button>
+                    <button onClick={() => void decide(detailRow, true)} className="rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500">승인</button>
+                  </>
+                )}
+                {canEdit && isApproved(detailRow) && !isCanceled(detailRow) && (
+                  <>
+                    <button onClick={() => void renewCert(detailRow)} className="rounded-2xl border border-blue-300 px-4 py-2 text-sm font-semibold text-blue-600 hover:bg-blue-50">갱신</button>
+                    <button onClick={() => void cancelCert(detailRow)} className="rounded-2xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100">인증취소</button>
+                    <button onClick={() => setUnapproveTarget(detailRow)} className="rounded-2xl border border-amber-300 px-4 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-50">승인취소</button>
+                  </>
+                )}
+                {canEdit && isCanceled(detailRow) && <span className="rounded-xl bg-slate-200 px-3 py-2 text-xs font-medium text-slate-600">취소된 인증(읽기전용)</span>}
+                <button onClick={() => setDetailRow(null)} className="rounded-2xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800">닫기</button>
+              </div>
             </div>
           </div>
         );
@@ -685,6 +710,20 @@ export default function ExamPmCertificationsPage({
         onKeepEditing={() => setConfirmClose(false)}
         onDiscard={() => { setConfirmClose(false); setEditRow(null); }}
         onSave={() => { setConfirmClose(false); void saveRow(); }} />
+
+      {/* 승인취소 확인 모달 */}
+      {unapproveTarget && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" onClick={() => setUnapproveTarget(null)}>
+          <div className={`w-full max-w-sm rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <h3 className="mb-2 text-lg font-semibold">PM 인증 승인취소</h3>
+            <p className="mb-5 text-sm text-slate-500 dark:text-slate-400">PM 인증 승인을 취소하시겠습니까? 승인 상태와 관련 이력이 변경됩니다.</p>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setUnapproveTarget(null)} className={`rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>닫기</button>
+              <button onClick={() => void unapproveCert(unapproveTarget)} className="rounded-2xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-500">승인취소</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

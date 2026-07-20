@@ -158,7 +158,17 @@ export function buildLadder(levels: Row[], rules: Row[]): LadderStep[] {
 // 직원 범위: process_id → part_id → group_id/category_id 역추적(마스터 행에서).
 export type EmployeeScope = { processId: string; partId: string; groupId: string; categoryId: string; resolved: boolean };
 export function resolveEmployeeScope(emp: Row, processes: Row[], parts: Row[], groups: Row[]): EmployeeScope {
-  const processId = asText(emp.process_id);
+  let processId = asText(emp.process_id);
+  // process_id 가 비어 있어도 part_id(FK) 로 공정이 tenant 내 유일하게 결정되면 그 공정으로 연결(요구사항 1).
+  //  이름 단독 매칭 금지 — 상위 계층(part_id) FK + 유일성이 성립할 때만 자동 연결. 2건 이상이면 연결하지 않음(미연결 유지).
+  if (!processId) {
+    const empPartId = asText(emp.part_id);
+    if (empPartId) {
+      const underPart = (Array.isArray(processes) ? processes : []).filter((p) => asText(p.part_id) === empPartId && p.is_active !== false && !p.deleted_at);
+      const uniqueIds = Array.from(new Set(underPart.map((p) => asText(p.id)).filter(Boolean)));
+      if (uniqueIds.length === 1) processId = uniqueIds[0];
+    }
+  }
   const proc = processes.find((p) => asText(p.id) === processId);
   const partId = asText(emp.part_id) || asText(proc?.part_id);
   const part = parts.find((p) => asText(p.id) === partId);

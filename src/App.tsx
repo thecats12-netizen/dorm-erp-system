@@ -4468,13 +4468,24 @@ export default function App() {
     }
   };
 
+  // localStorage 백업에서 사진/대용량 base64(data URL) 제외(§QuotaExceeded 방지). 실제 상태는 미변경 — 백업 스냅샷에서만 제거.
+  //  청소사진(before/after)·하자 사진 등 data URL 문자열/배열을 제거해 백업 용량을 줄인다. Supabase 본 저장은 원본 유지.
+  const stripHeavyMedia = <T extends Record<string, unknown>>(rows: T[]): T[] => (Array.isArray(rows) ? rows : []).map((r) => {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(r)) {
+      if (typeof v === "string" && v.startsWith("data:")) continue;
+      if (Array.isArray(v) && v.some((x) => typeof x === "string" && (x as string).startsWith("data:"))) continue;
+      out[k] = v;
+    }
+    return out as T;
+  });
   const buildBackupData = (): DataBackup["data"] => ({
     dorms,
     occupants,
     newHires,
     dormContracts,
-    cleaningReports,
-    defects,
+    cleaningReports: stripHeavyMedia(cleaningReports as unknown as Record<string, unknown>[]) as unknown as typeof cleaningReports,
+    defects: stripHeavyMedia(defects as unknown as Record<string, unknown>[]) as unknown as typeof defects,
     inventory,
     auditLogs,
     settlementRecords,

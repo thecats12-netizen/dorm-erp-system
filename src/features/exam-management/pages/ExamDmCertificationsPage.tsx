@@ -95,6 +95,7 @@ export default function ExamDmCertificationsPage({
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [pmRows, setPmRows] = useState<ExamRow[]>([]);
   const [rules, setRules] = useState<ExamRow[]>([]);
+  const [levels, setLevels] = useState<ExamRow[]>([]); // exam_levels 마스터(dm_stage/dm_level → level_id 해석용)
   const [autoInfo, setAutoInfo] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -136,13 +137,14 @@ export default function ExamDmCertificationsPage({
     setLoading(true); setError(null);
     try {
       // PM 인증은 참조용(읽기 전용) — 원본 미수정. exam_rules 는 D.M 계산 규칙.
-      const [data, pm, people, rule] = await Promise.all([
+      const [data, pm, people, rule, lvl] = await Promise.all([
         listExamRows("dm_certifications", tenantId),
         listExamRows("pm_certifications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setPmRows(pm); setRules(rule.filter(isDmRule)); setPersonnel(people); // [6단계] 사번→id 매핑용
+      setPmRows(pm); setRules(rule.filter(isDmRule)); setPersonnel(people); setLevels(lvl); // [6단계] 사번→id 매핑용 + 레벨 마스터
 
       let finalRows = data;
       if (canEdit) {
@@ -165,17 +167,25 @@ export default function ExamDmCertificationsPage({
         const activeKey = new Set(data.filter((d) => d.is_active !== false && d.approval_status !== "반려").map((d) => `${String(d.employee_no ?? "")}|${String(d.dm_stage ?? "")}`));
         const toCreate = cands.filter((c) => c.targetStageIdx > c.currentStageIdx && c.acquirable && scopeOk(c.personnel_id) && !activeKey.has(`${c.employee_no}|${c.dm_stage}`));
         if (toCreate.length) {
+          let created = 0, skipped = 0;
           for (const c of toCreate) {
-            await upsertExamRow("dm_certifications", {
+            const draft: ExamRow = {
               employee_no: c.employee_no, name: c.name, personnel_id: c.personnel_id,
               dm_stage: c.dm_stage, dm_level: c.dm_level,
               process_count: c.process_count, equipment_count: c.equipment_count, process_combination: c.process_combination,
               dual_multi: c.dual_multi, approval_status: "대기",
               notes: c.master_candidate ? "Master 후보(관리자 승인 필요)" : null,
-            }, tenantId, userId);
+            };
+            // level_id(NOT NULL) 미해석 후보는 자동 생성 건너뜀(null 요청 금지). 필요 시 수동 등록에서 레벨 지정.
+            const levelId = resolveLevelId(draft);
+            if (!levelId) { skipped++; continue; }
+            await upsertExamRow("dm_certifications", sanitizeDmCertificationPayload({ ...draft, level_id: levelId }), tenantId, userId);
+            created++;
           }
-          setAutoInfo(`승인대기 D.M 후보 ${toCreate.length}건을 자동 생성했습니다(승인 전에는 확정 집계 제외).`);
-          finalRows = await listExamRows("dm_certifications", tenantId);
+          setAutoInfo(created
+            ? `승인대기 D.M 후보 ${created}건을 자동 생성했습니다(승인 전에는 확정 집계 제외).${skipped ? ` 레벨 기준정보 미연결 ${skipped}건은 건너뜀.` : ""}`
+            : (skipped ? `자동 생성 대상 ${skipped}건이 인증 레벨 기준정보에 연결되지 않아 건너뛰었습니다. 인증 레벨 기준정보를 확인해 주세요.` : ""));
+          if (created) finalRows = await listExamRows("dm_certifications", tenantId);
         } else setAutoInfo("");
       }
       setRows(finalRows);
@@ -258,6 +268,38 @@ export default function ExamDmCertificationsPage({
   const visibleCols = COLS.filter((c) => !hidden.has(c.key));
   const toggleSort = (k: string) => { if (sortKey !== k) { setSortKey(k); setSortDir("asc"); } else if (sortDir === "asc") setSortDir("desc"); else { setSortKey(null); setSortDir("asc"); } };
 
+  // dm_certifications 실제 컬럼 화이트리스트(UI 파생/임시 필드가 upsert 로 새 나가는 것을 방지 → PGRST204 예방).
+  const sanitizeDmCertificationPayload = (row: ExamRow): ExamRow => {
+    const allow = new Set([
+      "id", "tenant_id", "organization_id", "personnel_id", "level_id", "part_id", "process_id",
+      "cert_no", "acquired_date", "expiry_date", "notes", "is_active", "deleted_at",
+      "created_by", "updated_by", "created_at", "updated_at",
+      "employee_no", "name", "dm_stage", "dm_level", "process_count", "equipment_count",
+      "process_combination", "dual_multi", "renewal_date", "proof_file",
+      "approval_status", "approved_by", "approved_at",
+    ]);
+    const out: ExamRow = {};
+    for (const [k, v] of Object.entries(row)) if (allow.has(k)) out[k] = v as ExamRow[string];
+    return out;
+  };
+
+  // dm_stage/dm_level → exam_levels.id 해석. 활성 레벨 내에서 code 또는 name 이 정확히 유일 매칭될 때만 연결.
+  // 0건 또는 2건 이상이면 null 반환(호출부에서 저장 차단). 이름 단독 임의 매칭 금지 — 정확 일치만 허용.
+  const resolveLevelId = (row: ExamRow): string | null => {
+    const existing = String(row.level_id ?? "").trim();
+    if (existing) return existing; // 이미 FK 로 연결됨(마스터 데이터 기준) → 유지.
+    const active = levels.filter((l) => l.is_active !== false && !l.deleted_at);
+    const norm = (s: unknown) => String(s ?? "").trim().toLowerCase();
+    const candidates = [String(row.dm_level ?? "").trim(), String(row.dm_stage ?? "").trim()].filter(Boolean);
+    for (const cand of candidates) {
+      const key = cand.toLowerCase();
+      const matches = active.filter((l) => norm(l.code) === key || norm(l.name) === key);
+      const uniqueIds = Array.from(new Set(matches.map((m) => String(m.id))));
+      if (uniqueIds.length === 1) return uniqueIds[0];
+    }
+    return null;
+  };
+
   const saveRow = async () => {
     if (!editRow) return;
     for (const c of FORM_COLS) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
@@ -268,9 +310,12 @@ export default function ExamDmCertificationsPage({
       if (await isDuplicateDm(tenantId, empNo, stage, acq, editRow.id ? String(editRow.id) : undefined)) {
         setError(`이미 등록된 D.M 인증입니다(사원번호+단계+취득일 중복): ${empNo} / ${stage}`); setSaving(false); return;
       }
+      // level_id(NOT NULL FK) 해석 — 미해석 시 저장 차단(null 로 Supabase 요청 금지 → 23502 예방).
+      const levelId = resolveLevelId(editRow);
+      if (!levelId) { setError("D.M 인증 레벨 기준정보가 연결되지 않았습니다. 인증 레벨을 선택해 주세요."); setSaving(false); return; }
       const isNew = !editRow.id;
       const before = isNew ? null : rows.find((r) => r.id === editRow.id) || null;
-      const saved = await upsertExamRow("dm_certifications", editRow, tenantId, userId);
+      const saved = await upsertExamRow("dm_certifications", sanitizeDmCertificationPayload({ ...editRow, level_id: levelId }), tenantId, userId);
       await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), isNew ? "create" : "update", before, saved);
       setEditRow(null); onToast?.(isNew ? "D.M 인증이 등록되었습니다." : "D.M 인증이 수정되었습니다."); await reload();
     } catch (e) { setError((e as { message?: string })?.message || "저장하지 못했습니다."); }
@@ -292,10 +337,13 @@ export default function ExamDmCertificationsPage({
         const acquired = ymd(r.acquired_date) || new Date().toISOString().slice(0, 10);
         const expiry = ymd(r.expiry_date) || calculateCertExpiry({ ...r, acquired_date: acquired }, rules).value.expiryDate || null;
         const certNo = String(r.cert_no ?? "").trim() || genDmCertNo(String(r.employee_no ?? ""), String(r.dm_stage ?? ""), acquired);
-        const saved = await upsertExamRow("dm_certifications", { ...r, approval_status: "승인", approved_by: userId, approved_at: nowIso(), acquired_date: acquired, expiry_date: expiry, cert_no: certNo, is_active: true }, tenantId, userId);
+        // 승인 시에도 level_id(NOT NULL) 보장 — 미해석이면 차단(null 요청 금지).
+        const apprLevelId = resolveLevelId(r);
+        if (!apprLevelId) { setError("D.M 인증 레벨 기준정보가 연결되지 않았습니다. 인증 레벨을 선택해 주세요."); return; }
+        const saved = await upsertExamRow("dm_certifications", sanitizeDmCertificationPayload({ ...r, level_id: apprLevelId, approval_status: "승인", approved_by: userId, approved_at: nowIso(), acquired_date: acquired, expiry_date: expiry, cert_no: certNo, is_active: true }), tenantId, userId);
         // 동일 사번+동일 단계의 다른 승인·활성 인증을 대체(비활성 · 이력 보존).
         const supersede = rows.filter((x) => String(x.id) !== String(r.id) && String(x.employee_no ?? "") === String(r.employee_no ?? "") && String(x.dm_stage ?? "") === String(r.dm_stage ?? "") && String(x.approval_status ?? "") === "승인" && x.is_active !== false);
-        for (const old of supersede) { await upsertExamRow("dm_certifications", { ...old, is_active: false, notes: `${String(old.notes ?? "")} · 신규 인증(${certNo})으로 대체`.trim() }, tenantId, userId); await writeExamAudit(tenantId, userId, "dm_certifications", String(old.id), "update", old, null, `신규 인증(${certNo})으로 대체`); }
+        for (const old of supersede) { await upsertExamRow("dm_certifications", sanitizeDmCertificationPayload({ ...old, is_active: false, notes: `${String(old.notes ?? "")} · 신규 인증(${certNo})으로 대체`.trim() }), tenantId, userId); await writeExamAudit(tenantId, userId, "dm_certifications", String(old.id), "update", old, null, `신규 인증(${certNo})으로 대체`); }
         await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), "approve", r, saved, `승인 · 인증번호 ${certNo}`);
         // [자동 라이선스] DM 승인 → 라이선스 마지막 단계(DM) 완료 처리(비차단).
         //  level_id 가 사다리 단계와 매칭되면 그 단계를, 미매칭이면 fallbackFinal 로 최종 단계를 완료 확정.
@@ -304,7 +352,7 @@ export default function ExamDmCertificationsPage({
         } catch (err) { console.warn("[licensePlan] DM 승인 단계전환 실패(무시)", err); }
         onToast?.("승인 완료: 취득일·만료일·인증번호·이력이 자동 처리되었습니다."); setDetailRow(saved);
       } else {
-        const saved = await upsertExamRow("dm_certifications", { ...r, approval_status: "반려", approved_by: userId, approved_at: nowIso() }, tenantId, userId);
+        const saved = await upsertExamRow("dm_certifications", sanitizeDmCertificationPayload({ ...r, approval_status: "반려", approved_by: userId, approved_at: nowIso() }), tenantId, userId);
         await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), "reject", r, saved, "반려");
         onToast?.("반려 처리했습니다."); setDetailRow(saved);
       }
@@ -598,7 +646,28 @@ export default function ExamDmCertificationsPage({
                   )}
                 </div>
               ))}
+              {/* 인증 레벨 기준정보(exam_levels) — dm_certifications.level_id(NOT NULL) 직접 연결. 자동 해석 실패 시 여기서 지정. */}
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">인증 레벨(기준정보)<span className="text-rose-500"> *</span></label>
+                {(() => {
+                  const resolved = editRow ? resolveLevelId(editRow) : null;
+                  return (
+                    <>
+                      <select className={`${inputCls} w-full`} value={String(editRow.level_id ?? resolved ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), level_id: e.target.value || null }))}>
+                        <option value="">선택(자동 해석)</option>
+                        {levels.filter((l) => l.is_active !== false && !l.deleted_at).map((l) => (
+                          <option key={String(l.id)} value={String(l.id)}>{String(l.name ?? "")}{l.code ? ` (${String(l.code)})` : ""}</option>
+                        ))}
+                      </select>
+                      {!editRow.level_id && (resolved
+                        ? <p className="mt-1 text-[0.65rem] text-emerald-600">단계/Level 기준 자동 연결됨.</p>
+                        : <p className="mt-1 text-[0.65rem] text-amber-600">단계/Level 로 레벨을 자동 연결하지 못했습니다. 인증 레벨을 선택해 주세요.</p>)}
+                    </>
+                  );
+                })()}
+              </div>
             </div>
+            {levels.length === 0 && <p className="mt-3 text-xs text-amber-600">※ exam_levels 인증 레벨 기준정보가 없어 D.M 인증을 저장할 수 없습니다(레벨 기준정보를 먼저 등록해 주세요).</p>}
             {rules.length === 0 && <p className="mt-3 text-xs text-amber-600">※ exam_rules에 D.M 계산 규칙이 없어 D.M Level 자동 제안이 비활성화됩니다(수동 입력).</p>}
             <div className="mt-6 flex justify-end gap-2">
               <button type="button" onClick={requestCloseEdit} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>

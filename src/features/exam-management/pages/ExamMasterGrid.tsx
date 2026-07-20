@@ -193,16 +193,28 @@ export default function ExamMasterGrid({
   const hasCol = (k: string) => config.columns.some((c) => c.key === k);
   const suggestCode = (name: string) => String(name).trim().toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
   const nextSort = () => rows.reduce((mx, r) => Math.max(mx, Number(r.sort_order) || 0), 0) + 1;
+  // [요구사항 5] 코드·품명 중복 검사는 "부모 범위" 기준(전역 unique 금지).
+  //   제품군(exam_categories): tenant 전역 · 그룹: category_id · 제품/파트: group_id · 공정: part_id · 장비: process_id.
+  //   범위 필드가 없는 표(levels/rules 등)는 기존대로 tenant 전역 검사.
+  const CODE_SCOPE_PARENT: Record<string, string | undefined> = {
+    exam_categories: undefined, // 전역
+    exam_groups: "category_id",
+    exam_parts: "group_id",
+    exam_processes: "part_id",
+    exam_equipment: "process_id",
+  };
+  const scopeField = config.table in CODE_SCOPE_PARENT ? CODE_SCOPE_PARENT[config.table] : undefined;
+  const sameScope = (r: ExamRow) => !scopeField || String(r[scopeField] ?? "") === String(editRow?.[scopeField] ?? "");
   const codeDup = useMemo(() => {
     if (!editRow || !hasCol("code")) return false;
     const v = String(editRow.code ?? "").trim().toUpperCase(); if (!v) return false;
-    return rows.some((r) => r.id !== editRow.id && String(r.code ?? "").trim().toUpperCase() === v);
+    return rows.some((r) => r.id !== editRow.id && String(r.code ?? "").trim().toUpperCase() === v && sameScope(r));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editRow, rows, config.columns]);
   const nameDup = useMemo(() => {
     if (!editRow || !hasCol("name")) return false;
     const v = String(editRow.name ?? "").trim(); if (!v) return false;
-    return rows.some((r) => r.id !== editRow.id && String(r.name ?? "").trim() === v);
+    return rows.some((r) => r.id !== editRow.id && String(r.name ?? "").trim() === v && sameScope(r));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editRow, rows, config.columns]);
 
