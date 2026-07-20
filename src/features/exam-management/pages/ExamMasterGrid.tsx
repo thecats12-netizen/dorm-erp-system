@@ -75,7 +75,41 @@ export default function ExamMasterGrid({
         })),
       ]);
       setRows(data);
-      setRefMap(Object.fromEntries(refs));
+      // [16] 동일 코드·품명이 서로 다른 상위 범위에 존재할 수 있으므로, 라벨이 겹치는 항목에만
+      //  상위 경로를 덧붙여 구분한다(예: "검사 · DRAM > 2그룹 > ETCH AMAT").
+      //  저장값은 그대로 row.id 이며, 겹치지 않는 항목의 라벨은 기존과 동일하게 유지한다.
+      const refEntries: Record<string, RefOpt[]> = Object.fromEntries(refs);
+      const byId: Record<string, Map<string, RefOpt>> = {};
+      for (const [t, opts] of Object.entries(refEntries)) byId[t] = new Map(opts.map((o) => [o.id, o]));
+      const parentOf = (t: string, o: RefOpt): { table: string; opt: RefOpt } | null => {
+        const chain: Array<[string, string | null | undefined]> = [
+          ["exam_processes", o.process_id], ["exam_parts", o.part_id],
+          ["exam_groups", o.group_id], ["exam_categories", o.category_id],
+        ];
+        for (const [pt, pid] of chain) {
+          if (pt === t || !pid) continue;
+          const p = byId[pt]?.get(String(pid));
+          if (p) return { table: pt, opt: p };
+        }
+        return null;
+      };
+      for (const [t, opts] of Object.entries(refEntries)) {
+        const seen = new Map<string, number>();
+        opts.forEach((o) => seen.set(o.label, (seen.get(o.label) || 0) + 1));
+        opts.forEach((o) => {
+          if ((seen.get(o.label) || 0) <= 1) return; // 유일한 라벨은 그대로 둔다
+          const names: string[] = [];
+          let curT = t, cur = o, guard = 0;
+          while (guard++ < 5) {
+            const p = parentOf(curT, cur);
+            if (!p) break;
+            names.unshift(p.opt.label);
+            curT = p.table; cur = p.opt;
+          }
+          if (names.length) o.label = `${o.label} · ${names.join(" > ")}`;
+        });
+      }
+      setRefMap(refEntries);
     } catch (e) {
       setError((e as { message?: string })?.message || "불러오지 못했습니다.");
     } finally {

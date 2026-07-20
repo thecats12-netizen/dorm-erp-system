@@ -6,6 +6,7 @@ import * as XLSX from "xlsx";
 import {
   listExamRows, upsertExamRow, softDeleteExamRow,
   writeExamAudit, listExamAudit, isDuplicateDm, examSupabaseReady,
+  translateExamWriteError,
   type ExamRow,
 } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
@@ -268,6 +269,24 @@ export default function ExamDmCertificationsPage({
   const visibleCols = COLS.filter((c) => !hidden.has(c.key));
   const toggleSort = (k: string) => { if (sortKey !== k) { setSortKey(k); setSortDir("asc"); } else if (sortDir === "asc") setSortDir("desc"); else { setSortKey(null); setSortDir("asc"); } };
 
+  // [8] D.M 저장 오류를 실제 원인별 안내로 변환. raw code(23502/PGRST204/null/undefined)는 UI 에 노출하지 않는다.
+  //  공통 매퍼(translateExamWriteError)는 다른 화면과 공유하므로 수정하지 않고, D.M 전용 분기만 앞에 둔다.
+  const translateDmSaveError = (error: unknown): string => {
+    const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown };
+    const code = String(e?.code ?? "");
+    const status = Number(e?.status ?? 0);
+    const msg = `${e?.message ?? ""} ${e?.details ?? ""} ${e?.hint ?? ""}`.toLowerCase();
+    if (code === "23502" && /level_id/.test(msg)) return "D.M 인증 레벨 기준정보가 연결되지 않았습니다.";
+    if (code === "23503" && /level_id/.test(msg)) return "D.M 인증 레벨 기준정보가 연결되지 않았습니다.";
+    if (status === 403 || code === "42501" || /row-level security|permission denied|not authorized/.test(msg)) {
+      return "D.M 인증 데이터를 저장할 권한이 없습니다.";
+    }
+    if (code === "PGRST204" || code === "42703" || /could not find the .* column|schema cache/.test(msg)) {
+      return "D.M 인증 데이터 구조가 준비되지 않았습니다.";
+    }
+    return translateExamWriteError(error);
+  };
+
   // dm_certifications 실제 컬럼 화이트리스트(UI 파생/임시 필드가 upsert 로 새 나가는 것을 방지 → PGRST204 예방).
   const sanitizeDmCertificationPayload = (row: ExamRow): ExamRow => {
     const allow = new Set([
@@ -318,7 +337,7 @@ export default function ExamDmCertificationsPage({
       const saved = await upsertExamRow("dm_certifications", sanitizeDmCertificationPayload({ ...editRow, level_id: levelId }), tenantId, userId);
       await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), isNew ? "create" : "update", before, saved);
       setEditRow(null); onToast?.(isNew ? "D.M 인증이 등록되었습니다." : "D.M 인증이 수정되었습니다."); await reload();
-    } catch (e) { setError((e as { message?: string })?.message || "저장하지 못했습니다."); }
+    } catch (e) { setError(translateDmSaveError(e)); }
     finally { setSaving(false); }
   };
 
@@ -358,7 +377,7 @@ export default function ExamDmCertificationsPage({
       }
       await reload();
       onDataChanged?.(); // 승인/반려로 실적 변경 → 시험 통계(대시보드/연간/월간/보고서) 자동 갱신.
-    } catch (e) { setError((e as { message?: string })?.message || "승인 처리 실패."); }
+    } catch (e) { setError(translateDmSaveError(e)); }
   };
 
   const openHistory = async (r: ExamRow) => { setHistoryRow(r); try { setHistoryList(await listExamAudit(tenantId, "dm_certifications", String(r.id))); } catch { setHistoryList([]); } };

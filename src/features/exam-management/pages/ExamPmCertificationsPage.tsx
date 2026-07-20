@@ -718,7 +718,7 @@ export default function ExamPmCertificationsPage({
             <h3 className="mb-2 text-lg font-semibold">PM 인증 승인취소</h3>
             <p className="mb-5 text-sm text-slate-500 dark:text-slate-400">PM 인증 승인을 취소하시겠습니까? 승인 상태와 관련 이력이 변경됩니다.</p>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setUnapproveTarget(null)} className={`rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>닫기</button>
+              <button onClick={() => setUnapproveTarget(null)} className={`rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>계속 유지</button>
               <button onClick={() => void unapproveCert(unapproveTarget)} className="rounded-2xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-500">승인취소</button>
             </div>
           </div>
