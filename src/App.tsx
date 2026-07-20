@@ -10907,25 +10907,39 @@ export default function App() {
       targetIds.forEach((id) => cleaningPhotosFetchedIdsRef.current.add(id)); // 성공 → 1회만 시도
       const dbById = new Map((photos || []).map((p) => [p.id, p]));
       const recovery = buildLocalCleaningPhotoRecovery();
+      let dbSyncedCount = 0;
       setCleaningReports((prev) =>
         prev.map((r) => {
           if (!targetIds.includes(r.id)) return r;
           const dbP = dbById.get(r.id);
+          // DB 에서 실제로 사진을 읽어온 행인지(= 이미 DB 와 동기 상태) 구분한다.
+          let fromDb = !!(dbP?.before?.length || dbP?.after?.length);
           let before = dbP?.before?.length ? dbP.before : (r.beforePhotoDataUrls?.length ? r.beforePhotoDataUrls : []);
           let after = dbP?.after?.length ? dbP.after : (r.afterPhotoDataUrls?.length ? r.afterPhotoDataUrls : []);
           if (before.length + after.length === 0) {
             const rec = recovery.lookup(r); // 백업 복구
             if (rec && rec.before.length + rec.after.length > 0) {
               before = rec.before; after = rec.after;
+              fromDb = false; // 백업 복구분은 DB 에 없음 → 저장 대상으로 남겨둔다.
               console.log("[청소사진 복구] 백업에서 복원:", { id: r.id, before: before.length, after: after.length });
             } else {
               // 디버그: DB·백업 모두 0장인 보고서 → 원인 확인용
               import.meta.env.DEV && console.log("[청소사진 디버그] 사진 0장(DB+백업 없음):", { id: r.id, report_date: r.reportDate, building: r.buildingName });
             }
           }
-          return { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
+          const merged = { ...r, beforePhotoDataUrls: before, afterPhotoDataUrls: after };
+          // [다중 PATCH 방지] 지연 로딩으로 DB 사진을 채우면 행 해시가 바뀌어 다음 자동저장이
+          //  이 행들을 "변경분"으로 오인한다(본문 재upsert + 행마다 사진 PATCH). DB 에서 읽어온 값은
+          //  사용자 편집이 아니므로, 이미 저장 이력이 있는 행에 한해 해시만 최신화해 재전송을 막는다.
+          //  (백업 복구분·저장 이력 없는 행은 제외 → 실제 저장이 필요한 데이터는 그대로 전송된다.)
+          if (fromDb && savedRowHashRef.current.has(`cleaning_reports:${r.id}`)) {
+            savedRowHashRef.current.set(`cleaning_reports:${r.id}`, rowHash(merged));
+            dbSyncedCount++;
+          }
+          return merged;
         })
       );
+      import.meta.env.DEV && console.debug("[청소사진 병합]", { requested: targetIds.length, dbSynced: dbSyncedCount });
     } catch (e) {
       console.warn("cleaning 사진 병합 실패:", e);
       setCleaningPhotosError(true); // 실패 → "로딩 실패"(사진없음 확정 아님, 데이터 삭제 아님)
@@ -25412,6 +25426,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   currentUser={currentUser}
                   operationalDorms={operationalDorms}
                   defaultSite={cleaningReportForm.site}
+                  // 성별은 청소보고서 저장 필드가 아니라 선택된 기숙사의 속성이다.
+                  //  기존 보고서를 열 때 지역(defaultSite)처럼 선택 기숙사 성별을 초기값으로 넘겨
+                  //  "전체"로만 보이던 문제를 해소한다. 미배정/기타 성별이면 기존 기본값("전체") 유지.
+                  defaultGender={(() => {
+                    const g = operationalDorms.find((d) => d.id === cleaningReportForm.dormId)?.gender;
+                    return g === "남" || g === "여" ? g : "전체";
+                  })()}
                   label="기숙사"
                 />
               )}

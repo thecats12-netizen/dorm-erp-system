@@ -655,6 +655,18 @@ const isSchemaMismatchError = (err: any): boolean => {
   return code === "PGRST204" || code === "42703" || code === "42P01" ||
     /could not find the .* column|column .* does not exist|relation .* does not exist|schema cache/.test(msg);
 };
+// 재시도해도 결과가 달라지지 않는 오류(사진 저장 경로 전용).
+//  인증/권한/중복/제약/요청형식 오류는 1.5초 뒤 재시도해도 동일하게 실패하며 요청 수만 2배가 된다.
+//  네트워크 일시 오류·타임아웃(5xx 중 timeout 류)만 재시도 대상으로 남긴다.
+const isNonRetryablePhotoError = (err: any): boolean => {
+  if (isSchemaMismatchError(err)) return true;
+  const status = Number(err?.status);
+  if ([400, 401, 403, 404, 409, 413, 422].includes(status)) return true;
+  const code = String(err?.code ?? "");
+  if (/^(2[23]\d{3}|42\d{3})$/.test(code)) return true; // Postgres 제약/권한/구문 오류(23502/23503/23505/42501 등)
+  const msg = `${err?.message ?? ""} ${err?.details ?? ""} ${err?.hint ?? ""}`.toLowerCase();
+  return /row-level security|violates .* constraint|payload too large|permission denied|invalid input syntax/.test(msg);
+};
 const base64Len = (arr?: string[]) => (Array.isArray(arr) ? arr.reduce((s, x) => s + (typeof x === "string" ? x.length : 0), 0) : 0);
 
 // ── [9] 장기 개선: 현재는 DB base64 저장 유지. 추후 Supabase Storage 업로드로 전환할 수 있도록
@@ -674,7 +686,7 @@ const savePhotosOptional = async (photoJobs: PhotoJob[]): Promise<string[]> => {
   };
   let results = await Promise.all(photoJobs.map(run));
   // [7] 사진 저장 실패 시 1회 자동 재시도(1.5초 후). 단, 스키마 불일치(존재하지 않는 컬럼 등)는 재시도 무의미 → 즉시 중단.
-  const failedOnce = results.filter((r) => r.error && !isSchemaMismatchError(r.error));
+  const failedOnce = results.filter((r) => r.error && !isNonRetryablePhotoError(r.error));
   if (failedOnce.length > 0) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     const retried = await Promise.all(failedOnce.map((r) => run(r.pj)));
