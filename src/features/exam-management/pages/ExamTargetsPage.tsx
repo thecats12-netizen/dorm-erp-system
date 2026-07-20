@@ -43,6 +43,11 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [levels, setLevels] = useState<RefOpt[]>([]);
+  // [기준정보 연동] 제품군→그룹→파트 계층 선택용 원본 행(부모 FK 가 필요해 listExamRefOptions 대신 listExamRows 사용).
+  //  exam_annual_targets / exam_monthly_results 에는 category_id·group_id 컬럼이 없으므로 선택 상태는 화면에서만 관리하고,
+  //  저장은 기존 텍스트 컬럼(product_group/group_name/part_name) + 실제 존재하는 part_id FK 로 한다(스키마 무변경).
+  const [master, setMaster] = useState<{ categories: ExamRow[]; groups: ExamRow[]; parts: ExamRow[] }>({ categories: [], groups: [], parts: [] });
+  const [scopeSel, setScopeSel] = useState<{ categoryId: string; groupId: string; partId: string }>({ categoryId: "", groupId: "", partId: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -90,11 +95,14 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
-      const [data, lv] = await Promise.all([
+      const [data, lv, cats, grps, prts] = await Promise.all([
         listExamRows(cfg.table, tenantId),
         hasLevel ? listExamRefOptions("exam_levels", tenantId) : Promise.resolve([] as RefOpt[]),
+        listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setRows(data); setLevels(lv);
+      setRows(data); setLevels(lv); setMaster({ categories: cats, groups: grps, parts: prts });
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [cfg.table, tenantId, hasLevel]);
@@ -190,9 +198,84 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   const visibleCols = cfg.cols.filter((c) => !hidden.has(c.key));
   const toggleSort = (k: string) => { if (sortKey !== k) { setSortKey(k); setSortDir("asc"); } else if (sortDir === "asc") setSortDir("desc"); else { setSortKey(null); setSortDir("asc"); } };
 
+  // ── [기준정보 연동] 제품군 → 그룹 → 파트 계층 선택 ──────────────────────────
+  const mName = (r: ExamRow | undefined) => String(r?.name ?? "").trim();
+  const activeOnly = (list: ExamRow[], keepId: string) => list.filter((r) => r.is_active !== false || String(r.id) === keepId);
+  const catOpts = useMemo(() => activeOnly(master.categories, scopeSel.categoryId), [master.categories, scopeSel.categoryId]);
+  const groupOpts = useMemo(
+    () => activeOnly(master.groups, scopeSel.groupId).filter((g) => !scopeSel.categoryId || String(g.category_id ?? "") === scopeSel.categoryId),
+    [master.groups, scopeSel.categoryId, scopeSel.groupId]
+  );
+  const partOpts = useMemo(
+    () => activeOnly(master.parts, scopeSel.partId).filter((p) => !scopeSel.groupId || String(p.group_id ?? "") === scopeSel.groupId),
+    [master.parts, scopeSel.groupId, scopeSel.partId]
+  );
+  // [5] 동일 명칭이 여러 범위에 있을 때만 상위 경로를 덧붙인다. 저장값은 항상 row.id 기준으로 파생.
+  const optLabel = (r: ExamRow, siblings: ExamRow[]): string => {
+    const name = mName(r) || String(r.id);
+    const dup = siblings.filter((s) => mName(s) === name).length > 1;
+    if (!dup) return `${name}${r.is_active === false ? " (비활성)" : ""}`;
+    const g = master.groups.find((x) => String(x.id) === String(r.group_id ?? ""));
+    const c = master.categories.find((x) => String(x.id) === String(r.category_id ?? g?.category_id ?? ""));
+    const path = [mName(c), mName(g)].filter(Boolean).join(" > ");
+    return `${name}${path ? ` · ${path}` : ""}${r.is_active === false ? " (비활성)" : ""}`;
+  };
+  // [4] 기존 데이터 초기값: part_id(FK) 우선 → 없으면 상위 계층까지 모두 일치하는 "유일" 항목만 매핑(0건·2건 이상은 미선택).
+  const resolveScopeFromRow = useCallback((r: ExamRow) => {
+    const partById = master.parts.find((p) => String(p.id) === String(r.part_id ?? ""));
+    let part = partById;
+    if (!part) {
+      const pn = String(r.part_name ?? "").trim(), gn = String(r.group_name ?? "").trim(), cn = String(r.product_group ?? "").trim();
+      if (pn) {
+        const cands = master.parts.filter((p) => {
+          if (mName(p) !== pn) return false;
+          const g = master.groups.find((x) => String(x.id) === String(p.group_id ?? ""));
+          if (gn && mName(g) !== gn) return false;
+          const c = master.categories.find((x) => String(x.id) === String(g?.category_id ?? p.category_id ?? ""));
+          if (cn && mName(c) !== cn) return false;
+          return true;
+        });
+        if (cands.length === 1) part = cands[0]; // 유일할 때만 연결(이름 단독/첫 항목 매칭 금지)
+      }
+    }
+    const grp = master.groups.find((x) => String(x.id) === String(part?.group_id ?? ""));
+    const cat = master.categories.find((x) => String(x.id) === String(grp?.category_id ?? part?.category_id ?? ""));
+    return { categoryId: String(cat?.id ?? ""), groupId: String(grp?.id ?? ""), partId: String(part?.id ?? "") };
+  }, [master]);
+  // 편집 모달 열릴 때 1회 초기화(모호하면 미선택 → 사용자가 직접 선택).
+  const editScopeKey = editRow ? String(editRow.id ?? "__new__") : "";
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  useEffect(() => { setScopeSel(editRow ? resolveScopeFromRow(editRow) : { categoryId: "", groupId: "", partId: "" }); }, [editScopeKey, master]);
+
+  // 선택 변경 → 하위 초기화 + 기존 텍스트 컬럼/part_id 동기화(사용자가 이름을 직접 입력하지 않음).
+  const applyScope = (next: { categoryId: string; groupId: string; partId: string }) => {
+    setScopeSel(next);
+    const cat = master.categories.find((x) => String(x.id) === next.categoryId);
+    const grp = master.groups.find((x) => String(x.id) === next.groupId);
+    const part = master.parts.find((x) => String(x.id) === next.partId);
+    setEditRow((f) => ({
+      ...(f || {}),
+      product_group: mName(cat) || null,
+      group_name: mName(grp) || null,
+      part_name: mName(part) || null,
+      part_id: next.partId || null, // 실제 존재하는 FK 컬럼만 저장
+    }));
+  };
+
   const saveRow = async () => {
     if (!editRow) return;
     for (const c of formCols) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
+    // [7] 계층 무결성 검증(신규 등록 시 식별자 편집 가능한 경우에만 적용).
+    if (!editRow.id) {
+      if (!scopeSel.categoryId) { setError("제품군을 선택해 주세요."); return; }
+      if (!scopeSel.groupId) { setError("그룹을 선택해 주세요."); return; }
+      if (!scopeSel.partId) { setError("파트를 선택해 주세요."); return; }
+      const grp = master.groups.find((x) => String(x.id) === scopeSel.groupId);
+      const part = master.parts.find((x) => String(x.id) === scopeSel.partId);
+      if (grp && String(grp.category_id ?? "") !== scopeSel.categoryId) { setError("선택한 그룹이 현재 제품군에 속하지 않습니다."); return; }
+      if (part && String(part.group_id ?? "") !== scopeSel.groupId) { setError("선택한 파트가 현재 그룹에 속하지 않습니다."); return; }
+      if (grp?.is_active === false || part?.is_active === false) { setError("비활성 기준정보는 새로 선택할 수 없습니다."); return; }
+    }
     setSaving(true); setError(null);
     try {
       const key = identityKey(editRow);
@@ -372,6 +455,22 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
                     <div className={`${inputCls} w-full ${darkMode ? "bg-slate-800/60 text-slate-400" : "bg-slate-100 text-slate-500"}`} title={autoActual ? "승인 완료 인증에서 자동 집계됩니다(수정 불가)" : "등록 후 변경할 수 없습니다"}>
                       {c.type === "ref" ? (levels.find((o) => o.id === String(editRow[c.key] ?? ""))?.label || "-") : (String(editRow[c.key] ?? "") || "-")}
                     </div>
+                  ) : c.key === "product_group" ? (
+                    // 제품군 → 그룹 → 파트 계층 선택(기준정보 연동). 상위 변경 시 하위 자동 초기화.
+                    <select className={`${inputCls} w-full`} value={scopeSel.categoryId} onChange={(e) => applyScope({ categoryId: e.target.value, groupId: "", partId: "" })}>
+                      <option value="">선택</option>
+                      {catOpts.map((o) => <option key={String(o.id)} value={String(o.id)}>{optLabel(o, catOpts)}</option>)}
+                    </select>
+                  ) : c.key === "group_name" ? (
+                    <select className={`${inputCls} w-full`} value={scopeSel.groupId} disabled={!scopeSel.categoryId} onChange={(e) => applyScope({ ...scopeSel, groupId: e.target.value, partId: "" })}>
+                      <option value="">{scopeSel.categoryId ? "선택" : "제품군을 먼저 선택"}</option>
+                      {groupOpts.map((o) => <option key={String(o.id)} value={String(o.id)}>{optLabel(o, groupOpts)}</option>)}
+                    </select>
+                  ) : c.key === "part_name" ? (
+                    <select className={`${inputCls} w-full`} value={scopeSel.partId} disabled={!scopeSel.groupId} onChange={(e) => applyScope({ ...scopeSel, partId: e.target.value })}>
+                      <option value="">{scopeSel.groupId ? "선택" : "그룹을 먼저 선택"}</option>
+                      {partOpts.map((o) => <option key={String(o.id)} value={String(o.id)}>{optLabel(o, partOpts)}</option>)}
+                    </select>
                   ) : c.type === "ref" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}><option value="">선택</option>{levels.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
                   ) : c.type === "select" ? (
