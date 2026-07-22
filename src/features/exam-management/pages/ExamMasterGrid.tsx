@@ -5,7 +5,7 @@ import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import type { ExamColumn, ExamEntityConfig } from "../examMasterConfigs";
 import {
   listExamRows, upsertExamRow, softDeleteExamRow, setExamRowActive,
-  writeExamAudit, listExamAudit, examSupabaseReady, type ExamRow, type ExamMasterTable,
+  writeExamAudit, listExamAudit, examSupabaseReady, translateExamWriteError, type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 
 // 참조 옵션은 라벨뿐 아니라 상위 FK(category_id/group_id/part_id/process_id)와 활성여부를 함께 싣는다(종속 선택용).
@@ -331,27 +331,54 @@ export default function ExamMasterGrid({
 
   const importExcel = async (file: File) => {
     setError(null);
+    // 헤더 정규화: 앞뒤 공백/제로폭 문자(ZWSP·ZWJ·BOM)/대소문자 차이로 c.label 과 정확히 일치하지 않아 값이 누락되는 것을 방지.
+    const normHeader = (s: string) => s.replace(/[​-‍﻿]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
     try {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: "array" });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
-      // 헤더 정규화: 공백/제로폭 문자/대소문자 차이로 c.label 과 정확히 일치하지 않아 값이 누락되는 것을 방지
-      //  (엑셀 파일마다 헤더에 앞뒤 공백·BOM 이 섞여 "0건 등록"이 되는 문제). 의미가 다른 컬럼은 매핑하지 않는다.
-      const normHeader = (s: string) => s.replace(/[​-‍﻿]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
-      let ok = 0;
-      for (const r of raw) {
+      const sheetName = wb.SheetNames[0];
+      const sheet = wb.Sheets[sheetName];
+      const raw = sheet ? XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" }) : [];
+
+      // [진단] 개발 환경에서만 업로드 흐름을 구조화해 1회 출력(원시 행/개인정보 미출력 — 첫 행 키와 개수만).
+      const firstRowKeys = raw.length ? Object.keys(raw[0]) : [];
+      const normalizedHeaders = firstRowKeys.map(normHeader);
+      const requiredCols = tableColumns.filter((c) => c.required).map((c) => ({ key: c.key, label: c.label }));
+
+      // A. 파싱 결과가 0건 → 데이터/시트 문제. "0건 등록"으로 위장하지 않는다.
+      if (raw.length === 0) {
+        if (import.meta.env.DEV) console.warn("[ExamMasterGrid][ExcelImport] 파싱 0건", { masterType: config.table, sheetNames: wb.SheetNames, sheetName });
+        setError("등록할 데이터가 없습니다. Excel 헤더와 데이터 행을 확인해 주세요.");
+        return;
+      }
+      // B. 필수 헤더 누락 → 어떤 컬럼이 없는지 명확히 안내(모든 행이 조용히 skip 되는 것 방지).
+      const headerSet = new Set(normalizedHeaders);
+      const missingRequired = requiredCols.filter((c) => !headerSet.has(normHeader(c.label)));
+      if (missingRequired.length > 0) {
+        if (import.meta.env.DEV) console.warn("[ExamMasterGrid][ExcelImport] 필수 헤더 누락", { masterType: config.table, firstRowKeys, normalizedHeaders, missing: missingRequired });
+        setError(`필수 컬럼 ‘${missingRequired.map((c) => c.label).join(", ")}’을(를) 찾을 수 없습니다. Excel 헤더를 확인해 주세요.`);
+        return;
+      }
+
+      const rowErrors: Array<{ row: number; reason: string }> = [];
+      const toSave: ExamRow[] = [];
+      let refFailed = 0;
+      raw.forEach((r, idx) => {
         const rowByNorm = new Map<string, unknown>();
         for (const [k, val] of Object.entries(r)) rowByNorm.set(normHeader(k), val);
-        const cell = (label: string) => rowByNorm.has(normHeader(label)) ? rowByNorm.get(normHeader(label)) : "";
+        const cell = (label: string) => (rowByNorm.has(normHeader(label)) ? rowByNorm.get(normHeader(label)) : "");
         const row: ExamRow = {};
-        let hasRequired = true;
+        let rowErr = "";
         for (const c of tableColumns) {
           const v = String(cell(c.label) ?? "").trim();
           if (c.type === "ref") {
-            // 빈 셀은 참조 미지정(null). (v==="" 일 때 startsWith 가 항상 참이 되어 첫 옵션이 잘못 배정되는 것을 방지)
-            const opt = v ? (refMap[c.refTable as string] || []).find((o) => o.label === v || o.label.startsWith(v)) : undefined;
-            row[c.key] = opt?.id ?? null;
+            if (!v) { row[c.key] = null; continue; } // 선택 참조(빈 셀 허용)
+            // [6] startsWith 로 첫 항목을 잘못 연결하지 않는다. 코드/이름 "정확 일치"(라벨 "코드 · 이름" 세그먼트) 유일 1건만 연결.
+            const matches = (refMap[c.refTable as string] || []).filter((o) => o.label === v || o.label.split(" · ").some((seg) => seg.trim() === v));
+            const ids = Array.from(new Set(matches.map((o) => o.id)));
+            if (ids.length === 0) { rowErr = rowErr || `${c.label} ‘${v}’을(를) 기준정보에서 찾을 수 없습니다`; refFailed++; }
+            else if (ids.length > 1) { rowErr = rowErr || `${c.label} ‘${v}’이(가) 여러 건 존재하여 연결할 수 없습니다`; refFailed++; }
+            else row[c.key] = ids[0];
           } else if (c.type === "number") {
             row[c.key] = v === "" ? null : Number(v.replace(/[^0-9.-]/g, ""));
           } else if (c.type === "boolean") {
@@ -359,16 +386,46 @@ export default function ExamMasterGrid({
           } else {
             row[c.key] = v || null;
           }
-          if (c.required && !v) hasRequired = false;
+          if (c.required && !v) rowErr = rowErr || `${c.label} 누락`;
         }
-        if (!hasRequired) continue;
-        const saved = await upsertExamRow(config.table, row, tenantId, userId);
-        await writeExamAudit(tenantId, userId, config.table, String(saved.id), "import", null, saved);
-        ok++;
+        if (rowErr) rowErrors.push({ row: idx + 2, reason: rowErr }); // +2: 헤더 1행 + 1-based
+        else toSave.push(row);
+      });
+
+      // D. 저장(행별 오류를 잡아 전체가 멈추지 않게 하고, 실제 Supabase 오류는 콘솔에만 남긴다).
+      let ok = 0; const saveErrors: Array<{ row: number; reason: string }> = [];
+      for (let i = 0; i < toSave.length; i++) {
+        try {
+          const saved = await upsertExamRow(config.table, toSave[i], tenantId, userId);
+          await writeExamAudit(tenantId, userId, config.table, String(saved.id), "import", null, saved);
+          ok++;
+        } catch (e) {
+          const err = e as { code?: unknown; message?: string; details?: unknown; hint?: unknown };
+          console.error("[ExamMasterGrid][ExcelImport] 저장 실패", { masterType: config.table, code: err?.code, message: err?.message, details: err?.details, hint: err?.hint });
+          saveErrors.push({ row: i, reason: translateExamWriteError(e) });
+        }
       }
-      onToast?.(`${config.title} Excel ${ok}건을 등록했습니다.`);
-      await reload();
+
+      const failCount = rowErrors.length + saveErrors.length;
+      if (import.meta.env.DEV) {
+        console.group("[Exam Excel Import Debug]");
+        console.log({ masterType: config.table, sheetNames: wb.SheetNames, sheetName, parsedRowCount: raw.length, firstRowKeys, normalizedHeaders, requiredColumns: requiredCols, refFailedCount: refFailed, validRowCount: toSave.length, invalidRowCount: rowErrors.length, saveTargetCount: toSave.length, successCount: ok, failedCount: failCount });
+        if (rowErrors.length) console.log("검증 실패 행:", rowErrors.slice(0, 20));
+        console.groupEnd();
+      }
+
+      // 오류 행 상세는 화면에도 최소 표시(최대 5건).
+      const errPreview = [...rowErrors, ...saveErrors.map((s) => ({ row: 0, reason: s.reason }))].slice(0, 5)
+        .map((e) => (e.row ? `${e.row}행: ${e.reason}` : e.reason)).join(" · ");
+
+      // [7] 성공/실패 건수 구분 토스트.
+      if (ok > 0 && failCount === 0) onToast?.(`${config.title} Excel ${ok}건을 등록했습니다.`);
+      else if (ok > 0 && failCount > 0) { onToast?.(`${config.title} Excel ${raw.length}건 중 ${ok}건을 등록했고 ${failCount}건은 실패했습니다.`); if (errPreview) setError(`일부 실패: ${errPreview}`); }
+      else setError(`${config.title} Excel 등록에 실패했습니다.${errPreview ? ` (${errPreview})` : " 오류 내용을 확인해 주세요."}`);
+
+      if (ok > 0) await reload();
     } catch (e) {
+      console.error("[ExamMasterGrid][ExcelImport] 처리 실패", e);
       setError((e as { message?: string })?.message || "Excel 등록에 실패했습니다.");
     }
   };
