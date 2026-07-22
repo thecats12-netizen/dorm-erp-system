@@ -146,6 +146,17 @@ export default function ExamMasterGrid({
     if (col.type === "date") return String(v).slice(0, 10);
     return String(v);
   };
+  // 목록(Table) 전용 표시: 참조 컬럼은 조합 라벨(코드·이름·상위경로)이 아니라 "이름만" 보여준다.
+  //  상위 계층은 각 참조 컬럼에서 자기 값만 표시하므로 반복이 사라진다. Excel/검색이 쓰는 cellText 는 불변.
+  const cellDisplay = (col: ExamColumn, row: ExamRow) => {
+    if (col.type === "ref") {
+      const id = row[col.key];
+      if (!id) return "-";
+      const opt = (refMap[col.refTable as string] || []).find((o) => o.id === String(id));
+      return (opt?.name && String(opt.name).trim()) || opt?.label || "-";
+    }
+    return cellText(col, row);
+  };
 
   // 한 옵션이 상위 폼 선택에 부합하는지 판정(기본 FK → null 이면 fallback 상위로 역추적).
   const matchesFilter = (col: ExamColumn, opt: RefOpt, edit: ExamRow | null): boolean => {
@@ -538,7 +549,7 @@ export default function ExamMasterGrid({
               <tr key={String(r.id)} aria-selected={ri === activeIdx} title={canEdit ? "클릭하여 수정" : undefined}
                 onClick={() => { setActiveIdx(ri); if (canEdit) openEdit(r); }}
                 className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} border-t ${canEdit ? "cursor-pointer" : ""} ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
-                {tableColumns.map((c) => <td key={c.key} className="whitespace-nowrap px-3 py-2">{cellText(c, r)}</td>)}
+                {tableColumns.map((c) => <td key={c.key} className="whitespace-nowrap px-3 py-2">{cellDisplay(c, r)}</td>)}
                 <td className="px-3 py-2">
                   <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${r.is_active === false ? "bg-slate-200 text-slate-500" : "bg-emerald-100 text-emerald-700"}`}>{r.is_active === false ? "미사용" : "사용"}</span>
                 </td>
