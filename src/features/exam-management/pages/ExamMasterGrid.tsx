@@ -240,7 +240,29 @@ export default function ExamMasterGrid({
   };
 
   const openAdd = () => setEditRow({});
-  const openEdit = (r: ExamRow) => setEditRow({ ...r });
+  // 수정 진입 시 저장된 참조(process_id/part_id 등)로부터 상위 계층(filter 전용 transient: _cat/_group/_part)을 역복원한다.
+  //  저장값(process_id·part_id 등)은 그대로 두고, 화면 표시용 상위 선택값만 채운다(임의 첫 항목 선택 금지 · 실제 부모 FK만 사용).
+  const withEditScope = (r: ExamRow): ExamRow => {
+    const transientRefs = config.columns.filter((c) => c.transient && c.type === "ref");
+    const leaf = config.columns.find((c) => c.type === "ref" && !c.transient); // 실제 저장되는 참조 컬럼
+    if (transientRefs.length === 0 || !leaf || !r[leaf.key]) return { ...r };
+    const find = (t: string, id: string) => (refMap[t] || []).find((o) => o.id === id);
+    let categoryId = "", groupId = "", partId = "";
+    const leafId = String(r[leaf.key]);
+    if (leaf.refTable === "exam_processes") { const p = find("exam_processes", leafId); partId = String(p?.part_id ?? ""); }
+    else if (leaf.refTable === "exam_parts") { partId = leafId; }
+    else if (leaf.refTable === "exam_groups") { groupId = leafId; }
+    if (partId) { const pt = find("exam_parts", partId); groupId = groupId || String(pt?.group_id ?? ""); categoryId = categoryId || String(pt?.category_id ?? ""); }
+    if (groupId) { const g = find("exam_groups", groupId); categoryId = categoryId || String(g?.category_id ?? ""); }
+    const scope: ExamRow = {};
+    for (const c of transientRefs) {
+      if (c.refTable === "exam_categories") scope[c.key] = categoryId || null;
+      else if (c.refTable === "exam_groups") scope[c.key] = groupId || null;
+      else if (c.refTable === "exam_parts") scope[c.key] = partId || null;
+    }
+    return { ...r, ...scope };
+  };
+  const openEdit = (r: ExamRow) => setEditRow(withEditScope(r));
   const tableKeyDown = useTableKeyboardNav({
     count: filtered.length, active: activeIdx, setActive: setActiveIdx, pageSize: 10,
     onEnter: (i) => { if (canEdit && filtered[i]) openEdit(filtered[i]); },
