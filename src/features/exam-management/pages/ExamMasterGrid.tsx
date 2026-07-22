@@ -579,7 +579,9 @@ export default function ExamMasterGrid({
                       <>
                         <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => changeRef(c.key, e.target.value)}>
                           <option value="">선택 안 함</option>
-                          {opts.map((o) => <option key={o.id} value={o.id}>{o.label}{o.is_active ? "" : " (미사용)"}</option>)}
+                          {/* 표시(label)만 이름으로: 상위 드롭다운으로 이미 범위가 좁혀졌으므로 상위 경로/코드는 반복 표시하지 않는다.
+                              저장값(o.id)·FK·Excel·조회는 불변. name 이 없을 때만 기존 label 로 안전 폴백. */}
+                          {opts.map((o) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}{o.is_active ? "" : " (미사용)"}</option>)}
                         </select>
                         {parentMissing && <p className="mt-1 text-xs text-slate-400">상위 항목을 먼저 선택하면 목록이 좁혀집니다.</p>}
                         {!parentMissing && opts.length === 0 && <p className="mt-1 text-xs text-amber-600">선택 가능한 항목이 없습니다.</p>}
