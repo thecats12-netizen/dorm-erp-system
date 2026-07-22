@@ -9,7 +9,17 @@ import {
 } from "../services/examMasterService";
 
 // 참조 옵션은 라벨뿐 아니라 상위 FK(category_id/group_id/part_id/process_id)와 활성여부를 함께 싣는다(종속 선택용).
-type RefOpt = { id: string; label: string; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null; process_id?: string | null };
+type RefOpt = { id: string; label: string; code?: string | null; name?: string | null; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null; process_id?: string | null };
+
+// "코드 · 이름" 표시 문자열을 코드/이름으로 안전 분리(부분일치·startsWith 금지). 구분자가 없으면 단일 토큰으로 취급.
+//  §16 로 라벨 뒤에 상위 경로가 덧붙는 경우("… · A > B")가 있어, 앞의 두 세그먼트만 코드·이름으로 사용한다.
+function parseMasterRefValue(value: unknown): { raw: string; code: string; name: string } {
+  const raw = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!raw) return { raw: "", code: "", name: "" };
+  const seg = raw.split("·").map((s) => s.trim()).filter(Boolean);
+  if (seg.length >= 2) return { raw, code: seg[0], name: seg[1] };
+  return { raw, code: raw, name: "" };
+}
 
 export default function ExamMasterGrid({
   config, darkMode, canEdit, tenantId, userId, onToast,
@@ -65,6 +75,8 @@ export default function ExamMasterGrid({
           const opts: RefOpt[] = refRows.map((r) => ({
             id: String(r.id),
             label: [r.code, r.name].filter(Boolean).join(" · ") || String(r.name ?? r.id),
+            code: (r.code ?? null) as string | null,
+            name: (r.name ?? null) as string | null,
             is_active: r.is_active !== false,
             category_id: (r.category_id ?? null) as string | null,
             group_id: (r.group_id ?? null) as string | null,
@@ -363,22 +375,71 @@ export default function ExamMasterGrid({
       const rowErrors: Array<{ row: number; reason: string }> = [];
       const toSave: ExamRow[] = [];
       let refFailed = 0;
+      // [3~5] 계층형 참조 해석기. 표시 라벨이 아니라 "코드·이름 정확일치 + 상위 parent FK 범위"로 연결한다.
+      //  동일 이름이 다른 상위 경로에 있어도 부모 범위가 다르면 별도 기준정보로 정상 처리(모호 아님).
+      const eqTxt = (a: unknown, b: string) => String(a ?? "").trim().toLowerCase() === b.trim().toLowerCase();
+      const eqId = (a: unknown, b: string) => String(a ?? "") === b;
+      const active = (list: RefOpt[]) => list.filter((o) => o.is_active !== false);
+      const pickId = (cands: RefOpt[], p: { code: string; name: string }): string[] => {
+        const m = p.code && p.name
+          ? cands.filter((o) => eqTxt(o.code, p.code) && eqTxt(o.name, p.name))     // "코드 · 이름" 둘 다 일치
+          : cands.filter((o) => eqTxt(o.code, p.code || p.name) || eqTxt(o.name, p.code || p.name)); // 단일 토큰: 코드 또는 이름
+        return Array.from(new Set(m.map((o) => o.id)));
+      };
+      const cats = active(refMap["exam_categories"] || []);
+      const groups = active(refMap["exam_groups"] || []);
+      const parts = active(refMap["exam_parts"] || []);
+      const procs = active(refMap["exam_processes"] || []);
+
       raw.forEach((r, idx) => {
         const rowByNorm = new Map<string, unknown>();
         for (const [k, val] of Object.entries(r)) rowByNorm.set(normHeader(k), val);
         const cell = (label: string) => (rowByNorm.has(normHeader(label)) ? rowByNorm.get(normHeader(label)) : "");
+        const cellPath = (labels: string[]) => { for (const l of labels) { const v = String(cell(l) ?? "").trim(); if (v) return v; } return ""; };
+
+        // 상위 경로 해석(제품군→그룹→제품/파트→공정). "적용 …"(인증 규칙) 헤더도 함께 인식.
+        const catRaw = cellPath(["제품군", "적용 제품군"]);
+        const grpRaw = cellPath(["그룹", "적용 그룹"]);
+        const partRaw = cellPath(["제품/파트", "적용 제품/파트"]);
+        const procRaw = cellPath(["공정", "적용 공정"]);
+        const chain: { category_id: string; group_id: string; part_id: string; process_id: string; error: string } = { category_id: "", group_id: "", part_id: "", process_id: "", error: "" };
+        const resolveLevel = (rawVal: string, cands: RefOpt[], label: string, pathPrefix: string): string => {
+          if (!rawVal) return "";
+          const ids = pickId(cands, parseMasterRefValue(rawVal));
+          if (ids.length === 0) { chain.error = chain.error || `${pathPrefix ? `‘${pathPrefix}’ 아래에서 ` : ""}${label} ‘${rawVal}’을(를) 찾을 수 없습니다`; refFailed++; return ""; }
+          if (ids.length > 1) { chain.error = chain.error || `${pathPrefix ? `‘${pathPrefix}’ 아래에 ` : ""}동일한 ${label} ‘${rawVal}’이(가) 여러 건 존재합니다`; refFailed++; return ""; }
+          return ids[0];
+        };
+        if (catRaw) chain.category_id = resolveLevel(catRaw, cats, "제품군", "");
+        if (!chain.error && grpRaw) {
+          if (!chain.category_id) chain.error = `그룹 ‘${grpRaw}’의 상위 제품군을 확인할 수 없습니다`;
+          else chain.group_id = resolveLevel(grpRaw, groups.filter((g) => eqId(g.category_id, chain.category_id)), "그룹", catRaw);
+        }
+        if (!chain.error && partRaw) {
+          if (!chain.group_id) chain.error = `제품/파트 ‘${partRaw}’의 상위 그룹을 확인할 수 없습니다`;
+          else chain.part_id = resolveLevel(partRaw, parts.filter((p) => eqId(p.group_id, chain.group_id)), "제품/파트", `${catRaw} > ${grpRaw}`);
+        }
+        if (!chain.error && procRaw) {
+          if (!chain.part_id) chain.error = `공정 ‘${procRaw}’의 상위 제품/파트를 확인할 수 없습니다`;
+          else chain.process_id = resolveLevel(procRaw, procs.filter((p) => eqId(p.part_id, chain.part_id)), "공정", `${catRaw} > ${grpRaw} > ${partRaw}`);
+        }
+
         const row: ExamRow = {};
-        let rowErr = "";
+        let rowErr = chain.error;
         for (const c of tableColumns) {
           const v = String(cell(c.label) ?? "").trim();
           if (c.type === "ref") {
-            if (!v) { row[c.key] = null; continue; } // 선택 참조(빈 셀 허용)
-            // [6] startsWith 로 첫 항목을 잘못 연결하지 않는다. 코드/이름 "정확 일치"(라벨 "코드 · 이름" 세그먼트) 유일 1건만 연결.
-            const matches = (refMap[c.refTable as string] || []).filter((o) => o.label === v || o.label.split(" · ").some((seg) => seg.trim() === v));
-            const ids = Array.from(new Set(matches.map((o) => o.id)));
-            if (ids.length === 0) { rowErr = rowErr || `${c.label} ‘${v}’을(를) 기준정보에서 찾을 수 없습니다`; refFailed++; }
-            else if (ids.length > 1) { rowErr = rowErr || `${c.label} ‘${v}’이(가) 여러 건 존재하여 연결할 수 없습니다`; refFailed++; }
-            else row[c.key] = ids[0];
+            // 계층 참조는 위에서 해석한 chain 값을 사용(라벨 매칭 금지). 그 외 참조(예: 인증레벨)는 코드·이름 정확일치.
+            if (c.key === "category_id" || c.key === "group_id" || c.key === "part_id" || c.key === "process_id") {
+              row[c.key] = (chain as Record<string, string>)[c.key] || null;
+            } else if (!v) {
+              row[c.key] = null;
+            } else {
+              const ids = pickId(active(refMap[c.refTable as string] || []), parseMasterRefValue(v));
+              if (ids.length === 0) { rowErr = rowErr || `${c.label} ‘${v}’을(를) 기준정보에서 찾을 수 없습니다`; refFailed++; }
+              else if (ids.length > 1) { rowErr = rowErr || `${c.label} ‘${v}’이(가) 여러 건 존재합니다`; refFailed++; }
+              else row[c.key] = ids[0];
+            }
           } else if (c.type === "number") {
             row[c.key] = v === "" ? null : Number(v.replace(/[^0-9.-]/g, ""));
           } else if (c.type === "boolean") {
