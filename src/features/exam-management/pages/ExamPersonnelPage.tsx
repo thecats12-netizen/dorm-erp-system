@@ -4,7 +4,7 @@ import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import * as XLSX from "xlsx";
 import {
   listExamRows, upsertExamRow, softDeleteExamRow, writeExamAudit, listExamAudit,
-  isDuplicateEmployeeNo, listByPersonnel, examSupabaseReady, type ExamRow, type ExamPersonnelChildTable,
+  isDuplicateEmployeeNo, listByPersonnel, examSupabaseReady, makeExcelRowReader, type ExamRow, type ExamPersonnelChildTable,
 } from "../services/examMasterService";
 import { calculatePmLevel } from "../services/examAutomationService";
 // [자동 라이선스 관리] 인력 저장 후 employee_license_plan 자동 생성(추가 전용·비차단). 기존 저장 흐름 무변경.
@@ -278,9 +278,10 @@ export default function ExamPersonnelPage({
       let ok = 0, skipped = 0;
       // [자동 라이선스] 업로드 사원별 계획 생성을 위해 사다리를 1회만 로드(반복 쿼리 방지). 실패 시 빈 배열→생성 skip.
       for (const r of raw) {
+        const cell = makeExcelRowReader(r);
         const row: ExamRow = {};
         for (const c of COLS) {
-          const v = r[c.label];
+          const v = cell(c.label);
           if (c.type === "number") { const n = String(v ?? "").replace(/[^0-9.-]/g, ""); row[c.key] = n === "" ? null : Number(n); }
           else if (c.type === "date") { row[c.key] = ymd(v) || null; }
           else if (c.type === "boolean") { const s = String(v ?? "").trim().toLowerCase(); row[c.key] = ["o", "예", "y", "true", "1", "가능"].includes(s) ? true : (s === "" ? null : false); }

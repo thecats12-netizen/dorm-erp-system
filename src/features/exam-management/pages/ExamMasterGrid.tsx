@@ -336,12 +336,18 @@ export default function ExamMasterGrid({
       const wb = XLSX.read(buf, { type: "array" });
       const sheet = wb.Sheets[wb.SheetNames[0]];
       const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+      // 헤더 정규화: 공백/제로폭 문자/대소문자 차이로 c.label 과 정확히 일치하지 않아 값이 누락되는 것을 방지
+      //  (엑셀 파일마다 헤더에 앞뒤 공백·BOM 이 섞여 "0건 등록"이 되는 문제). 의미가 다른 컬럼은 매핑하지 않는다.
+      const normHeader = (s: string) => s.replace(/[​-‍﻿]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
       let ok = 0;
       for (const r of raw) {
+        const rowByNorm = new Map<string, unknown>();
+        for (const [k, val] of Object.entries(r)) rowByNorm.set(normHeader(k), val);
+        const cell = (label: string) => rowByNorm.has(normHeader(label)) ? rowByNorm.get(normHeader(label)) : "";
         const row: ExamRow = {};
         let hasRequired = true;
         for (const c of tableColumns) {
-          const v = String(r[c.label] ?? "").trim();
+          const v = String(cell(c.label) ?? "").trim();
           if (c.type === "ref") {
             // 빈 셀은 참조 미지정(null). (v==="" 일 때 startsWith 가 항상 참이 되어 첫 옵션이 잘못 배정되는 것을 방지)
             const opt = v ? (refMap[c.refTable as string] || []).find((o) => o.label === v || o.label.startsWith(v)) : undefined;

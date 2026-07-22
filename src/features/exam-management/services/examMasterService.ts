@@ -73,6 +73,15 @@ export async function listExamRows(table: ExamMasterTable, tenantId: string): Pr
 }
 
 // 참조 선택용 경량 목록({ id, label }). name(+code) 로 라벨 구성.
+// Excel 업로드 헤더 정규화 리더. 헤더에 앞뒤 공백·제로폭 문자·대소문자 차이가 있어도 c.label 로 값을 찾게 한다
+//  (엑셀 파일마다 헤더가 미세하게 달라 필수값이 누락되고 "0건 등록"이 되는 문제 방지). 의미가 다른 컬럼은 매핑하지 않는다.
+export function makeExcelRowReader(row: Record<string, unknown>): (label: string) => unknown {
+  const norm = (s: string) => s.replace(/[​-‍﻿]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+  const byNorm = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(row)) byNorm.set(norm(k), v);
+  return (label: string) => (byNorm.has(norm(label)) ? byNorm.get(norm(label)) : "");
+}
+
 export async function listExamRefOptions(table: ExamMasterTable, tenantId: string): Promise<Array<{ id: string; label: string }>> {
   const rows = await listExamRows(table, tenantId);
   return rows

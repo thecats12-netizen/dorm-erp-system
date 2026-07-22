@@ -4,7 +4,7 @@ import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overla
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import {
   listExamRows, listExamRefOptions, upsertExamRow, softDeleteExamRow,
-  writeExamAudit, listExamAudit, isDuplicateApplication, examSupabaseReady,
+  writeExamAudit, listExamAudit, isDuplicateApplication, examSupabaseReady, makeExcelRowReader,
   type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, type ExamCandidate } from "../services/examAutomationService";
@@ -594,10 +594,10 @@ export default function ExamApplicationsPage({
       const okRows: ExamRow[] = []; const err: Array<{ row: number; reason: string }> = []; let dup = 0;
       const levelOpts = refMap["exam_levels"] || []; const equipOpts = refMap["exam_equipment"] || [];
       for (let i = 0; i < raw.length; i++) {
-        const r = raw[i]; const row: ExamRow = {}; let bad = "";
+        const r = raw[i]; const cell = makeExcelRowReader(r); const row: ExamRow = {}; let bad = "";
         for (const c of COLS) {
           if (c.type === "cert") continue;
-          const v = r[c.label];
+          const v = cell(c.label);
           if (c.type === "date") { if (!isValidDateCell(v)) bad = bad || `${c.label} 날짜 오류`; row[c.key] = ymd(v) || null; }
           else if (c.type === "number") { const s = String(v ?? "").replace(/[^0-9.-]/g, ""); row[c.key] = s === "" ? null : Number(s); }
           else if (c.type === "ref") {

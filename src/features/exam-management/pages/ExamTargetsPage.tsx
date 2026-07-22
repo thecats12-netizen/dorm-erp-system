@@ -5,7 +5,7 @@ import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import { calculateMonthlyPerformanceYear, calculateAnnualPerformance } from "../services/examAutomationService";
 import {
   listExamRows, listExamRefOptions, upsertExamRow, softDeleteExamRow,
-  writeExamAudit, examSupabaseReady, type ExamRow, type ExamMasterTable,
+  writeExamAudit, examSupabaseReady, makeExcelRowReader, type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 
 type RefOpt = { id: string; label: string };
@@ -337,9 +337,9 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
       const okRows: ExamRow[] = []; const err: Array<{ row: number; reason: string }> = []; let dup = 0;
       const seen = new Set(rows.map(identityKey));
       for (let i = 0; i < raw.length; i++) {
-        const r = raw[i]; const row: ExamRow = {};
+        const r = raw[i]; const cell = makeExcelRowReader(r); const row: ExamRow = {};
         for (const c of formCols) {
-          const v = r[c.label];
+          const v = cell(c.label);
           if (c.type === "number") { const s = String(v ?? "").replace(/[^0-9.-]/g, ""); row[c.key] = s === "" ? null : Math.round(Number(s)); }
           else if (c.type === "ref") { const s = String(v ?? "").trim(); const opt = levels.find((o) => o.label === s || o.label.includes(s)); row[c.key] = opt ? opt.id : null; }
           else { const s = String(v ?? "").replace(/#REF!|#N\/A|#VALUE!/gi, "").trim(); row[c.key] = s || null; }

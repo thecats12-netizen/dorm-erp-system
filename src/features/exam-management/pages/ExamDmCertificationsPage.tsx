@@ -6,7 +6,7 @@ import * as XLSX from "xlsx";
 import {
   listExamRows, upsertExamRow, softDeleteExamRow,
   writeExamAudit, listExamAudit, isDuplicateDm, examSupabaseReady,
-  translateExamWriteError,
+  translateExamWriteError, makeExcelRowReader,
   type ExamRow,
 } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
@@ -407,9 +407,9 @@ export default function ExamDmCertificationsPage({
       const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]], { defval: "" });
       const okRows: ExamRow[] = []; const err: Array<{ row: number; reason: string }> = []; let dup = 0;
       for (let i = 0; i < raw.length; i++) {
-        const r = raw[i]; const row: ExamRow = {}; let bad = "";
+        const r = raw[i]; const cell = makeExcelRowReader(r); const row: ExamRow = {}; let bad = "";
         for (const c of FORM_COLS) {
-          const v = r[c.label];
+          const v = cell(c.label);
           if (c.type === "date") { if (!isValidDateCell(v)) bad = bad || `${c.label} 날짜 오류`; row[c.key] = ymd(v) || null; }
           else if (c.type === "number") { const s = String(v ?? "").replace(/[^0-9.-]/g, ""); row[c.key] = s === "" ? null : Number(s); }
           else if (c.type === "bool") row[c.key] = toBool(v);
