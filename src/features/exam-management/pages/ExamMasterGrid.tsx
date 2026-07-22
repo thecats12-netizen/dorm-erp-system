@@ -207,6 +207,25 @@ export default function ExamMasterGrid({
     });
   };
 
+  // [인증 규칙 전용] 기준 구분 → 적용 제품군 → 그룹 → 제품/파트 → 공정 순으로만 선택 가능하게 게이팅.
+  //  적용 제품군은 filterBy 로 표현할 수 없는 선행조건(기준 구분)이 있어 별도 처리. 다른 탭 동작은 불변.
+  const isRules = config.table === "exam_rules";
+  const rulesGate = (colKey: string): { disabled: boolean; reason: string } => {
+    if (!isRules) return { disabled: false, reason: "" };
+    const has = (k: string) => !!String(editRow?.[k] ?? "").trim();
+    switch (colKey) {
+      case "category_id": return { disabled: !has("rule_type"), reason: "기준 구분을 먼저 선택해 주세요." };
+      case "group_id": return { disabled: !has("category_id"), reason: "적용 제품군을 먼저 선택해 주세요." };
+      case "_part": return { disabled: !has("group_id"), reason: "적용 그룹을 먼저 선택해 주세요." };
+      case "process_id": return { disabled: !has("_part"), reason: "적용 제품/파트를 먼저 선택해 주세요." };
+      default: return { disabled: false, reason: "" };
+    }
+  };
+  // 기준 구분(select) 변경 시 인증 규칙의 하위 계층 전체 초기화(잘못된 상위-하위 조합 방지).
+  const changeRuleType = (value: string) => {
+    setEditRow((f) => ({ ...(f || {}), rule_type: value || null, category_id: null, group_id: null, _part: null, process_id: null }));
+  };
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = rows.filter((r) => {
@@ -244,16 +263,20 @@ export default function ExamMasterGrid({
   //  저장값(process_id·part_id 등)은 그대로 두고, 화면 표시용 상위 선택값만 채운다(임의 첫 항목 선택 금지 · 실제 부모 FK만 사용).
   const withEditScope = (r: ExamRow): ExamRow => {
     const transientRefs = config.columns.filter((c) => c.transient && c.type === "ref");
-    const leaf = config.columns.find((c) => c.type === "ref" && !c.transient); // 실제 저장되는 참조 컬럼
-    if (transientRefs.length === 0 || !leaf || !r[leaf.key]) return { ...r };
+    if (transientRefs.length === 0) return { ...r };
     const find = (t: string, id: string) => (refMap[t] || []).find((o) => o.id === id);
-    let categoryId = "", groupId = "", partId = "";
-    const leafId = String(r[leaf.key]);
-    if (leaf.refTable === "exam_processes") { const p = find("exam_processes", leafId); partId = String(p?.part_id ?? ""); }
-    else if (leaf.refTable === "exam_parts") { partId = leafId; }
-    else if (leaf.refTable === "exam_groups") { groupId = leafId; }
-    if (partId) { const pt = find("exam_parts", partId); groupId = groupId || String(pt?.group_id ?? ""); categoryId = categoryId || String(pt?.category_id ?? ""); }
-    if (groupId) { const g = find("exam_groups", groupId); categoryId = categoryId || String(g?.category_id ?? ""); }
+    // 저장된(비 transient) 계층 참조 값 우선 → 없으면 하위(process/part)에서 부모 FK 로 역추적.
+    const savedHier = (table: string) => {
+      const col = config.columns.find((c) => c.type === "ref" && !c.transient && c.refTable === table);
+      return col ? String(r[col.key] ?? "") : "";
+    };
+    let categoryId = savedHier("exam_categories");
+    let groupId = savedHier("exam_groups");
+    let partId = savedHier("exam_parts");
+    const processId = savedHier("exam_processes");
+    if (!partId && processId) { const p = find("exam_processes", processId); partId = String(p?.part_id ?? ""); }
+    if (!groupId && partId) { const pt = find("exam_parts", partId); groupId = String(pt?.group_id ?? ""); if (!categoryId) categoryId = String(pt?.category_id ?? ""); }
+    if (!categoryId && groupId) { const g = find("exam_groups", groupId); categoryId = String(g?.category_id ?? ""); }
     const scope: ExamRow = {};
     for (const c of transientRefs) {
       if (c.refTable === "exam_categories") scope[c.key] = categoryId || null;
@@ -303,6 +326,14 @@ export default function ExamMasterGrid({
     for (const c of config.columns) {
       if (c.transient) continue; // 필터 전용 필드는 저장/필수 대상 아님
       if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
+    }
+    // [인증 규칙 전용] 기준 구분→제품군→그룹→제품/파트→공정 전체 선택 필수(§7).
+    if (isRules) {
+      if (!String(editRow.rule_type ?? "").trim()) { setError("기준 구분을 선택해 주세요."); return; }
+      if (!String(editRow.category_id ?? "").trim()) { setError("적용 제품군을 선택해 주세요."); return; }
+      if (!String(editRow.group_id ?? "").trim()) { setError("적용 그룹을 선택해 주세요."); return; }
+      if (!String(editRow._part ?? "").trim()) { setError("적용 제품/파트를 선택해 주세요."); return; }
+      if (!String(editRow.process_id ?? "").trim()) { setError("적용 공정을 선택해 주세요."); return; }
     }
     // 종속 무결성: 하위 선택이 상위에 속하는지 검증(참조 FK 가 있을 때만 — 없으면 텍스트/레거시 호환으로 통과).
     for (const c of refColumns) {
@@ -606,18 +637,20 @@ export default function ExamMasterGrid({
                 <div key={c.key}>
                   <label className="mb-1 block text-sm font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}</label>
                   {c.type === "ref" ? (() => {
-                    const opts = optionsFor(c, editRow);
+                    const gate = rulesGate(c.key);
+                    const opts = gate.disabled ? [] : optionsFor(c, editRow); // 게이팅 중에는 하위 목록을 계산/노출하지 않음(중복 방지)
                     const parentMissing = !!c.filterBy && !String(editRow[c.filterBy.formKey] ?? "");
                     return (
                       <>
-                        <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => changeRef(c.key, e.target.value)}>
+                        <select className={`${inputCls} w-full ${gate.disabled ? "cursor-not-allowed opacity-60" : ""}`} disabled={gate.disabled} value={String(editRow[c.key] ?? "")} onChange={(e) => changeRef(c.key, e.target.value)}>
                           <option value="">선택 안 함</option>
                           {/* 표시(label)만 이름으로: 상위 드롭다운으로 이미 범위가 좁혀졌으므로 상위 경로/코드는 반복 표시하지 않는다.
                               저장값(o.id)·FK·Excel·조회는 불변. name 이 없을 때만 기존 label 로 안전 폴백. */}
                           {opts.map((o) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}{o.is_active ? "" : " (미사용)"}</option>)}
                         </select>
-                        {parentMissing && <p className="mt-1 text-xs text-slate-400">상위 항목을 먼저 선택하면 목록이 좁혀집니다.</p>}
-                        {!parentMissing && opts.length === 0 && <p className="mt-1 text-xs text-amber-600">선택 가능한 항목이 없습니다.</p>}
+                        {gate.disabled ? <p className="mt-1 text-xs text-slate-400">{gate.reason}</p>
+                          : parentMissing ? <p className="mt-1 text-xs text-slate-400">상위 항목을 먼저 선택하면 목록이 좁혀집니다.</p>
+                            : opts.length === 0 ? <p className="mt-1 text-xs text-amber-600">선택 가능한 항목이 없습니다.</p> : null}
                       </>
                     );
                   })() : c.type === "boolean" ? (
@@ -626,7 +659,7 @@ export default function ExamMasterGrid({
                       <option value="true">예</option>
                     </select>
                   ) : c.type === "select" ? (
-                    <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}>
+                    <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => { if (isRules && c.key === "rule_type") changeRuleType(e.target.value); else setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null })); }}>
                       <option value="">선택</option>
                       {(c.options || []).map((o) => <option key={o} value={o}>{o}</option>)}
                     </select>
