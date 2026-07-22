@@ -242,6 +242,23 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
     const cat = master.categories.find((x) => String(x.id) === String(grp?.category_id ?? part?.category_id ?? ""));
     return { categoryId: String(cat?.id ?? ""), groupId: String(grp?.id ?? ""), partId: String(part?.id ?? "") };
   }, [master]);
+  // [6] Excel 업로드용: 제품군+그룹+파트 "이름"으로 tenant 내 파트를 찾되, 상위 계층까지 모두 일치하는
+  //  유일 1건일 때만 연결한다(0건·2건 이상은 오류). 이름 단독/첫 항목 매칭 금지 — 화면 드롭다운과 동일 원칙.
+  const matchPartByNames = (productGroup: string, groupName: string, partName: string): { part?: ExamRow; count: number } => {
+    const pn = partName.trim(); if (!pn) return { count: 0 };
+    const gn = groupName.trim(), cn = productGroup.trim();
+    const cands = master.parts.filter((p) => {
+      if (p.is_active === false) return false;
+      if (mName(p) !== pn) return false;
+      const g = master.groups.find((x) => String(x.id) === String(p.group_id ?? ""));
+      if (gn && mName(g) !== gn) return false;
+      const c = master.categories.find((x) => String(x.id) === String(g?.category_id ?? p.category_id ?? ""));
+      if (cn && mName(c) !== cn) return false;
+      return true;
+    });
+    const ids = Array.from(new Set(cands.map((p) => String(p.id))));
+    return { part: ids.length === 1 ? cands.find((p) => String(p.id) === ids[0]) : undefined, count: ids.length };
+  };
   // 편집 모달 열릴 때 1회 초기화(모호하면 미선택 → 사용자가 직접 선택).
   const editScopeKey = editRow ? String(editRow.id ?? "__new__") : "";
   // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
@@ -328,6 +345,18 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
           else { const s = String(v ?? "").replace(/#REF!|#N\/A|#VALUE!/gi, "").trim(); row[c.key] = s || null; }
         }
         if (!num(row.year)) { err.push({ row: i + 2, reason: "연도 누락/오류" }); continue; }
+        // [6] 제품군→그룹→파트 계층 검증 + part_id 연결(파트명이 있을 때만). 텍스트 컬럼은 그대로 유지(unique 인덱스 호환).
+        const partName = String(row.part_name ?? "").trim();
+        if (partName) {
+          const m = matchPartByNames(String(row.product_group ?? ""), String(row.group_name ?? ""), partName);
+          if (m.count === 0) { err.push({ row: i + 2, reason: `기준정보에서 파트를 찾을 수 없습니다(${[row.product_group, row.group_name, partName].filter(Boolean).join(" > ")})` }); continue; }
+          if (m.count > 1) { err.push({ row: i + 2, reason: `동일한 파트가 여러 건 존재하여 자동 연결할 수 없습니다(${partName}). 제품군·그룹을 함께 입력해 주세요.` }); continue; }
+          const part = m.part!;
+          const grp = master.groups.find((x) => String(x.id) === String(part.group_id ?? ""));
+          const cat = master.categories.find((x) => String(x.id) === String(grp?.category_id ?? part.category_id ?? ""));
+          row.part_id = String(part.id);
+          row.part_name = mName(part); row.group_name = mName(grp) || row.group_name; row.product_group = mName(cat) || row.product_group; // FK 와 이름 일치
+        }
         const key = identityKey(row);
         if (seen.has(key)) { dup++; continue; }
         seen.add(key); okRows.push(row);

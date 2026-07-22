@@ -418,6 +418,10 @@ export default function ExamDmCertificationsPage({
         if (!String(row.employee_no ?? "").trim() || !String(row.name ?? "").trim()) { err.push({ row: i + 2, reason: "사원번호/성명 누락" }); continue; }
         if (!String(row.dm_stage ?? "").trim()) { err.push({ row: i + 2, reason: "D.M 단계 누락" }); continue; }
         if (bad) { err.push({ row: i + 2, reason: bad }); continue; }
+        // level_id(NOT NULL FK) 해석 — 미해석 시 오류 행(23502 예방, null 전송 금지). 폼 저장과 동일 규칙.
+        const levelId = resolveLevelId(row);
+        if (!levelId) { err.push({ row: i + 2, reason: "인증 레벨 기준정보를 연결할 수 없습니다(D.M 단계/Level 확인)" }); continue; }
+        row.level_id = levelId;
         if (await isDuplicateDm(tenantId, String(row.employee_no), String(row.dm_stage), ymd(row.acquired_date) || null)) { dup++; continue; }
         okRows.push(row);
       }
@@ -427,7 +431,7 @@ export default function ExamDmCertificationsPage({
   const commitImport = async () => {
     if (!importPreview) return;
     try {
-      for (const row of importPreview.okRows) { const saved = await upsertExamRow("dm_certifications", row, tenantId, userId); await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), "import", null, saved); }
+      for (const row of importPreview.okRows) { const saved = await upsertExamRow("dm_certifications", sanitizeDmCertificationPayload(row), tenantId, userId); await writeExamAudit(tenantId, userId, "dm_certifications", String(saved.id), "import", null, saved); }
       onToast?.(`정상 ${importPreview.okRows.length}건 등록 · 중복 ${importPreview.dup}건 · 오류 ${importPreview.err.length}건`);
       setImportPreview(null); await reload();
     } catch (e) { setError((e as { message?: string })?.message || "Excel 반영 실패."); }
