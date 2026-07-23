@@ -17,6 +17,12 @@ export default function ExamRulesPage({
 }) {
   const [sub, setSub] = useState<string>(EXAM_ENTITY_CONFIGS[0].key);
   const active = EXAM_ENTITY_CONFIGS.find((c) => c.key === sub) || EXAM_ENTITY_CONFIGS[0];
+  // 하위 빠른 추가: 상위 탭에서 "○○ 추가" 클릭 → 자식 탭으로 전환하고 상위 FK 를 채운 등록 모달을 연다.
+  const [pendingChild, setPendingChild] = useState<{ key: string; scope: Record<string, unknown> } | null>(null);
+  const handleQuickAdd = useCallback((childKey: string, scope: Record<string, unknown>) => {
+    setSub(childKey);
+    setPendingChild({ key: childKey, scope });
+  }, []);
 
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
@@ -83,7 +89,10 @@ export default function ExamRulesPage({
         ))}
       </div>
 
-      <ExamMasterGrid key={active.key} config={active} darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast} />
+      <ExamMasterGrid key={active.key} config={active} darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast}
+        onQuickAdd={handleQuickAdd}
+        initialEdit={pendingChild && pendingChild.key === active.key ? (pendingChild.scope as Record<string, unknown>) : null}
+        onInitialEditConsumed={() => setPendingChild(null)} />
     </section>
   );
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
@@ -21,8 +21,17 @@ function parseMasterRefValue(value: unknown): { raw: string; code: string; name:
   return { raw, code: raw, name: "" };
 }
 
+// 하위 빠른 추가: 각 기준정보의 "자식" 탭. 상위 행에서 자식 등록 모달을 상위 FK 채운 채로 연다.
+const CHILD_TAB: Record<string, { key: string; title: string }> = {
+  exam_categories: { key: "groups", title: "그룹" },
+  exam_groups: { key: "parts", title: "제품/파트" },
+  exam_parts: { key: "processes", title: "공정" },
+  exam_processes: { key: "equipment", title: "장비" },
+  exam_equipment: { key: "rules", title: "인증 규칙" },
+};
+
 export default function ExamMasterGrid({
-  config, darkMode, canEdit, tenantId, userId, onToast,
+  config, darkMode, canEdit, tenantId, userId, onToast, onQuickAdd, initialEdit, onInitialEditConsumed,
 }: {
   config: ExamEntityConfig;
   darkMode: boolean;
@@ -30,6 +39,10 @@ export default function ExamMasterGrid({
   tenantId: string;
   userId: string;
   onToast?: (msg: string) => void;
+  // 하위 빠른 추가: 상위 그리드가 자식 탭 key 와 상위 FK 스코프를 부모(ExamRulesPage)로 전달 → 탭 전환 + 자식 그리드 initialEdit.
+  onQuickAdd?: (childKey: string, scope: ExamRow) => void;
+  initialEdit?: ExamRow | null;      // 자식 그리드가 열릴 때 미리 채울 상위 FK(신규 등록)
+  onInitialEditConsumed?: () => void; // initialEdit 소비 완료 알림(부모 상태 정리)
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [refMap, setRefMap] = useState<Record<string, RefOpt[]>>({});
@@ -223,7 +236,13 @@ export default function ExamMasterGrid({
   };
   // 기준 구분(select) 변경 시 인증 규칙의 하위 계층 전체 초기화(잘못된 상위-하위 조합 방지).
   const changeRuleType = (value: string) => {
-    setEditRow((f) => ({ ...(f || {}), rule_type: value || null, category_id: null, group_id: null, _part: null, process_id: null }));
+    setEditRow((f) => {
+      // 기존 선택에서 "다른 값으로 변경"할 때만 하위 초기화. 빈 값 → 첫 선택은 초기화하지 않음
+      //  (하위 빠른 추가로 상위 FK 가 미리 채워진 상태를 보존).
+      const prev = String(f?.rule_type ?? "").trim();
+      const resetHier = !!prev && prev !== value;
+      return { ...(f || {}), rule_type: value || null, ...(resetHier ? { category_id: null, group_id: null, _part: null, process_id: null } : {}) };
+    });
   };
 
   const filtered = useMemo(() => {
@@ -286,6 +305,41 @@ export default function ExamMasterGrid({
     return { ...r, ...scope };
   };
   const openEdit = (r: ExamRow) => setEditRow(withEditScope(r));
+
+  // 하위 빠른 추가: 현재 행에서 자식 등록에 필요한 상위 FK(제품군/그룹/제품·파트/공정)를 도출한다(실제 FK만 · 이름 매칭 금지).
+  const buildChildScope = (row: ExamRow): ExamRow => {
+    const find = (t: string, id: string) => (refMap[t] || []).find((o) => o.id === String(id));
+    let categoryId = "", groupId = "", partId = "", processId = "";
+    switch (config.table) {
+      case "exam_categories": categoryId = String(row.id ?? ""); break;
+      case "exam_groups": groupId = String(row.id ?? ""); categoryId = String(row.category_id ?? ""); break;
+      case "exam_parts": partId = String(row.id ?? ""); groupId = String(row.group_id ?? ""); categoryId = String(row.category_id ?? ""); break;
+      case "exam_processes": processId = String(row.id ?? ""); partId = String(row.part_id ?? ""); break;
+      case "exam_equipment": processId = String(row.process_id ?? ""); break;
+    }
+    if (!partId && processId) { const p = find("exam_processes", processId); partId = String(p?.part_id ?? ""); }
+    if (!groupId && partId) { const pt = find("exam_parts", partId); groupId = String(pt?.group_id ?? ""); if (!categoryId) categoryId = String(pt?.category_id ?? ""); }
+    if (!categoryId && groupId) { const g = find("exam_groups", groupId); categoryId = String(g?.category_id ?? ""); }
+    return { category_id: categoryId || null, group_id: groupId || null, part_id: partId || null, process_id: processId || null };
+  };
+  const quickAddChild = (row: ExamRow) => {
+    const child = CHILD_TAB[config.table];
+    if (!child || !onQuickAdd) return;
+    onQuickAdd(child.key, buildChildScope(row));
+  };
+  // 자식 그리드로 열릴 때: 전달받은 상위 FK 스코프로 신규 등록 모달을 연다(저장되는 참조 컬럼만 세팅 → transient 는 withEditScope 가 역복원).
+  const initChildEditConsumedRef = useRef(false);
+  useEffect(() => {
+    if (!initialEdit || loading || Object.keys(refMap).length === 0 || initChildEditConsumedRef.current) return;
+    const e: ExamRow = {};
+    for (const c of config.columns) {
+      if (c.type === "ref" && !c.transient && initialEdit[c.key] != null) e[c.key] = initialEdit[c.key];
+    }
+    initChildEditConsumedRef.current = true;
+    setEditRow(withEditScope(e));
+    onInitialEditConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialEdit, loading, refMap]);
   const tableKeyDown = useTableKeyboardNav({
     count: filtered.length, active: activeIdx, setActive: setActiveIdx, pageSize: 10,
     onEnter: (i) => { if (canEdit && filtered[i]) openEdit(filtered[i]); },
@@ -611,6 +665,10 @@ export default function ExamMasterGrid({
                   <button className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-200" onClick={(e) => { e.stopPropagation(); void openHistory(r); }}>이력</button>
                   {canEdit && <><span className="mx-1 text-slate-300">·</span>
                     <button className="text-blue-600 hover:underline" onClick={(e) => { e.stopPropagation(); openEdit(r); }}>수정</button>
+                    {CHILD_TAB[config.table] && onQuickAdd && <>
+                      <span className="mx-1 text-slate-300">·</span>
+                      <button className="text-emerald-600 hover:underline" title={`이 항목 아래에 ${CHILD_TAB[config.table].title} 추가`} onClick={(e) => { e.stopPropagation(); quickAddChild(r); }}>{CHILD_TAB[config.table].title} 추가</button>
+                    </>}
                     <span className="mx-1 text-slate-300">·</span>
                     <button className="text-slate-500 hover:underline" onClick={(e) => { e.stopPropagation(); void toggleActive(r); }}>{r.is_active === false ? "사용" : "미사용"}</button>
                     <span className="mx-1 text-slate-300">·</span>
