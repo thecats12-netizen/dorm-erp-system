@@ -117,6 +117,8 @@ import { validateExcel, type ExcelTableType, type ExcelValidationResult } from "
 import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
 import FilteredDormSelector from "./components/FilteredDormSelector";
+import ContractFilesSection from "./components/ContractFilesSection";
+import FilePreviewModal, { type FilePreviewTarget } from "./components/FilePreviewModal";
 import SimMemberGridModal, { type SimMemberRow } from "./components/SimMemberGridModal";
 import ReportView, { type ReportConfig } from "./components/ReportView";
 import ExamManagementPage from "./features/exam-management/pages/ExamManagementPage";
@@ -3333,6 +3335,7 @@ export default function App() {
   const [assignManagerToDorm, setAssignManagerToDorm] = useState(false);
   // 지연 초기화: 템플릿(오늘 날짜 포함)을 매 렌더가 아닌 최초 1회만 생성 (불필요한 객체/날짜 재생성 방지)
   const [dormContractForm, setDormContractForm] = useState<DormContractFormState>(() => dormContractTemplate());
+  const [contractPreview, setContractPreview] = useState<FilePreviewTarget>(null); // 계약 첨부 미리보기 대상
   const [newHireForm, setNewHireForm] = useState<NewHireFormState>(() => newHireTemplate());
   const [inventoryForm, setInventoryForm] = useState(inventoryTemplate());
   const [leaseForm, setLeaseForm] = useState(leaseTemplate());
@@ -25747,6 +25750,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <Input label="수정일" type="date-text" value={dormContractForm.updatedAt} onChange={(v) => setDormContractForm((f) => ({ ...f, updatedAt: v }))} />
               </div>
             </div>
+            {/* 계약 첨부파일(Private Storage · 별도 테이블) — 기존 계약 저장과 분리. 미적용 환경에선 "첨부 없음"으로 안전 표시. */}
+            <ContractFilesSection
+              contractId={editingDormContractId || ""}
+              tenantId={tenantId}
+              userId={currentUser?.id || ""}
+              darkMode={theme.darkMode}
+              canEdit={canEditData(currentUser)}
+              onPreview={setContractPreview}
+            />
           </div>,
           () => setShowDormContractForm(false),
           saveDormContract,
@@ -27043,6 +27055,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             inventory={inventory}
           />
         )}
+
+        {/* 계약 첨부파일 미리보기(다운로드 없이 브라우저에서 바로 확인) */}
+        <FilePreviewModal target={contractPreview} darkMode={theme.darkMode} onClose={() => setContractPreview(null)} />
 
         {/* [1] 정산 기숙사 상세보기 모달(카드 더블클릭) — 현재/퇴실 포함 거주 이력 표시 */}
         {settlementDetailDorm && (() => {
