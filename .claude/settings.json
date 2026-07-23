@@ -31,7 +31,8 @@
       "Bash(git show 0e7d08a:src/App.tsx | sed -n '10397,10425p' > /tmp/op.txt; sed -n '10510,10538p' src/App.tsx > /tmp/np.txt; if diff -q /tmp/op.txt /tmp/np.txt >/dev/null; then echo \"OK canEditCleaningReport 무변경\"; else diff -u /tmp/op.txt /tmp/np.txt; fi *)",
       "Bash(perl -0pi -e 's/\\\\} catch \\\\\\(e\\\\\\) \\\\{ setError\\\\\\(\\\\\\(e as \\\\{ message\\\\?: string \\\\}\\\\\\)\\\\?\\\\.message \\\\|\\\\| \"저장하지 못했습니다\\\\.\"\\\\\\); \\\\}/} catch \\(e\\) { setError\\(translateDmSaveError\\(e\\)\\); }/; s/\\\\} catch \\\\\\(e\\\\\\) \\\\{ setError\\\\\\(\\\\\\(e as \\\\{ message\\\\?: string \\\\}\\\\\\)\\\\?\\\\.message \\\\|\\\\| \"승인 처리 실패\\\\.\"\\\\\\); \\\\}/} catch \\(e\\) { setError\\(translateDmSaveError\\(e\\)\\); }/' src/features/exam-management/pages/ExamDmCertificationsPage.tsx)",
       "Bash(grep -n \"replace\\(/\\\\[\" src/features/exam-management/services/examMasterService.ts)",
-      "Bash(awk 'NR>=25655 && NR<=25760 && /특약|메모|notes|저장|contractFiles|첨부|dormContractForm.id|<\\\\/div>\\\\s*$/ {print NR\": \"$0}' src/App.tsx)"
+      "Bash(awk 'NR>=25655 && NR<=25760 && /특약|메모|notes|저장|contractFiles|첨부|dormContractForm.id|<\\\\/div>\\\\s*$/ {print NR\": \"$0}' src/App.tsx)",
+      "Bash(awk -F: '$1>20000 && $1<24000')"
     ],
     "additionalDirectories": [
       "\\tmp"
