@@ -118,6 +118,7 @@ import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
 import FilteredDormSelector from "./components/FilteredDormSelector";
 import ContractFilesSection from "./components/ContractFilesSection";
+import DormitoryContractsTab from "./components/DormitoryContractsTab";
 import FilePreviewModal, { type FilePreviewTarget } from "./components/FilePreviewModal";
 import SimMemberGridModal, { type SimMemberRow } from "./components/SimMemberGridModal";
 import ReportView, { type ReportConfig } from "./components/ReportView";
@@ -7754,6 +7755,10 @@ export default function App() {
     : [];
   const selectedDetailInventory = selectedDetailDorm
     ? inventory.filter((item) => item.dormId === selectedDormDetailId && !item.isDeleted)
+    : [];
+  // 상세보기 계약서(읽기 전용): 기존 계약 관리 데이터를 방(getDormKey) 기준으로 매칭. 중복 저장 없음(원본은 계약 관리 유지).
+  const selectedDetailContracts = selectedDetailDorm
+    ? dormContracts.filter((c) => !c.isDeleted && getDormKey(c.site, c.buildingName, c.dong, c.roomHo) === getDormKey(selectedDetailDorm.site, selectedDetailDorm.buildingName, selectedDetailDorm.dong, selectedDetailDorm.roomHo))
     : [];
 
   // 입주자 메뉴의 기숙사 범위: 기숙사 메뉴 검색(dormSearch)과 독립.
@@ -19729,6 +19734,18 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         <div>고장/노후: {selectedDetailInventory.filter((item) => ["고장", "노후"].includes(item.status)).length}</div>
                       </div>
                     </div>
+                  </div>
+
+                  {/* 계약서(읽기 전용) — 기존 계약 관리 데이터 조회. 등록/수정/삭제/업로드 없음. */}
+                  <div className="mt-6">
+                    <DormitoryContractsTab
+                      contracts={selectedDetailContracts}
+                      tenantId={tenantId}
+                      darkMode={theme.darkMode}
+                      canEdit={canEditData(currentUser)}
+                      onPreview={setContractPreview}
+                      onOpenContractMenu={() => { closeDormDetailModal(); setActiveTab("dormContracts"); }}
+                    />
                   </div>
 
                   <div className={`${theme.darkMode ? "mt-6 rounded-3xl border border-slate-700 p-4" : "mt-6 rounded-3xl border border-slate-200 p-4"}`}>
