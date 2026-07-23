@@ -14,6 +14,8 @@ import EmployeeSelector from "../components/EmployeeSelector";
 import { loadEmployeeAutofill } from "../services/employeeAutofillService";
 import { completeStageByCode } from "../services/licensePlanService";
 import PracticalEvalTab from "./PracticalEvalTab";
+import { formatExamSequence, examSequenceYear } from "../utils/formatExamSequence";
+import { getNextExamSequence } from "../services/examSequenceService";
 import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 
 type RefOpt = { id: string; label: string; name?: string };
@@ -184,6 +186,11 @@ export default function ExamApplicationsPage({
     if (c.type === "date") return ymd(v) || "-";
     if (v === null || v === undefined || v === "") return "-";
     return String(v);
+  };
+  // 목록/상세 표시 전용: 연번은 "YYYY-NNNN"(등록연도 기준)으로 보여준다. 저장값(숫자 seq_no)·Excel·검색·정렬은 cellText 그대로 유지.
+  const displayCell = (c: Col, r: ExamRow) => {
+    if (c.key === "seq_no") { const s = formatExamSequence(r.seq_no, examSequenceYear(r)); return s || "미지정"; }
+    return cellText(c, r);
   };
   const rowMonth = (r: ExamRow) => ymd(r.written_exam_date || r.cert_acquired_date || r.practical_pass_date).slice(0, 7);
 
@@ -458,6 +465,12 @@ export default function ExamApplicationsPage({
       const { cert_status_manual_reason: _omit, ...editForSave } = editRow as ExamRow & { cert_status_manual_reason?: string };
       void _omit;
       const payload = computeDerivedFields(editForSave); // 저장 직전 자동계산(인증 취득일/취득여부/PM Level/D.M 공정)
+      // [연번 자동 발급] 신규 등록 + 연번 미지정일 때만 tenant·연도별 동시성 안전 RPC 로 발급.
+      //  RPC 미적용(초안 SQL 미실행)이면 null → seq_no 미지정으로 저장(기존 동작 유지 · 저장 안 깨짐).
+      if (isNew && (payload.seq_no == null || payload.seq_no === "")) {
+        const nextSeq = await getNextExamSequence(tenantId, new Date().getFullYear());
+        if (nextSeq != null) payload.seq_no = nextSeq;
+      }
       const saved = await upsertExamRow("exam_applications", payload, tenantId, userId);
       const auditMemo = editRow.cert_status_manual === true ? `인증취득여부 수동 확정(${String(editRow.cert_status ?? "")}) 사유: ${manualReason}` : undefined;
       await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), isNew ? "create" : "update", before, saved, auditMemo);
@@ -755,7 +768,7 @@ export default function ExamApplicationsPage({
                               </span>
                             );
                           })()
-                            : cellText(c, r)}
+                            : displayCell(c, r)}
                     </td>
                   ))}
                   <td className="whitespace-nowrap px-2.5 py-2">
@@ -891,7 +904,14 @@ export default function ExamApplicationsPage({
               {COLS.filter((c) => c.type !== "cert").map((c) => (
                 <div key={c.key}>
                   <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}{AUTO_READONLY.has(c.key) && <span className="ml-1 text-[0.6rem] font-normal text-slate-400">(사번 자동)</span>}</label>
-                  {c.key === "employee_no" ? (
+                  {c.key === "seq_no" ? (
+                    // 연번: 사용자 입력 불가. 신규는 저장 시 자동 생성, 수정은 기존 연번을 읽기전용 표시.
+                    <div className={`${inputCls} w-full ${darkMode ? "bg-slate-800/60 text-slate-400" : "bg-slate-100 text-slate-500"}`} title="연번은 저장 시 자동 생성됩니다">
+                      {editRow.id
+                        ? (formatExamSequence(editRow.seq_no, examSequenceYear(editRow)) || "미지정")
+                        : "저장 시 자동 생성됩니다"}
+                    </div>
+                  ) : c.key === "employee_no" ? (
                     // 사번: 인력(연명부)에서 선택 → 성명/그룹/제품/공정/PM Level 자동입력.
                     <select className={`${inputCls} w-full`} value={String(editRow.employee_no ?? "")} onChange={(e) => applyPersonnel(e.target.value)}>
                       <option value="">사번 선택</option>
@@ -1026,7 +1046,7 @@ export default function ExamApplicationsPage({
                 <div className="mb-1 text-sm font-semibold text-slate-500">{title as string}</div>
                 <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
                   {(keys as string[]).map((key) => { const c = COLS.find((x) => x.key === key) || { key, label: key, type: "text" } as Col; return (
-                    <div key={key} className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}><div className="text-[0.65rem] uppercase tracking-wide text-slate-400">{c.label}</div><div className="mt-0.5">{cellText(c, detailRow)}</div></div>
+                    <div key={key} className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}><div className="text-[0.65rem] uppercase tracking-wide text-slate-400">{c.label}</div><div className="mt-0.5">{displayCell(c, detailRow)}</div></div>
                   ); })}
                 </dl>
               </div>
