@@ -467,14 +467,20 @@ export default function ExamApplicationsPage({
       const payload = computeDerivedFields(editForSave); // 저장 직전 자동계산(인증 취득일/취득여부/PM Level/D.M 공정)
       // [연번 자동 발급] 신규 등록 + 연번 미지정일 때만 tenant·연도별 동시성 안전 RPC 로 발급.
       //  RPC 미적용(초안 SQL 미실행)이면 null → seq_no 미지정으로 저장(기존 동작 유지 · 저장 안 깨짐).
+      let seqIssueFailed = false;
       if (isNew && (payload.seq_no == null || payload.seq_no === "")) {
         const nextSeq = await getNextExamSequence(tenantId, new Date().getFullYear());
-        if (nextSeq != null) payload.seq_no = nextSeq;
+        if (nextSeq != null) payload.seq_no = nextSeq; else seqIssueFailed = true;
       }
       const saved = await upsertExamRow("exam_applications", payload, tenantId, userId);
       const auditMemo = editRow.cert_status_manual === true ? `인증취득여부 수동 확정(${String(editRow.cert_status ?? "")}) 사유: ${manualReason}` : undefined;
       await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), isNew ? "create" : "update", before, saved, auditMemo);
-      setEditRow(null); onToast?.(isNew ? "응시 항목이 등록되었습니다." : "응시 항목이 수정되었습니다."); await reload();
+      setEditRow(null);
+      // 저장은 성공. 신규인데 연번 발급만 실패했으면(개발 오류 미노출) 자연스러운 안내로 부분 실패를 알린다.
+      onToast?.(isNew
+        ? (seqIssueFailed ? "연번을 자동 생성하지 못했습니다. 시험 응시는 저장되었으며 연번은 미지정 상태입니다." : "응시 항목이 등록되었습니다.")
+        : "응시 항목이 수정되었습니다.");
+      await reload();
       // [결과→계획 연동] 최종 취득 상태면 라이선스 계획을 완료 처리(비차단·멱등). 저장은 이미 성공했으므로 실패해도 롤백/삭제하지 않는다.
       const finalAcquired = /인증\s*취득|실기\s*합격/.test(String(saved.status ?? "")) || String(saved.cert_status ?? "") === "취득" || !!String(saved.cert_acquired_date ?? "").trim();
       if (finalAcquired) {
