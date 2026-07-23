@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { listExamRows, upsertExamRow, writeExamAudit, type ExamRow } from "../services/examMasterService";
+import { listExamRows, upsertExamRow, writeExamAudit, isDuplicateApplication, type ExamRow } from "../services/examMasterService";
+import { getNextExamSequence } from "../services/examSequenceService";
 import { loadAllPlans, decoratePlans, todayYmd, toYmd, type EmployeeLicensePlan } from "../services/licensePlanService";
 import { loadEmployeeLicenseSummaries } from "../services/employeeAutofillService";
 import type { EmployeeAutofill } from "../types/employeeLookup";
@@ -113,34 +114,51 @@ export default function ExamCandidatePoolBoard({
   const toggleAll = () => setChecked((prev) => { const n = new Set(prev); if (filtered.every((c) => n.has(c.key))) filtered.forEach((c) => n.delete(c.key)); else filtered.forEach((c) => n.add(c.key)); return n; });
   const toggle = (k: string) => setChecked((prev) => { const n = new Set(prev); if (n.has(k)) n.delete(k); else n.add(k); return n; });
 
-  // 일괄 등록 → exam_applications(승인대기). category_code=단계 로 중복 방지(부분 유니크 + 프론트 taken).
+  // 후보 승인 등록 → exam_applications(승인대기). 일반 신규 등록과 동일 정책:
+  //  ① 저장 직전 DB 중복 검증(tenant+사번+구분코드) ② 중복 아님 확인 후에만 연번 RPC 발급(번호 낭비 방지)
+  //  ③ 순차 처리(무제한 동시요청 금지). 성공/중복/실패/연번미발급 분리 집계 + 프론트 캐시 refetch(reload).
   const registerChecked = async () => {
     const chosen = filtered.filter((c) => checked.has(c.key));
     if (busy || chosen.length === 0) return;
     if (!tenantId) { setError("회사 정보가 확인되지 않았습니다."); return; }
     setBusy(true); setError(null);
-    let ok = 0; const fails: Array<{ ref: string; reason: string }> = [];
+    const year = new Date().getFullYear();
+    let created = 0, duplicate = 0, seqFailed = 0; const fails: Array<{ ref: string; reason: string }> = [];
     for (const c of chosen) {
       const ref = `${c.empNo} ${c.name}`.trim();
       try {
         if (!c.empNo) { fails.push({ ref, reason: "사번 없음" }); continue; }
+        // 저장 직전 DB 기준 중복 검증(후보 목록에 없다는 이유만으로 판단하지 않음). 중복이면 RPC·insert 안 함.
+        if (await isDuplicateApplication(tenantId, c.empNo, c.level)) { duplicate++; continue; }
         const payload: ExamRow = {
           employee_no: c.empNo, name: c.name, group_name: c.group, product: c.productGroup,
           process: c.process, pm_level: c.level, category_code: c.level, status: "승인대기",
         };
+        // 연번 자동 발급(중복 아님이 확인된 뒤에만 · 실패해도 등록은 진행). 프론트 배열길이/ max+1 금지.
+        const nextSeq = await getNextExamSequence(tenantId, year);
+        if (nextSeq != null) payload.seq_no = nextSeq; else seqFailed++;
         const saved = await upsertExamRow("exam_applications", payload, tenantId, userId || "");
-        await writeExamAudit(tenantId, userId || "", "exam_applications", String(saved.id), "create", null, saved, `응시 후보 일괄 등록(${c.level})`);
-        ok++;
+        await writeExamAudit(tenantId, userId || "", "exam_applications", String(saved.id), "create", null, saved, `응시 후보 승인 등록(${c.level})`);
+        created++;
       } catch (e) {
         const msg = (e as { message?: string })?.message || "";
-        fails.push({ ref, reason: /이미|중복|duplicate/.test(msg) ? "이미 응시 신청 있음" : msg || "저장 실패" });
+        // DB 유니크(동시 승인 등)로 인한 중복은 "이미 등록"으로 집계(개발용 코드 미노출).
+        if (/이미|중복|duplicate|23505/.test(msg)) duplicate++;
+        else fails.push({ ref, reason: msg || "저장 실패" });
       }
     }
     setBusy(false);
-    if (ok > 0 && fails.length === 0) onToast?.(`응시 대상 ${ok}건을 시험 응시관리(승인대기)로 등록했습니다.`);
-    else if (ok > 0) { onToast?.(`${ok}건 등록, ${fails.length}건 실패.`); setError(`일부 실패(${fails.length}):\n` + fails.map((f) => `· ${f.ref}: ${f.reason}`).join("\n")); }
+    // 사용자 안내: 성공/중복/실패 분리 집계(자연스러운 한글). 연번 미발급은 별도 부기.
+    const parts: string[] = [];
+    if (created > 0) parts.push(`${created}명 등록`);
+    if (duplicate > 0) parts.push(`${duplicate}명은 이미 등록되어 제외`);
+    if (fails.length > 0) parts.push(`${fails.length}명은 저장에 실패`);
+    const summary = `총 ${chosen.length}명 중 ${parts.join(", ")}.`;
+    if (created > 0 && fails.length === 0) onToast?.(summary + (seqFailed > 0 ? ` (이 중 ${seqFailed}명은 연번 미지정 상태)` : ""));
+    else if (created > 0) { onToast?.(summary); setError(`저장 실패(${fails.length}):\n` + fails.map((f) => `· ${f.ref}: ${f.reason}`).join("\n")); }
+    else if (fails.length === 0) onToast?.(summary); // 전부 중복 제외 등
     else setError(`등록 실패(${fails.length}):\n` + fails.map((f) => `· ${f.ref}: ${f.reason}`).join("\n"));
-    await reload();
+    await reload(); // apps refetch → 후보 재계산(taken 제외)으로 등록 완료 후보 즉시 제거
   };
 
   const card = darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white";

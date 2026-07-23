@@ -1,0 +1,60 @@
+-- ============================================================================
+-- [초안 · 자동 적용 금지] 시험 응시 후보 승인 등록 — 중복 방어 점검
+--   후보 승인 등록 경로의 중복 방지 최종 방어(DB) 상태 점검 + 기존 중복 진단.
+--
+--   ⚠ SELECT(진단) 위주입니다. 인덱스 생성은 (3) 진단이 0행일 때만 검토하세요.
+--   ⚠ 기존 데이터 자동 삭제 없음. 정리는 사용자 확인 후 수동.
+-- ============================================================================
+
+-- ────────────────────────────────────────────────────────────────────────
+-- (1) [확인] 이미 존재하는 중복 방어 유니크 인덱스
+--     본 프로젝트의 응시 중복 기준은 (tenant_id, employee_no, category_code) 이며,
+--     아래 인덱스가 이미 그 기준으로 DB 레벨 중복을 최종 차단합니다(20260712030000).
+--       ux_exam_applications_emp_catcode
+--         on public.exam_applications (tenant_id, employee_no, category_code)
+--         where deleted_at is null and category_code is not null and employee_no is not null;
+--     → 프론트(isDuplicateApplication) + 이 인덱스로 "같은 번호/같은 대상 중복 저장"이 차단됩니다.
+--     존재 여부 확인:
+-- select indexname, indexdef from pg_indexes
+--  where schemaname = 'public' and tablename = 'exam_applications'
+--    and indexname = 'ux_exam_applications_emp_catcode';
+
+-- ────────────────────────────────────────────────────────────────────────
+-- (2) [진단 · SELECT 전용] 기존 중복 등록 점검 (tenant + 사번 + 구분코드, 활성)
+--     결과 행이 있으면 후보 승인 등록 중복이 이미 발생한 것입니다.
+-- ────────────────────────────────────────────────────────────────────────
+-- select tenant_id, employee_no, category_code, count(*) as cnt,
+--        array_agg(id order by created_at) as ids,
+--        array_agg(seq_no order by created_at) as seq_nos,
+--        array_agg(status order by created_at) as statuses
+--   from public.exam_applications
+--  where deleted_at is null and employee_no is not null and category_code is not null
+--  group by tenant_id, employee_no, category_code
+-- having count(*) > 1
+--  order by cnt desc, employee_no;
+
+-- ────────────────────────────────────────────────────────────────────────
+-- (3) [정리안 · 수동 · 자동 실행 금지] 중복 정리 절차(사용자 승인 후)
+--     정책: 가장 오래된 1건 유지, 나머지는 soft delete(deleted_at). 물리 삭제 금지.
+--     ⚠ 실행 전 확인: 각 중복 건에 시험 결과(exam_results)·인증·파일·이력 참조가 있으면 삭제 금지.
+--        참조가 있는 건은 유지 대상으로 바꾸고, 참조 없는 최신 중복만 정리하세요.
+--
+-- with dups as (
+--   select id,
+--          row_number() over (partition by tenant_id, employee_no, category_code
+--                             order by created_at asc, id asc) as rn
+--     from public.exam_applications
+--    where deleted_at is null and employee_no is not null and category_code is not null
+-- )
+-- update public.exam_applications a
+--    set deleted_at = now()
+--   from dups
+--  where a.id = dups.id and dups.rn > 1;   -- rn=1(가장 오래된 1건)만 유지
+
+-- ────────────────────────────────────────────────────────────────────────
+-- (4) [불필요] 신규 유니크 인덱스
+--     (1)의 ux_exam_applications_emp_catcode 가 이미 동일 기준을 강제하므로
+--     추가 유니크 인덱스는 만들지 않습니다(중복 방어 중복 생성 금지).
+--     설비별 별도 응시(equipment_id 포함)나 연도별 허용 등 "업무 기준 변경"이 필요할 때만
+--     새 기준을 확정한 뒤 별도 초안으로 논의하세요.
+-- ============================================================================
