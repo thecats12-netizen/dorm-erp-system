@@ -16,7 +16,7 @@ import { completeStageByCode } from "../services/licensePlanService";
 import PracticalEvalTab from "./PracticalEvalTab";
 import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 
-type RefOpt = { id: string; label: string };
+type RefOpt = { id: string; label: string; name?: string };
 type ColType = "text" | "date" | "number" | "select" | "ref" | "cert";
 type Col = { key: string; label: string; type: ColType; options?: string[]; refTable?: ExamMasterTable; required?: boolean; filter?: boolean; hideable?: boolean };
 
@@ -904,8 +904,8 @@ export default function ExamApplicationsPage({
                     // 인증단계 변경 시 설비 선택 초기화(단계별 설비만 표시되도록).
                     <select className={`${inputCls} w-full`} value={String(editRow.level_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), level_id: e.target.value || null, equipment_id: null }))}><option value="">선택</option>{(refMap["exam_levels"] || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
                   ) : c.key === "equipment_id" ? (
-                    // 인증 설비: 선택된 인증단계에 연결된 공정의 설비만 표시.
-                    <select className={`${inputCls} w-full`} value={String(editRow.equipment_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), equipment_id: e.target.value || null }))}><option value="">선택</option>{equipmentOptions.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
+                    // 인증 설비: 선택된 인증단계에 연결된 공정의 설비만 표시. 표시는 품명/설비명 우선(저장값 equipment_id 불변, name 없으면 label 폴백).
+                    <select className={`${inputCls} w-full`} value={String(editRow.equipment_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), equipment_id: e.target.value || null }))}><option value="">선택</option>{equipmentOptions.map((o) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}</option>)}</select>
                   ) : c.type === "ref" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}><option value="">선택</option>{(refMap[c.refTable as string] || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
                   ) : c.type === "select" ? (

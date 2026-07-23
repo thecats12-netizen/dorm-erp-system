@@ -403,7 +403,9 @@ export default function ExamPersonnelPage({
     const box = (label: string, hint: string, node: ReactNode) => (
       <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{label}</label>{node}{hint && <p className="mt-0.5 text-[0.65rem] text-slate-400">{hint}</p>}</div>
     );
-    const opt = (o: MRef) => <option key={o.id} value={o.id}>{o.label}{o.is_active ? "" : " (미사용)"}</option>;
+    // 표시(label)만 품명/이름으로: 상위 드롭다운으로 이미 범위가 좁혀졌으므로 코드·상위경로는 반복 표시하지 않는다.
+    //  저장값(o.id)·FK 는 불변. name 이 없을 때만 기존 label 로 안전 폴백.
+    const opt = (o: MRef) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}{o.is_active ? "" : " (미사용)"}</option>;
     return (
       <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
         <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">선택 시 그룹·제품군·파트·공정 자동 반영</span></div>

@@ -82,13 +82,15 @@ export function makeExcelRowReader(row: Record<string, unknown>): (label: string
   return (label: string) => (byNorm.has(norm(label)) ? byNorm.get(norm(label)) : "");
 }
 
-export async function listExamRefOptions(table: ExamMasterTable, tenantId: string): Promise<Array<{ id: string; label: string }>> {
+export async function listExamRefOptions(table: ExamMasterTable, tenantId: string): Promise<Array<{ id: string; label: string; name: string }>> {
   const rows = await listExamRows(table, tenantId);
   return rows
     .filter((r) => r.is_active !== false)
     .map((r) => ({
       id: String(r.id),
+      // label: 코드·이름 조합(검색·기존 표시 호환). name: 이름만(품명 중심 표시용 · 추가 필드 · 기존 사용처 무영향).
       label: [r.code, r.name].filter(Boolean).join(" · ") || String(r.name || r.id),
+      name: String(r.name ?? ""),
     }));
 }
 
