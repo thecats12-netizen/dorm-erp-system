@@ -56,7 +56,8 @@ export default function ContractFilesSection({
     onPreview({ url, fileName: f.file_name, mime: f.mime });
   };
   const download = async (f: ContractFile) => {
-    const url = await getContractFileSignedUrl(f.storage_path);
+    // 서명 URL 에 원본 파일명(download 옵션)을 실어 Storage UUID 키가 아닌 원본명으로 저장되게 한다.
+    const url = await getContractFileSignedUrl(f.storage_path, 600, f.file_name || undefined);
     if (!url) { setMsg("다운로드 URL을 만들 수 없습니다. 첨부 저장소 설정을 확인해 주세요."); return; }
     const a = document.createElement("a"); a.href = url; a.download = f.file_name || ""; a.target = "_blank"; a.rel = "noreferrer";
     document.body.appendChild(a); a.click(); a.remove();
