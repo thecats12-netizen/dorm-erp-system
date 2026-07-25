@@ -89,6 +89,32 @@ export async function listExamRows(table: ExamMasterTable, tenantId: string): Pr
   return (data as ExamRow[]) || [];
 }
 
+// [이중계상 방지 · fail-closed] 특정 스코프(tenant/year/group_id/level_id)의 미삭제 목표만 조회(소량).
+//  수동 저장 직전 반대 유형 공존 확인용. 실패 시 예외를 던져 상위에서 저장을 "중단"(폴백 금지)하게 한다.
+//  대상은 목표 테이블(exam_annual_targets / exam_monthly_results)에 한정.
+export async function listTargetScopeRows(
+  table: ExamMasterTable, tenantId: string, year: number, groupId: string, levelId: string,
+): Promise<ExamRow[]> {
+  if (!isSupabaseAvailable() || !supabase) throw new Error("Supabase 미설정");
+  const { data, error } = await supabase
+    .from(table)
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .eq("year", year)
+    .eq("group_id", groupId)
+    .eq("level_id", levelId)
+    .is("deleted_at", null);
+  if (error) {
+    console.error("[examMasterService] listTargetScopeRows 실패:", {
+      table, tenantId, year, groupId, levelId,
+      code: (error as { code?: unknown })?.code ?? "(unknown)",
+      message: error.message,
+    });
+    throw new Error(translateSupabaseError(error.message || String(error)));
+  }
+  return (data as ExamRow[]) || [];
+}
+
 // 참조 선택용 경량 목록({ id, label }). name(+code) 로 라벨 구성.
 // Excel 업로드 헤더 정규화 리더. 헤더에 앞뒤 공백·제로폭 문자·대소문자 차이가 있어도 c.label 로 값을 찾게 한다
 //  (엑셀 파일마다 헤더가 미세하게 달라 필수값이 누락되고 "0건 등록"이 되는 문제 방지). 의미가 다른 컬럼은 매핑하지 않는다.

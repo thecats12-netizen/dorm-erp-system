@@ -4,7 +4,7 @@ import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overla
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import { calculateMonthlyPerformanceYear, calculateAnnualPerformance } from "../services/examAutomationService";
 import {
-  listExamRows, listExamRefOptions, upsertExamRow, softDeleteExamRow,
+  listExamRows, listExamRefOptions, listTargetScopeRows, upsertExamRow, softDeleteExamRow,
   writeExamAudit, examSupabaseReady, makeExcelRowReader, type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 
@@ -337,13 +337,24 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
       const grp = master.groups.find((x) => String(x.id) === scopeSel.groupId);
       if (grp && String(grp.category_id ?? "") !== scopeSel.categoryId) { setError("선택한 그룹이 현재 제품군에 속하지 않습니다."); return; }
       if (grp?.is_active === false) { setError("비활성 기준정보는 새로 선택할 수 없습니다."); return; }
-      // [이중계상 방지] 동일 tenant/year/group_id/level_id 에 "반대 유형" 목표가 이미 있으면 신규 저장 차단(경고만).
+      // [이중계상 방지 · fail-closed] 화면 rows(부분 로딩 가능) 대신 DB 를 스코프 한정 조회해 반대 유형 공존 확인.
+      //  scopeConflictKey 산출 가능(year/group_id/level_id 존재) 시에만 검사. 조회 실패 시 저장 중단(폴백 금지).
       //  Excel Import 와 동일 규칙(findOppositeScopeConflict) 사용. 데이터/통계/DB/identity 무변경.
-      if (findOppositeScopeConflict(editRow, rows, tenantId)) {
-        setError(isPartScopedTarget(editRow)
-          ? "이 그룹·연도·인증레벨에는 이미 그룹 단위 목표가 있어 파트 목표를 저장할 수 없습니다. (중복 집계 방지)"
-          : "이 그룹·연도·인증레벨에는 이미 파트 단위 목표가 있어 그룹 목표를 저장할 수 없습니다. (중복 집계 방지)");
-        return;
+      if (scopeConflictKey(tenantId, editRow)) {
+        let scopeRows: ExamRow[];
+        try {
+          scopeRows = await listTargetScopeRows(cfg.table, tenantId, Number(editRow.year), String(editRow.group_id ?? ""), String(editRow.level_id ?? ""));
+        } catch (e) {
+          console.error("[ExamTargetsPage] 이중계상 충돌 검사 DB 조회 실패:", e);
+          setError("기존 목표 데이터를 확인하지 못해 저장할 수 없습니다. 잠시 후 다시 시도해 주세요.");
+          return;
+        }
+        if (findOppositeScopeConflict(editRow, scopeRows, tenantId)) {
+          setError(isPartScopedTarget(editRow)
+            ? "이 그룹·연도·인증레벨에는 이미 그룹 단위 목표가 있어 파트 목표를 저장할 수 없습니다. (중복 집계 방지)"
+            : "이 그룹·연도·인증레벨에는 이미 파트 단위 목표가 있어 그룹 목표를 저장할 수 없습니다. (중복 집계 방지)");
+          return;
+        }
       }
     }
     setSaving(true); setError(null);
@@ -388,9 +399,17 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
       const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
       const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]], { defval: "" });
       const okRows: ExamRow[] = []; const err: Array<{ row: number; reason: string }> = []; let dup = 0;
-      // [부분 로딩 대응] 화면 rows(페이지네이션/필터로 일부만일 수 있음) 대신, Import 시점에 tenant 전체
-      //  비삭제 목표를 1회 batch 조회해 중복·스코프 충돌 판정에 사용(deleted_at is null 은 listExamRows 가 이미 적용).
-      const existingRows = await listExamRows(cfg.table, tenantId).catch(() => rows);
+      // [부분 로딩 대응 · fail-closed] 화면 rows(페이지네이션/필터로 일부만일 수 있음) 대신, Import 시점에 tenant
+      //  전체 비삭제 목표를 1회 batch 조회(deleted_at is null 은 listExamRows 가 적용). 조회 실패 시 폴백하지 않고
+      //  프리뷰 생성을 중단한다(okRows 미생성 → commitImport 진행 불가).
+      let existingRows: ExamRow[];
+      try {
+        existingRows = await listExamRows(cfg.table, tenantId);
+      } catch (e) {
+        console.error("[ExamTargetsPage] Import 이중계상 검사용 목표 조회 실패:", e);
+        setError("기존 목표 데이터를 확인하지 못해 Excel 가져오기를 중단했습니다. 잠시 후 다시 시도해 주세요.");
+        return;
+      }
       const seen = new Set(existingRows.map(identityKey));
       const acceptedInFile: ExamRow[] = []; // 같은 파일 내 확정 행(스코프 충돌 상호 검사용)
       for (let i = 0; i < raw.length; i++) {
