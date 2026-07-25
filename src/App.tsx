@@ -26160,6 +26160,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           {/* 미리보기: 계약 첨부와 동일한 공통 모달(FilePreviewModal) 재사용. data 는 base64(선택 직후) 또는 Public URL(저장 후) 모두 지원. */}
                           <button type="button" onClick={() => setContractPreview({ url: proof.data, fileName: proof.name || (isPdf ? "증빙파일.pdf" : "증빙파일") })} className="min-h-[36px] rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold hover:bg-slate-100">미리보기</button>
                           <button type="button" onClick={() => window.open(proof.data, "_blank")} className="min-h-[36px] rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold hover:bg-slate-100">열기</button>
+                          {/* 원본 파일명으로 다운로드(data URL·Storage URL 모두 fetch→Blob 처리 → cross-origin download 속성 무시 문제 회피). */}
+                          <button type="button" onClick={async () => {
+                            try {
+                              const res = await fetch(proof.data); const blob = await res.blob();
+                              const u = URL.createObjectURL(blob); const a = document.createElement("a");
+                              a.href = u; a.download = proof.name || (isPdf ? "증빙파일.pdf" : "증빙파일"); document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u);
+                            } catch { void appAlert("알림", "파일을 다운로드하지 못했습니다. 잠시 후 다시 시도해주세요."); }
+                          }} className="min-h-[36px] rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold hover:bg-slate-100">다운로드</button>
                           <button type="button" onClick={async () => { if (await appConfirm("확인", "증빙파일을 삭제할까요?")) setInventoryForm((f) => ({ ...f, proofFile: "" })); }} className="rounded-lg border border-rose-300 px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50">삭제</button>
                         </div>
                       ) : proof.name ? (
