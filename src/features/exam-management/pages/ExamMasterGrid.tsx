@@ -5,7 +5,7 @@ import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import type { ExamColumn, ExamEntityConfig } from "../examMasterConfigs";
 import {
   listExamRows, upsertExamRow, softDeleteExamRow, setExamRowActive,
-  writeExamAudit, listExamAudit, examSupabaseReady, translateExamWriteError, type ExamRow, type ExamMasterTable,
+  writeExamAudit, listExamAudit, examSupabaseReady, translateExamWriteError, isExamTableMissing, type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 
 // 참조 옵션은 라벨뿐 아니라 상위 FK(category_id/group_id/part_id/process_id)와 활성여부를 함께 싣는다(종속 선택용).
@@ -103,6 +103,8 @@ export default function ExamMasterGrid({
         })),
       ]);
       setRows(data);
+      // 미적용(미생성) 테이블이면 안내(오류 아님). 예: exam_lines DRAFT 미실행 → 라인 탭.
+      if (isExamTableMissing(config.table)) setError("이 기능의 데이터 구조가 아직 적용되지 않았습니다. 관리자에게 문의해 주세요(기준정보 DB 적용 필요).");
       // [16] 동일 코드·품명이 서로 다른 상위 범위에 존재할 수 있으므로, 라벨이 겹치는 항목에만
       //  상위 경로를 덧붙여 구분한다(예: "검사 · DRAM > 2그룹 > ETCH AMAT").
       //  저장값은 그대로 row.id 이며, 겹치지 않는 항목의 라벨은 기존과 동일하게 유지한다.

@@ -49,9 +49,18 @@ const EXAM_TABLE_ORDER: Record<ExamMasterTable, string[]> = {
   exam_monthly_results: ["created_at"],
 };
 
-// 목록 조회(미삭제). 실패 시 예외(상위에서 안내). 존재하지 않는 컬럼으로 정렬/필터하지 않는다.
+// 미적용(미생성) 테이블 캐시 — DRAFT SQL 미실행으로 존재하지 않는 테이블(예: exam_lines)을 기억해
+//  동일 404(PGRST205)/undefined_table 반복 호출을 차단한다(1회 구조화 로그 후 이후엔 네트워크 없이 [] 반환).
+//  SQL 적용 후에는 페이지 새로고침 시 캐시가 비어 정상 조회된다.
+const MISSING_EXAM_TABLES = new Set<string>();
+export const isExamTableMissing = (table: string) => MISSING_EXAM_TABLES.has(table);
+const isMissingTableError = (code: unknown, message: string) =>
+  code === "PGRST205" || code === "42P01" || /could not find the table|does not exist|schema cache/i.test(message || "");
+
+// 목록 조회(미삭제). 미생성 테이블은 [] 반환(반복 404 방지). 그 외 오류는 예외(상위 안내).
 export async function listExamRows(table: ExamMasterTable, tenantId: string): Promise<ExamRow[]> {
   if (!isSupabaseAvailable() || !supabase) return [];
+  if (MISSING_EXAM_TABLES.has(table)) return []; // 이미 미생성 확인됨 → 네트워크 호출 생략
   const orderCols = EXAM_TABLE_ORDER[table] || ["created_at"];
   let q = supabase
     .from(table)
@@ -61,10 +70,16 @@ export async function listExamRows(table: ExamMasterTable, tenantId: string): Pr
   for (const col of orderCols) q = q.order(col, { ascending: true, nullsFirst: true });
   const { data, error } = await q;
   if (error) {
+    const code = (error as { code?: unknown })?.code;
+    // 미생성 테이블: 1회만 경고 로그 후 캐시 등록 → 이후 반복 호출·404 억제. [] 반환(다른 탭·기능 무영향).
+    if (isMissingTableError(code, error.message)) {
+      if (!MISSING_EXAM_TABLES.has(table)) { MISSING_EXAM_TABLES.add(table); console.warn(`[examMasterService] 테이블 미적용(스킵): ${table} (DRAFT SQL 적용 필요)`, { code }); }
+      return [];
+    }
     // [진단용] 실제 Supabase 응답(code/message/details/hint)을 개발 콘솔에 남긴다. 사용자 UI 는 상위에서 안내.
     console.error("[examMasterService] listExamRows 실패:", {
       table, tenantId, orderColumns: orderCols,
-      code: (error as { code?: unknown })?.code ?? "(unknown)",
+      code: code ?? "(unknown)",
       message: error.message,
       details: (error as { details?: unknown })?.details ?? "(none)",
       hint: (error as { hint?: unknown })?.hint ?? "(none)",
