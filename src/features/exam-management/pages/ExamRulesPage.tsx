@@ -15,8 +15,11 @@ export default function ExamRulesPage({
   userId: string;
   onToast?: (msg: string) => void;
 }) {
-  const [sub, setSub] = useState<string>(EXAM_ENTITY_CONFIGS[0].key);
-  const active = EXAM_ENTITY_CONFIGS.find((c) => c.key === sub) || EXAM_ENTITY_CONFIGS[0];
+  // 탭/등록 흐름에 노출할 config 만(제품/파트 등 hidden 제외 · 테이블/데이터/config 는 유지).
+  const VISIBLE_CONFIGS = EXAM_ENTITY_CONFIGS.filter((c) => !c.hidden);
+  const [sub, setSub] = useState<string>(VISIBLE_CONFIGS[0].key);
+  // 숨김 탭 key(직접 접근/저장 후 복귀 등)면 첫 노출 탭으로 폴백(오류 없이 처리).
+  const active = VISIBLE_CONFIGS.find((c) => c.key === sub) || VISIBLE_CONFIGS[0];
   // 하위 빠른 추가: 상위 탭에서 "○○ 추가" 클릭 → 자식 탭으로 전환하고 상위 FK 를 채운 등록 모달을 연다.
   const [pendingChild, setPendingChild] = useState<{ key: string; scope: Record<string, unknown> } | null>(null);
   const handleQuickAdd = useCallback((childKey: string, scope: Record<string, unknown>) => {
@@ -69,14 +72,14 @@ export default function ExamRulesPage({
       <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-800/40" : "border-slate-200 bg-slate-50"}`}>
         <div className="mb-2 text-xs font-medium text-slate-500">등록 순서</div>
         <div className="flex flex-wrap items-center gap-1.5">
-          {EXAM_ENTITY_CONFIGS.map((c, i) => (
+          {VISIBLE_CONFIGS.map((c, i) => (
             <div key={c.key} className="flex items-center gap-1.5">
               <button type="button" onClick={() => setSub(c.key)}
                 className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs ${sub === c.key ? "bg-blue-600 text-white" : (darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100")}`}>
                 <span className="font-medium">{i + 1}. {c.title}</span>
                 <span className={`rounded-full px-1.5 py-0.5 text-[0.6rem] font-semibold ${counts[c.key] ? (sub === c.key ? "bg-white/20" : "bg-emerald-100 text-emerald-700") : "bg-slate-200 text-slate-500"}`}>{counts[c.key] ?? "–"}</span>
               </button>
-              {i < EXAM_ENTITY_CONFIGS.length - 1 && <span className="text-slate-400">→</span>}
+              {i < VISIBLE_CONFIGS.length - 1 && <span className="text-slate-400">→</span>}
             </div>
           ))}
         </div>
@@ -84,7 +87,7 @@ export default function ExamRulesPage({
 
       {/* 하위 탭 */}
       <div className="mb-4 flex flex-wrap gap-1">
-        {EXAM_ENTITY_CONFIGS.map((c) => (
+        {VISIBLE_CONFIGS.map((c) => (
           <button key={c.key} type="button" onClick={() => setSub(c.key)} className={subCls(sub === c.key)}>{c.title}</button>
         ))}
       </div>

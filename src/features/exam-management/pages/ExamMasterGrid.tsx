@@ -22,10 +22,9 @@ function parseMasterRefValue(value: unknown): { raw: string; code: string; name:
 }
 
 // 하위 빠른 추가: 각 기준정보의 "자식" 탭. 상위 행에서 자식 등록 모달을 상위 FK 채운 채로 연다.
+// 하위 빠른 추가: 각 기준정보의 "자식" 탭. 제품/파트 단계 제거로 groups/parts 는 빠른추가 대상에서 제외.
 const CHILD_TAB: Record<string, { key: string; title: string }> = {
   exam_categories: { key: "groups", title: "그룹" },
-  exam_groups: { key: "parts", title: "제품/파트" },
-  exam_parts: { key: "processes", title: "공정" },
   exam_processes: { key: "equipment", title: "장비" },
   exam_equipment: { key: "rules", title: "인증 규칙" },
 };
@@ -81,6 +80,9 @@ export default function ExamMasterGrid({
     setLoading(true); setError(null);
     try {
       const refTables = Array.from(new Set(refColumns.map((c) => c.refTable as ExamMasterTable)));
+      // [계층 단순화] 공정을 "그룹" 기준으로 필터하려면 exam_parts(part.group_id)를 역추적해야 한다.
+      //  공정을 참조하는데 exam_parts 가 참조 목록에 없으면(제품/파트 단계 제거) 역추적용으로 함께 로드.
+      if (refTables.includes("exam_processes") && !refTables.includes("exam_parts")) refTables.push("exam_parts");
       const [data, refs] = await Promise.all([
         listExamRows(config.table, tenantId),
         Promise.all(refTables.map(async (t) => {
@@ -107,6 +109,17 @@ export default function ExamMasterGrid({
       const refEntries: Record<string, RefOpt[]> = Object.fromEntries(refs);
       const byId: Record<string, Map<string, RefOpt>> = {};
       for (const [t, opts] of Object.entries(refEntries)) byId[t] = new Map(opts.map((o) => [o.id, o]));
+      // [계층 단순화] 공정 옵션에 group_id/category_id 를 exam_parts(part.group_id)에서 역추적해 채운다
+      //  → 인증규칙에서 공정을 제품/파트 없이 "그룹"으로 바로 필터. 저장값(process_id)·part_id 는 불변.
+      const partsById = byId["exam_parts"];
+      if (partsById && refEntries["exam_processes"]) {
+        for (const o of refEntries["exam_processes"]) {
+          if (!o.group_id && o.part_id) {
+            const part = partsById.get(String(o.part_id));
+            if (part) { o.group_id = part.group_id ?? null; if (!o.category_id) o.category_id = part.category_id ?? null; }
+          }
+        }
+      }
       const parentOf = (t: string, o: RefOpt): { table: string; opt: RefOpt } | null => {
         const chain: Array<[string, string | null | undefined]> = [
           ["exam_processes", o.process_id], ["exam_parts", o.part_id],
@@ -221,8 +234,8 @@ export default function ExamMasterGrid({
     });
   };
 
-  // [인증 규칙 전용] 기준 구분 → 적용 제품군 → 그룹 → 제품/파트 → 공정 순으로만 선택 가능하게 게이팅.
-  //  적용 제품군은 filterBy 로 표현할 수 없는 선행조건(기준 구분)이 있어 별도 처리. 다른 탭 동작은 불변.
+  // [인증 규칙 전용] 기준 구분 → 적용 라인 → 제품군 → 그룹 → 공정 순으로만 선택 가능하게 게이팅(제품/파트 단계 제거).
+  //  적용 제품군은 filterBy 로 표현할 수 없는 선행조건(기준 구분)이 있어 별도 처리. 적용 라인은 선택(게이팅 없음). 다른 탭 동작은 불변.
   const isRules = config.table === "exam_rules";
   const rulesGate = (colKey: string): { disabled: boolean; reason: string } => {
     if (!isRules) return { disabled: false, reason: "" };
@@ -230,8 +243,7 @@ export default function ExamMasterGrid({
     switch (colKey) {
       case "category_id": return { disabled: !has("rule_type"), reason: "기준 구분을 먼저 선택해 주세요." };
       case "group_id": return { disabled: !has("category_id"), reason: "적용 제품군을 먼저 선택해 주세요." };
-      case "_part": return { disabled: !has("group_id"), reason: "적용 그룹을 먼저 선택해 주세요." };
-      case "process_id": return { disabled: !has("_part"), reason: "적용 제품/파트를 먼저 선택해 주세요." };
+      case "process_id": return { disabled: !has("group_id"), reason: "적용 그룹을 먼저 선택해 주세요." };
       default: return { disabled: false, reason: "" };
     }
   };
@@ -242,7 +254,7 @@ export default function ExamMasterGrid({
       //  (하위 빠른 추가로 상위 FK 가 미리 채워진 상태를 보존).
       const prev = String(f?.rule_type ?? "").trim();
       const resetHier = !!prev && prev !== value;
-      return { ...(f || {}), rule_type: value || null, ...(resetHier ? { category_id: null, group_id: null, _part: null, process_id: null } : {}) };
+      return { ...(f || {}), rule_type: value || null, ...(resetHier ? { category_id: null, group_id: null, process_id: null } : {}) };
     });
   };
 
@@ -382,12 +394,11 @@ export default function ExamMasterGrid({
       if (c.transient) continue; // 필터 전용 필드는 저장/필수 대상 아님
       if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
     }
-    // [인증 규칙 전용] 기준 구분→제품군→그룹→제품/파트→공정 전체 선택 필수(§7).
+    // [인증 규칙 전용] 기준 구분→제품군→그룹→공정 전체 선택 필수(제품/파트 단계 제거). 적용 라인은 선택.
     if (isRules) {
       if (!String(editRow.rule_type ?? "").trim()) { setError("기준 구분을 선택해 주세요."); return; }
       if (!String(editRow.category_id ?? "").trim()) { setError("적용 제품군을 선택해 주세요."); return; }
       if (!String(editRow.group_id ?? "").trim()) { setError("적용 그룹을 선택해 주세요."); return; }
-      if (!String(editRow._part ?? "").trim()) { setError("적용 제품/파트를 선택해 주세요."); return; }
       if (!String(editRow.process_id ?? "").trim()) { setError("적용 공정을 선택해 주세요."); return; }
     }
     // 종속 무결성: 하위 선택이 상위에 속하는지 검증(참조 FK 가 있을 때만 — 없으면 텍스트/레거시 호환으로 통과).

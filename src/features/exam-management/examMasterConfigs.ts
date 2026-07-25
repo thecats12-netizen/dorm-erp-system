@@ -25,6 +25,7 @@ export type ExamEntityConfig = {
   title: string;    // 화면 표시 제목
   table: ExamMasterTable;
   columns: ExamColumn[];
+  hidden?: boolean; // 탭/등록 흐름에서 제외(테이블·데이터·config 는 유지 · 하위호환/역추적용). 예: 제품/파트.
 };
 
 // 인증 기준관리 하위 기준정보/기준 엔티티 정의. 시험 규칙(취득/달성/유효기간/목표)은 exam_rules 에서 관리(하드코딩 금지).
@@ -59,7 +60,9 @@ export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
     ],
   },
   {
-    key: "parts", title: "제품/파트", table: "exam_parts",
+    // [계층 단순화] 제품/파트 단계는 인증 기준관리 탭/등록 흐름에서 제외(hidden). 테이블·데이터·part_id·Excel 은 유지.
+    //  공정→그룹 연결은 exam_parts(group_id)를 역추적해 표시/필터에만 사용한다.
+    key: "parts", title: "제품/파트", table: "exam_parts", hidden: true,
     columns: [
       // exam_parts.category_id·group_id 모두 운영 DB 존재 확인 → 제품군→그룹 종속 저장.
       { key: "category_id", label: "제품군", type: "ref", refTable: "exam_categories" },
@@ -116,10 +119,10 @@ export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
       { key: "category_id", label: "적용 제품군", type: "ref", refTable: "exam_categories" },
       // 그룹은 제품군에 종속(exam_groups.category_id — 확실). 저장 컬럼.
       { key: "group_id", label: "적용 그룹", type: "ref", refTable: "exam_groups", filterBy: { formKey: "category_id", refField: "category_id" } },
-      // 제품/파트는 필터 전용(그룹 종속 · part.group_id, group_id null 은 category_id fallback). 규칙은 공정 기준 저장이라 파트는 저장 안 함.
-      { key: "_part", label: "적용 제품/파트", type: "ref", refTable: "exam_parts", transient: true, filterBy: { formKey: "group_id", refField: "group_id", fallback: { formKey: "category_id", refField: "category_id" } } },
-      // 공정은 제품/파트에 종속(process.part_id — 확실). exam_rules.part_id 기존 값은 보존.
-      { key: "process_id", label: "적용 공정", type: "ref", refTable: "exam_processes", filterBy: { formKey: "_part", refField: "part_id" } },
+      // [계층 단순화] 제품/파트 단계 제거 → 공정을 그룹에 직접 종속시켜 표시/필터.
+      //  공정 옵션의 group_id 는 exam_parts(part.group_id)에서 역추적해 채운다(ExamMasterGrid reload). group_id null 은 category_id fallback.
+      //  기존 규칙의 exam_rules.part_id 값은 보존(저장하지 않을 뿐 삭제/변경하지 않음).
+      { key: "process_id", label: "적용 공정", type: "ref", refTable: "exam_processes", filterBy: { formKey: "group_id", refField: "group_id", fallback: { formKey: "category_id", refField: "category_id" } } },
       { key: "level_id", label: "인증 단계", type: "ref", refTable: "exam_levels" },
       { key: "prerequisite_level_id", label: "선행 인증 단계", type: "ref", refTable: "exam_levels" },
       { key: "require_written", label: "필기 합격 필요", type: "boolean" },
