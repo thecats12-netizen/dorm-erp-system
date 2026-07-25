@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { listExamRefOptions } from "../exam-management/services/examMasterService";
+import { listExamRows, type ExamRow } from "../exam-management/services/examMasterService";
 import { loadRoleScopes, saveRoleScopes } from "./customRoleScopeService";
 import {
   ORG_VALUES, REGION_VALUES, GENDER_VALUES, DORM_MODE_VALUES, PROCESS_MODE_VALUES, OWNER_VALUES,
@@ -26,7 +26,9 @@ const toggleIn = (set: Set<string>, v: string) => { const n = new Set(set); n.ha
 export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, darkMode, dormOptions, onToast, appConfirm }: Props) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [processOptions, setProcessOptions] = useState<DormOption[]>([]);
+  // 공정 옵션에 상위 계층 경로(제품군 > 그룹 > 제품/파트) 포함. 저장값은 여전히 process_id(p.id) 만 사용.
+  const [processOptions, setProcessOptions] = useState<Array<{ id: string; processName: string; path: string }>>([]);
+  const [processSearch, setProcessSearch] = useState("");
   // 선택 상태
   const [org, setOrg] = useState("all");
   const [regions, setRegions] = useState<Set<string>>(new Set());
@@ -46,9 +48,30 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
     (async () => {
       if (!roleId) return;
       setLoading(true);
-      const [scopes, procs] = await Promise.all([loadRoleScopes(roleId, tenantId), listExamRefOptions("exam_processes", tenantId).catch(() => [])]);
+      const [scopes, procRows, partRows, groupRows, catRows] = await Promise.all([
+        loadRoleScopes(roleId, tenantId),
+        listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
+      ]);
       if (!alive) return;
-      setProcessOptions(procs as DormOption[]);
+      // 상위 계층 역추적: 공정(part_id) → 파트(group_id/category_id) → 그룹(category_id) → 제품군.
+      //  process_id 는 그대로 저장. 라벨만 "제품군 > 그룹 > 제품/파트" 경로로 구성해 동일명 공정을 구분.
+      const nm = (r?: ExamRow) => String(r?.name ?? r?.code ?? "").trim();
+      const partById = new Map(partRows.map((r) => [String(r.id), r]));
+      const groupById = new Map(groupRows.map((r) => [String(r.id), r]));
+      const catById = new Map(catRows.map((r) => [String(r.id), r]));
+      const opts = procRows.filter((p) => p.is_active !== false).map((p) => {
+        const part = partById.get(String(p.part_id ?? ""));
+        const group = groupById.get(String(part?.group_id ?? ""));
+        const cat = catById.get(String(group?.category_id ?? part?.category_id ?? ""));
+        const processName = nm(p) || String(p.id);
+        // 상위 일부 누락 시 "미지정"으로 채워 빈 구분자(>>)를 만들지 않음.
+        const path = [nm(cat) || "제품군 미지정", nm(group) || "그룹 미지정", nm(part)].filter(Boolean).join(" > ");
+        return { id: String(p.id), processName, path };
+      }).sort((a, b) => (a.path + a.processName).localeCompare(b.path + b.processName, "ko"));
+      setProcessOptions(opts);
       // 로드된 범위를 상태로 복원.
       const rows = scopes.rows;
       const val = (t: string) => rows.filter((r) => r.scope_type === t).map((r) => r.scope_value);
@@ -113,6 +136,12 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
   };
 
   const inputCls = darkMode ? "border-slate-600 bg-slate-800 text-slate-100" : "border-slate-300 bg-white text-slate-900";
+  // 검색(제품군/그룹/제품·파트/공정 경로 전체 · 대소문자 무시). 저장값 무관 · useMemo.
+  const visibleProcessOptions = useMemo(() => {
+    const q = processSearch.trim().toLowerCase();
+    if (!q) return processOptions;
+    return processOptions.filter((p) => `${p.path} ${p.processName}`.toLowerCase().includes(q));
+  }, [processOptions, processSearch]);
   const chip = (on: boolean) => on ? "bg-slate-900 text-white" : darkMode ? "border border-slate-600 text-slate-300" : "border border-slate-300 text-slate-600";
 
   if (!roleId) return <div className={`rounded-xl border px-3 py-3 text-sm ${darkMode ? "border-slate-700 text-slate-400" : "border-slate-200 text-slate-500"}`}>먼저 권한을 저장한 뒤 데이터 범위를 설정할 수 있습니다.</div>;
@@ -164,10 +193,29 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
         </select>
       </label>
       {processMode === "select" && (
-        <div className={`max-h-32 overflow-y-auto rounded-xl border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
-          {processOptions.length === 0 ? <div className="text-xs text-slate-400">공정 없음</div> : processOptions.map((p) => (
-            <label key={p.id} className="flex items-center gap-2 py-0.5 text-xs"><input type="checkbox" checked={processIds.has(p.id)} onChange={() => setProcessIds((s) => toggleIn(s, p.id))} className="h-3.5 w-3.5" />{p.label}</label>
-          ))}
+        <div className={`rounded-xl border ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+          <div className="flex items-center gap-2 border-b p-2 dark:border-slate-700">
+            <input value={processSearch} onChange={(e) => setProcessSearch(e.target.value)} placeholder="제품군·그룹·제품/파트·공정 검색"
+              className={`min-w-0 flex-1 rounded-lg border px-2 py-1 text-xs outline-none ${inputCls}`} />
+            <span className="whitespace-nowrap text-[0.7rem] text-slate-400">선택 {processIds.size}개</span>
+          </div>
+          <div className="max-h-52 overflow-y-auto p-2">
+            {visibleProcessOptions.length === 0 ? (
+              <div className="text-xs text-slate-400">{processOptions.length === 0 ? "공정 없음" : "검색 결과 없음"}</div>
+            ) : visibleProcessOptions.map((p) => {
+              const on = processIds.has(p.id);
+              // 표시: 1줄=공정명, 2줄=제품군 > 그룹 > 제품/파트. 동일 공정명도 경로로 구분. 클릭영역=행 전체(44px+).
+              return (
+                <label key={p.id} className={`flex min-h-[44px] cursor-pointer items-center gap-2 rounded-lg px-2 py-1 ${on ? (darkMode ? "bg-blue-950/30" : "bg-blue-50") : "hover:bg-slate-100 dark:hover:bg-slate-800"}`}>
+                  <input type="checkbox" checked={on} onChange={() => setProcessIds((s) => toggleIn(s, p.id))} className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0">
+                    <span className="block truncate text-xs font-medium">{p.processName}{on && <span className="ml-1.5 rounded-full bg-blue-100 px-1.5 py-0.5 text-[0.6rem] font-semibold text-blue-700 dark:bg-blue-900 dark:text-blue-200">선택됨</span>}</span>
+                    <span className="block truncate text-[0.7rem] text-slate-400">{p.path}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
         </div>
       )}
 
