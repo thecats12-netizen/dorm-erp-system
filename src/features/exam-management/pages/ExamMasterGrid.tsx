@@ -308,7 +308,8 @@ export default function ExamMasterGrid({
     let groupId = savedHier("exam_groups");
     let partId = savedHier("exam_parts");
     const processId = savedHier("exam_processes");
-    if (!partId && processId) { const p = find("exam_processes", processId); partId = String(p?.part_id ?? ""); }
+    // 공정에서 그룹 복원: 공정.group_id(직접) 우선, 없으면 공정→파트→그룹 역추적(레거시 호환).
+    if (processId) { const p = find("exam_processes", processId); if (!groupId) groupId = String(p?.group_id ?? ""); if (!partId) partId = String(p?.part_id ?? ""); }
     if (!groupId && partId) { const pt = find("exam_parts", partId); groupId = String(pt?.group_id ?? ""); if (!categoryId) categoryId = String(pt?.category_id ?? ""); }
     if (!categoryId && groupId) { const g = find("exam_groups", groupId); categoryId = String(g?.category_id ?? ""); }
     const scope: ExamRow = {};
@@ -329,9 +330,10 @@ export default function ExamMasterGrid({
       case "exam_categories": categoryId = String(row.id ?? ""); break;
       case "exam_groups": groupId = String(row.id ?? ""); categoryId = String(row.category_id ?? ""); break;
       case "exam_parts": partId = String(row.id ?? ""); groupId = String(row.group_id ?? ""); categoryId = String(row.category_id ?? ""); break;
-      case "exam_processes": processId = String(row.id ?? ""); partId = String(row.part_id ?? ""); break;
+      case "exam_processes": processId = String(row.id ?? ""); groupId = String(row.group_id ?? ""); partId = String(row.part_id ?? ""); break;
       case "exam_equipment": processId = String(row.process_id ?? ""); break;
     }
+    if (processId && !groupId) { const p = find("exam_processes", processId); groupId = String(p?.group_id ?? ""); if (!partId) partId = String(p?.part_id ?? ""); }
     if (!partId && processId) { const p = find("exam_processes", processId); partId = String(p?.part_id ?? ""); }
     if (!groupId && partId) { const pt = find("exam_parts", partId); groupId = String(pt?.group_id ?? ""); if (!categoryId) categoryId = String(pt?.category_id ?? ""); }
     if (!categoryId && groupId) { const g = find("exam_groups", groupId); categoryId = String(g?.category_id ?? ""); }
@@ -371,7 +373,7 @@ export default function ExamMasterGrid({
     exam_categories: undefined, // 전역
     exam_groups: "category_id",
     exam_parts: "group_id",
-    exam_processes: "part_id",
+    exam_processes: "group_id", // [Line 전환] 공정 코드 중복 검사 기준: 부모 그룹(part_id → group_id)
     exam_equipment: "process_id",
   };
   const scopeField = config.table in CODE_SCOPE_PARENT ? CODE_SCOPE_PARENT[config.table] : undefined;

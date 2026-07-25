@@ -75,11 +75,10 @@ export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
   {
     key: "processes", title: "공정", table: "exam_processes",
     columns: [
-      // exam_processes 에는 part_id 만 존재(category_id/group_id 없음 — 운영 확인). 저장은 part_id.
-      //  제품군·그룹은 필터 전용(_cat/_group). 그룹 → 제품/파트(part.group_id, group_id null 은 category_id fallback) → part_id 저장.
+      // [Line 전환] 제품/파트 단계 제거 → 공정을 그룹에 직접 저장(exam_processes.group_id, DRAFT 적용됨).
+      //  제품군(_cat)은 필터 전용, 그룹(group_id)은 저장. 기존 part_id 는 폼에서 제외하되 저장 payload 로 보존(삭제 금지).
       { key: "_cat", label: "제품군", type: "ref", refTable: "exam_categories", transient: true },
-      { key: "_group", label: "그룹", type: "ref", refTable: "exam_groups", transient: true, filterBy: { formKey: "_cat", refField: "category_id" } },
-      { key: "part_id", label: "제품/파트", type: "ref", refTable: "exam_parts", filterBy: { formKey: "_group", refField: "group_id", fallback: { formKey: "_cat", refField: "category_id" } } },
+      { key: "group_id", label: "그룹", type: "ref", refTable: "exam_groups", filterBy: { formKey: "_cat", refField: "category_id" } },
       { key: "code", label: "코드", type: "text" },
       { key: "name", label: "공정명", type: "text", required: true },
       { key: "sort_order", label: "정렬", type: "number" },
@@ -88,12 +87,11 @@ export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
   {
     key: "equipment", title: "장비 목록", table: "exam_equipment",
     columns: [
-      // 저장은 process_id(exam_equipment.process_id). 제품군·그룹·제품/파트는 필터 전용.
-      //  _cat → _group(group.category_id) → 제품/파트(part.group_id, fallback category_id) → 공정(process.part_id) → process_id 저장.
+      // [Line 전환] 제품/파트 단계 제거 → 공정을 "그룹" 기준으로 직접 필터(공정 group_id 사용). 저장은 process_id(불변).
+      //  _cat → _group(group.category_id) → 공정(process.group_id, group_id null 은 category_id fallback) → process_id 저장.
       { key: "_cat", label: "제품군", type: "ref", refTable: "exam_categories", transient: true },
       { key: "_group", label: "그룹", type: "ref", refTable: "exam_groups", transient: true, filterBy: { formKey: "_cat", refField: "category_id" } },
-      { key: "_part", label: "제품/파트", type: "ref", refTable: "exam_parts", transient: true, filterBy: { formKey: "_group", refField: "group_id", fallback: { formKey: "_cat", refField: "category_id" } } },
-      { key: "process_id", label: "공정", type: "ref", refTable: "exam_processes", filterBy: { formKey: "_part", refField: "part_id" } },
+      { key: "process_id", label: "공정", type: "ref", refTable: "exam_processes", filterBy: { formKey: "_group", refField: "group_id", fallback: { formKey: "_cat", refField: "category_id" } } },
       { key: "code", label: "코드", type: "text" },
       { key: "name", label: "장비명", type: "text", required: true },
       { key: "spec", label: "사양", type: "text" },
