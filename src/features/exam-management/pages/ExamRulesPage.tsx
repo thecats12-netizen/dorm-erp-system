@@ -46,7 +46,7 @@ export default function ExamRulesPage({
   };
 
   const subCls = (on: boolean) => `rounded-lg px-3 py-1.5 text-xs font-medium ${on ? "bg-blue-600 text-white" : (darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200")}`;
-  const btnCls = `rounded-xl border px-3 py-1.5 text-xs font-medium ${darkMode ? "border-slate-600 text-slate-200 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-100"}`;
+  const btnCls = `inline-flex items-center justify-center rounded-xl border px-3 py-1.5 text-xs font-medium ${darkMode ? "border-slate-600 text-slate-200 hover:bg-slate-800" : "border-slate-300 text-slate-700 hover:bg-slate-100"}`;
 
   return (
     <section className={`rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
