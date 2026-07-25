@@ -27,6 +27,33 @@ const sumMonths = (r: ExamRow) => MONTHS.reduce((a, k) => a + num(r[k]), 0);
 const IDENTITY = ["year", "group_name", "product_group", "part_name", "level_id"];
 const PAGE_SIZE = 20;
 
+// [이중계상 방지] 목표 스코프 유형/충돌 판정 — 수동 저장과 Excel Import 가 "동일 규칙"을 쓰도록 공통 추출.
+//  파트 목표 = part_id 또는 trim(part_name) 존재 / 그룹 목표 = 둘 다 없음.
+const isPartScopedTarget = (r: ExamRow): boolean =>
+  !!String(r.part_id ?? "").trim() || !!String(r.part_name ?? "").trim();
+//  충돌 키: tenant_id + year + group_id + level_id. 셋 중 하나라도 없으면 null(검사 생략 → 기존 입력 검증 유지).
+//  JSON.stringify 로 배열을 직렬화해 필드 경계가 값과 섞이지 않도록 안전 구성(단순 문자열 연결 충돌 방지).
+const scopeConflictKey = (tenant: string, r: ExamRow): string | null => {
+  const gid = String(r.group_id ?? "").trim();
+  const yr = String(r.year ?? "").trim();
+  const lv = String(r.level_id ?? "").trim();
+  if (!gid || !yr || !lv) return null;
+  return JSON.stringify([String(tenant ?? "").trim(), yr, gid, lv]);
+};
+//  candidate 와 "동일 스코프 · 반대 유형"인 기존 행 반환(자기 자신 id 는 제외 → 업데이트 Import 오탐 방지).
+//  tenant_id 는 양쪽 실제 값 기준 비교(candidate 는 tenant 인자, 기존 행은 r.tenant_id).
+const findOppositeScopeConflict = (candidate: ExamRow, existingRows: ExamRow[], tenant: string): ExamRow | undefined => {
+  const key = scopeConflictKey(tenant, candidate);
+  if (!key) return undefined;
+  const candIsPart = isPartScopedTarget(candidate);
+  return existingRows.find((r) => {
+    if (r === candidate) return false;
+    if (r.id && candidate.id && String(r.id) === String(candidate.id)) return false;
+    if (scopeConflictKey(String(r.tenant_id ?? tenant), r) !== key) return false;
+    return isPartScopedTarget(r) !== candIsPart; // 반대 유형만 충돌
+  });
+};
+
 type GridConfig = {
   table: ExamMasterTable;
   title: string;
@@ -310,28 +337,13 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
       const grp = master.groups.find((x) => String(x.id) === scopeSel.groupId);
       if (grp && String(grp.category_id ?? "") !== scopeSel.categoryId) { setError("선택한 그룹이 현재 제품군에 속하지 않습니다."); return; }
       if (grp?.is_active === false) { setError("비활성 기준정보는 새로 선택할 수 없습니다."); return; }
-      // [이중계상 방지] 동일 그룹·연도·인증레벨에 "반대 유형" 목표가 이미 있으면 신규 저장 차단(경고만 · 데이터/통계/DB 무변경).
-      //  파트 목표 = part_id 또는 part_name 보유 / 그룹 목표 = 둘 다 없음. group_id 가 있는 경우에만 판정(정규화 축 기준).
-      {
-        const gid = String(editRow.group_id ?? scopeSel.groupId ?? "");
-        const yr = String(editRow.year ?? "").trim();
-        const lv = String(editRow.level_id ?? "");
-        const isPart = !!String(editRow.part_id ?? "").trim() || !!String(editRow.part_name ?? "").trim();
-        if (gid && yr) {
-          const conflict = rows.some((r) => {
-            if (String(r.group_id ?? "") !== gid) return false;
-            if (String(r.year ?? "").trim() !== yr) return false;
-            if (String(r.level_id ?? "") !== lv) return false;
-            const rIsPart = !!String(r.part_id ?? "").trim() || !!String(r.part_name ?? "").trim();
-            return rIsPart !== isPart; // 반대 유형만 충돌
-          });
-          if (conflict) {
-            setError(isPart
-              ? "이 그룹·연도·인증레벨에는 이미 그룹 단위 목표가 있어 파트 목표를 저장할 수 없습니다. (중복 집계 방지)"
-              : "이 그룹·연도·인증레벨에는 이미 파트 단위 목표가 있어 그룹 목표를 저장할 수 없습니다. (중복 집계 방지)");
-            return;
-          }
-        }
+      // [이중계상 방지] 동일 tenant/year/group_id/level_id 에 "반대 유형" 목표가 이미 있으면 신규 저장 차단(경고만).
+      //  Excel Import 와 동일 규칙(findOppositeScopeConflict) 사용. 데이터/통계/DB/identity 무변경.
+      if (findOppositeScopeConflict(editRow, rows, tenantId)) {
+        setError(isPartScopedTarget(editRow)
+          ? "이 그룹·연도·인증레벨에는 이미 그룹 단위 목표가 있어 파트 목표를 저장할 수 없습니다. (중복 집계 방지)"
+          : "이 그룹·연도·인증레벨에는 이미 파트 단위 목표가 있어 그룹 목표를 저장할 수 없습니다. (중복 집계 방지)");
+        return;
       }
     }
     setSaving(true); setError(null);
@@ -376,7 +388,11 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
       const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
       const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]], { defval: "" });
       const okRows: ExamRow[] = []; const err: Array<{ row: number; reason: string }> = []; let dup = 0;
-      const seen = new Set(rows.map(identityKey));
+      // [부분 로딩 대응] 화면 rows(페이지네이션/필터로 일부만일 수 있음) 대신, Import 시점에 tenant 전체
+      //  비삭제 목표를 1회 batch 조회해 중복·스코프 충돌 판정에 사용(deleted_at is null 은 listExamRows 가 이미 적용).
+      const existingRows = await listExamRows(cfg.table, tenantId).catch(() => rows);
+      const seen = new Set(existingRows.map(identityKey));
+      const acceptedInFile: ExamRow[] = []; // 같은 파일 내 확정 행(스코프 충돌 상호 검사용)
       for (let i = 0; i < raw.length; i++) {
         const r = raw[i]; const cell = makeExcelRowReader(r); const row: ExamRow = {};
         for (const c of formCols) {
@@ -414,9 +430,17 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
             if (gids.length === 1) row.group_id = gids[0];
           }
         }
+        // [이중계상 방지] 기존 DB 목표 + 같은 파일 내 확정 행과 "동일 스코프 · 반대 유형" 충돌 시 저장 제외(경고).
+        //  group_id 확정 + year + level_id 가 모두 있는 행만 검사(scopeConflictKey 산출 가능 시). 그 외는 기존 검증 유지.
+        if (scopeConflictKey(tenantId, row)
+          && (findOppositeScopeConflict(row, existingRows, tenantId) || findOppositeScopeConflict(row, acceptedInFile, tenantId))) {
+          const isPart = isPartScopedTarget(row);
+          err.push({ row: i + 2, reason: `${String(row.year ?? "")}년 · ${[row.product_group, row.group_name].filter(Boolean).join(" > ") || "-"} · ${levelLabel(row.level_id)} : 같은 그룹·연도·인증레벨에 ${isPart ? "그룹" : "파트"} 단위 목표가 있어 ${isPart ? "파트" : "그룹"} 목표를 가져올 수 없습니다.` });
+          continue;
+        }
         const key = identityKey(row);
         if (seen.has(key)) { dup++; continue; }
-        seen.add(key); okRows.push(row);
+        seen.add(key); okRows.push(row); acceptedInFile.push(row);
       }
       setImportPreview({ okRows, dup, err });
     } catch (e) { setError((e as { message?: string })?.message || "Excel 분석 실패."); }
