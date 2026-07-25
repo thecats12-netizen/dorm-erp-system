@@ -515,7 +515,7 @@ export default function ExamPmCertificationsPage({
         <span className="ml-2">만료일</span><input type="date" value={expFrom} onChange={(e) => { setExpFrom(e.target.value); setPage(1); }} className={inputCls} /><span>~</span><input type="date" value={expTo} onChange={(e) => { setExpTo(e.target.value); setPage(1); }} className={inputCls} />
         <span className="ml-auto flex gap-1.5">
           <button className={btn} onClick={exportExcel}>Excel</button>
-          {canEdit && <button className="rounded-xl bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800" onClick={() => setEditRow({ approval_status: "대기" })}>등록</button>}
+          {canEdit && <button className="rounded-xl bg-slate-900 min-h-[44px] px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800" onClick={() => setEditRow({ approval_status: "대기" })}>등록</button>}
         </span>
       </div>
 

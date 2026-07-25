@@ -445,7 +445,7 @@ export default function ExamPersonnelPage({
         <span className="ml-auto flex flex-wrap gap-1.5">
           <button className={btn} onClick={exportExcel}>Excel 내보내기</button>
           {canEdit && <label className={`${btn} cursor-pointer`}>Excel 등록<input type="file" accept=".xlsx,.xls" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void importExcel(f); e.currentTarget.value = ""; }} /></label>}
-          {canEdit && <button className="rounded-xl bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800" onClick={() => setEditRow({ employment_status: "재직" })}>등록</button>}
+          {canEdit && <button className="rounded-xl bg-slate-900 min-h-[44px] px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800" onClick={() => setEditRow({ employment_status: "재직" })}>등록</button>}
         </span>
       </div>
 
