@@ -3,7 +3,9 @@
  * - Supabase 등 외부(cross-origin) 요청 및 비 GET 요청은 절대 캐시하지 않음
  *   → 인증/실시간/저장 데이터는 항상 네트워크로 처리 (캐시 미개입)
  */
-const CACHE = "dorm-erp-shell-v1";
+// 캐시 버전 상향 시 activate 에서 이전 캐시를 삭제 → 클라이언트가 구형 번들(예: index-XMQdKFS.js)을
+//  계속 실행하는 문제를 강제 해소한다(첨부 업로드 등 최신 코드로 갱신). Supabase/비GET 은 원래 미개입.
+const CACHE = "dorm-erp-shell-v2";
 const APP_SHELL = ["/", "/index.html", "/manifest.json", "/favicon.svg", "/icon.svg", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {

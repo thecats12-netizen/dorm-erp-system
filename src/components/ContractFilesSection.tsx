@@ -39,14 +39,18 @@ export default function ContractFilesSection({
   useEffect(() => { void refresh(); }, [refresh]);
 
   const onPick = async (fileList: FileList | null) => {
+    // 이벤트 객체를 비동기 내부까지 넘기지 않도록 즉시 File[] 로 복사(파일 선택·드래그 공통 진입점).
     const arr = Array.from(fileList || []);
     if (arr.length === 0) return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      setMsg("파일 업로드 중 네트워크 연결이 끊겼습니다. 연결 상태를 확인한 후 다시 시도해주세요."); return;
+    }
     const bad = arr.filter((f) => !isAllowedContractFile(f.name));
-    if (bad.length) { setMsg("PDF, JPG, PNG 파일만 첨부할 수 있습니다."); return; }
+    if (bad.length) { setMsg("지원하지 않는 파일 형식입니다. (PDF, JPG, PNG)"); return; }
     setBusy(true); setMsg(null);
     const res = await uploadContractFiles(tenantId, contractId, userId, arr);
     setBusy(false);
-    setMsg(res.ok > 0 ? `${res.ok}개 첨부되었습니다.${res.failed ? ` (${res.failed}개 실패)` : ""}` : (res.message || "첨부에 실패했습니다."));
+    setMsg(res.ok > 0 ? `${res.ok}개 첨부되었습니다.${res.failed ? ` (${res.failed}개 실패 — ${res.message || "확인 필요"})` : ""}` : (res.message || "파일을 업로드하지 못했습니다. 잠시 후 다시 시도해주세요."));
     await refresh();
   };
 
