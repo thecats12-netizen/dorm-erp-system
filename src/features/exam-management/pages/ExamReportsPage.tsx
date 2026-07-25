@@ -224,7 +224,8 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
         {/* 검색 + 필터 */}
         <div className="mb-2 flex flex-wrap items-center gap-1.5">
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="검색(모든 컬럼)" className={`${selCls} min-w-[200px]`} />
-          {([["year", "연도", opts.years], ["month", "월", Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"))], ["group", "그룹", opts.groups], ["product", "제품군", opts.products], ["part", "파트", opts.parts], ["process", "공정", opts.processes], ["level", "레벨", opts.levels]] as Array<[keyof typeof f, string, string[]]>).map(([key, label, list]) => (
+          {/* [Line 전환] 제품/파트 필터 드롭다운 제거(f.part 기본 "전체" 유지 → 집계/합계·레거시 파트별 리포트 불변, part_name 데이터 보존). */}
+          {([["year", "연도", opts.years], ["month", "월", Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"))], ["group", "그룹", opts.groups], ["product", "제품군", opts.products], ["process", "공정", opts.processes], ["level", "레벨", opts.levels]] as Array<[keyof typeof f, string, string[]]>).map(([key, label, list]) => (
             <select key={key} value={f[key]} onChange={(e) => setF((p) => ({ ...p, [key]: e.target.value }))} className={selCls}>
               <option value="전체">{label}: 전체</option>
               {list.map((o) => <option key={o} value={o}>{key === "month" ? `${Number(o)}월` : o}</option>)}

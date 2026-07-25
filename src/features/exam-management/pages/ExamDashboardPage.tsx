@@ -381,7 +381,8 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
         <div className="flex flex-wrap gap-1.5">
           {([
             ["year", "연도", opts.years], ["month", "월", Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"))],
-            ["group", "그룹", opts.groups], ["product", "제품군", opts.products], ["part", "파트", opts.parts], ["process", "공정", opts.processes], ["level", "레벨", opts.levels],
+            // [Line 전환] 보고서 필터에서 제품/파트 드롭다운 제거(f.part 는 기본 "전체" 유지 → 집계/합계 불변, part_name 컬럼·데이터는 보존).
+            ["group", "그룹", opts.groups], ["product", "제품군", opts.products], ["process", "공정", opts.processes], ["level", "레벨", opts.levels],
           ] as Array<[keyof typeof f, string, string[]]>).map(([key, label, list]) => (
             <select key={key} value={f[key]} onChange={(e) => setF((p) => ({ ...p, [key]: e.target.value }))} className={selCls}>
               <option value="전체">{label}: 전체</option>

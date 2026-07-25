@@ -63,17 +63,18 @@ export default function ExamProcessScopeEditor({
           getUserProcessScopes(userId, tenantId),
         ]);
         if (!alive) return;
-        // 상위 계층 역추적: 공정(part_id) → 파트(group_id/category_id) → 그룹(category_id) → 제품군.
+        // [Line 전환] 계층 역추적: 공정(group_id 직접) 우선 → 없으면 공정(part_id)→파트(group_id)로 역추적(레거시) → 제품군.
+        //   표시 경로는 제품군 > 그룹 > 공정 까지만(제품/파트 단계 제거). 저장값은 여전히 process_id 만.
         const nm = (r?: ExamRow) => String(r?.name ?? r?.code ?? "").trim();
         const partById = new Map(partRows.map((r) => [String(r.id), r]));
         const groupById = new Map(groupRows.map((r) => [String(r.id), r]));
         const catById = new Map(catRows.map((r) => [String(r.id), r]));
         const enriched = procRows.filter((p) => p.is_active !== false).map((p) => {
           const part = partById.get(String(p.part_id ?? ""));
-          const group = groupById.get(String(part?.group_id ?? ""));
+          const group = groupById.get(String(p.group_id ?? part?.group_id ?? ""));
           const cat = catById.get(String(group?.category_id ?? part?.category_id ?? ""));
           const processName = nm(p), partName = nm(part), groupName = nm(group), categoryName = nm(cat);
-          const path = [categoryName, groupName, partName, processName].filter(Boolean).join(" > ") || processName || String(p.id);
+          const path = [categoryName, groupName, processName].filter(Boolean).join(" > ") || processName || String(p.id);
           return { id: String(p.id), processName, partName, groupName, categoryName, categoryId: String(cat?.id ?? ""), groupId: String(group?.id ?? ""), path };
         }).sort((a, b) => a.path.localeCompare(b.path, "ko"));
         setProcesses(enriched);
@@ -197,7 +198,7 @@ export default function ExamProcessScopeEditor({
         <>
           {/* 검색 + 제품군/그룹 필터 + 일괄 선택(표시 전용 · 저장값 무관) */}
           <div className="mb-2 flex flex-wrap items-center gap-2">
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="제품군·그룹·제품/파트·공정 검색"
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="제품군·그룹·공정 검색"
               className={`min-w-[180px] flex-1 rounded-lg border px-2 py-1.5 text-xs outline-none ${darkMode ? "border-slate-600 bg-slate-900" : "border-slate-300 bg-white"}`} />
             <select value={catFilter} onChange={(e) => { setCatFilter(e.target.value); setGroupFilter(""); }}
               className={`rounded-lg border px-2 py-1.5 text-xs ${darkMode ? "border-slate-600 bg-slate-900" : "border-slate-300 bg-white"}`}>
@@ -214,13 +215,13 @@ export default function ExamProcessScopeEditor({
               <button type="button" onClick={() => setManyProcesses(false)} className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800">표시 전체 해제</button>
             </>}
           </div>
-          <div className="mb-2 text-[0.7rem] text-slate-400">표시 {visibleProcesses.length}개 · 선택됨 {Object.keys(scopeMap).length}개 (제품군 &gt; 그룹 &gt; 제품/파트 &gt; 공정)</div>
+          <div className="mb-2 text-[0.7rem] text-slate-400">표시 {visibleProcesses.length}개 · 선택됨 {Object.keys(scopeMap).length}개 (제품군 &gt; 그룹 &gt; 공정)</div>
 
           <div className="max-h-[420px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-700">
             <table className="w-full text-left text-xs">
               <thead className={`sticky top-0 ${darkMode ? "bg-slate-800" : "bg-slate-100"}`}>
                 <tr>
-                  <th className="px-2 py-1.5">담당</th><th className="px-2 py-1.5">제품군 &gt; 그룹 &gt; 제품/파트 &gt; 공정</th>
+                  <th className="px-2 py-1.5">담당</th><th className="px-2 py-1.5">제품군 &gt; 그룹 &gt; 공정</th>
                   {PERMS.map((p) => <th key={p.key} className="px-2 py-1.5 text-center">{p.label}</th>)}
                 </tr>
               </thead>

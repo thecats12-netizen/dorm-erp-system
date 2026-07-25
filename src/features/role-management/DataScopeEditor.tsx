@@ -64,11 +64,12 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
       const catById = new Map(catRows.map((r) => [String(r.id), r]));
       const opts = procRows.filter((p) => p.is_active !== false).map((p) => {
         const part = partById.get(String(p.part_id ?? ""));
-        const group = groupById.get(String(part?.group_id ?? ""));
+        // [Line 전환] 그룹은 공정(group_id 직접) 우선, 없으면 공정→파트→그룹 역추적(레거시).
+        const group = groupById.get(String(p.group_id ?? part?.group_id ?? ""));
         const cat = catById.get(String(group?.category_id ?? part?.category_id ?? ""));
         const processName = nm(p) || String(p.id);
-        // 상위 일부 누락 시 "미지정"으로 채워 빈 구분자(>>)를 만들지 않음.
-        const path = [nm(cat) || "제품군 미지정", nm(group) || "그룹 미지정", nm(part)].filter(Boolean).join(" > ");
+        // [Line 전환] 경로는 제품군 > 그룹 까지만 표시(제품/파트 단계 제거). 상위 누락 시 "미지정"으로 빈 구분자 방지.
+        const path = [nm(cat) || "제품군 미지정", nm(group) || "그룹 미지정"].join(" > ");
         return { id: String(p.id), processName, path };
       }).sort((a, b) => (a.path + a.processName).localeCompare(b.path + b.processName, "ko"));
       setProcessOptions(opts);
@@ -195,7 +196,7 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
       {processMode === "select" && (
         <div className={`rounded-xl border ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
           <div className="flex items-center gap-2 border-b p-2 dark:border-slate-700">
-            <input value={processSearch} onChange={(e) => setProcessSearch(e.target.value)} placeholder="제품군·그룹·제품/파트·공정 검색"
+            <input value={processSearch} onChange={(e) => setProcessSearch(e.target.value)} placeholder="제품군·그룹·공정 검색"
               className={`min-w-0 flex-1 rounded-lg border px-2 py-1 text-xs outline-none ${inputCls}`} />
             <span className="whitespace-nowrap text-[0.7rem] text-slate-400">선택 {processIds.size}개</span>
           </div>
@@ -204,7 +205,7 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
               <div className="text-xs text-slate-400">{processOptions.length === 0 ? "공정 없음" : "검색 결과 없음"}</div>
             ) : visibleProcessOptions.map((p) => {
               const on = processIds.has(p.id);
-              // 표시: 1줄=공정명, 2줄=제품군 > 그룹 > 제품/파트. 동일 공정명도 경로로 구분. 클릭영역=행 전체(44px+).
+              // 표시: 1줄=공정명, 2줄=제품군 > 그룹. 동일 공정명도 경로로 구분. 클릭영역=행 전체(44px+).
               return (
                 <label key={p.id} className={`flex min-h-[44px] cursor-pointer items-center gap-2 rounded-lg px-2 py-1 ${on ? (darkMode ? "bg-blue-950/30" : "bg-blue-50") : "hover:bg-slate-100 dark:hover:bg-slate-800"}`}>
                   <input type="checkbox" checked={on} onChange={() => setProcessIds((s) => toggleIn(s, p.id))} className="h-4 w-4 shrink-0" />

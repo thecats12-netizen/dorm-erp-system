@@ -25,7 +25,7 @@ const COLS: Col[] = [
   { key: "name", label: "이름", type: "text", required: true },
   { key: "group_name", label: "그룹", type: "text", filter: true },
   { key: "product_group", label: "제품군", type: "text", filter: true },
-  { key: "part_name", label: "파트", type: "text", filter: true },
+  { key: "part_name", label: "파트", type: "text" }, // [Line 전환] 파트 필터 제거(검색/필터는 라인·제품군·그룹·공정). 컬럼값은 Excel·상세·저장에 보존.
   { key: "position", label: "직책", type: "text" },
   { key: "hire_date", label: "입사일", type: "date" },
   { key: "employment_status", label: "재직여부", type: "select", options: ["재직", "휴직", "퇴직"], filter: true },
@@ -46,6 +46,8 @@ const FILTERS = COLS.filter((c) => c.filter);
 // [3단계] 자동계산 필드(읽기전용 카드로 이동) vs 직접입력 필드. 목록/상세 테이블은 COLS 전체 그대로 사용(무변경).
 const AUTO_KEYS = new Set(["current_pm_level", "pm_capable_rate", "single_job", "m1", "m2", "m3", "m4", "dm", "cert_level", "dual_multi"]);
 const DIRECT_COLS = COLS.filter((c) => !AUTO_KEYS.has(c.key));
+// [Line 전환] 목록 테이블에서만 "파트" 컬럼 숨김(제품/파트 표시 제거). COLS 는 Excel 내보내기·상세·검색·저장에 그대로 사용 → part_name 데이터/호환 보존.
+const TABLE_COLS = COLS.filter((c) => c.key !== "part_name");
 const AUTO_COLS = COLS.filter((c) => AUTO_KEYS.has(c.key));
 const PAGE_SIZE = 20;
 
@@ -187,13 +189,15 @@ export default function ExamPersonnelPage({
   const saveRow = async () => {
     if (!editRow) return;
     for (const c of COLS) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
-    // 기준정보 연동 무결성: 마스터 FK 조합이 선택된 경우에만 검증(legacy 텍스트-only 저장은 통과).
+    // 기준정보 연동 무결성: [Line 전환] 공정↔그룹만 검증(제품/파트 단계 제거). 기존 part_id 는 검증하지 않고 보존.
     {
-      const selPart = master.parts.find((o) => o.id === String(editRow.part_id ?? ""));
       const selProc = master.processes.find((o) => o.id === String(editRow.process_id ?? ""));
-      if (selProc && selPart && selProc.part_id != null && String(selProc.part_id) !== selPart.id) { setError("선택한 공정은 해당 제품/파트에 속하지 않습니다."); return; }
       const gId = String(editRow._group_id ?? "");
-      if (selPart && gId && selPart.group_id != null && String(selPart.group_id) !== gId) { setError("선택한 제품/파트는 해당 그룹에 속하지 않습니다."); return; }
+      // 공정.group_id(직접) 또는 공정→파트→그룹 역추적으로 그룹 일치 확인. 둘 다 없으면(레거시) 통과.
+      if (selProc && gId) {
+        const procGroup = String(selProc.group_id ?? "") || String(master.parts.find((p) => p.id === String(selProc.part_id ?? ""))?.group_id ?? "");
+        if (procGroup && procGroup !== gId) { setError("선택한 공정은 해당 그룹에 속하지 않습니다."); return; }
+      }
     }
     setSaving(true); setError(null);
     try {
@@ -386,18 +390,14 @@ export default function ExamPersonnelPage({
 
     const catOpts = master.categories.filter((o) => o.is_active || o.id === catId);
     const groupOpts = master.groups.filter((o) => (o.is_active || o.id === groupId) && (!catId || String(o.category_id ?? "") === catId));
-    const partOpts = master.parts.filter((o) => {
-      if (!(o.is_active || o.id === partId)) return false;
-      if (groupId) { if (o.group_id != null) return String(o.group_id) === groupId; if (catId) return String(o.category_id ?? "") === catId; return true; }
-      if (catId) return String(o.category_id ?? "") === catId;
-      return true;
-    });
-    const procOpts = master.processes.filter((o) => (o.is_active || o.id === String(e.process_id ?? "")) && (!partId || String(o.part_id ?? "") === partId));
+    // [Line 전환] 공정을 "그룹" 기준으로 필터(제품/파트 단계 제거). 공정.group_id(직접) 우선, 없으면 공정→파트→그룹 역추적(레거시).
+    const procGroupOf = (o: MRef) => String(o.group_id ?? "") || String(master.parts.find((p) => p.id === String(o.part_id ?? ""))?.group_id ?? "");
+    const procOpts = master.processes.filter((o) => (o.is_active || o.id === String(e.process_id ?? "")) && (!groupId || procGroupOf(o) === groupId));
 
     const set = (patch: Partial<ExamRow>) => setEditRow((f) => ({ ...(f || {}), ...patch }));
-    const onCat = (id: string) => { const c = byId(master.categories, id); set({ _cat_id: id || null, product_group: c ? c.name : e.product_group, _group_id: null, group_name: null, part_id: null, part_name: null, process_id: null }); };
-    const onGroup = (id: string) => { const g = byId(master.groups, id); set({ _group_id: id || null, group_name: g ? g.name : null, _cat_id: g?.category_id ?? e._cat_id ?? null, part_id: null, part_name: null, process_id: null }); };
-    const onPart = (id: string) => { const p = byId(master.parts, id); set({ part_id: id || null, part_name: p ? p.name : null, _group_id: p?.group_id ?? e._group_id ?? null, _cat_id: p?.category_id ?? e._cat_id ?? null, process_id: null }); };
+    // 제품군/그룹 변경 시 공정만 초기화. 기존 part_id/part_name 은 보존(자동 null 금지 · 레거시/Excel 호환).
+    const onCat = (id: string) => { const c = byId(master.categories, id); set({ _cat_id: id || null, product_group: c ? c.name : e.product_group, _group_id: null, group_name: null, process_id: null }); };
+    const onGroup = (id: string) => { const g = byId(master.groups, id); set({ _group_id: id || null, group_name: g ? g.name : null, _cat_id: g?.category_id ?? e._cat_id ?? null, process_id: null }); };
     const onProc = (id: string) => set({ process_id: id || null });
 
     const box = (label: string, hint: string, node: ReactNode) => (
@@ -408,12 +408,11 @@ export default function ExamPersonnelPage({
     const opt = (o: MRef) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}{o.is_active ? "" : " (미사용)"}</option>;
     return (
       <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
-        <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">선택 시 그룹·제품군·파트·공정 자동 반영</span></div>
+        <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">선택 시 제품군·그룹·공정 자동 반영</span></div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {box("제품군", "", <select className={`${inputCls} w-full`} value={catId} onChange={(ev) => onCat(ev.target.value)}><option value="">선택</option>{catOpts.map(opt)}</select>)}
           {box("그룹", !catId ? "제품군을 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={groupId} onChange={(ev) => onGroup(ev.target.value)}><option value="">선택</option>{groupOpts.map(opt)}</select>)}
-          {box("제품/파트", "", <select className={`${inputCls} w-full`} value={partId} onChange={(ev) => onPart(ev.target.value)}><option value="">선택</option>{partOpts.map(opt)}</select>)}
-          {box("공정", !partId ? "제품/파트를 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={String(e.process_id ?? "")} onChange={(ev) => onProc(ev.target.value)}><option value="">선택</option>{procOpts.map(opt)}</select>)}
+          {box("공정", !groupId ? "그룹을 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={String(e.process_id ?? "")} onChange={(ev) => onProc(ev.target.value)}><option value="">선택</option>{procOpts.map(opt)}</select>)}
         </div>
       </div>
     );
@@ -457,7 +456,7 @@ export default function ExamPersonnelPage({
         <table className="w-full text-left text-xs">
           <thead className={`sticky top-0 z-[1] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
             <tr>
-              {COLS.map((c) => (
+              {TABLE_COLS.map((c) => (
                 <th key={c.key} onClick={() => toggleSort(c.key)} className="cursor-pointer select-none whitespace-nowrap px-2.5 py-2 hover:underline">
                   {c.label}{sortKey === c.key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
                   {c.key === "hire_date" ? "" : ""}
@@ -471,7 +470,7 @@ export default function ExamPersonnelPage({
             {paged.map((r, ri) => (
               <tr key={String(r.id)} aria-selected={ri === activeIdx} title={canEdit ? "클릭하여 수정" : "클릭하여 상세"} onClick={() => { setActiveIdx(ri); if (canEdit) setEditRow({ ...r }); else void openDetail(r); }} onDoubleClick={() => void openDetail(r)}
                 className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} cursor-pointer border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
-                {COLS.map((c) => (
+                {TABLE_COLS.map((c) => (
                   <td key={c.key} className="whitespace-nowrap px-2.5 py-2">
                     {c.key === "current_pm_level" ? (() => {
                       // 저장된 현재 PM Level 은 그대로 두고, 자동계산 PM Level 을 작은 배지+툴팁(근거)으로 보조 표시.
@@ -499,7 +498,7 @@ export default function ExamPersonnelPage({
                 </td>
               </tr>
             ))}
-            {!loading && paged.length === 0 && <tr><td colSpan={COLS.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
+            {!loading && paged.length === 0 && <tr><td colSpan={TABLE_COLS.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -567,12 +566,12 @@ export default function ExamPersonnelPage({
               {!isExamAdmin && <p className="mt-2 text-[0.7rem] text-slate-400">자동 계산 값은 조회 전용입니다. 수정은 관리자만 가능합니다.</p>}
             </div>
 
-            {/* 기준정보 연동(cascade) — 제품군→그룹→제품/파트→공정. 선택 시 아래 텍스트 필드 자동 반영. */}
+            {/* 기준정보 연동(cascade) — [Line 전환] 제품군→그룹→공정(제품/파트 단계 제거). 선택 시 아래 텍스트 필드 자동 반영. */}
             {renderCascade()}
 
-            {/* 직접 입력 필드(기존 텍스트 — legacy 조회/직접입력 호환 유지) */}
+            {/* 직접 입력 필드(기존 텍스트 — legacy 조회/직접입력 호환 유지) · [Line 전환] 제품/파트 직접입력 UI 제거(기존 part_name 값은 저장 시 그대로 보존). */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {DIRECT_COLS.map((c) => renderField(c))}
+              {DIRECT_COLS.filter((c) => c.key !== "part_name").map((c) => renderField(c))}
             </div>
             <div className="mt-6 flex justify-end gap-2">
               <button type="button" onClick={requestCloseEdit} className={`min-h-[44px] rounded-2xl px-4 py-2 text-sm font-medium ${darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-50"}`}>취소</button>
