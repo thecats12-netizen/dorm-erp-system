@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase, isSupabaseAvailable } from "../../../services/supabaseService";
-import { listExamRefOptions } from "../services/examMasterService";
+import { listExamRows, type ExamRow } from "../services/examMasterService";
 import {
   getUserProcessScopes, saveUserProcessScopes, setUserExamRole,
   type ExamRole, type ExamProcessScope,
@@ -37,9 +37,14 @@ export default function ExamProcessScopeEditor({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [examRole, setExamRole] = useState<ExamRole>(null);
-  const [processes, setProcesses] = useState<Array<{ id: string; label: string }>>([]);
+  // 공정 + 상위 계층(제품군>그룹>제품/파트>공정) 라벨. 저장값은 여전히 process_id(proc.id) 만 사용.
+  const [processes, setProcesses] = useState<Array<{ id: string; processName: string; partName: string; groupName: string; categoryName: string; categoryId: string; groupId: string; path: string }>>([]);
   const [scopeMap, setScopeMap] = useState<Record<string, ExamProcessScope>>({});
   const [error, setError] = useState<string | null>(null);
+  // 표시 전용 필터/검색(저장 무관).
+  const [search, setSearch] = useState("");
+  const [catFilter, setCatFilter] = useState("");
+  const [groupFilter, setGroupFilter] = useState("");
 
   const isSystemAdmin = baseRole === "admin"; // 시스템 admin = 시험 총관리자(전권, 편집 불필요)
 
@@ -49,13 +54,29 @@ export default function ExamProcessScopeEditor({
       if (!userId || !isSupabaseAvailable() || !supabase || isSystemAdmin) return;
       setLoading(true); setError(null);
       try {
-        const [procs, prof, scopes] = await Promise.all([
-          listExamRefOptions("exam_processes", tenantId),
+        const [procRows, partRows, groupRows, catRows, prof, scopes] = await Promise.all([
+          listExamRows("exam_processes", tenantId),
+          listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
+          listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
+          listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
           supabase.from("profiles").select("exam_role").eq("id", userId).maybeSingle(),
           getUserProcessScopes(userId, tenantId),
         ]);
         if (!alive) return;
-        setProcesses(procs);
+        // 상위 계층 역추적: 공정(part_id) → 파트(group_id/category_id) → 그룹(category_id) → 제품군.
+        const nm = (r?: ExamRow) => String(r?.name ?? r?.code ?? "").trim();
+        const partById = new Map(partRows.map((r) => [String(r.id), r]));
+        const groupById = new Map(groupRows.map((r) => [String(r.id), r]));
+        const catById = new Map(catRows.map((r) => [String(r.id), r]));
+        const enriched = procRows.filter((p) => p.is_active !== false).map((p) => {
+          const part = partById.get(String(p.part_id ?? ""));
+          const group = groupById.get(String(part?.group_id ?? ""));
+          const cat = catById.get(String(group?.category_id ?? part?.category_id ?? ""));
+          const processName = nm(p), partName = nm(part), groupName = nm(group), categoryName = nm(cat);
+          const path = [categoryName, groupName, partName, processName].filter(Boolean).join(" > ") || processName || String(p.id);
+          return { id: String(p.id), processName, partName, groupName, categoryName, categoryId: String(cat?.id ?? ""), groupId: String(group?.id ?? ""), path };
+        }).sort((a, b) => a.path.localeCompare(b.path, "ko"));
+        setProcesses(enriched);
         setExamRole(((prof.data as { exam_role?: ExamRole } | null)?.exam_role) ?? null);
         const m: Record<string, ExamProcessScope> = {};
         for (const s of scopes) if (s.is_active) m[s.process_id] = s;
@@ -83,6 +104,40 @@ export default function ExamProcessScopeEditor({
       </div>
     );
   }
+
+  // 필터 옵션(제품군 → 그룹 종속). 표시 전용.
+  const catOptions = useMemo(() => {
+    const m = new Map<string, string>();
+    processes.forEach((p) => { if (p.categoryId) m.set(p.categoryId, p.categoryName); });
+    return Array.from(m, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  }, [processes]);
+  const groupOptions = useMemo(() => {
+    const m = new Map<string, string>();
+    processes.forEach((p) => { if (p.groupId && (!catFilter || p.categoryId === catFilter)) m.set(p.groupId, p.groupName); });
+    return Array.from(m, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  }, [processes, catFilter]);
+  const visibleProcesses = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return processes.filter((p) => {
+      if (catFilter && p.categoryId !== catFilter) return false;
+      if (groupFilter && p.groupId !== groupFilter) return false;
+      if (q && !p.path.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [processes, search, catFilter, groupFilter]);
+
+  // 현재 표시된 공정 일괄 선택/해제(process_id 기준 · 저장값 방식 불변).
+  const setManyProcesses = (on: boolean) => {
+    if (!userId) return;
+    setScopeMap((prev) => {
+      const next = { ...prev };
+      for (const p of visibleProcesses) {
+        if (on) next[p.id] = prev[p.id] || { user_id: userId, process_id: p.id, can_view: true, can_create: false, can_update: false, can_approve: false, can_export: false, is_active: true };
+        else delete next[p.id];
+      }
+      return next;
+    });
+  };
 
   const toggle = (processId: string, perm: Perm) => {
     setScopeMap((prev) => {
@@ -139,34 +194,60 @@ export default function ExamProcessScopeEditor({
       </div>
 
       {examRole === "process_owner" && (
-        <div className="overflow-auto rounded-lg border border-slate-200 dark:border-slate-700">
-          <table className="w-full text-left text-xs">
-            <thead className={darkMode ? "bg-slate-800" : "bg-slate-100"}>
-              <tr>
-                <th className="px-2 py-1.5">담당</th><th className="px-2 py-1.5">공정</th>
-                {PERMS.map((p) => <th key={p.key} className="px-2 py-1.5 text-center">{p.label}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {processes.length === 0 && <tr><td colSpan={2 + PERMS.length} className="px-2 py-4 text-center text-slate-400">등록된 공정이 없습니다.</td></tr>}
-              {processes.map((proc) => {
-                const on = !!scopeMap[proc.id];
-                const s = scopeMap[proc.id];
-                return (
-                  <tr key={proc.id} className={`border-t ${cell}`}>
-                    <td className="px-2 py-1.5"><input type="checkbox" checked={on} disabled={!canManage} onChange={(e) => toggleProcess(proc.id, e.target.checked)} /></td>
-                    <td className="px-2 py-1.5">{proc.label}</td>
-                    {PERMS.map((p) => (
-                      <td key={p.key} className="px-2 py-1.5 text-center">
-                        <input type="checkbox" checked={!!(s && s[p.key])} disabled={!canManage || !on} onChange={() => toggle(proc.id, p.key)} />
+        <>
+          {/* 검색 + 제품군/그룹 필터 + 일괄 선택(표시 전용 · 저장값 무관) */}
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="제품군·그룹·제품/파트·공정 검색"
+              className={`min-w-[180px] flex-1 rounded-lg border px-2 py-1.5 text-xs outline-none ${darkMode ? "border-slate-600 bg-slate-900" : "border-slate-300 bg-white"}`} />
+            <select value={catFilter} onChange={(e) => { setCatFilter(e.target.value); setGroupFilter(""); }}
+              className={`rounded-lg border px-2 py-1.5 text-xs ${darkMode ? "border-slate-600 bg-slate-900" : "border-slate-300 bg-white"}`}>
+              <option value="">제품군: 전체</option>
+              {catOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+            <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}
+              className={`rounded-lg border px-2 py-1.5 text-xs ${darkMode ? "border-slate-600 bg-slate-900" : "border-slate-300 bg-white"}`}>
+              <option value="">그룹: 전체</option>
+              {groupOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+            {canManage && <>
+              <button type="button" onClick={() => setManyProcesses(true)} className="rounded-lg border border-blue-300 px-2 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40">표시 전체 선택</button>
+              <button type="button" onClick={() => setManyProcesses(false)} className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800">표시 전체 해제</button>
+            </>}
+          </div>
+          <div className="mb-2 text-[0.7rem] text-slate-400">표시 {visibleProcesses.length}개 · 선택됨 {Object.keys(scopeMap).length}개 (제품군 &gt; 그룹 &gt; 제품/파트 &gt; 공정)</div>
+
+          <div className="max-h-[420px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-700">
+            <table className="w-full text-left text-xs">
+              <thead className={`sticky top-0 ${darkMode ? "bg-slate-800" : "bg-slate-100"}`}>
+                <tr>
+                  <th className="px-2 py-1.5">담당</th><th className="px-2 py-1.5">제품군 &gt; 그룹 &gt; 제품/파트 &gt; 공정</th>
+                  {PERMS.map((p) => <th key={p.key} className="px-2 py-1.5 text-center">{p.label}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {visibleProcesses.length === 0 && <tr><td colSpan={2 + PERMS.length} className="px-2 py-4 text-center text-slate-400">{processes.length === 0 ? "등록된 공정이 없습니다." : "검색/필터 결과가 없습니다."}</td></tr>}
+                {visibleProcesses.map((proc) => {
+                  const on = !!scopeMap[proc.id];
+                  const s = scopeMap[proc.id];
+                  return (
+                    <tr key={proc.id} className={`border-t ${cell} ${on ? (darkMode ? "bg-blue-950/20" : "bg-blue-50/40") : ""}`}>
+                      <td className="px-2 py-1.5"><input type="checkbox" checked={on} disabled={!canManage} onChange={(e) => toggleProcess(proc.id, e.target.checked)} /></td>
+                      <td className="px-2 py-1.5">
+                        <span className="font-medium">{proc.path}</span>
+                        {on && <span className="ml-1.5 rounded-full bg-blue-100 px-1.5 py-0.5 text-[0.6rem] font-semibold text-blue-700 dark:bg-blue-900 dark:text-blue-200">선택됨</span>}
                       </td>
-                    ))}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                      {PERMS.map((p) => (
+                        <td key={p.key} className="px-2 py-1.5 text-center">
+                          <input type="checkbox" checked={!!(s && s[p.key])} disabled={!canManage || !on} onChange={() => toggle(proc.id, p.key)} />
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </div>
   );
