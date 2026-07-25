@@ -26070,6 +26070,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 currentUser={currentUser}
                 operationalDorms={operationalDorms}
                 defaultSite={inventoryForm.site}
+                // 성별은 비품 저장 필드가 아니라 선택된 기숙사의 속성(FilteredDormSelector 필터).
+                //  수정 재오픈 시 지역(defaultSite)처럼 선택 기숙사 성별을 초기값으로 넘겨 "전체"로만 보이던 문제를 해소.
+                defaultGender={(() => {
+                  const g = operationalDorms.find((d) => d.id === inventoryForm.dormId)?.gender;
+                  return g === "남" || g === "여" ? g : "전체";
+                })()}
                 label="기숙사"
               />
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 mt-4">
@@ -26144,7 +26150,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                             <span className="flex h-14 w-14 items-center justify-center rounded-lg bg-rose-100 text-[10px] font-bold text-rose-600">{isPdf ? "PDF" : "파일"}</span>
                           )}
                           <div className="min-w-0 flex-1 truncate text-xs font-medium text-slate-700">{proof.name || (isPdf ? "PDF 파일" : "첨부파일")}</div>
-                          <button type="button" onClick={() => window.open(proof.data, "_blank")} className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold hover:bg-slate-100">열기</button>
+                          {/* 미리보기: 계약 첨부와 동일한 공통 모달(FilePreviewModal) 재사용. data 는 base64(선택 직후) 또는 Public URL(저장 후) 모두 지원. */}
+                          <button type="button" onClick={() => setContractPreview({ url: proof.data, fileName: proof.name || (isPdf ? "증빙파일.pdf" : "증빙파일") })} className="min-h-[36px] rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold hover:bg-slate-100">미리보기</button>
+                          <button type="button" onClick={() => window.open(proof.data, "_blank")} className="min-h-[36px] rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold hover:bg-slate-100">열기</button>
                           <button type="button" onClick={async () => { if (await appConfirm("확인", "증빙파일을 삭제할까요?")) setInventoryForm((f) => ({ ...f, proofFile: "" })); }} className="rounded-lg border border-rose-300 px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50">삭제</button>
                         </div>
                       ) : proof.name ? (
