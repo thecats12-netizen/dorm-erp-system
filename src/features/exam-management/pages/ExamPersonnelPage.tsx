@@ -98,7 +98,7 @@ export default function ExamPersonnelPage({
   const [confirmClose, setConfirmClose] = useState(false);
   const [activeIdx, setActiveIdx] = useState(-1);
   // 인증 기준관리 마스터(제품군/그룹/제품·파트/공정) — 기준정보 연동 cascade 옵션.
-  const [master, setMaster] = useState<{ categories: MRef[]; groups: MRef[]; parts: MRef[]; processes: MRef[] }>({ categories: [], groups: [], parts: [], processes: [] });
+  const [master, setMaster] = useState<{ categories: MRef[]; groups: MRef[]; parts: MRef[]; processes: MRef[]; lines: MRef[] }>({ categories: [], groups: [], parts: [], processes: [], lines: [] });
   useEffect(() => {
     let alive = true;
     const toOpt = (r: ExamRow): MRef => ({
@@ -106,16 +106,24 @@ export default function ExamPersonnelPage({
       is_active: r.is_active !== false, category_id: (r.category_id ?? null) as string | null, group_id: (r.group_id ?? null) as string | null, part_id: (r.part_id ?? null) as string | null,
     });
     (async () => {
-      const [categories, groups, parts, processes] = await Promise.all([
+      const [categories, groups, parts, processes, lines] = await Promise.all([
         listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_lines", tenantId).catch(() => [] as ExamRow[]),   // [주 라인] 현재 tenant 라인만(미적용 시 [] → 라인 옵션만 비고, 페이지 정상)
       ]);
-      if (alive) setMaster({ categories: categories.map(toOpt), groups: groups.map(toOpt), parts: parts.map(toOpt), processes: processes.map(toOpt) });
+      if (alive) setMaster({ categories: categories.map(toOpt), groups: groups.map(toOpt), parts: parts.map(toOpt), processes: processes.map(toOpt), lines: lines.map(toOpt) });
     })();
     return () => { alive = false; };
   }, [tenantId]);
+
+  // [주 라인] 현재 tenant 활성 라인 옵션(id/이름). 행마다 find 없이 Map 조회. line_id 는 부가 축(identity 아님).
+  const lineOptions = useMemo(() => master.lines.filter((o) => o.is_active)
+    .map((o) => ({ id: o.id, name: (o.name && o.name.trim()) || o.label }))
+    .sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.lines]);
+  const lineMap = useMemo(() => new Map(lineOptions.map((o) => [o.id, o.name])), [lineOptions]);
+  const lineName = (id: unknown) => { const s = String(id ?? "").trim(); if (!s) return "라인 미지정"; return lineMap.get(s) ?? "라인 확인 필요"; };
 
   // 미저장 변경 보호 + 앱 공통 닫기(ESC·뒤로가기·최상위 우선) 연동.
   const [editBase, setEditBase] = useState("");
@@ -189,6 +197,8 @@ export default function ExamPersonnelPage({
   const saveRow = async () => {
     if (!editRow) return;
     for (const c of COLS) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
+    // [주 라인] 선택된 line_id 는 현재 tenant 라인 옵션에 존재해야 저장(잘못된/타 tenant 값 차단). 미지정(null)은 허용.
+    { const lid = String(editRow.line_id ?? "").trim(); if (lid && !lineOptions.some((o) => o.id === lid)) { setError("선택한 라인을 확인할 수 없습니다. 목록에서 다시 선택해 주세요."); return; } }
     // 기준정보 연동 무결성: [Line 전환] 공정↔그룹만 검증(제품/파트 단계 제거). 기존 part_id 는 검증하지 않고 보존.
     {
       const selProc = master.processes.find((o) => o.id === String(editRow.process_id ?? ""));
@@ -462,6 +472,7 @@ export default function ExamPersonnelPage({
                   {c.key === "hire_date" ? "" : ""}
                 </th>
               ))}
+              <th className="whitespace-nowrap px-2.5 py-2">라인</th>
               <th className="whitespace-nowrap px-2.5 py-2">재직기간</th>
               <th className="whitespace-nowrap px-2.5 py-2">작업</th>
             </tr>
@@ -484,6 +495,7 @@ export default function ExamPersonnelPage({
                     })() : cellText(c, r)}
                   </td>
                 ))}
+                <td className="whitespace-nowrap px-2.5 py-2">{lineName(r.line_id)}</td>
                 <td className="whitespace-nowrap px-2.5 py-2">{tenureText(r.hire_date)}</td>
                 <td className="whitespace-nowrap px-2.5 py-2">
                   <button className="text-slate-500 hover:underline" onClick={(e) => { e.stopPropagation(); void openDetail(r); }}>상세</button>
@@ -498,7 +510,7 @@ export default function ExamPersonnelPage({
                 </td>
               </tr>
             ))}
-            {!loading && paged.length === 0 && <tr><td colSpan={TABLE_COLS.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
+            {!loading && paged.length === 0 && <tr><td colSpan={TABLE_COLS.length + 3} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -569,6 +581,15 @@ export default function ExamPersonnelPage({
             {/* 기준정보 연동(cascade) — [Line 전환] 제품군→그룹→공정(제품/파트 단계 제거). 선택 시 아래 텍스트 필드 자동 반영. */}
             {renderCascade()}
 
+            {/* [주 라인] 독립 선택(선택 · 비필수). 변경해도 제품군/그룹/공정/파트/레벨/사번/이름 초기화하지 않음. "" → null. */}
+            <div className="mb-4">
+              <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">라인 <span className="text-slate-400">(선택 · 주 라인)</span></label>
+              <select className={`${inputCls} w-full sm:w-1/2`} value={String(editRow.line_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), line_id: e.target.value || null }))}>
+                <option value="">라인 미지정</option>
+                {lineOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+              </select>
+            </div>
+
             {/* 직접 입력 필드(기존 텍스트 — legacy 조회/직접입력 호환 유지) · [Line 전환] 제품/파트 직접입력 UI 제거(기존 part_name 값은 저장 시 그대로 보존). */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {DIRECT_COLS.filter((c) => c.key !== "part_name").map((c) => renderField(c))}
@@ -589,6 +610,7 @@ export default function ExamPersonnelPage({
               <div>
                 <h3 className="text-lg font-semibold">{String(detailRow.name || "-")} <span className="text-sm font-normal text-slate-500">인증 상세</span></h3>
                 <p className="text-sm text-slate-500">사번 {String(detailRow.employee_no || "-")} · {String(detailRow.part_name || "-")} · {String(detailRow.position || "-")}</p>
+                <p className="text-sm text-slate-500">라인 {lineName(detailRow.line_id)}</p>
               </div>
               <button onClick={() => setDetailRow(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
             </div>
