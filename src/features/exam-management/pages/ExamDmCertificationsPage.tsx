@@ -533,7 +533,7 @@ export default function ExamDmCertificationsPage({
           <button className={btn} onClick={exportExcel}>Excel</button>
           <button className={btn} onClick={printTable}>인쇄</button>
           {canEdit && <label className={`${btn} cursor-pointer`}>Excel 등록<input type="file" accept=".xlsx,.xls" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void buildImportPreview(f); e.currentTarget.value = ""; }} /></label>}
-          {canEdit && <button className="rounded-xl bg-slate-900 min-h-[44px] px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800" onClick={() => setEditRow({ approval_status: "대기", dm_stage: "Single Job" })}>등록</button>}
+          {canEdit && <button className="rounded-xl bg-slate-900 inline-flex items-center justify-center min-h-[42px] min-w-[72px] px-5 text-sm font-semibold text-white hover:bg-slate-800 whitespace-nowrap" onClick={() => setEditRow({ approval_status: "대기", dm_stage: "Single Job" })}>등록</button>}
         </span>
       </div>
 

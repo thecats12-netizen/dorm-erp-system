@@ -221,7 +221,7 @@ export default function ExamCandidatePoolBoard({
               </div>
               {canEdit && (
                 <button type="button" disabled={busy || chosenCount === 0} onClick={() => void registerChecked()}
-                  className={`mt-2 min-h-[44px] w-full rounded-xl px-4 py-2.5 text-sm font-semibold ${busy || chosenCount === 0 ? "bg-slate-300 text-slate-500" : "bg-blue-600 text-white hover:bg-blue-500"}`}>
+                  className={`mt-2 inline-flex min-h-[44px] w-full items-center justify-center whitespace-nowrap rounded-xl px-4 text-sm font-semibold ${busy || chosenCount === 0 ? "bg-slate-300 text-slate-500" : "bg-blue-600 text-white hover:bg-blue-500"}`}>
                   {busy ? "등록 중…" : `시험 응시관리로 일괄 등록 (${chosenCount}건)`}
                 </button>
               )}
