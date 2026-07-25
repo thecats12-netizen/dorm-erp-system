@@ -89,24 +89,8 @@ export default function ExamProcessScopeEditor({
     return () => { alive = false; };
   }, [userId, tenantId, isSystemAdmin]);
 
-  if (isSystemAdmin) {
-    return (
-      <div className={`rounded-2xl border p-4 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
-        <h4 className={`mb-1 text-sm font-semibold ${darkMode ? "text-slate-300" : "text-slate-700"}`}>시험관리 공정 권한</h4>
-        <p className="text-xs text-slate-500">시스템 관리자는 시험 총관리자로서 전체 공정에 대한 전권을 가집니다.</p>
-      </div>
-    );
-  }
-  if (!userId) {
-    return (
-      <div className={`rounded-2xl border p-4 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
-        <h4 className={`mb-1 text-sm font-semibold ${darkMode ? "text-slate-300" : "text-slate-700"}`}>시험관리 공정 권한</h4>
-        <p className="text-xs text-slate-500">계정을 먼저 저장한 뒤 공정 권한을 지정할 수 있습니다.</p>
-      </div>
-    );
-  }
-
   // 필터 옵션(제품군 → 그룹 종속). 표시 전용.
+  // [Hook 규칙] 모든 Hook 은 조건/early return 이전, 컴포넌트 최상위에서 항상 같은 순서로 호출한다.
   const catOptions = useMemo(() => {
     const m = new Map<string, string>();
     processes.forEach((p) => { if (p.categoryId) m.set(p.categoryId, p.categoryName); });
@@ -126,6 +110,23 @@ export default function ExamProcessScopeEditor({
       return true;
     });
   }, [processes, search, catFilter, groupFilter]);
+
+  if (isSystemAdmin) {
+    return (
+      <div className={`rounded-2xl border p-4 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+        <h4 className={`mb-1 text-sm font-semibold ${darkMode ? "text-slate-300" : "text-slate-700"}`}>시험관리 공정 권한</h4>
+        <p className="text-xs text-slate-500">시스템 관리자는 시험 총관리자로서 전체 공정에 대한 전권을 가집니다.</p>
+      </div>
+    );
+  }
+  if (!userId) {
+    return (
+      <div className={`rounded-2xl border p-4 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+        <h4 className={`mb-1 text-sm font-semibold ${darkMode ? "text-slate-300" : "text-slate-700"}`}>시험관리 공정 권한</h4>
+        <p className="text-xs text-slate-500">계정을 먼저 저장한 뒤 공정 권한을 지정할 수 있습니다.</p>
+      </div>
+    );
+  }
 
   // 현재 표시된 공정 일괄 선택/해제(process_id 기준 · 저장값 방식 불변).
   const setManyProcesses = (on: boolean) => {

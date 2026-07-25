@@ -133,6 +133,39 @@ export default function ExamDmCertificationsPage({
             : undefined;
   useRegisteredOverlay(!!topClose, () => topClose && topClose());
 
+  // [선언 순서] 아래 두 헬퍼는 reload/saveRow/승인 등에서 참조되므로, 최초 사용 지점(reload)보다 위에서 선언한다.
+  // dm_certifications 실제 컬럼 화이트리스트(UI 파생/임시 필드가 upsert 로 새 나가는 것을 방지 → PGRST204 예방).
+  const sanitizeDmCertificationPayload = (row: ExamRow): ExamRow => {
+    const allow = new Set([
+      "id", "tenant_id", "organization_id", "personnel_id", "level_id", "part_id", "process_id",
+      "cert_no", "acquired_date", "expiry_date", "notes", "is_active", "deleted_at",
+      "created_by", "updated_by", "created_at", "updated_at",
+      "employee_no", "name", "dm_stage", "dm_level", "process_count", "equipment_count",
+      "process_combination", "dual_multi", "renewal_date", "proof_file",
+      "approval_status", "approved_by", "approved_at",
+    ]);
+    const out: ExamRow = {};
+    for (const [k, v] of Object.entries(row)) if (allow.has(k)) out[k] = v as ExamRow[string];
+    return out;
+  };
+
+  // dm_stage/dm_level → exam_levels.id 해석. 활성 레벨 내에서 code 또는 name 이 정확히 유일 매칭될 때만 연결.
+  // 0건 또는 2건 이상이면 null 반환(호출부에서 저장 차단). 이름 단독 임의 매칭 금지 — 정확 일치만 허용.
+  const resolveLevelId = (row: ExamRow): string | null => {
+    const existing = String(row.level_id ?? "").trim();
+    if (existing) return existing; // 이미 FK 로 연결됨(마스터 데이터 기준) → 유지.
+    const active = levels.filter((l) => l.is_active !== false && !l.deleted_at);
+    const norm = (s: unknown) => String(s ?? "").trim().toLowerCase();
+    const candidates = [String(row.dm_level ?? "").trim(), String(row.dm_stage ?? "").trim()].filter(Boolean);
+    for (const cand of candidates) {
+      const key = cand.toLowerCase();
+      const matches = active.filter((l) => norm(l.code) === key || norm(l.name) === key);
+      const uniqueIds = Array.from(new Set(matches.map((m) => String(m.id))));
+      if (uniqueIds.length === 1) return uniqueIds[0];
+    }
+    return null;
+  };
+
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
@@ -285,38 +318,6 @@ export default function ExamDmCertificationsPage({
       return "D.M 인증 데이터 구조가 준비되지 않았습니다.";
     }
     return translateExamWriteError(error);
-  };
-
-  // dm_certifications 실제 컬럼 화이트리스트(UI 파생/임시 필드가 upsert 로 새 나가는 것을 방지 → PGRST204 예방).
-  const sanitizeDmCertificationPayload = (row: ExamRow): ExamRow => {
-    const allow = new Set([
-      "id", "tenant_id", "organization_id", "personnel_id", "level_id", "part_id", "process_id",
-      "cert_no", "acquired_date", "expiry_date", "notes", "is_active", "deleted_at",
-      "created_by", "updated_by", "created_at", "updated_at",
-      "employee_no", "name", "dm_stage", "dm_level", "process_count", "equipment_count",
-      "process_combination", "dual_multi", "renewal_date", "proof_file",
-      "approval_status", "approved_by", "approved_at",
-    ]);
-    const out: ExamRow = {};
-    for (const [k, v] of Object.entries(row)) if (allow.has(k)) out[k] = v as ExamRow[string];
-    return out;
-  };
-
-  // dm_stage/dm_level → exam_levels.id 해석. 활성 레벨 내에서 code 또는 name 이 정확히 유일 매칭될 때만 연결.
-  // 0건 또는 2건 이상이면 null 반환(호출부에서 저장 차단). 이름 단독 임의 매칭 금지 — 정확 일치만 허용.
-  const resolveLevelId = (row: ExamRow): string | null => {
-    const existing = String(row.level_id ?? "").trim();
-    if (existing) return existing; // 이미 FK 로 연결됨(마스터 데이터 기준) → 유지.
-    const active = levels.filter((l) => l.is_active !== false && !l.deleted_at);
-    const norm = (s: unknown) => String(s ?? "").trim().toLowerCase();
-    const candidates = [String(row.dm_level ?? "").trim(), String(row.dm_stage ?? "").trim()].filter(Boolean);
-    for (const cand of candidates) {
-      const key = cand.toLowerCase();
-      const matches = active.filter((l) => norm(l.code) === key || norm(l.name) === key);
-      const uniqueIds = Array.from(new Set(matches.map((m) => String(m.id))));
-      if (uniqueIds.length === 1) return uniqueIds[0];
-    }
-    return null;
   };
 
   const saveRow = async () => {
