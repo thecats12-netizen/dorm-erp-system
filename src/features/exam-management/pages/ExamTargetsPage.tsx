@@ -310,6 +310,29 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
       const grp = master.groups.find((x) => String(x.id) === scopeSel.groupId);
       if (grp && String(grp.category_id ?? "") !== scopeSel.categoryId) { setError("선택한 그룹이 현재 제품군에 속하지 않습니다."); return; }
       if (grp?.is_active === false) { setError("비활성 기준정보는 새로 선택할 수 없습니다."); return; }
+      // [이중계상 방지] 동일 그룹·연도·인증레벨에 "반대 유형" 목표가 이미 있으면 신규 저장 차단(경고만 · 데이터/통계/DB 무변경).
+      //  파트 목표 = part_id 또는 part_name 보유 / 그룹 목표 = 둘 다 없음. group_id 가 있는 경우에만 판정(정규화 축 기준).
+      {
+        const gid = String(editRow.group_id ?? scopeSel.groupId ?? "");
+        const yr = String(editRow.year ?? "").trim();
+        const lv = String(editRow.level_id ?? "");
+        const isPart = !!String(editRow.part_id ?? "").trim() || !!String(editRow.part_name ?? "").trim();
+        if (gid && yr) {
+          const conflict = rows.some((r) => {
+            if (String(r.group_id ?? "") !== gid) return false;
+            if (String(r.year ?? "").trim() !== yr) return false;
+            if (String(r.level_id ?? "") !== lv) return false;
+            const rIsPart = !!String(r.part_id ?? "").trim() || !!String(r.part_name ?? "").trim();
+            return rIsPart !== isPart; // 반대 유형만 충돌
+          });
+          if (conflict) {
+            setError(isPart
+              ? "이 그룹·연도·인증레벨에는 이미 그룹 단위 목표가 있어 파트 목표를 저장할 수 없습니다. (중복 집계 방지)"
+              : "이 그룹·연도·인증레벨에는 이미 파트 단위 목표가 있어 그룹 목표를 저장할 수 없습니다. (중복 집계 방지)");
+            return;
+          }
+        }
+      }
     }
     setSaving(true); setError(null);
     try {
