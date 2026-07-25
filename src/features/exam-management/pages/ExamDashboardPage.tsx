@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
 import { buildRetestCandidates, summarizeCertExpiry, buildExamNotifications, runRecalculation, type ExamNotification, type RecalcResult, type RecalcScope } from "../services/examAutomationService";
 import { listRetestCandidates, generateRetestCandidates, setRetestCandidateStatus, type RetestCandidateRow, type RetestStatus } from "../services/examRetestService";
@@ -83,6 +84,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
     { year: "전체", month: "전체", group: "전체", product: "전체", part: "전체", process: "전체", level: "전체" }
   );
   const [detail, setDetail] = useState<{ title: string; kind: Kind; rows: ExamRow[] } | null>(null);
+  const [detailSearch, setDetailSearch] = useState("");
   const [notiOpen, setNotiOpen] = useState(false);
   const [licAnalytics, setLicAnalytics] = useState<LicenseAnalytics | null>(null); // [9단계] 라이선스 계획 통계/자동화 오류
   const [issuesOpen, setIssuesOpen] = useState(false);
@@ -305,13 +307,57 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   const sectionCls = `rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`;
   const selCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
 
-  const openDetail = (title: string, s: { rows: ExamRow[]; kind: Kind }) => setDetail({ title, kind: s.kind, rows: s.rows });
+  const openDetail = (title: string, s: { rows: ExamRow[]; kind: Kind }) => { setDetailSearch(""); setDetail({ title, kind: s.kind, rows: s.rows }); };
 
   const DETAIL_COLS: Record<Kind, Array<[string, (r: ExamRow) => string]>> = {
     personnel: [["사번", (r) => str(r.employee_no)], ["성명", (r) => str(r.name)], ["그룹", (r) => str(r.group_name)], ["파트", (r) => str(r.part_name)], ["인증Level", (r) => str(r.cert_level)]],
     application: [["사번", (r) => str(r.employee_no)], ["성명", (r) => str(r.name)], ["공정", (r) => str(r.process)], ["인증단계", (r) => levelLabel(r.level_id)], ["응시상태", (r) => str(r.status) || "-"], ["취득", (r) => (isAcquired(r) ? "취득" : "미취득")]],
     cert: [["사번", (r) => str(r.employee_no)], ["성명", (r) => str(r.name)], ["D.M단계", (r) => str(r.dm_stage)], ["Level", (r) => str(r.dm_level)], ["취득일", (r) => ymd(r.acquired_date) || "-"], ["만료일", (r) => ymd(r.expiry_date) || "-"], ["상태", (r) => expiryState(r)]],
     target: [["연도", (r) => str(r.year)], ["그룹", (r) => str(r.group_name)], ["파트", (r) => str(r.part_name)], ["레벨", (r) => levelLabel(r.level_id)], ["목표", (r) => str(r.target_count)], ["현재", (r) => str(r.current_count)], ["달성률", (r) => `${pct(r.current_count, r.target_count)}%`]],
+  };
+
+  // 상세 목록: 검색어(전 컬럼 텍스트 · 대소문자·공백 무시)로 필터. 표시·다운로드 모두 이 결과를 사용(건수 정합).
+  const filteredDetailRows = useMemo(() => {
+    if (!detail) return [] as ExamRow[];
+    const q = detailSearch.trim().toLowerCase();
+    if (!q) return detail.rows;
+    const cols = DETAIL_COLS[detail.kind];
+    return detail.rows.filter((r) => cols.map(([, get]) => get(r)).join(" ").toLowerCase().includes(q));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail, detailSearch]);
+
+  // 파일명 안전화(경로/특수문자 제거). 예: 시험대시보드_응시예정_2026-07-25
+  const safeName = (title: string) => `시험대시보드_${String(title).replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "").slice(0, 40)}_${new Date().toISOString().slice(0, 10)}`;
+  const exportDetail = (format: "xlsx" | "csv") => {
+    if (!detail) return;
+    const cols = DETAIL_COLS[detail.kind];
+    const rows = filteredDetailRows;
+    const fname = safeName(detail.title);
+    if (format === "csv") {
+      const esc = (v: string) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+      const csv = [cols.map(([h]) => esc(h)).join(",")]
+        .concat(rows.map((r) => cols.map(([, get]) => esc(get(r) || "")).join(",")))
+        .join("\r\n");
+      const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = `${fname}.csv`; a.click(); URL.revokeObjectURL(url);
+      return;
+    }
+    // 실제 .xlsx(SheetJS). 문자열 셀 유지 → 사번 앞자리 0 보존·지수표기 방지.
+    const data = rows.map((r) => Object.fromEntries(cols.map(([h, get]) => [h, get(r) ?? ""])));
+    const ws = XLSX.utils.json_to_sheet(data, { header: cols.map(([h]) => h) });
+    ws["!cols"] = cols.map(([h]) => ({ wch: Math.max(10, Math.min(40, h.length * 2 + 4)) }));
+    if (rows.length > 0) ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length, c: cols.length - 1 } }) };
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "상세");
+    // 시트 2: 다운로드 조건(통계 기준·검색어·일시).
+    const meta = [
+      ["통계명", detail.title], ["기준일", new Date().toISOString().slice(0, 10)],
+      ["전체 건수", String(detail.rows.length)], ["다운로드 건수", String(rows.length)],
+      ["검색어", detailSearch.trim() || "(없음)"], ["다운로드 일시", new Date().toISOString().slice(0, 19).replace("T", " ")],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(meta), "다운로드 조건");
+    XLSX.writeFile(wb, `${fname}.xlsx`);
   };
 
   const resetF = () => setF({ year: "전체", month: "전체", group: "전체", product: "전체", part: "전체", process: "전체", level: "전체" });
@@ -466,26 +512,23 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
       {detail && (
         <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={() => setDetail(null)}>
           <div role="dialog" aria-modal="true" aria-labelledby="exam-dash-detail-title" tabIndex={-1} className={`my-8 w-full max-w-3xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
-            <div className="mb-3 flex items-center justify-between">
-              <h3 id="exam-dash-detail-title" className="text-lg font-semibold">{detail.title} <span className="text-sm font-normal text-slate-500">· {detail.rows.length}건</span></h3>
-              <div className="flex items-center gap-1">
-                {/* 표시된 목록을 CSV(Excel)로 내보내기 — 화면과 동일한 컬럼/필터 기준(§14). 외부 의존성 없음. */}
-                <button type="button" disabled={detail.rows.length === 0}
-                  onClick={() => {
-                    const cols = DETAIL_COLS[detail.kind];
-                    const esc = (v: string) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-                    const csv = [cols.map(([h]) => esc(h)).join(",")]
-                      .concat(detail.rows.map((r) => cols.map(([, get]) => esc(get(r) || "")).join(",")))
-                      .join("\r\n");
-                    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url; a.download = `${detail.title}_${new Date().toISOString().slice(0, 10)}.csv`;
-                    a.click(); URL.revokeObjectURL(url);
-                  }}
-                  className={`rounded-lg border px-2.5 py-1 text-xs font-medium ${detail.rows.length === 0 ? "cursor-not-allowed text-slate-300 dark:border-slate-700" : "text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"}`}>Excel</button>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <h3 id="exam-dash-detail-title" className="text-lg font-semibold">{detail.title}
+                <span className="text-sm font-normal text-slate-500"> · {detailSearch.trim() ? `${filteredDetailRows.length} / ${detail.rows.length}` : detail.rows.length}건</span>
+                <span className="ml-2 text-xs font-normal text-slate-400">기준일 {new Date().toISOString().slice(0, 10)}</span>
+              </h3>
+              <div className="flex items-center gap-1.5">
+                {/* 실제 .xlsx(SheetJS) 다운로드 · CSV 는 별도 버튼. 화면과 동일한 검색/컬럼 기준(필터 결과 전체). */}
+                <button type="button" disabled={filteredDetailRows.length === 0} onClick={() => exportDetail("xlsx")}
+                  className={`inline-flex items-center justify-center rounded-lg px-3 py-1.5 text-xs font-semibold text-white ${filteredDetailRows.length === 0 ? "cursor-not-allowed bg-slate-300" : "bg-emerald-600 hover:bg-emerald-500"}`}>Excel</button>
+                <button type="button" disabled={filteredDetailRows.length === 0} onClick={() => exportDetail("csv")}
+                  className={`inline-flex items-center justify-center rounded-lg border px-3 py-1.5 text-xs font-medium ${filteredDetailRows.length === 0 ? "cursor-not-allowed text-slate-300 dark:border-slate-700" : "text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"}`}>CSV</button>
                 <button type="button" aria-label="닫기" onClick={() => setDetail(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
               </div>
+            </div>
+            <div className="mb-2">
+              <input value={detailSearch} onChange={(e) => setDetailSearch(e.target.value)} placeholder="사번·성명·공정·상태 등 검색"
+                className={`w-full rounded-lg border px-3 py-2 text-sm outline-none ${darkMode ? "border-slate-600 bg-slate-950 text-slate-100" : "border-slate-300 bg-white text-slate-900"}`} />
             </div>
             <div className="max-h-[60vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
               <table className="w-full text-left text-xs">
@@ -493,12 +536,12 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
                   <tr>{DETAIL_COLS[detail.kind].map(([h]) => <th key={h} className="whitespace-nowrap px-2.5 py-2">{h}</th>)}</tr>
                 </thead>
                 <tbody>
-                  {detail.rows.map((r, i) => (
+                  {filteredDetailRows.map((r, i) => (
                     <tr key={str(r.id) || i} className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
                       {DETAIL_COLS[detail.kind].map(([h, get]) => <td key={h} className="whitespace-nowrap px-2.5 py-2">{get(r) || "-"}</td>)}
                     </tr>
                   ))}
-                  {detail.rows.length === 0 && <tr><td colSpan={DETAIL_COLS[detail.kind].length} className="px-3 py-10 text-center text-slate-400">해당 데이터가 없습니다.</td></tr>}
+                  {filteredDetailRows.length === 0 && <tr><td colSpan={DETAIL_COLS[detail.kind].length} className="px-3 py-10 text-center text-slate-400">{detail.rows.length === 0 ? "해당 데이터가 없습니다." : "검색 조건에 맞는 데이터가 없습니다."}</td></tr>}
                 </tbody>
               </table>
             </div>
