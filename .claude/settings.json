@@ -32,7 +32,9 @@
       "Bash(perl -0pi -e 's/\\\\} catch \\\\\\(e\\\\\\) \\\\{ setError\\\\\\(\\\\\\(e as \\\\{ message\\\\?: string \\\\}\\\\\\)\\\\?\\\\.message \\\\|\\\\| \"저장하지 못했습니다\\\\.\"\\\\\\); \\\\}/} catch \\(e\\) { setError\\(translateDmSaveError\\(e\\)\\); }/; s/\\\\} catch \\\\\\(e\\\\\\) \\\\{ setError\\\\\\(\\\\\\(e as \\\\{ message\\\\?: string \\\\}\\\\\\)\\\\?\\\\.message \\\\|\\\\| \"승인 처리 실패\\\\.\"\\\\\\); \\\\}/} catch \\(e\\) { setError\\(translateDmSaveError\\(e\\)\\); }/' src/features/exam-management/pages/ExamDmCertificationsPage.tsx)",
       "Bash(grep -n \"replace\\(/\\\\[\" src/features/exam-management/services/examMasterService.ts)",
       "Bash(awk 'NR>=25655 && NR<=25760 && /특약|메모|notes|저장|contractFiles|첨부|dormContractForm.id|<\\\\/div>\\\\s*$/ {print NR\": \"$0}' src/App.tsx)",
-      "Bash(awk -F: '$1>20000 && $1<24000')"
+      "Bash(awk -F: '$1>20000 && $1<24000')",
+      "Bash(awk -F: '$1>20640 && $1<21100')",
+      "Bash(awk -F: '$1>25000')"
     ],
     "additionalDirectories": [
       "\\tmp"
