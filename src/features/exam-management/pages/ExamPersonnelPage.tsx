@@ -18,7 +18,7 @@ import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 type ColType = "text" | "date" | "number" | "select" | "boolean";
 type Col = { key: string; label: string; type: ColType; options?: string[]; required?: boolean; filter?: boolean };
 // 인증 기준관리 참조 옵션(부모 FK 포함) — 인력현황 기준정보 연동(cascade)용.
-type MRef = { id: string; label: string; name: string; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null };
+type MRef = { id: string; label: string; name: string; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null; line_id?: string | null };
 
 const COLS: Col[] = [
   { key: "employee_no", label: "사번", type: "text", required: true },
@@ -104,6 +104,7 @@ export default function ExamPersonnelPage({
     const toOpt = (r: ExamRow): MRef => ({
       id: String(r.id), name: String(r.name ?? ""), label: [r.code, r.name].filter(Boolean).join(" · ") || String(r.name ?? r.id),
       is_active: r.is_active !== false, category_id: (r.category_id ?? null) as string | null, group_id: (r.group_id ?? null) as string | null, part_id: (r.part_id ?? null) as string | null,
+      line_id: (r.line_id ?? null) as string | null,   // [주 라인] 기준정보 행에 명시적 line_id 가 있으면 매핑(현재 공정/그룹/제품군 테이블엔 없음 → null)
     });
     (async () => {
       const [categories, groups, parts, processes, lines] = await Promise.all([
@@ -408,7 +409,13 @@ export default function ExamPersonnelPage({
     // 제품군/그룹 변경 시 공정만 초기화. 기존 part_id/part_name 은 보존(자동 null 금지 · 레거시/Excel 호환).
     const onCat = (id: string) => { const c = byId(master.categories, id); set({ _cat_id: id || null, product_group: c ? c.name : e.product_group, _group_id: null, group_name: null, process_id: null }); };
     const onGroup = (id: string) => { const g = byId(master.groups, id); set({ _group_id: id || null, group_name: g ? g.name : null, _cat_id: g?.category_id ?? e._cat_id ?? null, process_id: null }); };
-    const onProc = (id: string) => set({ process_id: id || null });
+    // [주 라인] 선택한 공정 행에 "명시적" line_id 가 있고 현재 tenant 라인이면 자동 반영. 없으면 기존 라인 유지
+    //  (공정→라인 추정 금지 · cascade 변경 시 라인 초기화 금지). 현재 exam_processes 에 line_id 컬럼이 없어 사실상 유지만.
+    const onProc = (id: string) => {
+      const p = byId(master.processes, id);
+      const ln = String(p?.line_id ?? "").trim();
+      set({ process_id: id || null, ...(ln && lineOptions.some((o) => o.id === ln) ? { line_id: ln } : {}) });
+    };
 
     const box = (label: string, hint: string, node: ReactNode) => (
       <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{label}</label>{node}{hint && <p className="mt-0.5 text-[0.65rem] text-slate-400">{hint}</p>}</div>
@@ -418,8 +425,9 @@ export default function ExamPersonnelPage({
     const opt = (o: MRef) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}{o.is_active ? "" : " (미사용)"}</option>;
     return (
       <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
-        <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">선택 시 제품군·그룹·공정 자동 반영</span></div>
+        <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">제품군·그룹·공정 자동 반영 · 라인은 직접 선택</span></div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {box("라인 (선택 · 주 라인)", "", <select className={`${inputCls} w-full`} value={String(e.line_id ?? "")} onChange={(ev) => set({ line_id: ev.target.value || null })}><option value="">라인 미지정</option>{lineOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>)}
           {box("제품군", "", <select className={`${inputCls} w-full`} value={catId} onChange={(ev) => onCat(ev.target.value)}><option value="">선택</option>{catOpts.map(opt)}</select>)}
           {box("그룹", !catId ? "제품군을 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={groupId} onChange={(ev) => onGroup(ev.target.value)}><option value="">선택</option>{groupOpts.map(opt)}</select>)}
           {box("공정", !groupId ? "그룹을 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={String(e.process_id ?? "")} onChange={(ev) => onProc(ev.target.value)}><option value="">선택</option>{procOpts.map(opt)}</select>)}
@@ -578,17 +586,8 @@ export default function ExamPersonnelPage({
               {!isExamAdmin && <p className="mt-2 text-[0.7rem] text-slate-400">자동 계산 값은 조회 전용입니다. 수정은 관리자만 가능합니다.</p>}
             </div>
 
-            {/* 기준정보 연동(cascade) — [Line 전환] 제품군→그룹→공정(제품/파트 단계 제거). 선택 시 아래 텍스트 필드 자동 반영. */}
+            {/* 기준정보 연동(cascade) — [Line 전환] 라인(직접)·제품군→그룹→공정. 라인은 cascade 맨 앞·독립(변경해도 하위 무초기화). */}
             {renderCascade()}
-
-            {/* [주 라인] 독립 선택(선택 · 비필수). 변경해도 제품군/그룹/공정/파트/레벨/사번/이름 초기화하지 않음. "" → null. */}
-            <div className="mb-4">
-              <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">라인 <span className="text-slate-400">(선택 · 주 라인)</span></label>
-              <select className={`${inputCls} w-full sm:w-1/2`} value={String(editRow.line_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), line_id: e.target.value || null }))}>
-                <option value="">라인 미지정</option>
-                {lineOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-              </select>
-            </div>
 
             {/* 직접 입력 필드(기존 텍스트 — legacy 조회/직접입력 호환 유지) · [Line 전환] 제품/파트 직접입력 UI 제거(기존 part_name 값은 저장 시 그대로 보존). */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
