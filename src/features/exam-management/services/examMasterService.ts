@@ -3,6 +3,7 @@
 import { supabase, isSupabaseAvailable, translateSupabaseError } from "../../../services/supabaseService";
 
 export type ExamMasterTable =
+  | "exam_lines"
   | "exam_categories"
   | "exam_groups"
   | "exam_parts"
@@ -32,6 +33,7 @@ export const examSupabaseReady = () => isSupabaseAvailable();
 //    `.order("sort_order")` 를 붙이면 400(column "sort_order" does not exist)이 발생한다 → 존재하는 컬럼만 정렬에 사용.
 //  - tenant_id(text), deleted_at 은 모든 시험 테이블에 존재하므로 공통 적용한다.
 const EXAM_TABLE_ORDER: Record<ExamMasterTable, string[]> = {
+  exam_lines: ["sort_order", "created_at"],
   exam_categories: ["sort_order", "created_at"],
   exam_groups: ["sort_order", "created_at"],
   exam_parts: ["sort_order", "created_at"],

@@ -84,7 +84,8 @@ export default function ExamMasterGrid({
       const [data, refs] = await Promise.all([
         listExamRows(config.table, tenantId),
         Promise.all(refTables.map(async (t) => {
-          const refRows = await listExamRows(t, tenantId); // RLS 로 현재 tenant·권한 범위만. 비활성 포함(수정 화면 표시용).
+          // 미적용 참조 테이블(예: exam_lines DRAFT 미실행)이 있어도 해당 탭 로드가 깨지지 않도록 개별 catch → 빈 옵션.
+          const refRows = await listExamRows(t, tenantId).catch(() => [] as ExamRow[]); // RLS 로 현재 tenant·권한 범위만. 비활성 포함(수정 화면 표시용).
           const opts: RefOpt[] = refRows.map((r) => ({
             id: String(r.id),
             label: [r.code, r.name].filter(Boolean).join(" · ") || String(r.name ?? r.id),
