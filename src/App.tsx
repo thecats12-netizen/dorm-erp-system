@@ -7828,7 +7828,7 @@ export default function App() {
   }, [users, userSearch, currentUser, showInactiveUsers, showDeletedUsers]);
 
   const visibleInventory = useMemo(() => {
-    return inventory.filter((i) => {
+    const filtered = inventory.filter((i) => {
       if (i.isDeleted) return false;
       if (!hasText(i.itemName)) return false; // sanitize: 비품명 없는 행 제외
       // 권한 필터링
@@ -7864,6 +7864,13 @@ export default function App() {
 
       const text = `${i.site} ${i.dormAddress} ${i.buildingName} ${i.dong} ${i.roomHo} ${i.managerName} ${i.itemName} ${i.quantity} ${i.modelName} ${i.maker} ${i.status} ${i.installationLocation} ${i.purchaseDate} ${i.purchaseAmount} ${i.issuedDate} ${i.proofFile} ${i.soldDate} ${i.soldAmount} ${i.disposalDate} ${i.disposalReason} ${i.notes}`.toLowerCase();
       return !inventorySearch || text.includes(inventorySearch.toLowerCase());
+    });
+    // 기본 정렬: 최근 등록순(createdAt DESC → id DESC 안정 정렬). 원본 배열은 복사 후 정렬(불변).
+    //  createdAt 은 등록일시(구매일 purchaseDate 와 별개). 수정 시 createdAt 유지 → 위치 불변. null/invalid 는 하단.
+    const t = (v: unknown) => { const n = v ? new Date(String(v)).getTime() : 0; return Number.isFinite(n) ? n : 0; };
+    return [...filtered].sort((a, b) => {
+      const d = t(b.createdAt) - t(a.createdAt);
+      return d !== 0 ? d : String(b.id).localeCompare(String(a.id));
     });
   }, [inventory, inventorySearch, inventoryStatusFilter, inventoryYearFilter, inventoryMonthFilter, inventoryDayFilter, currentUser, selectedInventoryDormId]);
 
