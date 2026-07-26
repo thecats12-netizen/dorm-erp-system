@@ -133,6 +133,7 @@ select pc.process_id, pc.level_id, l.code as level_code, l.rank_order,
   left join public.exam_levels l on l.id = pc.level_id
  where pc.tenant_id = :tenant_id and pc.personnel_id = :personnel_id
    and pc.process_id = :process_id and pc.is_active = true and pc.deleted_at is null
+   and pc.approval_status = '승인'   -- 프로젝트 표준 확정 상태(대기/반려/승인취소 제외)
    and (pc.expiry_date is null or pc.expiry_date >= :today)
  order by l.rank_order desc nulls last, pc.acquired_date desc;
 
@@ -143,6 +144,7 @@ select min(pc.acquired_date) filter (where pc.acquired_date is not null) as earl
   from public.pm_certifications pc
  where pc.tenant_id = :tenant_id and pc.personnel_id = :personnel_id
    and pc.process_id = :process_id and pc.is_active = true and pc.deleted_at is null
+   and pc.approval_status = '승인'   -- 프로젝트 표준 확정 상태(대기/반려/승인취소 제외)
    and (pc.expiry_date is null or pc.expiry_date >= :today);
 
 -- [14][25] needs_reeval 설비 -------------------------------------------------

@@ -42,13 +42,16 @@ export async function loadPersonnelCertState(tenantId: string, personnelId: stri
   if (!isSupabaseAvailable() || !supabase || !personnelId) return empty;
   const [certRes, pmRes] = await Promise.all([
     supabase.from("exam_equipment_certifications").select("equipment_id,status,metadata").eq("tenant_id", tenantId).eq("personnel_id", personnelId).is("deleted_at", null),
-    supabase.from("pm_certifications").select("level_id,pm_level,process_id,acquired_date,expiry_date").eq("tenant_id", tenantId).eq("personnel_id", personnelId).is("deleted_at", null).eq("is_active", true),
+    supabase.from("pm_certifications").select("level_id,pm_level,process_id,acquired_date,expiry_date,approval_status,is_active").eq("tenant_id", tenantId).eq("personnel_id", personnelId).is("deleted_at", null),
   ]);
   if (certRes.error) { console.warn("[certificationPreview] certs 조회 실패(미적용?):", (certRes.error as { code?: unknown }).code); return empty; }
   const certs = (certRes.data as ExamRow[]) || [];
   const approvedEquipmentIds = certs.filter((c) => c.status === "approved").map((c) => String(c.equipment_id ?? "")).filter(Boolean);
   const needsReeval = certs.some((c) => (c.metadata as { needs_reeval?: unknown } | null)?.needs_reeval === true);
-  const pmCerts: PmCertLite[] = (pmRes.error ? [] : ((pmRes.data as ExamRow[]) || [])).map((r) => ({
+  // 확정 단계로 인정: 프로젝트 표준 isApproved(=approval_status "승인") + 활성. 대기/반려/취소·승인취소(대기) 제외.
+  const pmCerts: PmCertLite[] = (pmRes.error ? [] : ((pmRes.data as ExamRow[]) || []))
+    .filter((r) => String(r.approval_status ?? "") === "승인" && r.is_active !== false)
+    .map((r) => ({
     levelId: r.level_id ? String(r.level_id) : null,
     pmLevel: r.pm_level ? String(r.pm_level) : null,
     processId: String(r.process_id ?? ""),

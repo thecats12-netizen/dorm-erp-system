@@ -49,6 +49,29 @@
 - **근속개월**: `hire_date` 완전 개월(로컬 tz 변환 없이 Y/M/D 정수 비교), 미래·누락 시 null → "입사일 정보 없음".
 - **경과개월**: 확정 단계 취득일(`pm_certifications.acquired_date`) 기준 — 단계간=최고 rank 확정일→오늘, 누적=최저 rank 확정일→오늘. **신뢰 가능한 단계 확정일이 없으면 null 유지("단계 취득일 정보 없음"), 조건 미충족, 자동 확정 없음.**
 
+## 3.5 실행 런북 (테스트 DB 보유자용)
+> 이 리포지토리 환경에는 **docker/psql/DB 비밀번호/브라우저가 없어** 아래를 자동 실행할 수 없습니다.
+> 테스트 프로젝트 자격이 있는 담당자가 아래를 실행하세요. **운영 프로젝트에는 적용 금지.**
+
+### (a) migration 4종 적용
+```bash
+# 옵션 1) 로컬 일회용 테스트 DB (docker 필요)
+supabase start
+supabase db reset            # supabase/migrations/* 전체 적용(테스트 전용)
+
+# 옵션 2) 원격 "테스트" 프로젝트 (운영 아님을 반드시 확인)
+supabase link --project-ref <TEST_PROJECT_REF>
+supabase db push             # 미적용 migration만 반영
+```
+적용 후 `preview-validation.sql` **[2]** 블록으로 컬럼/seed/테이블/constraint/RLS 존재를 확인.
+
+### (b) 테스트 직원 A~E 준비 (테스트 tenant 전용)
+`tenant_id='test'` 등에서 `exam_personnel`(hire_date/process_id), `exam_equipment_certifications`(status/acquired_date), `pm_certifications`(**approval_status='승인'**, acquired_date), `exam_equipment_stage_rules`(is_core_equipment/effective 범위), `exam_rules`(rule_type='달성 기준', criteria) row를 §1 표대로 구성.
+> ⚠ 확정 단계는 반드시 `approval_status='승인' AND is_active=true AND deleted_at is null AND (expiry_date is null OR expiry_date>=오늘)` 이어야 Preview에 "현재 확정 단계"로 반영됩니다(대기/반려/승인취소(대기)는 제외).
+
+### (c) 대조 & 기록
+`preview-validation.sql`의 각 블록 실행값과 Preview 화면값을 §2 체크리스트·본 완료보고 [5]~[29] 항목으로 1:1 대조하여 일치/불일치를 기록.
+
 ## 4. 데이터 구조 한계 / 다음 단계 migration 제안 ([12][35])
 현재 경과개월은 `pm_certifications.acquired_date`(단계 확정일)에 의존한다. PM 확정 이력이 없는 직원은 elapsed/cumulative를 산출할 수 없어 해당 조건은 미충족 처리된다(설비 취득일로 임의 대체하지 않음).
 
