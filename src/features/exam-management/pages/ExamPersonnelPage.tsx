@@ -18,7 +18,7 @@ import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 type ColType = "text" | "date" | "number" | "select" | "boolean";
 type Col = { key: string; label: string; type: ColType; options?: string[]; required?: boolean; filter?: boolean };
 // 인증 기준관리 참조 옵션(부모 FK 포함) — 인력현황 기준정보 연동(cascade)용.
-type MRef = { id: string; label: string; name: string; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null; line_id?: string | null };
+type MRef = { id: string; label: string; name: string; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null; line_id?: string | null; code?: string };
 
 const COLS: Col[] = [
   { key: "employee_no", label: "사번", type: "text", required: true },
@@ -105,6 +105,7 @@ export default function ExamPersonnelPage({
       id: String(r.id), name: String(r.name ?? ""), label: [r.code, r.name].filter(Boolean).join(" · ") || String(r.name ?? r.id),
       is_active: r.is_active !== false, category_id: (r.category_id ?? null) as string | null, group_id: (r.group_id ?? null) as string | null, part_id: (r.part_id ?? null) as string | null,
       line_id: (r.line_id ?? null) as string | null,   // [주 라인] 기준정보 행에 명시적 line_id 가 있으면 매핑(현재 공정/그룹/제품군 테이블엔 없음 → null)
+      code: String(r.code ?? "").trim(),                // [Excel 라인] 코드 정확 일치 매칭용
     });
     (async () => {
       const [categories, groups, parts, processes, lines, levels] = await Promise.all([
@@ -126,6 +127,22 @@ export default function ExamPersonnelPage({
     .sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.lines]);
   const lineMap = useMemo(() => new Map(lineOptions.map((o) => [o.id, o.name])), [lineOptions]);
   const lineName = (id: unknown) => { const s = String(id ?? "").trim(); if (!s) return "라인 미지정"; return lineMap.get(s) ?? "라인 확인 필요"; };
+  // [Excel] 라인 이름 전체 맵(활성·비활성 포함) — Export 표시용(조회 불가/null → 빈 셀). UUID 비노출.
+  const lineFullMap = useMemo(() => new Map(master.lines.map((o) => [o.id, (o.name && o.name.trim()) || o.code || ""])), [master.lines]);
+  // [Excel] 라인 코드/이름 역인덱스(현재 tenant · 대소문자 무시 · 중복 감지). 부분일치/추정 금지.
+  const lineByCode = useMemo(() => { const m = new Map<string, string[]>(); master.lines.forEach((o) => { const c = (o.code || "").trim().toLowerCase(); if (c) { const a = m.get(c) ?? []; a.push(o.id); m.set(c, a); } }); return m; }, [master.lines]);
+  const lineByName = useMemo(() => { const m = new Map<string, string[]>(); master.lines.forEach((o) => { const n = (o.name || "").trim().toLowerCase(); if (n) { const a = m.get(n) ?? []; a.push(o.id); m.set(n, a); } }); return m; }, [master.lines]);
+  // 라인 셀 → line_id. 빈값=미지정(null). 코드 정확일치 우선 → 이름 정확일치. 0건/2건↑/모호 = error.
+  const resolveLineCell = (raw: unknown): { id: string | null; error: string | null } => {
+    const s = String(raw ?? "").trim(); if (!s) return { id: null, error: null };
+    const codes = lineByCode.get(s.toLowerCase());
+    if (codes && codes.length > 1) return { id: null, error: "같은 코드의 라인이 여러 개입니다." };
+    const names = lineByName.get(s.toLowerCase());
+    if (names && names.length > 1) return { id: null, error: "같은 이름의 라인이 여러 개입니다." };
+    if (codes && codes.length === 1) return { id: codes[0], error: null };
+    if (names && names.length === 1) return { id: names[0], error: null };
+    return { id: null, error: "존재하지 않는 라인입니다." };
+  };
 
   // [빠른 선택] 이미 로드된 exam_rules(활성·현재 tenant) + master 를 재사용해 "조합" dropdown 소스 생성(추가 조회 없음).
   //  중복 제거 키 = line/category/group/process/level(rule_type 제외). rule_id 는 직원에 저장하지 않으므로 조합 기준 dedup.
@@ -323,7 +340,11 @@ export default function ExamPersonnelPage({
   const exportExcel = () => {
     const data = filtered.map((r) => {
       const o: Record<string, string> = {};
-      COLS.forEach((c) => { o[c.label] = cellText(c, r); });
+      COLS.forEach((c) => {
+        o[c.label] = cellText(c, r);
+        // [라인] 이름 컬럼 뒤에 "라인" 삽입(제품군/그룹 앞). line_id 이름 · null/조회불가 → 빈 셀(UUID 비노출).
+        if (c.key === "name") o["라인"] = r.line_id ? (lineFullMap.get(String(r.line_id)) || "") : "";
+      });
       o["재직기간"] = tenureText(r.hire_date);
       return o;
     });
@@ -349,6 +370,12 @@ export default function ExamPersonnelPage({
           else if (c.type === "date") { row[c.key] = ymd(v) || null; }
           else if (c.type === "boolean") { const s = String(v ?? "").trim().toLowerCase(); row[c.key] = ["o", "예", "y", "true", "1", "가능"].includes(s) ? true : (s === "" ? null : false); }
           else { row[c.key] = String(v ?? "").trim() || null; }
+        }
+        // [라인] optional 컬럼(라인/주 라인/주라인). 코드/이름 정확 유일 일치 시 line_id, 그 외(미존재/중복/모호)는 null.
+        //  개별 Import 는 신규 사원만 등록(기존 사번은 아래에서 skip)·preview 없음 → 라인 불일치로 사원을 드롭하지 않고 null 로 등록(레니언트).
+        {
+          const lineRaw = cell("라인") || cell("주 라인") || cell("주라인");
+          row.line_id = resolveLineCell(lineRaw).id;
         }
         const empNo = String(row.employee_no ?? "").trim();
         if (!empNo || !String(row.name ?? "").trim()) { skipped++; continue; }

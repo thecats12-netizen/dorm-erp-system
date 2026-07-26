@@ -263,7 +263,7 @@ export type PersonnelSyncOutcome = { total: number; newCount: number; updateCoun
 
 // exam_personnel 에 실제 존재하는 동기화 대상 필드(사번 제외). process_id/part_name 병행 저장.
 const PERSONNEL_SYNC_FIELDS = [
-  "name", "group_name", "product_group", "part_name", "process_id", "position", "hire_date",
+  "name", "group_name", "product_group", "part_name", "process_id", "line_id", "position", "hire_date",
   "employment_status", "career_type", "current_pm_level", "pm_capable_rate",
   "single_job", "m1", "m2", "m3", "m4", "dm", "cert_level", "dual_multi", "notes",
 ] as const;
