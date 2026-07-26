@@ -13,6 +13,7 @@ import { loadMyExamPermissions, type MyExamPermissions } from "../services/examP
 import EmployeeSelector from "../components/EmployeeSelector";
 import { loadEmployeeAutofill } from "../services/employeeAutofillService";
 import { completeStageByCode } from "../services/licensePlanService";
+import { createEquipmentCertificationCandidateFromApplication } from "../services/equipmentCertificationService";
 import PracticalEvalTab from "./PracticalEvalTab";
 import { formatExamSequence, examSequenceYear } from "../utils/formatExamSequence";
 import { getNextExamSequence } from "../services/examSequenceService";
@@ -507,6 +508,17 @@ export default function ExamApplicationsPage({
           if (rr.completed) onToast?.(`라이선스 단계 완료 처리${rr.activatedNext ? ` · 다음 단계(${rr.activatedNext}) 활성화` : ""}`);
           else setError("시험 결과는 저장되었지만 라이선스 계획 자동 완료 처리에 실패했습니다. 라이선스 계획과 단계 연결을 확인해 주세요.");
         } catch { setError("시험 결과는 저장되었으나 라이선스 계획 연동 중 오류가 발생했습니다."); }
+        // [설비취득 연계] 최종 합격 → 설비취득 후보 자동 생성(idempotent·비차단). 저장은 이미 성공 → 실패해도 롤백 안 함.
+        //  personnel/equipment/process 존재 시에만. DB 미적용/오류는 개발오류 비노출·안내만.
+        if (saved.personnel_id && saved.equipment_id && saved.process_id) {
+          try {
+            const ec = await createEquipmentCertificationCandidateFromApplication(saved, tenantId, userId);
+            if (ec.created) onToast?.("설비 취득 후보가 생성되었습니다(관리자 승인 대기).");
+          } catch (e) {
+            console.warn("[설비취득] 후보 생성 실패(무시)", e);
+            onToast?.("설비 인증 기능의 DB 설정이 아직 적용되지 않아 설비 취득 후보는 생성되지 않았습니다. 시험 결과는 정상 저장되었습니다.");
+          }
+        }
       }
     } catch (e) { setError((e as { message?: string })?.message || "저장하지 못했습니다."); }
     finally { setSaving(false); }
