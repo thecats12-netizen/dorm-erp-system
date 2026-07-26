@@ -68,8 +68,7 @@ const SHEET_CONFIGS: SheetConfig[] = [
     cols: [
       { key: "employee_no", label: "사원번호", aliases: ["사원번호", "사번", "empno"], type: "text", required: true },
       { key: "name", label: "이름", aliases: ["이름", "성명", "name"], type: "text", required: true },
-      // [주 라인] optional · exam_lines 코드/이름 정확 유일 일치 → line_id. 없거나 중복/모호 = 행 오류. 빈 셀 = null(sync 시 기존값 보존).
-      { key: "line_id", label: "라인", aliases: ["라인", "주 라인", "주라인"], type: "line" },
+      // [라인 UI 제외] 라인 컬럼 미매핑 → 과거 파일의 "라인/주 라인" 헤더가 있어도 무시(Import 실패 없음). line_id 저장값은 sync 시 보존.
       { key: "group_name", label: "그룹", aliases: ["그룹"], type: "text" },
       { key: "product_group", label: "제품군", aliases: ["제품군", "제품"], type: "text" },
       // 파트는 원본 텍스트(part_name)로 보존하고, 저장 시 공정(process_id)으로 매핑한다.
@@ -224,31 +223,6 @@ export default function ExamExcelImportPage({ darkMode, canEdit, tenantId, userI
     const hit = opts.find((o) => o.label === s || o.label.split("·").some((p) => p.trim() === s) || o.label.includes(s));
     return hit ? hit.id : null;
   };
-  // [주 라인] exam_lines 코드/이름 정확 유일 일치 인덱스(현재 tenant · 대소문자 무시 · 부분일치/추정 금지 · 중복 감지).
-  const lineIdx = useRef<{ byCode: Map<string, string[]>; byName: Map<string, string[]> }>({ byCode: new Map(), byName: new Map() });
-  const loadLines = useCallback(async () => {
-    try {
-      const rows = await listExamRows("exam_lines", tenantId);   // 현재 tenant · 미삭제(RLS/필터 적용) → 타 tenant 미포함
-      const byCode = new Map<string, string[]>(), byName = new Map<string, string[]>();
-      for (const r of rows) {
-        if (r.is_active === false) continue;
-        const id = String(r.id);
-        const c = String(r.code ?? "").trim().toLowerCase(); if (c) { const a = byCode.get(c) ?? []; a.push(id); byCode.set(c, a); }
-        const n = String(r.name ?? "").trim().toLowerCase(); if (n) { const a = byName.get(n) ?? []; a.push(id); byName.set(n, a); }
-      }
-      lineIdx.current = { byCode, byName };
-    } catch { lineIdx.current = { byCode: new Map(), byName: new Map() }; }
-  }, [tenantId]);
-  const resolveLineId = (v: unknown): { id: string | null; error: string | null } => {
-    const s = String(v ?? "").trim(); if (!s) return { id: null, error: null };
-    const codes = lineIdx.current.byCode.get(s.toLowerCase());
-    if (codes && codes.length > 1) return { id: null, error: "같은 코드의 라인이 여러 개입니다" };
-    const names = lineIdx.current.byName.get(s.toLowerCase());
-    if (names && names.length > 1) return { id: null, error: "같은 이름의 라인이 여러 개입니다" };
-    if (codes && codes.length === 1) return { id: codes[0], error: null };
-    if (names && names.length === 1) return { id: names[0], error: null };
-    return { id: null, error: "존재하지 않는 라인입니다" };
-  };
 
   const analyze = useCallback(async (file: File) => {
     setError(null); setResults([]); setExpanded(new Set()); setNoRequiredSheet(false); setAnalyzing(true);
@@ -261,7 +235,6 @@ export default function ExamExcelImportPage({ darkMode, canEdit, tenantId, userI
       // 매핑 검증용 기준정보(제품군/공정/설비/레벨) + 중복검증용 기존 데이터
       const refTables = Array.from(new Set(configsUsed.flatMap((c) => c.cols.filter((k) => k.type === "ref").map((k) => k.refTable as ExamMasterTable))));
       await loadRefs(refTables);
-      if (configsUsed.some((c) => c.cols.some((k) => k.type === "line"))) await loadLines(); // [주 라인] 조합 매칭용 1회 배치 로드
       const existing: Record<string, Set<string>> = {};
       const keyOf = (cfg: SheetConfig, r: ExamRow) => cfg.dedup.map((k) => String(r[k] ?? "")).join("|");
       for (const cfg of configsUsed) if (cfg.table && cfg.dedup.length && !existing[cfg.canonical]) {
@@ -333,13 +306,6 @@ export default function ExamExcelImportPage({ darkMode, canEdit, tenantId, userI
               const id = mapRefTo(m.col.refTable as string, s);
               if (!id) { if (m.col.refErrorOnMiss) reasons.push(`존재하지 않는 ${m.col.mapPartToProcess ? "공정(파트)" : m.col.label}: ${s}`); row[m.col.key] = null; continue; }
               row[m.col.key] = id;
-            } else if (m.col.type === "line") {
-              // [주 라인] 빈 셀 → null(sync 시 기존값 보존). 코드/이름 정확 유일 일치만 · 미존재/중복/모호 = 행 오류.
-              const s = String(raw ?? "").trim();
-              if (!s) { row[m.col.key] = null; continue; }
-              const { id, error } = resolveLineId(s);
-              if (error) { reasons.push(`${error}: ${s}`); row[m.col.key] = null; continue; }
-              row[m.col.key] = id;
             } else if (m.col.type === "date") {
               if (!isValidDate(raw)) { reasons.push(`${m.col.label} 날짜형식 오류`); continue; }
               row[m.col.key] = ymd(raw);
@@ -377,7 +343,7 @@ export default function ExamExcelImportPage({ darkMode, canEdit, tenantId, userI
       setResults(out);
     } catch (e) { setError((e as { message?: string })?.message || "Excel 분석에 실패했습니다."); }
     finally { setAnalyzing(false); }
-  }, [tenantId, loadRefs, loadLines]);
+  }, [tenantId, loadRefs]);
 
   const reset = () => { setFileName(""); setResults([]); setError(null); setExpanded(new Set()); setNoRequiredSheet(false); setPersonnelApplied(false); if (fileRef.current) fileRef.current.value = ""; };
   const pick = (file?: File) => { if (!file) return; setPersonnelApplied(false); setFileName(file.name); void analyze(file); };

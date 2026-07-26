@@ -34,11 +34,21 @@ export type ExamEntityConfig = {
 //   - 컬럼은 실제 DB 에 존재하는 것만 노출한다(없는 컬럼을 payload 에 넣으면 400). 확장 필드는 컬럼 추가 migration 적용 후 활성화한다.
 export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
   {
-    // 라인(최상위): P3F/P3D/TSV/공통 등. 제품군~인증규칙과 독립된 축. 인증규칙에서 line_id 로 선택(공통=미지정).
-    key: "lines", title: "라인", table: "exam_lines",
+    // [라인 UI 제외] 라인 탭 숨김. 테이블·데이터·line_id·FK·index·migration·저장값(exam_rules 등)은 모두 보존(백엔드 호환).
+    key: "lines", title: "라인", table: "exam_lines", hidden: true,
     columns: [
       { key: "code", label: "코드", type: "text" },
       { key: "name", label: "라인명", type: "text", required: true },
+      { key: "sort_order", label: "정렬", type: "number" },
+    ],
+  },
+  {
+    // [순서 통일] 그룹 → 제품군 → 공정 → 장비 → 인증 레벨 → 인증 규칙(사용자 화면 표시 순서).
+    key: "groups", title: "그룹", table: "exam_groups",
+    columns: [
+      { key: "category_id", label: "제품군", type: "ref", refTable: "exam_categories" },
+      { key: "code", label: "코드", type: "text" },
+      { key: "name", label: "그룹명", type: "text", required: true },
       { key: "sort_order", label: "정렬", type: "number" },
     ],
   },
@@ -47,15 +57,6 @@ export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
     columns: [
       { key: "code", label: "코드", type: "text" },
       { key: "name", label: "제품군명", type: "text", required: true },
-      { key: "sort_order", label: "정렬", type: "number" },
-    ],
-  },
-  {
-    key: "groups", title: "그룹", table: "exam_groups",
-    columns: [
-      { key: "category_id", label: "제품군", type: "ref", refTable: "exam_categories" },
-      { key: "code", label: "코드", type: "text" },
-      { key: "name", label: "그룹명", type: "text", required: true },
       { key: "sort_order", label: "정렬", type: "number" },
     ],
   },
@@ -112,11 +113,10 @@ export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
     key: "rules", title: "인증 규칙", table: "exam_rules",
     columns: [
       { key: "rule_type", label: "기준 구분", type: "select", options: ["취득 기준", "달성 기준", "시험 유효기간", "목표 기준"], required: true },
-      // 적용 라인(선택 · 미지정=공통). 동일 제품군·공정이라도 라인별 다른 규칙 등록 가능. exam_rules.line_id(nullable) 필요(DRAFT).
-      { key: "line_id", label: "적용 라인", type: "ref", refTable: "exam_lines" },
-      { key: "category_id", label: "적용 제품군", type: "ref", refTable: "exam_categories" },
-      // 그룹은 제품군에 종속(exam_groups.category_id — 확실). 저장 컬럼.
+      // [라인 UI 제외] "적용 라인" select 제거. exam_rules.line_id 컬럼/저장값은 보존(수정 시 non-config 필드로 유지 · null 덮어쓰기 없음).
+      // [순서 통일] 적용 그룹 → 제품군 → 공정. 그룹은 제품군에 종속(exam_groups.category_id) — filterBy 유지.
       { key: "group_id", label: "적용 그룹", type: "ref", refTable: "exam_groups", filterBy: { formKey: "category_id", refField: "category_id" } },
+      { key: "category_id", label: "적용 제품군", type: "ref", refTable: "exam_categories" },
       // [계층 단순화] 제품/파트 단계 제거 → 공정을 그룹에 직접 종속시켜 표시/필터.
       //  공정 옵션의 group_id 는 exam_parts(part.group_id)에서 역추적해 채운다(ExamMasterGrid reload). group_id null 은 category_id fallback.
       //  기존 규칙의 exam_rules.part_id 값은 보존(저장하지 않을 뿐 삭제/변경하지 않음).

@@ -234,9 +234,8 @@ export default function ExamApplicationsPage({
   );
 
   // [라인 스냅샷] 현재 tenant 라인 옵션/맵(표시·검증). 사번→line_id 스냅샷 맵(후보/Excel: 행별 DB 조회 없이 재사용).
+  // [라인 UI 제외] 목록/상세 라인 표시 제거. line_id 스냅샷 저장/검증 로직은 유지(lineOptions·personnelLineByEmp).
   const lineOptions = useMemo(() => lineRows.filter((l) => l.is_active !== false).map((l) => ({ id: String(l.id), name: String(l.name ?? "").trim() || String(l.code ?? "").trim() || String(l.id) })), [lineRows]);
-  const lineMap = useMemo(() => new Map(lineOptions.map((o) => [o.id, o.name])), [lineOptions]);
-  const lineName = (id: unknown) => { const s = String(id ?? "").trim(); if (!s) return "라인 미지정"; return lineMap.get(s) ?? "라인 확인 필요"; };
   const personnelLineByEmp = useMemo(() => new Map(personnel.map((p) => [String(p.employee_no ?? "").trim(), p.line_id ? String(p.line_id) : null])), [personnel]);
 
   // [4단계] 공통 EmployeeSelector 표시값(선택된 연명부 → EmployeeLite). 기존 사번 select 와 동기화.
@@ -762,7 +761,6 @@ export default function ExamApplicationsPage({
               {visibleCols.map((c) => (
                 <th key={c.key} onClick={() => toggleSort(c.key)} className={`cursor-pointer select-none whitespace-nowrap px-2.5 py-2 hover:underline ${pinFirst && c.key === "employee_no" ? "sticky left-9 " + (darkMode ? "bg-slate-800" : "bg-slate-100") : ""}`}>{c.label}{sortKey === c.key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}</th>
               ))}
-              <th className="whitespace-nowrap px-2.5 py-2">라인</th>
               <th className="whitespace-nowrap px-2.5 py-2">작업</th>
             </tr>
           </thead>
@@ -798,7 +796,6 @@ export default function ExamApplicationsPage({
                             : displayCell(c, r)}
                     </td>
                   ))}
-                  <td className="whitespace-nowrap px-2.5 py-2">{lineName(r.line_id)}</td>
                   <td className="whitespace-nowrap px-2.5 py-2">
                     <button className="text-slate-500 hover:underline" onClick={(e) => { e.stopPropagation(); openDetail(r); }}>상세</button>
                     <span className="mx-1 text-slate-300">·</span>
@@ -808,7 +805,7 @@ export default function ExamApplicationsPage({
                 </tr>
               );
             })}
-            {!loading && paged.length === 0 && <tr><td colSpan={visibleCols.length + 3} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
+            {!loading && paged.length === 0 && <tr><td colSpan={visibleCols.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1052,7 +1049,7 @@ export default function ExamApplicationsPage({
           <div className={`my-8 w-full max-w-2xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-start justify-between">
               <div><h3 className="text-lg font-semibold">{String(detailRow.name || "-")} <span className="text-sm font-normal text-slate-500">시험 응시 상세</span></h3>
-                <p className="text-sm text-slate-500">사번 {String(detailRow.employee_no || "-")} · 구분코드 {String(detailRow.category_code || "-")} · 라인 {lineName(detailRow.line_id)}</p></div>
+                <p className="text-sm text-slate-500">사번 {String(detailRow.employee_no || "-")} · 구분코드 {String(detailRow.category_code || "-")}</p></div>
               {/* 빠른 액션: 상세 → 기존 등록/수정 폼(edit 모드) 재사용. 수정 권한 없으면 미표시(§19·§24). */}
               <div className="flex items-center gap-1">
                 {canEdit && <button onClick={() => { const r = detailRow; setDetailRow(null); setEditRow({ ...r }); }} className="rounded-lg border border-blue-500 px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40">수정</button>}

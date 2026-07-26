@@ -73,7 +73,7 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   // [기준정보 연동] 제품군→그룹 계층 선택용 원본 행(부모 FK 가 필요해 listExamRefOptions 대신 listExamRows 사용).
   //  [Line 전환] exam_annual_targets / exam_monthly_results 에 group_id(nullable FK) 추가됨(20260741 DRAFT 적용).
   //  저장: 텍스트 identity(product_group/group_name/part_name) 유지 + group_id(정규화 축) 저장. 기존 part_id 는 보존.
-  const [master, setMaster] = useState<{ categories: ExamRow[]; groups: ExamRow[]; parts: ExamRow[]; lines: ExamRow[] }>({ categories: [], groups: [], parts: [], lines: [] });
+  const [master, setMaster] = useState<{ categories: ExamRow[]; groups: ExamRow[]; parts: ExamRow[] }>({ categories: [], groups: [], parts: [] });
   const [scopeSel, setScopeSel] = useState<{ categoryId: string; groupId: string; partId: string }>({ categoryId: "", groupId: "", partId: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +116,6 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   const MANUAL_KEYS = useMemo(() => new Set(["target_count", "notes"]), []);
   const isColEditable = useCallback((key: string, isNew: boolean) => {
     if (AUTO_ACTUAL_KEYS.has(key)) return false;                 // 자동 실적값: 편집 불가
-    if (key === "line_id") return true;                          // 라인(부가 축): 신규·수정 모두 편집 가능
     if (MANUAL_KEYS.has(key)) return true;                        // 목표/비고: 항상
     return isNew && IDENTITY.includes(key);                       // 식별자: 신규 등록 시만
   }, [AUTO_ACTUAL_KEYS, MANUAL_KEYS]);
@@ -126,15 +125,14 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
-      const [data, lv, cats, grps, prts, lns] = await Promise.all([
+      const [data, lv, cats, grps, prts] = await Promise.all([
         listExamRows(cfg.table, tenantId),
         hasLevel ? listExamRefOptions("exam_levels", tenantId) : Promise.resolve([] as RefOpt[]),
         listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
-        listExamRows("exam_lines", tenantId).catch(() => [] as ExamRow[]),   // [라인] 현재 tenant 라인만(미적용 시 [] → 라인 옵션만 비고, 오류 없음)
       ]);
-      setRows(data); setLevels(lv); setMaster({ categories: cats, groups: grps, parts: prts, lines: lns });
+      setRows(data); setLevels(lv); setMaster({ categories: cats, groups: grps, parts: prts });
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [cfg.table, tenantId, hasLevel]);
@@ -155,24 +153,8 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   }, [editRow, recordsLoaded, tenantId]);
 
   const levelLabel = (id: unknown) => (!id ? "-" : (levels.find((o) => o.id === String(id))?.label || "-"));
-  // [라인] 현재 tenant 활성 라인 옵션(id/이름/코드). 행마다 find 없이 Map 조회. line_id 는 부가 축(identity 아님).
-  const lineOpts = useMemo(() => master.lines.filter((l) => l.is_active !== false)
-    .map((l) => ({ id: String(l.id), name: String(l.name ?? "").trim() || String(l.code ?? "").trim() || String(l.id), code: String(l.code ?? "").trim() }))
-    .sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.lines]);
-  const lineMap = useMemo(() => new Map(lineOpts.map((o) => [o.id, o.name])), [lineOpts]);
-  const lineName = (id: unknown) => { const s = String(id ?? "").trim(); if (!s) return "라인 미지정"; return lineMap.get(s) ?? "라인 확인 필요"; };
-  // Excel 라인 매핑: 코드 정확 일치(대소문자 무시) 우선 → 이름 정확 일치, "유일 1건"일 때만 line_id. 미존재/중복/빈값 → null.
-  const matchLine = (raw: string): string | null => {
-    const s = raw.trim(); if (!s) return null;
-    const byCode = lineOpts.filter((o) => o.code && o.code.toLowerCase() === s.toLowerCase());
-    if (byCode.length === 1) return byCode[0].id;
-    const byName = lineOpts.filter((o) => o.name === s);
-    if (byName.length === 1) return byName[0].id;
-    return null;
-  };
   const cellText = (c: Col, r: ExamRow) => {
     if (c.type === "computed") return String(c.compute!(r));
-    if (c.type === "line") return lineName(r[c.key]);   // id 대신 라인 이름(개발값 비노출)
     if (c.type === "ref") return levelLabel(r[c.key]);
     const v = r[c.key];
     if (v === null || v === undefined || v === "") return "-";
@@ -348,8 +330,6 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   const saveRow = async () => {
     if (!editRow) return;
     for (const c of formCols) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
-    // [라인] 선택된 line_id 는 현재 tenant 라인 옵션에 존재해야 저장(잘못된/타 tenant 값 차단). 미지정(null)은 허용.
-    { const lid = String(editRow.line_id ?? "").trim(); if (lid && !lineOpts.some((o) => o.id === lid)) { setError("선택한 라인을 확인할 수 없습니다. 목록에서 다시 선택해 주세요."); return; } }
     // [Line 전환] 계층 무결성 검증(신규 등록만). 그룹까지만 필수 — 제품/파트 필수 검증 제거.
     if (!editRow.id) {
       if (!scopeSel.categoryId) { setError("제품군을 선택해 주세요."); return; }
@@ -403,7 +383,7 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
     onEnter: (i) => { if (canEdit && paged[i]) setEditRow({ ...paged[i] }); },
   });
 
-  const exportRows = () => filtered.map((r) => { const o: Record<string, string | number> = {}; cfg.cols.forEach((c) => { o[c.label] = c.type === "computed" ? c.compute!(r) : c.type === "line" ? (r.line_id ? lineName(r.line_id) : "") : (c.type === "ref" ? levelLabel(r[c.key]) : (r[c.key] as string ?? "")); }); return o; });
+  const exportRows = () => filtered.map((r) => { const o: Record<string, string | number> = {}; cfg.cols.forEach((c) => { o[c.label] = c.type === "computed" ? c.compute!(r) : (c.type === "ref" ? levelLabel(r[c.key]) : (r[c.key] as string ?? "")); }); return o; });
   const exportExcel = () => { const ws = XLSX.utils.json_to_sheet(exportRows()); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, cfg.title); XLSX.writeFile(wb, `시험관리_${cfg.fileBase}.xlsx`); };
   const exportPdf = () => {
     const w = window.open("", "_blank", "width=1180,height=800"); if (!w) return;
@@ -436,8 +416,7 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
         const r = raw[i]; const cell = makeExcelRowReader(r); const row: ExamRow = {};
         for (const c of formCols) {
           const v = cell(c.label);
-          if (c.type === "line") { row.line_id = matchLine(String(v ?? "")); } // [라인] 코드/이름 유일 일치 시에만 line_id, 미존재·중복·빈값 → null. identity/충돌키 무관.
-          else if (c.type === "number") { const s = String(v ?? "").replace(/[^0-9.-]/g, ""); row[c.key] = s === "" ? null : Math.round(Number(s)); }
+          if (c.type === "number") { const s = String(v ?? "").replace(/[^0-9.-]/g, ""); row[c.key] = s === "" ? null : Math.round(Number(s)); }
           else if (c.type === "ref") { const s = String(v ?? "").trim(); const opt = levels.find((o) => o.label === s || o.label.includes(s)); row[c.key] = opt ? opt.id : null; }
           else { const s = String(v ?? "").replace(/#REF!|#N\/A|#VALUE!/gi, "").trim(); row[c.key] = s || null; }
         }
@@ -616,12 +595,6 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
                       <option value="">{scopeSel.categoryId ? "선택" : "제품군을 먼저 선택"}</option>
                       {groupOpts.map((o) => <option key={String(o.id)} value={String(o.id)}>{optLabel(o, groupOpts)}</option>)}
                     </select>
-                  ) : c.type === "line" ? (
-                    // [라인] 독립 선택(선택 · 비필수). 변경해도 제품군/그룹/공정/레벨/파트/연도 초기화하지 않음. "" → null.
-                    <select className={`${inputCls} w-full`} value={String(editRow.line_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), line_id: e.target.value || null }))}>
-                      <option value="">라인 미지정</option>
-                      {lineOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-                    </select>
                   ) : c.type === "ref" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}><option value="">선택</option>{levels.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
                   ) : c.type === "select" ? (
@@ -691,11 +664,9 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
 
 const ANNUAL_COLS: Col[] = [
   { key: "year", label: "연도", type: "number", required: true, filter: true },
-  // [라인] 부가 축(선택 · identity 아님). 연도 다음 · 제품군 이전. Excel 헤더 "라인"(구양식엔 없어도 호환).
-  { key: "line_id", label: "라인", type: "line", hideable: true },
-  // [Line 전환] 표시/입력 순서: 제품군 → 그룹. 파트는 레거시(기본 숨김·필터 제외 · 라벨은 Excel 헤더 호환 위해 "파트" 유지).
-  { key: "product_group", label: "제품군", type: "text", filter: true },
+  // [라인 UI 제외] 라인 컬럼 제거(line_id 저장값은 보존). [순서 통일] 그룹 → 제품군.
   { key: "group_name", label: "그룹", type: "text", filter: true },
+  { key: "product_group", label: "제품군", type: "text", filter: true },
   { key: "part_name", label: "파트", type: "text", hideable: true },
   { key: "level_id", label: "인증레벨", type: "ref", refTable: "exam_levels", filter: true },
   { key: "current_count", label: "현재인원", type: "number" },
@@ -707,11 +678,9 @@ const ANNUAL_COLS: Col[] = [
 
 const MONTHLY_COLS: Col[] = [
   { key: "year", label: "연도", type: "number", required: true, filter: true },
-  // [라인] 부가 축(선택 · identity 아님). 연도 다음 · 제품군 이전.
-  { key: "line_id", label: "라인", type: "line", hideable: true },
-  // [Line 전환] 표시/입력 순서: 제품군 → 그룹. 파트는 레거시(기본 숨김·필터 제외 · 라벨 "파트" 유지 → Excel 호환).
-  { key: "product_group", label: "제품군", type: "text", filter: true },
+  // [라인 UI 제외] 라인 컬럼 제거(line_id 저장값은 보존). [순서 통일] 그룹 → 제품군.
   { key: "group_name", label: "그룹", type: "text", filter: true },
+  { key: "product_group", label: "제품군", type: "text", filter: true },
   { key: "part_name", label: "파트", type: "text", hideable: true },
   { key: "level_id", label: "인증레벨", type: "ref", refTable: "exam_levels", filter: true },
   ...MONTHS.map((k, i) => ({ key: k, label: `${i + 1}월`, type: "number" as ColType, hideable: true })),

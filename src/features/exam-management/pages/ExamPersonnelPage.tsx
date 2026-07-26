@@ -18,7 +18,7 @@ import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
 type ColType = "text" | "date" | "number" | "select" | "boolean";
 type Col = { key: string; label: string; type: ColType; options?: string[]; required?: boolean; filter?: boolean };
 // 인증 기준관리 참조 옵션(부모 FK 포함) — 인력현황 기준정보 연동(cascade)용.
-type MRef = { id: string; label: string; name: string; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null; line_id?: string | null; code?: string };
+type MRef = { id: string; label: string; name: string; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null };
 
 const COLS: Col[] = [
   { key: "employee_no", label: "사번", type: "text", required: true },
@@ -98,51 +98,26 @@ export default function ExamPersonnelPage({
   const [confirmClose, setConfirmClose] = useState(false);
   const [activeIdx, setActiveIdx] = useState(-1);
   // 인증 기준관리 마스터(제품군/그룹/제품·파트/공정) — 기준정보 연동 cascade 옵션.
-  const [master, setMaster] = useState<{ categories: MRef[]; groups: MRef[]; parts: MRef[]; processes: MRef[]; lines: MRef[]; levels: MRef[] }>({ categories: [], groups: [], parts: [], processes: [], lines: [], levels: [] });
+  const [master, setMaster] = useState<{ categories: MRef[]; groups: MRef[]; parts: MRef[]; processes: MRef[]; levels: MRef[] }>({ categories: [], groups: [], parts: [], processes: [], levels: [] });
   useEffect(() => {
     let alive = true;
     const toOpt = (r: ExamRow): MRef => ({
       id: String(r.id), name: String(r.name ?? ""), label: [r.code, r.name].filter(Boolean).join(" · ") || String(r.name ?? r.id),
       is_active: r.is_active !== false, category_id: (r.category_id ?? null) as string | null, group_id: (r.group_id ?? null) as string | null, part_id: (r.part_id ?? null) as string | null,
-      line_id: (r.line_id ?? null) as string | null,   // [주 라인] 기준정보 행에 명시적 line_id 가 있으면 매핑(현재 공정/그룹/제품군 테이블엔 없음 → null)
-      code: String(r.code ?? "").trim(),                // [Excel 라인] 코드 정확 일치 매칭용
     });
     (async () => {
-      const [categories, groups, parts, processes, lines, levels] = await Promise.all([
+      const [categories, groups, parts, processes, levels] = await Promise.all([
         listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
-        listExamRows("exam_lines", tenantId).catch(() => [] as ExamRow[]),   // [주 라인] 현재 tenant 라인만(미적용 시 [] → 라인 옵션만 비고, 페이지 정상)
         listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),  // [빠른 선택] 규칙 조합 라벨의 인증레벨명 표시용(1회 배치 로드)
       ]);
-      if (alive) setMaster({ categories: categories.map(toOpt), groups: groups.map(toOpt), parts: parts.map(toOpt), processes: processes.map(toOpt), lines: lines.map(toOpt), levels: levels.map(toOpt) });
+      if (alive) setMaster({ categories: categories.map(toOpt), groups: groups.map(toOpt), parts: parts.map(toOpt), processes: processes.map(toOpt), levels: levels.map(toOpt) });
     })();
     return () => { alive = false; };
   }, [tenantId]);
 
-  // [주 라인] 현재 tenant 활성 라인 옵션(id/이름). 행마다 find 없이 Map 조회. line_id 는 부가 축(identity 아님).
-  const lineOptions = useMemo(() => master.lines.filter((o) => o.is_active)
-    .map((o) => ({ id: o.id, name: (o.name && o.name.trim()) || o.label }))
-    .sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.lines]);
-  const lineMap = useMemo(() => new Map(lineOptions.map((o) => [o.id, o.name])), [lineOptions]);
-  const lineName = (id: unknown) => { const s = String(id ?? "").trim(); if (!s) return "라인 미지정"; return lineMap.get(s) ?? "라인 확인 필요"; };
-  // [Excel] 라인 이름 전체 맵(활성·비활성 포함) — Export 표시용(조회 불가/null → 빈 셀). UUID 비노출.
-  const lineFullMap = useMemo(() => new Map(master.lines.map((o) => [o.id, (o.name && o.name.trim()) || o.code || ""])), [master.lines]);
-  // [Excel] 라인 코드/이름 역인덱스(현재 tenant · 대소문자 무시 · 중복 감지). 부분일치/추정 금지.
-  const lineByCode = useMemo(() => { const m = new Map<string, string[]>(); master.lines.forEach((o) => { const c = (o.code || "").trim().toLowerCase(); if (c) { const a = m.get(c) ?? []; a.push(o.id); m.set(c, a); } }); return m; }, [master.lines]);
-  const lineByName = useMemo(() => { const m = new Map<string, string[]>(); master.lines.forEach((o) => { const n = (o.name || "").trim().toLowerCase(); if (n) { const a = m.get(n) ?? []; a.push(o.id); m.set(n, a); } }); return m; }, [master.lines]);
-  // 라인 셀 → line_id. 빈값=미지정(null). 코드 정확일치 우선 → 이름 정확일치. 0건/2건↑/모호 = error.
-  const resolveLineCell = (raw: unknown): { id: string | null; error: string | null } => {
-    const s = String(raw ?? "").trim(); if (!s) return { id: null, error: null };
-    const codes = lineByCode.get(s.toLowerCase());
-    if (codes && codes.length > 1) return { id: null, error: "같은 코드의 라인이 여러 개입니다." };
-    const names = lineByName.get(s.toLowerCase());
-    if (names && names.length > 1) return { id: null, error: "같은 이름의 라인이 여러 개입니다." };
-    if (codes && codes.length === 1) return { id: codes[0], error: null };
-    if (names && names.length === 1) return { id: names[0], error: null };
-    return { id: null, error: "존재하지 않는 라인입니다." };
-  };
 
   // [빠른 선택] 이미 로드된 exam_rules(활성·현재 tenant) + master 를 재사용해 "조합" dropdown 소스 생성(추가 조회 없음).
   //  중복 제거 키 = line/category/group/process/level(rule_type 제외). rule_id 는 직원에 저장하지 않으므로 조합 기준 dedup.
@@ -154,37 +129,31 @@ export default function ExamPersonnelPage({
   const levelMap = useMemo(() => idNameMap(master.levels), [master.levels]);
   const ruleCombos = useMemo(() => {
     const seen = new Set<string>();
-    const out: Array<{ key: string; line_id: string | null; category_id: string | null; group_id: string | null; process_id: string | null; label: string }> = [];
+    const out: Array<{ key: string; category_id: string | null; group_id: string | null; process_id: string | null; label: string }> = [];
     for (const r of rules) {
       if (r.is_active === false || r.deleted_at) continue;           // tenant·deleted_at 은 listExamRows 가 이미 필터
-      const line_id = r.line_id ? String(r.line_id) : null;
       const category_id = r.category_id ? String(r.category_id) : null;
       const group_id = r.group_id ? String(r.group_id) : null;
       const process_id = r.process_id ? String(r.process_id) : null;
       const level_id = r.level_id ? String(r.level_id) : null;
-      const key = JSON.stringify([line_id, category_id, group_id, process_id, level_id]); // 안정적 조합 키(라벨 충돌 무관)
+      const key = JSON.stringify([category_id, group_id, process_id, level_id]); // 안정적 조합 키(라인 제외)
       if (seen.has(key)) continue;
       seen.add(key);
-      const lineLabel = !line_id ? "라인 미지정" : (lineMap.get(line_id) ?? "라인 확인 필요");
-      const label = `${lineLabel} / ${nameOf(categoryMap, category_id)} / ${nameOf(groupMap, group_id)} / ${nameOf(processMap, process_id)} / ${nameOf(levelMap, level_id)}`;
-      out.push({ key, line_id, category_id, group_id, process_id, label });
+      // [순서 통일] 그룹 / 제품군 / 공정 / 인증레벨 (라인 UI 제외)
+      const label = `${nameOf(groupMap, group_id)} / ${nameOf(categoryMap, category_id)} / ${nameOf(processMap, process_id)} / ${nameOf(levelMap, level_id)}`;
+      out.push({ key, category_id, group_id, process_id, label });
     }
     return out.sort((a, b) => a.label.localeCompare(b.label, "ko"));
-  }, [rules, categoryMap, groupMap, processMap, levelMap, lineMap]);
+  }, [rules, categoryMap, groupMap, processMap, levelMap]);
   const ruleComboMap = useMemo(() => new Map(ruleCombos.map((c) => [c.key, c])), [ruleCombos]);
-  // 조합 선택 → 명시적 값만 부분 반영(라인/제품군/그룹/공정). cert_level·장비·인력 고유값(사번/이름/직책/입사일/재직/경력/비고/part)은 미변경.
+  // 조합 선택 → 제품군/그룹/공정만 부분 반영. [라인 제외] line_id 는 변경하지 않음(기존 값 유지). 인력 고유값·cert_level·part 미변경.
   const applyRuleCombo = (key: string) => {
     const c = ruleComboMap.get(key); if (!c) return;
-    let linePatch: Partial<ExamRow>;
-    if (c.line_id) {
-      if (!lineOptions.some((o) => o.id === c.line_id)) { setError("선택한 기준정보의 라인을 현재 조직에서 확인할 수 없습니다."); return; }
-      linePatch = { line_id: c.line_id };                            // 명시적·tenant 유효 line_id 만 반영
-    } else linePatch = { line_id: null };                            // 규칙 line_id 없음 → 라인 미지정
     const cat = c.category_id ? master.categories.find((o) => o.id === c.category_id) : undefined;
     const grp = c.group_id ? master.groups.find((o) => o.id === c.group_id) : undefined;
     const proc = c.process_id ? master.processes.find((o) => o.id === c.process_id) : undefined;
     setError(null);
-    setEditRow((f) => ({ ...(f || {}), ...linePatch,               // 명시적 값 없는 필드는 기존값 유지(이름 역추정 금지)
+    setEditRow((f) => ({ ...(f || {}),                              // 명시적 값 없는 필드는 기존값 유지(이름 역추정 금지)
       ...(cat ? { _cat_id: cat.id, product_group: cat.name } : {}),
       ...(grp ? { _group_id: grp.id, group_name: grp.name } : {}),
       ...(proc ? { process_id: proc.id } : {}),
@@ -263,8 +232,6 @@ export default function ExamPersonnelPage({
   const saveRow = async () => {
     if (!editRow) return;
     for (const c of COLS) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
-    // [주 라인] 선택된 line_id 는 현재 tenant 라인 옵션에 존재해야 저장(잘못된/타 tenant 값 차단). 미지정(null)은 허용.
-    { const lid = String(editRow.line_id ?? "").trim(); if (lid && !lineOptions.some((o) => o.id === lid)) { setError("선택한 라인을 확인할 수 없습니다. 목록에서 다시 선택해 주세요."); return; } }
     // 기준정보 연동 무결성: [Line 전환] 공정↔그룹만 검증(제품/파트 단계 제거). 기존 part_id 는 검증하지 않고 보존.
     {
       const selProc = master.processes.find((o) => o.id === String(editRow.process_id ?? ""));
@@ -342,8 +309,6 @@ export default function ExamPersonnelPage({
       const o: Record<string, string> = {};
       COLS.forEach((c) => {
         o[c.label] = cellText(c, r);
-        // [라인] 이름 컬럼 뒤에 "라인" 삽입(제품군/그룹 앞). line_id 이름 · null/조회불가 → 빈 셀(UUID 비노출).
-        if (c.key === "name") o["라인"] = r.line_id ? (lineFullMap.get(String(r.line_id)) || "") : "";
       });
       o["재직기간"] = tenureText(r.hire_date);
       return o;
@@ -371,12 +336,7 @@ export default function ExamPersonnelPage({
           else if (c.type === "boolean") { const s = String(v ?? "").trim().toLowerCase(); row[c.key] = ["o", "예", "y", "true", "1", "가능"].includes(s) ? true : (s === "" ? null : false); }
           else { row[c.key] = String(v ?? "").trim() || null; }
         }
-        // [라인] optional 컬럼(라인/주 라인/주라인). 코드/이름 정확 유일 일치 시 line_id, 그 외(미존재/중복/모호)는 null.
-        //  개별 Import 는 신규 사원만 등록(기존 사번은 아래에서 skip)·preview 없음 → 라인 불일치로 사원을 드롭하지 않고 null 로 등록(레니언트).
-        {
-          const lineRaw = cell("라인") || cell("주 라인") || cell("주라인");
-          row.line_id = resolveLineCell(lineRaw).id;
-        }
+        // [라인 UI 제외] 과거 파일의 "라인/주 라인" 헤더가 있어도 무시(Import 실패 없음). line_id 는 설정하지 않음(기존값 보존 · 신규는 null).
         const empNo = String(row.employee_no ?? "").trim();
         if (!empNo || !String(row.name ?? "").trim()) { skipped++; continue; }
         if (await isDuplicateEmployeeNo(tenantId, empNo)) { skipped++; continue; } // 중복 사번 스킵
@@ -484,13 +444,7 @@ export default function ExamPersonnelPage({
     // 제품군/그룹 변경 시 공정만 초기화. 기존 part_id/part_name 은 보존(자동 null 금지 · 레거시/Excel 호환).
     const onCat = (id: string) => { const c = byId(master.categories, id); set({ _cat_id: id || null, product_group: c ? c.name : e.product_group, _group_id: null, group_name: null, process_id: null }); };
     const onGroup = (id: string) => { const g = byId(master.groups, id); set({ _group_id: id || null, group_name: g ? g.name : null, _cat_id: g?.category_id ?? e._cat_id ?? null, process_id: null }); };
-    // [주 라인] 선택한 공정 행에 "명시적" line_id 가 있고 현재 tenant 라인이면 자동 반영. 없으면 기존 라인 유지
-    //  (공정→라인 추정 금지 · cascade 변경 시 라인 초기화 금지). 현재 exam_processes 에 line_id 컬럼이 없어 사실상 유지만.
-    const onProc = (id: string) => {
-      const p = byId(master.processes, id);
-      const ln = String(p?.line_id ?? "").trim();
-      set({ process_id: id || null, ...(ln && lineOptions.some((o) => o.id === ln) ? { line_id: ln } : {}) });
-    };
+    const onProc = (id: string) => set({ process_id: id || null });
 
     const box = (label: string, hint: string, node: ReactNode) => (
       <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{label}</label>{node}{hint && <p className="mt-0.5 text-[0.65rem] text-slate-400">{hint}</p>}</div>
@@ -500,13 +454,13 @@ export default function ExamPersonnelPage({
     const opt = (o: MRef) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}{o.is_active ? "" : " (미사용)"}</option>;
     return (
       <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
-        <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">빠른 선택 시 라인·제품군·그룹·공정 자동 반영 · 이후 개별 수정 가능</span></div>
+        <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">빠른 선택 시 그룹·제품군·공정 자동 반영 · 이후 개별 수정 가능</span></div>
         {/* [빠른 선택] 인증규칙(exam_rules) 조합 · 초기 입력 편의(선택 후 아래 필드 수동 수정 가능 · rule_id 미저장). */}
         {ruleCombos.length === 0 ? (
           <p className="mb-3 text-[0.7rem] text-slate-400">사용 가능한 인증 기준이 없습니다. 아래에서 직접 선택하세요.</p>
         ) : (
           <div className="mb-3">
-            <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">빠른 선택 <span className="text-slate-400">(라인 / 제품군 / 그룹 / 공정 / 인증레벨)</span></label>
+            <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">빠른 선택 <span className="text-slate-400">(그룹 / 제품군 / 공정 / 인증레벨)</span></label>
             <select className={`${inputCls} w-full`} value="" onChange={(ev) => { if (ev.target.value) applyRuleCombo(ev.target.value); }}>
               <option value="">기준정보를 선택하세요</option>
               {ruleCombos.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
@@ -514,9 +468,9 @@ export default function ExamPersonnelPage({
           </div>
         )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {box("라인 (선택 · 주 라인)", "", <select className={`${inputCls} w-full`} value={String(e.line_id ?? "")} onChange={(ev) => set({ line_id: ev.target.value || null })}><option value="">라인 미지정</option>{lineOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>)}
+          {/* [순서 통일] 그룹 → 제품군 → 공정. 종속 로직(제품군→그룹 filter)은 유지 · 그룹 선택 시 제품군 자동 반영. */}
+          {box("그룹", "", <select className={`${inputCls} w-full`} value={groupId} onChange={(ev) => onGroup(ev.target.value)}><option value="">선택</option>{groupOpts.map(opt)}</select>)}
           {box("제품군", "", <select className={`${inputCls} w-full`} value={catId} onChange={(ev) => onCat(ev.target.value)}><option value="">선택</option>{catOpts.map(opt)}</select>)}
-          {box("그룹", !catId ? "제품군을 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={groupId} onChange={(ev) => onGroup(ev.target.value)}><option value="">선택</option>{groupOpts.map(opt)}</select>)}
           {box("공정", !groupId ? "그룹을 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={String(e.process_id ?? "")} onChange={(ev) => onProc(ev.target.value)}><option value="">선택</option>{procOpts.map(opt)}</select>)}
         </div>
       </div>
@@ -567,7 +521,6 @@ export default function ExamPersonnelPage({
                   {c.key === "hire_date" ? "" : ""}
                 </th>
               ))}
-              <th className="whitespace-nowrap px-2.5 py-2">라인</th>
               <th className="whitespace-nowrap px-2.5 py-2">재직기간</th>
               <th className="whitespace-nowrap px-2.5 py-2">작업</th>
             </tr>
@@ -590,7 +543,6 @@ export default function ExamPersonnelPage({
                     })() : cellText(c, r)}
                   </td>
                 ))}
-                <td className="whitespace-nowrap px-2.5 py-2">{lineName(r.line_id)}</td>
                 <td className="whitespace-nowrap px-2.5 py-2">{tenureText(r.hire_date)}</td>
                 <td className="whitespace-nowrap px-2.5 py-2">
                   <button className="text-slate-500 hover:underline" onClick={(e) => { e.stopPropagation(); void openDetail(r); }}>상세</button>
@@ -605,7 +557,7 @@ export default function ExamPersonnelPage({
                 </td>
               </tr>
             ))}
-            {!loading && paged.length === 0 && <tr><td colSpan={TABLE_COLS.length + 3} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
+            {!loading && paged.length === 0 && <tr><td colSpan={TABLE_COLS.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -696,7 +648,6 @@ export default function ExamPersonnelPage({
               <div>
                 <h3 className="text-lg font-semibold">{String(detailRow.name || "-")} <span className="text-sm font-normal text-slate-500">인증 상세</span></h3>
                 <p className="text-sm text-slate-500">사번 {String(detailRow.employee_no || "-")} · {String(detailRow.part_name || "-")} · {String(detailRow.position || "-")}</p>
-                <p className="text-sm text-slate-500">라인 {lineName(detailRow.line_id)}</p>
               </div>
               <button onClick={() => setDetailRow(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">✕</button>
             </div>

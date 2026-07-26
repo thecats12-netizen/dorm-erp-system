@@ -32,31 +32,29 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
   const [targets, setTargets] = useState<ExamRow[]>([]);
   const [monthly, setMonthly] = useState<ExamRow[]>([]);
   const [levels, setLevels] = useState<Array<{ id: string; label: string }>>([]);
-  // [계층 표시/필터] 라인·장비 기준정보(id→이름 매핑 · 필터 옵션용). 저장 구조/통계 무관.
-  const [lineRows, setLineRows] = useState<ExamRow[]>([]);
+  // [장비] 기준정보(id→이름 매핑 · 필터 옵션용). 저장 구조/통계 무관. [라인 UI 제외]
   const [equipRows, setEquipRows] = useState<ExamRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<ReportType>("전체 인증 현황");
   const [search, setSearch] = useState("");
-  // line/equipment 는 id 로 저장(표시는 이름 매핑). 기본 "전체" → 기존 집계/합계 불변.
-  const [f, setF] = useState({ year: "전체", month: "전체", line: "전체", group: "전체", product: "전체", part: "전체", process: "전체", equipment: "전체", level: "전체" });
+  // equipment 는 id 로 저장(표시는 이름 매핑). 기본 "전체" → 기존 집계/합계 불변. [라인 UI 제외]
+  const [f, setF] = useState({ year: "전체", month: "전체", group: "전체", product: "전체", part: "전체", process: "전체", equipment: "전체", level: "전체" });
 
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
     setLoading(true); setError(null);
     try {
-      const [p, a, c, t, m, lv, ln, eq] = await Promise.all([
+      const [p, a, c, t, m, lv, eq] = await Promise.all([
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_annual_targets", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_monthly_results", tenantId).catch(() => [] as ExamRow[]),
         listExamRefOptions("exam_levels", tenantId).catch(() => []),
-        listExamRows("exam_lines", tenantId).catch(() => [] as ExamRow[]),      // 미적용(DRAFT) 시 [] → 라인 옵션만 비고, 오류 없음
         listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setMonthly(m); setLevels(lv); setLineRows(ln); setEquipRows(eq);
+      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setMonthly(m); setLevels(lv); setEquipRows(eq);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId, refreshKey]);
@@ -78,40 +76,33 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
     };
   }, [personnel, apps, targets, monthly, levels]);
 
-  // [라인·장비] 기준정보 id→이름 옵션/맵(활성만 · 이름 정렬). 행마다 find 반복 없이 Map 조회.
-  const lineOpts = useMemo(() => lineRows.filter((r) => r.is_active !== false)
-    .map((r) => ({ id: str(r.id), name: str(r.name) || str(r.code) || str(r.id) }))
-    .sort((x, y) => x.name.localeCompare(y.name, "ko")), [lineRows]);
+  // [장비] 기준정보 id→이름 옵션/맵(활성만 · 이름 정렬). 행마다 find 반복 없이 Map 조회. [라인 UI 제외]
   const equipOpts = useMemo(() => equipRows.filter((r) => r.is_active !== false)
     .map((r) => ({ id: str(r.id), name: str(r.name) || str(r.code) || str(r.id) }))
     .sort((x, y) => x.name.localeCompare(y.name, "ko")), [equipRows]);
-  const lineMap = useMemo(() => new Map(lineOpts.map((o) => [o.id, o.name])), [lineOpts]);
   const equipMap = useMemo(() => new Map(equipOpts.map((o) => [o.id, o.name])), [equipOpts]);
 
-  // 데이터셋별 필터.
-  // [라인] 모든 데이터셋에 적용하되, 특정 라인 선택 시 line_id 가 명확히 일치하는 행만(미지정 행은 임의 분류 안 함).
-  //  현재 대부분 데이터에 line_id 가 없어 특정 라인 선택 시 0건일 수 있음(정상 · 임의 추정 금지). "전체"는 무영향.
-  const lineOk = useCallback((r: ExamRow) => f.line === "전체" || str(r.line_id) === f.line, [f.line]);
-  const fPersonnel = useMemo(() => personnel.filter((r) => lineOk(r) &&
+  // 데이터셋별 필터. [라인 UI 제외] 라인 필터 없음 → 전체 집계 기본(line_id 유무로 데이터 누락 없음).
+  const fPersonnel = useMemo(() => personnel.filter((r) =>
     (f.group === "전체" || str(r.group_name) === f.group) && (f.product === "전체" || str(r.product_group) === f.product) &&
     (f.part === "전체" || str(r.part_name) === f.part) && (f.level === "전체" || str(r.cert_level) === f.level)
-  ), [personnel, f, lineOk]);
+  ), [personnel, f]);
   const fApps = useMemo(() => apps.filter((r) => {
     const ym = appMonth(r);
-    return lineOk(r) && (f.equipment === "전체" || str(r.equipment_id) === f.equipment) &&
+    return (f.equipment === "전체" || str(r.equipment_id) === f.equipment) &&
       (f.year === "전체" || ym.slice(0, 4) === f.year) && (f.month === "전체" || ym.slice(5, 7) === f.month) &&
       (f.group === "전체" || str(r.group_name) === f.group) && (f.product === "전체" || str(r.product) === f.product) &&
       (f.process === "전체" || str(r.process) === f.process) && (f.level === "전체" || levelLabel(r.level_id) === f.level);
-  }), [apps, f, levelLabel, lineOk]);
-  const fCerts = useMemo(() => certs.filter((r) => lineOk(r) && (() => { const ym = ymd(r.acquired_date).slice(0, 7); return (f.year === "전체" || !ym || ym.slice(0, 4) === f.year) && (f.month === "전체" || !ym || ym.slice(5, 7) === f.month); })()), [certs, f, lineOk]);
-  const fTargets = useMemo(() => targets.filter((r) => lineOk(r) &&
+  }), [apps, f, levelLabel]);
+  const fCerts = useMemo(() => certs.filter((r) => { const ym = ymd(r.acquired_date).slice(0, 7); return (f.year === "전체" || !ym || ym.slice(0, 4) === f.year) && (f.month === "전체" || !ym || ym.slice(5, 7) === f.month); }), [certs, f]);
+  const fTargets = useMemo(() => targets.filter((r) =>
     (f.year === "전체" || str(r.year) === f.year) && (f.group === "전체" || str(r.group_name) === f.group) &&
     (f.product === "전체" || str(r.product_group) === f.product) && (f.part === "전체" || str(r.part_name) === f.part) && (f.level === "전체" || levelLabel(r.level_id) === f.level)
-  ), [targets, f, levelLabel, lineOk]);
-  const fMonthly = useMemo(() => monthly.filter((r) => lineOk(r) &&
+  ), [targets, f, levelLabel]);
+  const fMonthly = useMemo(() => monthly.filter((r) =>
     (f.year === "전체" || str(r.year) === f.year) && (f.group === "전체" || str(r.group_name) === f.group) &&
     (f.product === "전체" || str(r.product_group) === f.product) && (f.part === "전체" || str(r.part_name) === f.part) && (f.level === "전체" || levelLabel(r.level_id) === f.level)
-  ), [monthly, f, levelLabel, lineOk]);
+  ), [monthly, f, levelLabel]);
 
   // 집계 헬퍼.
   const aggFlags = (rows: ExamRow[], keyFn: (r: ExamRow) => string): ExamRow[] => {
@@ -181,18 +172,17 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
 
   const activeFilters = useMemo(() => {
     const parts: string[] = [];
-    const labels: Record<string, string> = { year: "연도", month: "월", line: "라인", group: "그룹", product: "제품군", part: "파트", process: "공정", equipment: "장비", level: "레벨" };
+    const labels: Record<string, string> = { year: "연도", month: "월", group: "그룹", product: "제품군", part: "파트", process: "공정", equipment: "장비", level: "레벨" };
     const shown = (k: keyof typeof f) => {
       const v = f[k];
       if (k === "month") return `${Number(v)}월`;
-      if (k === "line") return lineMap.get(v) || "라인 미지정";   // id 대신 이름 표시(개발값 노출 금지)
-      if (k === "equipment") return equipMap.get(v) || v;
+      if (k === "equipment") return equipMap.get(v) || v;   // id 대신 이름 표시(개발값 노출 금지)
       return v;
     };
     (Object.keys(f) as Array<keyof typeof f>).forEach((k) => { if (f[k] !== "전체") parts.push(`${labels[k]}=${shown(k)}`); });
     if (search.trim()) parts.push(`검색='${search.trim()}'`);
     return parts;
-  }, [f, search, lineMap, equipMap]);
+  }, [f, search, equipMap]);
 
   const today = new Date().toISOString().slice(0, 10);
   const authorName = author || "-";
@@ -259,12 +249,8 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
               {list.map((o) => <option key={o} value={o}>{key === "month" ? `${Number(o)}월` : o}</option>)}
             </select>
           ))}
-          {/* 라인(독립 필터 · id 저장/이름 표시). 변경해도 제품군·그룹·공정·장비를 초기화하지 않음. */}
-          <select value={f.line} onChange={(e) => setF((p) => ({ ...p, line: e.target.value }))} className={selCls}>
-            <option value="전체">라인: 전체</option>
-            {lineOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-          </select>
-          {([["product", "제품군", opts.products], ["group", "그룹", opts.groups], ["process", "공정", opts.processes]] as Array<[keyof typeof f, string, string[]]>).map(([key, label, list]) => (
+          {/* [라인 UI 제외] 라인 필터 없음. [순서 통일] 그룹 → 제품군 → 공정. */}
+          {([["group", "그룹", opts.groups], ["product", "제품군", opts.products], ["process", "공정", opts.processes]] as Array<[keyof typeof f, string, string[]]>).map(([key, label, list]) => (
             <select key={key} value={f[key]} onChange={(e) => setF((p) => ({ ...p, [key]: e.target.value }))} className={selCls}>
               <option value="전체">{label}: 전체</option>
               {list.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -279,7 +265,7 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
             <option value="전체">레벨: 전체</option>
             {opts.levels.map((o) => <option key={o} value={o}>{o}</option>)}
           </select>
-          <button className={btn} onClick={() => { setF({ year: "전체", month: "전체", line: "전체", group: "전체", product: "전체", part: "전체", process: "전체", equipment: "전체", level: "전체" }); setSearch(""); }}>초기화</button>
+          <button className={btn} onClick={() => { setF({ year: "전체", month: "전체", group: "전체", product: "전체", part: "전체", process: "전체", equipment: "전체", level: "전체" }); setSearch(""); }}>초기화</button>
         </div>
 
         {/* 내보내기 */}
