@@ -15,6 +15,7 @@ import { completeStageByLevelId } from "../services/licensePlanService";
 import EmployeeSelector from "../components/EmployeeSelector";
 import { loadEmployeeAutofill } from "../services/employeeAutofillService";
 import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
+import EquipmentCertificationBoard from "./EquipmentCertificationBoard";
 
 type RefOpt = { id: string; label: string };
 
@@ -127,6 +128,8 @@ export default function ExamPmCertificationsPage({
   darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void;
   onDataChanged?: () => void; refreshKey?: number;
 }) {
+  // [설비 인증현황] PM 인증관리 하위 탭(최소 추가 · 기존 PM 화면 무변경).
+  const [subTab, setSubTab] = useState<"pm" | "equip">("pm");
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [apps, setApps] = useState<ExamRow[]>([]);
   const [personnel, setPersonnel] = useState<ExamRow[]>([]);
@@ -482,8 +485,24 @@ export default function ExamPmCertificationsPage({
     </div>
   );
 
+  const subTabBar = (
+    <div className="mb-3 flex flex-wrap gap-1.5">
+      {([["pm", "PM 인증"], ["equip", "설비 인증현황"]] as const).map(([k, label]) => (
+        <button key={k} onClick={() => setSubTab(k)} className={`rounded-xl px-3 py-1.5 text-xs font-medium transition ${subTab === k ? "bg-blue-600 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{label}</button>
+      ))}
+    </div>
+  );
+  if (subTab === "equip") {
+    return (
+      <section className={`rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+        {subTabBar}
+        <EquipmentCertificationBoard darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast} />
+      </section>
+    );
+  }
   return (
     <section className={`rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+      {subTabBar}
       <div className="mb-4">
         <h2 className="text-lg font-semibold">PM 인증관리</h2>
         <p className="text-sm text-slate-500">시험 응시(필기·실기 합격, 선행 충족, 인증취득) 건을 승인대기로 자동 연결하고, 승인 시 인증번호·만료일·PM Level·이력을 자동 처리합니다.</p>
