@@ -98,7 +98,7 @@ export default function ExamPersonnelPage({
   const [confirmClose, setConfirmClose] = useState(false);
   const [activeIdx, setActiveIdx] = useState(-1);
   // 인증 기준관리 마스터(제품군/그룹/제품·파트/공정) — 기준정보 연동 cascade 옵션.
-  const [master, setMaster] = useState<{ categories: MRef[]; groups: MRef[]; parts: MRef[]; processes: MRef[]; lines: MRef[] }>({ categories: [], groups: [], parts: [], processes: [], lines: [] });
+  const [master, setMaster] = useState<{ categories: MRef[]; groups: MRef[]; parts: MRef[]; processes: MRef[]; lines: MRef[]; levels: MRef[] }>({ categories: [], groups: [], parts: [], processes: [], lines: [], levels: [] });
   useEffect(() => {
     let alive = true;
     const toOpt = (r: ExamRow): MRef => ({
@@ -107,14 +107,15 @@ export default function ExamPersonnelPage({
       line_id: (r.line_id ?? null) as string | null,   // [주 라인] 기준정보 행에 명시적 line_id 가 있으면 매핑(현재 공정/그룹/제품군 테이블엔 없음 → null)
     });
     (async () => {
-      const [categories, groups, parts, processes, lines] = await Promise.all([
+      const [categories, groups, parts, processes, lines, levels] = await Promise.all([
         listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_lines", tenantId).catch(() => [] as ExamRow[]),   // [주 라인] 현재 tenant 라인만(미적용 시 [] → 라인 옵션만 비고, 페이지 정상)
+        listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),  // [빠른 선택] 규칙 조합 라벨의 인증레벨명 표시용(1회 배치 로드)
       ]);
-      if (alive) setMaster({ categories: categories.map(toOpt), groups: groups.map(toOpt), parts: parts.map(toOpt), processes: processes.map(toOpt), lines: lines.map(toOpt) });
+      if (alive) setMaster({ categories: categories.map(toOpt), groups: groups.map(toOpt), parts: parts.map(toOpt), processes: processes.map(toOpt), lines: lines.map(toOpt), levels: levels.map(toOpt) });
     })();
     return () => { alive = false; };
   }, [tenantId]);
@@ -125,6 +126,53 @@ export default function ExamPersonnelPage({
     .sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.lines]);
   const lineMap = useMemo(() => new Map(lineOptions.map((o) => [o.id, o.name])), [lineOptions]);
   const lineName = (id: unknown) => { const s = String(id ?? "").trim(); if (!s) return "라인 미지정"; return lineMap.get(s) ?? "라인 확인 필요"; };
+
+  // [빠른 선택] 이미 로드된 exam_rules(활성·현재 tenant) + master 를 재사용해 "조합" dropdown 소스 생성(추가 조회 없음).
+  //  중복 제거 키 = line/category/group/process/level(rule_type 제외). rule_id 는 직원에 저장하지 않으므로 조합 기준 dedup.
+  const nameOf = (m: Map<string, string>, id: string | null) => (!id ? "미지정" : (m.get(id) ?? "확인 필요"));
+  const idNameMap = (arr: MRef[]) => new Map(arr.map((o) => [o.id, (o.name && o.name.trim()) || o.label]));
+  const categoryMap = useMemo(() => idNameMap(master.categories), [master.categories]);
+  const groupMap = useMemo(() => idNameMap(master.groups), [master.groups]);
+  const processMap = useMemo(() => idNameMap(master.processes), [master.processes]);
+  const levelMap = useMemo(() => idNameMap(master.levels), [master.levels]);
+  const ruleCombos = useMemo(() => {
+    const seen = new Set<string>();
+    const out: Array<{ key: string; line_id: string | null; category_id: string | null; group_id: string | null; process_id: string | null; label: string }> = [];
+    for (const r of rules) {
+      if (r.is_active === false || r.deleted_at) continue;           // tenant·deleted_at 은 listExamRows 가 이미 필터
+      const line_id = r.line_id ? String(r.line_id) : null;
+      const category_id = r.category_id ? String(r.category_id) : null;
+      const group_id = r.group_id ? String(r.group_id) : null;
+      const process_id = r.process_id ? String(r.process_id) : null;
+      const level_id = r.level_id ? String(r.level_id) : null;
+      const key = JSON.stringify([line_id, category_id, group_id, process_id, level_id]); // 안정적 조합 키(라벨 충돌 무관)
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const lineLabel = !line_id ? "라인 미지정" : (lineMap.get(line_id) ?? "라인 확인 필요");
+      const label = `${lineLabel} / ${nameOf(categoryMap, category_id)} / ${nameOf(groupMap, group_id)} / ${nameOf(processMap, process_id)} / ${nameOf(levelMap, level_id)}`;
+      out.push({ key, line_id, category_id, group_id, process_id, label });
+    }
+    return out.sort((a, b) => a.label.localeCompare(b.label, "ko"));
+  }, [rules, categoryMap, groupMap, processMap, levelMap, lineMap]);
+  const ruleComboMap = useMemo(() => new Map(ruleCombos.map((c) => [c.key, c])), [ruleCombos]);
+  // 조합 선택 → 명시적 값만 부분 반영(라인/제품군/그룹/공정). cert_level·장비·인력 고유값(사번/이름/직책/입사일/재직/경력/비고/part)은 미변경.
+  const applyRuleCombo = (key: string) => {
+    const c = ruleComboMap.get(key); if (!c) return;
+    let linePatch: Partial<ExamRow>;
+    if (c.line_id) {
+      if (!lineOptions.some((o) => o.id === c.line_id)) { setError("선택한 기준정보의 라인을 현재 조직에서 확인할 수 없습니다."); return; }
+      linePatch = { line_id: c.line_id };                            // 명시적·tenant 유효 line_id 만 반영
+    } else linePatch = { line_id: null };                            // 규칙 line_id 없음 → 라인 미지정
+    const cat = c.category_id ? master.categories.find((o) => o.id === c.category_id) : undefined;
+    const grp = c.group_id ? master.groups.find((o) => o.id === c.group_id) : undefined;
+    const proc = c.process_id ? master.processes.find((o) => o.id === c.process_id) : undefined;
+    setError(null);
+    setEditRow((f) => ({ ...(f || {}), ...linePatch,               // 명시적 값 없는 필드는 기존값 유지(이름 역추정 금지)
+      ...(cat ? { _cat_id: cat.id, product_group: cat.name } : {}),
+      ...(grp ? { _group_id: grp.id, group_name: grp.name } : {}),
+      ...(proc ? { process_id: proc.id } : {}),
+    }));
+  };
 
   // 미저장 변경 보호 + 앱 공통 닫기(ESC·뒤로가기·최상위 우선) 연동.
   const [editBase, setEditBase] = useState("");
@@ -425,7 +473,19 @@ export default function ExamPersonnelPage({
     const opt = (o: MRef) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}{o.is_active ? "" : " (미사용)"}</option>;
     return (
       <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
-        <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">제품군·그룹·공정 자동 반영 · 라인은 직접 선택</span></div>
+        <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">빠른 선택 시 라인·제품군·그룹·공정 자동 반영 · 이후 개별 수정 가능</span></div>
+        {/* [빠른 선택] 인증규칙(exam_rules) 조합 · 초기 입력 편의(선택 후 아래 필드 수동 수정 가능 · rule_id 미저장). */}
+        {ruleCombos.length === 0 ? (
+          <p className="mb-3 text-[0.7rem] text-slate-400">사용 가능한 인증 기준이 없습니다. 아래에서 직접 선택하세요.</p>
+        ) : (
+          <div className="mb-3">
+            <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">빠른 선택 <span className="text-slate-400">(라인 / 제품군 / 그룹 / 공정 / 인증레벨)</span></label>
+            <select className={`${inputCls} w-full`} value="" onChange={(ev) => { if (ev.target.value) applyRuleCombo(ev.target.value); }}>
+              <option value="">기준정보를 선택하세요</option>
+              {ruleCombos.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+            </select>
+          </div>
+        )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {box("라인 (선택 · 주 라인)", "", <select className={`${inputCls} w-full`} value={String(e.line_id ?? "")} onChange={(ev) => set({ line_id: ev.target.value || null })}><option value="">라인 미지정</option>{lineOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>)}
           {box("제품군", "", <select className={`${inputCls} w-full`} value={catId} onChange={(ev) => onCat(ev.target.value)}><option value="">선택</option>{catOpts.map(opt)}</select>)}
