@@ -25,25 +25,35 @@ export async function loadPreviewMaster(tenantId: string): Promise<PreviewMaster
   return { levels, equipment, processes, groups, categories, stageRules, criteriaRules, ok: true };
 }
 
+// pm_certifications 확정 단계(경량). level_id 우선 · pm_level 텍스트 fallback은 화면 계층에서 해석.
+//  acquired_date 는 신뢰 가능한 단계 확정일(경과개월 계산의 근거) · expiry_date 로 만료 판정.
+export type PmCertLite = { levelId: string | null; pmLevel: string | null; processId: string; acquiredDate: string | null; expiryDate: string | null };
+
 export type PersonnelCertState = {
   approvedEquipmentIds: string[];   // 승인(approved) 설비 취득 id
-  achievedLevelIds: string[];       // pm_certifications 확정 단계 level id(읽기 전용)
+  pmCerts: PmCertLite[];            // pm_certifications 확정 단계(읽기 전용 · 만료/공정 필터는 화면에서)
   needsReeval: boolean;             // 설비 취득 metadata.needs_reeval
   ok: boolean;                      // DB 미적용/오류면 false(상위에서 한글 안내)
 };
 
 // 직원 1명의 취득/확정 상태 배치 조회(2쿼리). 설비 취득 미적용이면 ok=false, PM 오류는 무시(빈 확정).
 export async function loadPersonnelCertState(tenantId: string, personnelId: string): Promise<PersonnelCertState> {
-  const empty: PersonnelCertState = { approvedEquipmentIds: [], achievedLevelIds: [], needsReeval: false, ok: false };
+  const empty: PersonnelCertState = { approvedEquipmentIds: [], pmCerts: [], needsReeval: false, ok: false };
   if (!isSupabaseAvailable() || !supabase || !personnelId) return empty;
   const [certRes, pmRes] = await Promise.all([
     supabase.from("exam_equipment_certifications").select("equipment_id,status,metadata").eq("tenant_id", tenantId).eq("personnel_id", personnelId).is("deleted_at", null),
-    supabase.from("pm_certifications").select("level_id").eq("tenant_id", tenantId).eq("personnel_id", personnelId).is("deleted_at", null).eq("is_active", true),
+    supabase.from("pm_certifications").select("level_id,pm_level,process_id,acquired_date,expiry_date").eq("tenant_id", tenantId).eq("personnel_id", personnelId).is("deleted_at", null).eq("is_active", true),
   ]);
   if (certRes.error) { console.warn("[certificationPreview] certs 조회 실패(미적용?):", (certRes.error as { code?: unknown }).code); return empty; }
   const certs = (certRes.data as ExamRow[]) || [];
   const approvedEquipmentIds = certs.filter((c) => c.status === "approved").map((c) => String(c.equipment_id ?? "")).filter(Boolean);
   const needsReeval = certs.some((c) => (c.metadata as { needs_reeval?: unknown } | null)?.needs_reeval === true);
-  const achievedLevelIds = (pmRes.error ? [] : ((pmRes.data as ExamRow[]) || [])).map((r) => String(r.level_id ?? "")).filter(Boolean);
-  return { approvedEquipmentIds, achievedLevelIds, needsReeval, ok: true };
+  const pmCerts: PmCertLite[] = (pmRes.error ? [] : ((pmRes.data as ExamRow[]) || [])).map((r) => ({
+    levelId: r.level_id ? String(r.level_id) : null,
+    pmLevel: r.pm_level ? String(r.pm_level) : null,
+    processId: String(r.process_id ?? ""),
+    acquiredDate: r.acquired_date ? String(r.acquired_date).slice(0, 10) : null,
+    expiryDate: r.expiry_date ? String(r.expiry_date).slice(0, 10) : null,
+  }));
+  return { approvedEquipmentIds, pmCerts, needsReeval, ok: true };
 }
