@@ -108,6 +108,7 @@ export default function ExamApplicationsPage({
   const [refMap, setRefMap] = useState<Record<string, RefOpt[]>>({});
   const [rules, setRules] = useState<ExamRow[]>([]); // exam_rules(인증취득 요건 검증용)
   const [personnel, setPersonnel] = useState<ExamRow[]>([]);       // exam_personnel(사번 선택/자동입력용)
+  const [lineRows, setLineRows] = useState<ExamRow[]>([]);         // [라인 스냅샷] 현재 tenant exam_lines(표시·검증용 · 행별 재조회 없음)
   const [equipmentRows, setEquipmentRows] = useState<ExamRow[]>([]); // exam_equipment(인증단계별 설비 필터용 — process_id 보유)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -162,14 +163,15 @@ export default function ExamApplicationsPage({
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
-      const [data, refs, ruleRows, people, equip] = await Promise.all([
+      const [data, refs, ruleRows, people, equip, lines] = await Promise.all([
         listExamRows("exam_applications", tenantId),
         Promise.all(refCols.map(async (c) => [c.refTable as string, await listExamRefOptions(c.refTable as ExamMasterTable, tenantId)] as const)),
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]), // 인증취득 요건(없으면 기본값)
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]), // 사번 선택/자동입력
         listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]), // 인증단계별 설비 필터(process_id)
+        listExamRows("exam_lines", tenantId).catch(() => [] as ExamRow[]),   // [라인 스냅샷] 현재 tenant 라인(미적용 시 [] → 표시만 비고)
       ]);
-      setRows(data); setRefMap(Object.fromEntries(refs)); setRules(ruleRows); setPersonnel(people); setEquipmentRows(equip);
+      setRows(data); setRefMap(Object.fromEntries(refs)); setRules(ruleRows); setPersonnel(people); setEquipmentRows(equip); setLineRows(lines);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId, refCols, refreshKey]);
@@ -230,6 +232,12 @@ export default function ExamApplicationsPage({
     () => personnel.find((p) => String(p.employee_no ?? "") === String(editRow?.employee_no ?? "")) || null,
     [personnel, editRow?.employee_no]
   );
+
+  // [라인 스냅샷] 현재 tenant 라인 옵션/맵(표시·검증). 사번→line_id 스냅샷 맵(후보/Excel: 행별 DB 조회 없이 재사용).
+  const lineOptions = useMemo(() => lineRows.filter((l) => l.is_active !== false).map((l) => ({ id: String(l.id), name: String(l.name ?? "").trim() || String(l.code ?? "").trim() || String(l.id) })), [lineRows]);
+  const lineMap = useMemo(() => new Map(lineOptions.map((o) => [o.id, o.name])), [lineOptions]);
+  const lineName = (id: unknown) => { const s = String(id ?? "").trim(); if (!s) return "라인 미지정"; return lineMap.get(s) ?? "라인 확인 필요"; };
+  const personnelLineByEmp = useMemo(() => new Map(personnel.map((p) => [String(p.employee_no ?? "").trim(), p.line_id ? String(p.line_id) : null])), [personnel]);
 
   // [4단계] 공통 EmployeeSelector 표시값(선택된 연명부 → EmployeeLite). 기존 사번 select 와 동기화.
   const selectorValue = useMemo<EmployeeLite | null>(() => {
@@ -465,6 +473,14 @@ export default function ExamApplicationsPage({
       const { cert_status_manual_reason: _omit, ...editForSave } = editRow as ExamRow & { cert_status_manual_reason?: string };
       void _omit;
       const payload = computeDerivedFields(editForSave); // 저장 직전 자동계산(인증 취득일/취득여부/PM Level/D.M 공정)
+      // [라인 스냅샷] 신규: 선택 personnel.line_id 복사. 수정: 사번(personnel) 변경 시에만 재스냅샷, 아니면 기존 스냅샷 보존(자동 백필 금지).
+      {
+        const snapLine = selectedPerson && selectedPerson.line_id ? String(selectedPerson.line_id) : null;
+        if (snapLine && !lineOptions.some((o) => o.id === snapLine)) { setError("선택한 인력의 라인을 현재 조직에서 확인할 수 없습니다."); setSaving(false); return; }
+        const empChanged = String(before?.employee_no ?? "") !== String(editRow.employee_no ?? "");
+        if (isNew || empChanged) payload.line_id = snapLine;      // 생성/사번 변경 → 스냅샷
+        else payload.line_id = (before?.line_id ?? null);         // 사번 미변경 수정 → 기존 스냅샷 유지
+      }
       // [연번 자동 발급] 신규 등록 + 연번 미지정일 때만 tenant·연도별 동시성 안전 RPC 로 발급.
       //  RPC 미적용(초안 SQL 미실행)이면 null → seq_no 미지정으로 저장(기존 동작 유지 · 저장 안 깨짐).
       let seqIssueFailed = false;
@@ -557,6 +573,8 @@ export default function ExamApplicationsPage({
         const payload: ExamRow = {
           employee_no: c.employee_no, name: c.name, group_name: c.group_name,
           product: c.product, process: c.process, pm_level: c.current_level, status: "승인대기",
+          // [라인 스냅샷] 이미 로드된 personnel 에서 사번→line_id(행별 재조회 없음). process 로 추정하지 않음.
+          line_id: personnelLineByEmp.get(String(c.employee_no ?? "").trim()) ?? null,
         };
         const saved = await upsertExamRow("exam_applications", payload, tenantId, userId);
         await writeExamAudit(tenantId, userId, "exam_applications", String(saved.id), "create", null, saved, `자동 후보 승인 → 승인대기(목표 ${c.target_level})`);
@@ -628,6 +646,8 @@ export default function ExamApplicationsPage({
         }
         if (!String(row.employee_no ?? "").trim() || !String(row.name ?? "").trim()) { err.push({ row: i + 2, reason: "사원번호/성명 누락" }); continue; }
         if (bad) { err.push({ row: i + 2, reason: bad }); continue; }
+        // [라인 스냅샷] 매칭 personnel(사번)의 line_id 스냅샷(신규 Import 전용 · 행별 DB 조회 없음). 미매칭이면 null(라인 추정 금지).
+        row.line_id = personnelLineByEmp.get(String(row.employee_no ?? "").trim()) ?? null;
         const code = String(row.category_code ?? "").trim();
         if (code && await isDuplicateApplication(tenantId, String(row.employee_no), code)) { dup++; continue; }
         okRows.push(row);
@@ -742,6 +762,7 @@ export default function ExamApplicationsPage({
               {visibleCols.map((c) => (
                 <th key={c.key} onClick={() => toggleSort(c.key)} className={`cursor-pointer select-none whitespace-nowrap px-2.5 py-2 hover:underline ${pinFirst && c.key === "employee_no" ? "sticky left-9 " + (darkMode ? "bg-slate-800" : "bg-slate-100") : ""}`}>{c.label}{sortKey === c.key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}</th>
               ))}
+              <th className="whitespace-nowrap px-2.5 py-2">라인</th>
               <th className="whitespace-nowrap px-2.5 py-2">작업</th>
             </tr>
           </thead>
@@ -777,6 +798,7 @@ export default function ExamApplicationsPage({
                             : displayCell(c, r)}
                     </td>
                   ))}
+                  <td className="whitespace-nowrap px-2.5 py-2">{lineName(r.line_id)}</td>
                   <td className="whitespace-nowrap px-2.5 py-2">
                     <button className="text-slate-500 hover:underline" onClick={(e) => { e.stopPropagation(); openDetail(r); }}>상세</button>
                     <span className="mx-1 text-slate-300">·</span>
@@ -786,7 +808,7 @@ export default function ExamApplicationsPage({
                 </tr>
               );
             })}
-            {!loading && paged.length === 0 && <tr><td colSpan={visibleCols.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
+            {!loading && paged.length === 0 && <tr><td colSpan={visibleCols.length + 3} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1030,7 +1052,7 @@ export default function ExamApplicationsPage({
           <div className={`my-8 w-full max-w-2xl rounded-3xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-start justify-between">
               <div><h3 className="text-lg font-semibold">{String(detailRow.name || "-")} <span className="text-sm font-normal text-slate-500">시험 응시 상세</span></h3>
-                <p className="text-sm text-slate-500">사번 {String(detailRow.employee_no || "-")} · 구분코드 {String(detailRow.category_code || "-")}</p></div>
+                <p className="text-sm text-slate-500">사번 {String(detailRow.employee_no || "-")} · 구분코드 {String(detailRow.category_code || "-")} · 라인 {lineName(detailRow.line_id)}</p></div>
               {/* 빠른 액션: 상세 → 기존 등록/수정 폼(edit 모드) 재사용. 수정 권한 없으면 미표시(§19·§24). */}
               <div className="flex items-center gap-1">
                 {canEdit && <button onClick={() => { const r = detailRow; setDetailRow(null); setEditRow({ ...r }); }} className="rounded-lg border border-blue-500 px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40">수정</button>}
