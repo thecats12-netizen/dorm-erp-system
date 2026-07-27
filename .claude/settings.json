@@ -34,7 +34,17 @@
       "Bash(awk 'NR>=25655 && NR<=25760 && /특약|메모|notes|저장|contractFiles|첨부|dormContractForm.id|<\\\\/div>\\\\s*$/ {print NR\": \"$0}' src/App.tsx)",
       "Bash(awk -F: '$1>20000 && $1<24000')",
       "Bash(awk -F: '$1>20640 && $1<21100')",
-      "Bash(awk -F: '$1>25000')"
+      "Bash(awk -F: '$1>25000')",
+      "Bash(perl -0pi -e 's/\\\\{EXAM_ENTITY_CONFIGS\\\\.map\\\\\\(\\\\\\(c, i\\\\\\) => \\\\\\(/{VISIBLE_CONFIGS.map\\(\\(c, i\\) => \\(/; s/\\\\{i < EXAM_ENTITY_CONFIGS\\\\.length - 1 &&/{i < VISIBLE_CONFIGS.length - 1 \\\\&\\\\&/; s/\\\\{EXAM_ENTITY_CONFIGS\\\\.map\\\\\\(\\\\\\(c\\\\\\) => \\\\\\(/{VISIBLE_CONFIGS.map\\(\\(c\\) => \\(/' src/features/exam-management/pages/ExamRulesPage.tsx)",
+      "Bash(exit)",
+      "Bash(grep -n \"group_id: next.groupId\\\\|AUTO_ACTUAL_KEYS.forEach\\\\|const payload: ExamRow = { ...editRow }\\\\|IDENTITY =\" src/features/exam-management/pages/ExamTargetsPage.tsx)",
+      "Bash(grep -nE \"activeTab|localStorage|VISIBLE_CONFIGS|lines|useState.*tab|EXAM_ENTITY_CONFIGS\\\\[0\\\\]|\\\\\\\\[0\\\\\\\\].key\" src/features/exam-management/pages/ExamRulesPage.tsx)",
+      "Bash(grep -nE \"const payload|\\\\\\\\.\\\\\\\\.\\\\\\\\.editRow|\\\\\\\\.\\\\\\\\.\\\\\\\\.row|transient|delete payload|line_id|line|upsertExamRow\" src/features/exam-management/pages/ExamMasterGrid.tsx)",
+      "Bash(grep -nE \"lineOptions|lineMap|lineName|lineFullMap|lineByCode|lineByName|resolveLineCell|line_id|lineLabel|라인|exam_lines|linePatch|master.lines|o\\\\\\\\[\\\\\"라인\\\\\"\\\\\\\\]|cell\\\\\\\\\\(\\\\\"라인|proc\\\\\\\\?\\\\\\\\.line_id\" src/features/exam-management/pages/ExamPersonnelPage.tsx)",
+      "Bash(grep -nE \"선택된 line_id|선택한 라인을 확인|const onProc|p\\\\\\\\?\\\\\\\\.line_id|o\\\\\\\\[\\\\\"라인\\\\\"\\\\\\\\]|const lineRaw|cell\\\\\\\\\\(\\\\\"라인|box\\\\\\\\\\(\\\\\"라인|value=\\\\\\\\{String\\\\\\\\\\(e.line_id|<th.*라인|lineName\\\\\\\\\\(r.line_id\\\\\\\\\\)|lineName\\\\\\\\\\(detailRow|빠른 선택 시 라인|라인 / 제품군 / 그룹|TABLE_COLS.length \\\\\\\\+ 3|box\\\\\\\\\\(\\\\\"제품군|box\\\\\\\\\\(\\\\\"그룹|box\\\\\\\\\\(\\\\\"공정\" src/features/exam-management/pages/ExamPersonnelPage.tsx)",
+      "Bash(grep -nE \"const \\\\[master, setMaster\\\\]|setMaster\\\\\\(\\\\{|const \\\\[data, lv, cats, grps, prts|lines: lns\" src/features/exam-management/pages/ExamTargetsPage.tsx)",
+      "Bash(grep -nE \"line:|f.line|lineOk|lineOpts|lineMap|lineRows|setLineRows|exam_lines|라인|line_id|\\\\\\\\[\\\\\"product\\\\\"|\\\\\\\\[\\\\\"group\\\\\"|opts.products|opts.groups\" src/features/exam-management/pages/ExamReportsPage.tsx)",
+      "Bash(grep -nE \"line: \\\\\"라인\\\\\"|k === \\\\\"line\\\\\"|lineMap.get|f.line|f: \\\\\"전체\\\\\"|라인: 전체|lineOpts|\\\\\\\\[\\\\\"product\\\\\", \\\\\"제품군\\\\\"|초기화\" src/features/exam-management/pages/ExamReportsPage.tsx)"
     ],
     "additionalDirectories": [
       "\\tmp"
