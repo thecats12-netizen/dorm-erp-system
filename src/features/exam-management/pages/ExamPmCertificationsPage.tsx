@@ -11,6 +11,8 @@ import {
 import { loadMyExamPermissions } from "../services/examPermissionService";
 // [자동 라이선스] PM 승인 시 해당 단계 완료 + 다음 단계 자동 활성화(추가 전용·비차단).
 import { completeStageByLevelId } from "../services/licensePlanService";
+// [인증 이력] 승인 완료 후 append-only 이력 1건 기록(비차단 · 승인 로직 불변).
+import { appendCertificationHistory } from "../services/certificationHistoryService";
 // [5단계] 공통 사원선택 + PM 추천(조회 전용 UI). 기존 목록/필드/저장/승인은 그대로 유지.
 import EmployeeSelector from "../components/EmployeeSelector";
 import { loadEmployeeAutofill } from "../services/employeeAutofillService";
@@ -357,6 +359,22 @@ export default function ExamPmCertificationsPage({
         if (person && String(r.pm_level ?? "").trim()) { const up = await upsertExamRow("exam_personnel", { ...person, current_pm_level: r.pm_level }, tenantId, userId); await writeExamAudit(tenantId, userId, "exam_personnel", String(up.id), "update", { current_pm_level: person.current_pm_level }, { current_pm_level: r.pm_level }, "PM Level 갱신(PM 인증 승인)"); }
         // ⑫ 감사로그
         await writeExamAudit(tenantId, userId, "pm_certifications", String(saved.id), "approve", r, saved, `승인 · 인증번호 ${certNo}`);
+        // [인증 이력] append-only 이력 1건 기록. 비차단 — 실패해도 승인은 유지(기존 로직 불변).
+        try {
+          await appendCertificationHistory({
+            personnel_id: String(saved.personnel_id ?? ""),
+            process_id: (saved.process_id as string) ?? null,
+            certification_type: String(saved.pm_level ?? "").trim() || "PM",
+            level_id: (saved.level_id as string) ?? null,
+            approved_at: (saved.approved_at as string) ?? nowIso(),
+            approved_by: userId,
+            source_type: "pm_certification",
+            source_id: (saved.id as string) ?? null,
+            reason: `승인 · 인증번호 ${certNo}`,
+            status: "approved",
+            metadata: { pm_level: saved.pm_level ?? null, cert_no: certNo },
+          }, tenantId, userId);
+        } catch (err) { console.warn("[certHistory] 이력 기록 실패(무시)", err); }
         // [자동 라이선스] PM 승인 → 해당 단계 completed + 다음 단계 자동 active(선행 취득일 기준). 비차단 — 실패해도 승인 유지.
         try {
           await completeStageByLevelId({ personnelId: saved.personnel_id as string, employeeNo: saved.employee_no as string }, tenantId, saved.level_id, acquired, userId);
