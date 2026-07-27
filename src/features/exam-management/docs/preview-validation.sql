@@ -157,3 +157,16 @@ select id, equipment_id, status, (metadata->>'needs_reeval') as needs_reeval
 select employee_no, name, hire_date, process_id, group_name, product_group, part_name, employment_status
   from public.exam_personnel
  where tenant_id = :tenant_id and id = :personnel_id;
+
+-- [히스토리] 인증 이력(exam_certification_history) — append 검증 & 조회 -----------
+-- 승인 1회당 1건 append 확인. UPDATE/DELETE 정책이 없어 불변(수정 시도는 RLS 거부).
+select id, certification_type, level_id, previous_level_id, approved_at, approved_by,
+       source_type, source_id, reason, status, metadata, created_by, created_at
+  from public.exam_certification_history
+ where tenant_id = :tenant_id and personnel_id = :personnel_id
+ order by approved_at desc nulls last, created_at desc;
+-- 같은 source(pm_certifications.id)로 이력이 2건 이상이면(중복 append) 점검
+select source_id, count(*) as history_rows
+  from public.exam_certification_history
+ where tenant_id = :tenant_id and personnel_id = :personnel_id and source_type = 'pm_certification'
+ group by source_id having count(*) > 1;
