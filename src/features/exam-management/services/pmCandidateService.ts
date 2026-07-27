@@ -1,8 +1,8 @@
-// PM 자동 "후보" 생성(승인 아님) — Single~M4 엔진 결과로 PM 조건 충족 직원을 pm_certifications
-//  approval_status='대기'(후보)로 생성. 승인/취득/강등 없음. 배치 조회 + 단일 batch insert(N+1 없음).
-//  후보 = 최고 PM 단계(M4) 충족 + criteria 전부 충족 + 재평가 아님 + 승인 설비만 인정 + PM 미보유 + 기존 대기 없음.
-import { supabase, isSupabaseAvailable, translateSupabaseError } from "../../../services/supabaseService";
-import { listExamRows, writeExamAudit, type ExamRow } from "./examMasterService";
+// PM 자동 "후보" 생성(승인 아님). 클라이언트는 Single~M4 엔진으로 후보 스냅샷만 계산하고,
+//  실제 권한검증·게이트 재검증·INSERT·감사·중복 방지는 서버 RPC(exam_generate_pm_candidates)가 수행한다.
+//  → 프론트 직접 pm_certifications INSERT 없음. DB partial unique 로 동시성 최종 방어(23505→"이미 존재").
+import { supabase, isSupabaseAvailable } from "../../../services/supabaseService";
+import { listExamRows, type ExamRow } from "./examMasterService";
 import { listEquipmentStageRules } from "./equipmentStageRuleService";
 import { listProcessCriteriaRules } from "./processCriteriaRuleService";
 import { calculateEquipmentSummary, calculateProcessStageEligibility, isCriteriaEffective, normalizeCriteria } from "../engines/criteriaEvaluator";
@@ -10,12 +10,12 @@ import type { EvaluationSubject } from "../types/certificationCriteria";
 
 const ENGINE_VERSION = "pm-stage-eligibility/v1";
 const LEVEL_CODES = new Set(["SINGLE", "M1", "M2", "M3", "M4"]);
-const nowIso = () => new Date().toISOString();
 const todayYmd = () => new Date().toISOString().slice(0, 10);
 
-export type PmCandidateResult = { created: number; existing: number; ineligible: number; errors: number; message: string };
+export type PmCandidateResult = { created: number; existing: number; ineligible: number; reevalExcluded: number; confirmedHeld: number; errors: number; message: string };
+type Snapshot = { personnel_id: string; process_id: string; level_id: string; engine_version: string; criteria_version: number | null };
 
-// 확정 단계 취득일(YYYY-MM-DD) → 오늘까지 완전 개월(로컬 tz 변환 없이 Y/M/D 정수). 미래/무효면 null.
+// 확정 단계 취득일(YYYY-MM-DD) → 오늘까지 완전 개월(tz 변환 없이 Y/M/D 정수). 미래/무효면 null.
 function fullMonthsSince(ymd?: string | null): number | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ymd ?? "")); if (!m) return null;
   const a = [Number(m[1]), Number(m[2]), Number(m[3])] as const; const n = new Date();
@@ -25,9 +25,11 @@ function fullMonthsSince(ymd?: string | null): number | null {
   return Math.max(0, months);
 }
 
-// PM 후보 배치 생성. 관리자 실행(권한은 UI+RLS 로도 강제). 결과 카운트 반환.
+// PM 후보 배치 생성. userId 는 호출 호환용(서버는 auth.uid() 로 actor 결정). 결과 카운트 반환.
 export async function generatePmCandidates(tenantId: string, userId: string): Promise<PmCandidateResult> {
-  if (!isSupabaseAvailable() || !supabase) return { created: 0, existing: 0, ineligible: 0, errors: 0, message: "Supabase 미설정 — DB 설정이 필요합니다." };
+  void userId; // 서버 RPC 가 auth.uid() 로 actor·권한을 결정(클라이언트 값 신뢰 안 함).
+  const empty: PmCandidateResult = { created: 0, existing: 0, ineligible: 0, reevalExcluded: 0, confirmedHeld: 0, errors: 0, message: "" };
+  if (!isSupabaseAvailable() || !supabase) return { ...empty, message: "Supabase 미설정 — DB 설정이 필요합니다." };
 
   // ── 배치 로드(테넌트 단위 · 행별 호출 없음) ──────────────────────────────
   const [personnel, levels, equipment, stageRules, criteriaRules] = await Promise.all([
@@ -41,24 +43,22 @@ export async function generatePmCandidates(tenantId: string, userId: string): Pr
     supabase.from("exam_equipment_certifications").select("personnel_id,equipment_id,status,metadata").eq("tenant_id", tenantId).is("deleted_at", null),
     supabase.from("pm_certifications").select("personnel_id,process_id,level_id,pm_level,acquired_date,expiry_date,approval_status,is_active").eq("tenant_id", tenantId).is("deleted_at", null),
   ]);
-  if (certRes.error) return { created: 0, existing: 0, ineligible: 0, errors: 0, message: "설비 취득 데이터를 불러오려면 시험관리 DB 설정이 필요합니다." };
+  if (certRes.error) return { ...empty, message: "설비 취득 데이터를 불러오려면 시험관리 DB 설정이 필요합니다." };
 
-  // ── PM 단계(Single~M4) + 최고 단계(M4) ───────────────────────────────────
   const pmLevels = levels
     .filter((r) => r.is_active !== false && LEVEL_CODES.has(String(r.code ?? "").toUpperCase()))
     .map((r) => ({ id: String(r.id), code: String(r.code ?? "").toUpperCase(), rank_order: Number(r.rank_order ?? 0), requires_approval: r.requires_approval !== false, auto_promote: r.auto_promote === true }))
     .sort((a, b) => a.rank_order - b.rank_order);
-  if (pmLevels.length === 0) return { created: 0, existing: 0, ineligible: 0, errors: 0, message: "PM 단계(Single~M4) 기준정보가 없습니다. 인증 레벨 seed 적용이 필요합니다." };
-  const topLevel = pmLevels[pmLevels.length - 1];   // 최고 PM 단계 = M4
+  if (pmLevels.length === 0) return { ...empty, message: "PM 단계(Single~M4) 기준정보가 없습니다. 인증 레벨 seed 적용이 필요합니다." };
+  const topLevel = pmLevels[pmLevels.length - 1];
   const maxPmRank = topLevel.rank_order;
 
-  // ── Map/Set 인덱스 ──────────────────────────────────────────────────────
   const levelById = new Map(levels.map((r) => [String(r.id), r]));
   const levelByCode = new Map<string, ExamRow>();
   for (const r of levels) { const c = String(r.code ?? "").trim().toUpperCase(); if (c) levelByCode.set(c, r); const n = String(r.name ?? "").trim().toUpperCase(); if (n) levelByCode.set(n, r); }
 
-  const approvedByPerson = new Map<string, Set<string>>();      // personnel → 승인 설비 id Set
-  const reevalPersons = new Set<string>();                      // needs_reeval 보유 personnel
+  const approvedByPerson = new Map<string, Set<string>>();
+  const reevalPersons = new Set<string>();
   for (const c of (certRes.data as ExamRow[]) || []) {
     const pid = String(c.personnel_id ?? ""); if (!pid) continue;
     if ((c.metadata as { needs_reeval?: unknown } | null)?.needs_reeval === true) reevalPersons.add(pid);
@@ -67,18 +67,16 @@ export async function generatePmCandidates(tenantId: string, userId: string): Pr
     (approvedByPerson.get(pid) ?? approvedByPerson.set(pid, new Set()).get(pid)!).add(eq);
   }
 
-  // pm_certs 그룹핑: 확정(승인·활성·미만료) 레벨 rank + 대기(후보) 존재 여부(personnel|process|level 키).
   const today = todayYmd();
   const resolvePmLevelId = (r: ExamRow) => (r.level_id && levelById.has(String(r.level_id))) ? String(r.level_id) : (r.pm_level ? String(levelByCode.get(String(r.pm_level).trim().toUpperCase())?.id ?? "") : "");
-  const confirmedByKey = new Map<string, number>();            // `${person}|${process}` → 최고 확정 rank
-  const pendingKeys = new Set<string>();                       // `${person}|${process}|${levelId}` 대기 존재
-  const confirmedLevelIdsByPerson = new Map<string, Set<string>>(); // 선행단계 평가용(공정 스코프)
+  const confirmedByKey = new Map<string, number>();
+  const pendingKeys = new Set<string>();
+  const confirmedLevelIdsByPerson = new Map<string, Set<string>>();
   for (const r of (pmRes.data as ExamRow[]) || []) {
     const person = String(r.personnel_id ?? ""); const proc = String(r.process_id ?? "");
     const lid = resolvePmLevelId(r); if (!person) continue;
     const status = String(r.approval_status ?? "");
     if (status === "대기" && r.is_active !== false && lid) { pendingKeys.add(`${person}|${proc}|${lid}`); continue; }
-    // 확정(승인) — 만료 제외
     if (status !== "승인" || r.is_active === false) continue;
     const exp = r.expiry_date ? String(r.expiry_date).slice(0, 10) : "";
     if (exp && exp < today) continue;
@@ -86,18 +84,17 @@ export async function generatePmCandidates(tenantId: string, userId: string): Pr
     const rank = Number(levelById.get(lid)?.rank_order ?? 0);
     const key = `${person}|${proc}`;
     if (rank > (confirmedByKey.get(key) ?? 0)) confirmedByKey.set(key, rank);
-    (confirmedLevelIdsByPerson.get(`${person}|${proc}`) ?? confirmedLevelIdsByPerson.set(`${person}|${proc}`, new Set()).get(`${person}|${proc}`)!).add(lid);
+    (confirmedLevelIdsByPerson.get(key) ?? confirmedLevelIdsByPerson.set(key, new Set()).get(key)!).add(lid);
   }
 
-  // ── 후보 평가 ──────────────────────────────────────────────────────────
-  let created = 0, existing = 0, ineligible = 0, errors = 0;
-  const toInsert: ExamRow[] = [];
-
+  // ── 후보 스냅샷 계산(클라이언트) + 클라이언트측 분류 카운트 ────────────────
+  let cReeval = 0, cHeld = 0, cExisting = 0, cIneligible = 0;
+  const snapshot: Snapshot[] = [];
   for (const p of personnel) {
-    if (p.is_active === false || p.deleted_at) { continue; }
+    if (p.is_active === false || p.deleted_at) continue;
     const personId = String(p.id ?? ""); const pid = String(p.process_id ?? "");
-    if (!personId || !pid) { ineligible++; continue; }
-    if (reevalPersons.has(personId)) { ineligible++; continue; }  // 재평가 필요는 후보 제외
+    if (!personId || !pid) { cIneligible++; continue; }
+    if (reevalPersons.has(personId)) { cReeval++; continue; }
 
     const acquired = approvedByPerson.get(personId) ?? new Set<string>();
     const targetEquipmentIds = new Set(equipment.filter((e) => String(e.process_id ?? "") === pid && e.is_active !== false).map((e) => String(e.id)));
@@ -105,20 +102,17 @@ export async function generatePmCandidates(tenantId: string, userId: string): Pr
     const coreEquipmentIds = new Set([...acquired].filter((id) => coreSet.has(id)));
     const achievedLevelIds = confirmedLevelIdsByPerson.get(`${personId}|${pid}`) ?? new Set<string>();
 
-    // 확정 단계 취득일 기반 경과개월(승인 pm_certs) — Preview 와 동일 정의.
     const confRows = ((pmRes.data as ExamRow[]) || []).filter((r) => String(r.personnel_id ?? "") === personId && String(r.process_id ?? "") === pid && String(r.approval_status ?? "") === "승인" && r.is_active !== false && r.acquired_date);
     const confSorted = confRows.map((r) => ({ rank: Number(levelById.get(resolvePmLevelId(r))?.rank_order ?? 0), d: String(r.acquired_date).slice(0, 10) })).sort((a, b) => a.rank - b.rank);
-    const elapsedMonths = fullMonthsSince(confSorted[confSorted.length - 1]?.d ?? null);
-    const cumulativeMonths = fullMonthsSince(confSorted[0]?.d ?? null);
-
     const subj: EvaluationSubject = {
       tenantId, personnelId: personId, processId: pid,
       acquiredEquipmentIds: acquired, coreEquipmentIds, targetEquipmentIds, achievedLevelIds,
-      tenureMonths: fullMonthsSince(p.hire_date as string), elapsedMonths, cumulativeElapsedMonths: cumulativeMonths,
+      tenureMonths: fullMonthsSince(p.hire_date as string),
+      elapsedMonths: fullMonthsSince(confSorted[confSorted.length - 1]?.d ?? null),
+      cumulativeElapsedMonths: fullMonthsSince(confSorted[0]?.d ?? null),
     };
     const summary = calculateEquipmentSummary(subj);
 
-    // 공정·유효기간 내 달성기준 → level 별 1건(priority↓, 최근 시작↓).
     const byLevel = new Map<string, ExamRow[]>();
     for (const r of criteriaRules) {
       if (String(r.process_id ?? "") !== pid || r.deleted_at || r.is_active === false) continue;
@@ -133,37 +127,37 @@ export async function generatePmCandidates(tenantId: string, userId: string): Pr
     }
 
     const { highestPassedRank } = calculateProcessStageEligibility(subj, summary, pmLevels, rulesByLevel);
-    // PM 조건: 최고 단계(M4)까지 연속 충족.
-    if (highestPassedRank !== maxPmRank) { ineligible++; continue; }
-    // PM 미보유: 최고 단계 확정(승인) 없어야 함.
-    if ((confirmedByKey.get(`${personId}|${pid}`) ?? 0) >= maxPmRank) { existing++; continue; }
-    // 기존 대기(후보) 없어야 함.
-    if (pendingKeys.has(`${personId}|${pid}|${topLevel.id}`)) { existing++; continue; }
+    if (highestPassedRank !== maxPmRank) { cIneligible++; continue; }                 // 최고 단계 미충족
+    if ((confirmedByKey.get(`${personId}|${pid}`) ?? 0) >= maxPmRank) { cHeld++; continue; } // 확정 보유
+    if (pendingKeys.has(`${personId}|${pid}|${topLevel.id}`)) { cExisting++; continue; }      // 기존 대기
 
-    const critVer = normalizeCriteria(rulesByLevel.get(topLevel.id)).version ?? null;
-    toInsert.push({
-      tenant_id: tenantId, personnel_id: personId, employee_no: p.employee_no ?? null,
-      process_id: pid, level_id: topLevel.id, pm_level: topLevel.code,
-      approval_status: "대기", is_active: true, acquired_date: today,
-      created_by: userId, updated_by: userId, created_at: nowIso(), updated_at: nowIso(),
-      metadata: { auto_candidate: true, candidate_generated_at: nowIso(), engine_version: ENGINE_VERSION, criteria_version: critVer } as ExamRow[keyof ExamRow],
-    });
-    // 동일 배치 내 중복 방지.
-    pendingKeys.add(`${personId}|${pid}|${topLevel.id}`);
+    snapshot.push({ personnel_id: personId, process_id: pid, level_id: topLevel.id, engine_version: ENGINE_VERSION, criteria_version: normalizeCriteria(rulesByLevel.get(topLevel.id)).version ?? null });
   }
 
-  // ── 단일 batch insert(승인 로직·History 미관여 · 대기 행만 생성) ──────────────
-  if (toInsert.length > 0) {
-    const { data, error } = await supabase.from("pm_certifications").insert(toInsert).select("id");
-    if (error) { errors = toInsert.length; return { created: 0, existing, ineligible, errors, message: `후보 생성 실패: ${translateSupabaseError(error.message || String(error))}` }; }
-    created = (data as ExamRow[])?.length ?? toInsert.length;
+  // ── 서버 RPC 호출(권한검증·게이트 재검증·원자적 INSERT·감사) ───────────────
+  const base: PmCandidateResult = { created: 0, existing: cExisting, ineligible: cIneligible, reevalExcluded: cReeval, confirmedHeld: cHeld, errors: 0, message: "" };
+  if (snapshot.length === 0) return { ...base, message: buildMsg(base) };
+
+  const { data, error } = await supabase.rpc("exam_generate_pm_candidates", { p_tenant_id: tenantId, p_candidates: snapshot });
+  if (error) {
+    const m = String((error as { message?: string }).message || "");
+    if (/AUTH_REQUIRED/i.test(m)) return { ...base, message: "로그인이 필요합니다. 다시 로그인 후 시도해 주세요." };
+    if (/FORBIDDEN/i.test(m)) return { ...base, message: "PM 후보를 생성할 권한이 없습니다(관리자 전용)." };
+    return { ...base, errors: snapshot.length, message: "후보 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." };
   }
+  const rpc = (data ?? {}) as { created?: number; existing?: number; ineligible?: number; reeval_excluded?: number; confirmed_held?: number; errors?: number };
+  const merged: PmCandidateResult = {
+    created: rpc.created ?? 0,
+    existing: cExisting + (rpc.existing ?? 0),
+    ineligible: cIneligible + (rpc.ineligible ?? 0),
+    reevalExcluded: cReeval + (rpc.reeval_excluded ?? 0),
+    confirmedHeld: cHeld + (rpc.confirmed_held ?? 0),
+    errors: rpc.errors ?? 0,
+    message: "",
+  };
+  return { ...merged, message: buildMsg(merged) };
+}
 
-  // ── 감사로그: 배치 1건만 기록(후보 개별/History 기록 안 함) ───────────────────
-  try {
-    await writeExamAudit(tenantId, userId, "pm_certifications", `batch-${Date.now()}`, "create", null,
-      { created, existing, ineligible, errors, engine_version: ENGINE_VERSION }, "PM 후보 자동 생성(배치 · 대기 상태)");
-  } catch { /* 감사 실패는 결과에 영향 없음 */ }
-
-  return { created, existing, ineligible, errors, message: `생성 ${created} · 이미 존재 ${existing} · 조건 미충족 ${ineligible} · 오류 ${errors}` };
+function buildMsg(r: PmCandidateResult): string {
+  return `생성 ${r.created} · 이미 존재 ${r.existing} · 조건 미충족 ${r.ineligible} · 재평가 제외 ${r.reevalExcluded} · 확정 보유 ${r.confirmedHeld} · 오류 ${r.errors}`;
 }

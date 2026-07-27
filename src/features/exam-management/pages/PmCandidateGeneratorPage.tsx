@@ -22,7 +22,7 @@ export default function PmCandidateGeneratorPage({ darkMode, tenantId, userId, o
       const r = await generatePmCandidates(tenantId, userId);
       setResult(r); setRanAt(new Date().toLocaleString("ko-KR"));
       onToast?.(r.created > 0 ? `PM 후보 ${r.created}건을 생성했습니다(승인 대기).` : "생성할 신규 PM 후보가 없습니다.");
-    } catch (e) { setResult({ created: 0, existing: 0, ineligible: 0, errors: 1, message: (e as { message?: string })?.message || "실행 중 오류가 발생했습니다." }); }
+    } catch { setResult({ created: 0, existing: 0, ineligible: 0, reevalExcluded: 0, confirmedHeld: 0, errors: 1, message: "실행 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." }); }
     finally { setRunning(false); }
   };
 
@@ -31,6 +31,8 @@ export default function PmCandidateGeneratorPage({ darkMode, tenantId, userId, o
     { label: "생성", value: result.created, cls: "text-emerald-600" },
     { label: "이미 존재", value: result.existing, cls: "text-slate-500" },
     { label: "조건 미충족", value: result.ineligible, cls: "text-slate-500" },
+    { label: "재평가 제외", value: result.reevalExcluded, cls: "text-slate-500" },
+    { label: "확정 보유", value: result.confirmedHeld, cls: "text-slate-500" },
     { label: "오류", value: result.errors, cls: result.errors ? "text-rose-600" : "text-slate-400" },
   ] : [];
 
@@ -61,7 +63,7 @@ export default function PmCandidateGeneratorPage({ darkMode, tenantId, userId, o
       {result && (
         <div className={card}>
           <div className="mb-2 text-sm font-medium">실행 결과</div>
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             {tiles.map((t) => (
               <div key={t.label} className={`rounded-xl border p-3 text-center ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                 <div className={`text-2xl font-bold ${t.cls}`}>{t.value}</div>
