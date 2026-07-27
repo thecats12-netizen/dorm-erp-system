@@ -4,12 +4,14 @@ import ExamMasterGrid from "./ExamMasterGrid";
 import EquipmentStageRulesPage from "./EquipmentStageRulesPage";
 import ProcessCriteriaRulesPage from "./ProcessCriteriaRulesPage";
 import EmployeeCertificationPreviewPage from "./EmployeeCertificationPreviewPage";
+import PmCandidateGeneratorPage from "./PmCandidateGeneratorPage";
 import { downloadExamMasterTemplate, downloadExamMasterCurrent, loadExamMasterCounts } from "../services/examMasterBundleService";
 
-// ExamMasterGrid(config union) 로 다루지 않는 커스텀 하위 탭 key(설비별 인증단계 · 공정별 달성기준 · 직원 Preview).
+// ExamMasterGrid(config union) 로 다루지 않는 커스텀 하위 탭 key(설비별 인증단계 · 공정별 달성기준 · 직원 Preview · PM 후보 생성).
 const CUSTOM_TAB_EQ_STAGE = "__eq_stage_rules";
 const CUSTOM_TAB_PROC_CRITERIA = "__proc_criteria_rules";
 const CUSTOM_TAB_PREVIEW = "__emp_cert_preview";
+const CUSTOM_TAB_PM_CANDIDATE = "__pm_candidate_gen";
 
 // 시험관리 > 인증 기준관리 — 기준정보(제품군/그룹/제품파트/공정/장비/레벨) + 인증 규칙(exam_rules) CRUD.
 //  · 상단: 등록 순서 안내 + 항목별 요약 카운트 + 통합 Excel(양식/현재데이터) 다운로드.
@@ -101,6 +103,7 @@ export default function ExamRulesPage({
         <button type="button" onClick={() => setSub(CUSTOM_TAB_EQ_STAGE)} className={subCls(sub === CUSTOM_TAB_EQ_STAGE)}>설비별 인증단계</button>
         <button type="button" onClick={() => setSub(CUSTOM_TAB_PROC_CRITERIA)} className={subCls(sub === CUSTOM_TAB_PROC_CRITERIA)}>공정별 달성기준</button>
         <button type="button" onClick={() => setSub(CUSTOM_TAB_PREVIEW)} className={subCls(sub === CUSTOM_TAB_PREVIEW)}>직원별 인증 Preview</button>
+        <button type="button" onClick={() => setSub(CUSTOM_TAB_PM_CANDIDATE)} className={subCls(sub === CUSTOM_TAB_PM_CANDIDATE)}>PM 후보 생성</button>
       </div>
 
       {sub === CUSTOM_TAB_EQ_STAGE ? (
@@ -109,6 +112,8 @@ export default function ExamRulesPage({
         <ProcessCriteriaRulesPage darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast} />
       ) : sub === CUSTOM_TAB_PREVIEW ? (
         <EmployeeCertificationPreviewPage darkMode={darkMode} tenantId={tenantId} onToast={onToast} />
+      ) : sub === CUSTOM_TAB_PM_CANDIDATE ? (
+        <PmCandidateGeneratorPage darkMode={darkMode} tenantId={tenantId} userId={userId} onToast={onToast} />
       ) : (
         <ExamMasterGrid key={active.key} config={active} darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast}
           onQuickAdd={handleQuickAdd}
