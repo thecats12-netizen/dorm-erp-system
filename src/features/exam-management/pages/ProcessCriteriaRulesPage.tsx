@@ -60,7 +60,8 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
     .map((r) => ({ id: String(r.id), name: String(r.name ?? "").trim() || String(r.code ?? ""), code: String(r.code ?? ""), rank: Number(r.rank_order ?? 0) }))
     .sort((a, b) => a.rank - b.rank), [m.levels]);
   const groupOpts = useMemo(() => m.groups.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.groups]);
-  const catOpts = useMemo(() => m.categories.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.categories]);
+  // 제품군 목록: 선택한 그룹에 속한 항목만(그룹→제품군 계층). DB 상 그룹이 제품군에 속하므로 선택 그룹의 category 로 한정.
+  const catOpts = useMemo(() => { const gc = fGroup ? String(groupById.get(fGroup)?.category_id ?? "") : ""; return m.categories.filter((r) => r.is_active !== false && (!gc || String(r.id) === gc)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })); }, [m.categories, fGroup, groupById]);
   const procOpts = useMemo(() => m.processes.filter((r) => r.is_active !== false && (!fGroup || String(r.group_id ?? "") === fGroup)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.processes, fGroup]);
   const formMaster: ProcCriteriaMaster = useMemo(() => ({ groups: m.groups, processes: m.processes, equipment: m.equipment, groupById, catById, procById, equipById, levelOpts }), [m.groups, m.processes, m.equipment, groupById, catById, procById, equipById, levelOpts]);
 
@@ -116,8 +117,8 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
       </div>
 
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
-        <select value={fGroup} onChange={(ev) => { setFGroup(ev.target.value); setFProc(""); setPage(1); }} className={inp}><option value="">그룹: 전체</option>{groupOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
-        <select value={fCat} onChange={(ev) => { setFCat(ev.target.value); setPage(1); }} className={inp}><option value="">제품군: 전체</option>{catOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
+        <select value={fGroup} onChange={(ev) => { setFGroup(ev.target.value); setFCat(""); setFProc(""); setPage(1); }} className={inp}><option value="">그룹: 전체</option>{groupOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
+        <select value={fCat} onChange={(ev) => { setFCat(ev.target.value); setFProc(""); setPage(1); }} className={inp}><option value="">제품군: 전체</option>{catOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
         <select value={fProc} onChange={(ev) => { setFProc(ev.target.value); setPage(1); }} className={inp}><option value="">공정: 전체</option>{procOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
         <select value={fLevel} onChange={(ev) => { setFLevel(ev.target.value); setPage(1); }} className={inp}><option value="">단계: 전체</option>{levelOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
         <select value={fOp} onChange={(ev) => { setFOp(ev.target.value); setPage(1); }} className={inp}><option value="">방식: 전체</option><option value="AND">AND</option><option value="OR">OR</option></select>
