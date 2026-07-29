@@ -3314,7 +3314,7 @@ export default function App() {
   }, [operationalSyncError]);
   const [customTemplates, setCustomTemplates] = usePersistedState<CustomTemplate[]>(CUSTOM_TEMPLATES_KEY, [], tenantId);
   const [templateUploadName, setTemplateUploadName] = useState("");
-  const [templateUploadType, setTemplateUploadType] = useState<"dormContract" | "newHire" | "dorm" | "occupant" | "inventory" | "sale">("dormContract");
+  const [templateUploadType, setTemplateUploadType] = useState<"dormContract" | "newHire" | "inventory">("dormContract");
 
   const [editingDormId, setEditingDormId] = useState<string | null>(null);
   const [editingOccupantId, setEditingOccupantId] = useState<string | null>(null);
@@ -16713,10 +16713,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
                 <button
                   onClick={() => {
-                    const ws = XLSX.utils.aoa_to_sheet([
-                      ["지역", "도로명주소", "건물명", "동", "호수", "평수", "임대인명", "임대인연락처", "부동산명", "부동산연락처", "관리사무소연락처", "계약시작일", "계약종료일", "계약상태", "계약금액", "공동현관", "세대현관", "선납금", "보증금", "월세/관리비", "계약유형", "성별", "비고", "등록일", "수정일", "등록자"],
-                      ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                    ]);
+                    const headers = ["지역", "도로명주소", "건물명", "동", "호수", "평수", "임대인명", "임대인연락처", "부동산명", "부동산연락처", "관리사무소연락처", "계약시작일", "계약종료일", "계약상태", "계약금액", "공동현관", "세대현관", "선납금", "보증금", "월세/관리비", "계약유형", "성별", "비고", "등록일", "수정일", "등록자"];
+                    const ws = XLSX.utils.aoa_to_sheet([headers, []]);
+                    ws["!cols"] = headers.map(() => ({ wch: 14 }));
+                    ws["!autofilter"] = { ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}1` };
                     const wb = XLSX.utils.book_new();
                     XLSX.utils.book_append_sheet(wb, ws, "기숙사계약현황");
                     XLSX.writeFile(wb, "기숙사계약현황_양식.xlsx");
@@ -16741,38 +16741,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </button>
                 <button
                   onClick={() => {
-                    const ws = XLSX.utils.aoa_to_sheet([
-                      ["담당기숙사명", "지역", "성별", "건물명", "주소", "동", "호수", "평수", "계약시작", "계약종료", "계약만료일", "남은일수", "계약금액", "상태", "공동현관", "세대현관", "담당관리자", "선납계약금", "부동산명", "잔금일", "비고"],
-                      [],
-                    ]);
-                    const wb = XLSX.utils.book_new();
-                    XLSX.utils.book_append_sheet(wb, ws, "기숙사");
-                    XLSX.writeFile(wb, "기숙사_양식.xlsx");
-                  }}
-                  className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-                >
-                  📋 기숙사
-                </button>
-                <button
-                  onClick={() => {
-                    const ws = XLSX.utils.aoa_to_sheet([
-                      ["담당기숙사명", "지역", "기숙사", "이름", "성별", "부서", "연락처", "입실일", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "예상입실일", "퇴실예정일", "예상퇴실일", "실제퇴실일", "상태", "비고"],
-                      [],
-                    ]);
-                    const wb = XLSX.utils.book_new();
-                    XLSX.utils.book_append_sheet(wb, ws, "입주자");
-                    XLSX.writeFile(wb, "입주자_양식.xlsx");
-                  }}
-                  className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-                >
-                  📋 입주자
-                </button>
-                <button
-                  onClick={() => {
-                    const ws = XLSX.utils.aoa_to_sheet([
-                      ["담당기숙사명", "지역", "건물명", "기숙사주소", "동", "호수", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "비품명", "수량", "모델명", "메이커", "구매액", "구매일", "지급일", "매각일", "비고"],
-                      [],
-                    ]);
+                    const headers = ["담당기숙사명", "지역", "건물명", "기숙사주소", "동", "호수", "설치위치", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "비품명", "수량", "모델명", "메이커", "구매액", "구매일", "지급일", "매각일", "비고"];
+                    const ws = XLSX.utils.aoa_to_sheet([headers, []]);
+                    ws["!cols"] = headers.map(() => ({ wch: 14 }));
+                    ws["!autofilter"] = { ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}1` };
                     const wb = XLSX.utils.book_new();
                     XLSX.utils.book_append_sheet(wb, ws, "비품현황");
                     XLSX.writeFile(wb, "비품현황_양식.xlsx");
@@ -16780,34 +16752,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
                 >
                   📋 비품현황
-                </button>
-                <button
-                  onClick={() => {
-                    const ws = XLSX.utils.aoa_to_sheet([
-                      ["일자", "품목", "단가", "수량", "합계", "매각업체", "비고"],
-                      ["", "", "", "", "", "", ""],
-                    ]);
-                    const wb = XLSX.utils.book_new();
-                    XLSX.utils.book_append_sheet(wb, ws, "비품매각");
-                    XLSX.writeFile(wb, "비품매각_양식.xlsx");
-                  }}
-                  className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-                >
-                  📋 비품매각
-                </button>
-                <button
-                  onClick={() => {
-                    const ws = XLSX.utils.aoa_to_sheet([
-                      ["담당기숙사명", "보고일", "지역", "건물명", "동", "호수", "공동현관", "세대현관", "담당관리자", "청소담당자", "주차", "월", "청소상태", "확인결과", "점수", "메모"],
-                      [],
-                    ]);
-                    const wb = XLSX.utils.book_new();
-                    XLSX.utils.book_append_sheet(wb, ws, "청소관리");
-                    XLSX.writeFile(wb, "청소관리_양식.xlsx");
-                  }}
-                  className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-                >
-                  📋 청소관리
                 </button>
               </div>
             </div>
@@ -16824,15 +16768,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 />
                 <select
                   value={templateUploadType}
-                  onChange={(e) => setTemplateUploadType(e.target.value as "dormContract" | "newHire" | "dorm" | "occupant" | "inventory" | "sale")}
+                  onChange={(e) => setTemplateUploadType(e.target.value as "dormContract" | "newHire" | "inventory")}
                   className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-slate-400"}`}
                 >
                   <option value="dormContract">기숙사 계약현황</option>
                   <option value="newHire">신입사원명단</option>
-                  <option value="dorm">기숙사</option>
-                  <option value="occupant">입주자</option>
                   <option value="inventory">비품현황</option>
-                  <option value="sale">비품매각</option>
                 </select>
                 <button
                   onClick={() => templateInputRef.current?.click()}
