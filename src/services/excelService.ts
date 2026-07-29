@@ -139,6 +139,10 @@ export const buildDefaultExportRow = (row: Record<string, unknown>, type: TableT
   }
 };
 
+// 기본 양식(빈 템플릿) 헤더 = 실제 내보내기 정의(buildDefaultExportRow)와 동일한 단일 원본.
+//  문서관리 기본 양식 다운로드가 이 함수를 재사용해 메뉴 양식과 헤더/순서를 완전히 일치시킨다(중복 배열 금지).
+export const getTemplateHeaders = (type: TableType): string[] => Object.keys(buildDefaultExportRow({}, type));
+
 export const mapRowToTemplateHeaders = (row: Record<string, unknown>, type: TableType, headers: string[]) => {
   const defaultRow = buildDefaultExportRow(row, type);
   const aliasMap = HEADER_ALIASES[type];

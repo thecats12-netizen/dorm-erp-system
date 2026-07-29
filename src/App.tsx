@@ -167,7 +167,7 @@ import {
   arrayBufferToBase64,
   base64ToArrayBuffer,
 } from "./utils/excelUtils";
-import { mapRowToTemplateHeaders, parseExcelDate } from "./services/excelService";
+import { mapRowToTemplateHeaders, parseExcelDate, getTemplateHeaders } from "./services/excelService";
 import type {
   AuditLog,
   CleaningReport,
@@ -16713,7 +16713,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
                 <button
                   onClick={() => {
-                    const headers = ["지역", "도로명주소", "건물명", "동", "호수", "평수", "임대인명", "임대인연락처", "부동산명", "부동산연락처", "관리사무소연락처", "계약시작일", "계약종료일", "계약상태", "계약금액", "공동현관", "세대현관", "선납금", "보증금", "월세/관리비", "계약유형", "성별", "비고", "등록일", "수정일", "등록자"];
+                    const headers = getTemplateHeaders("dormContract");
                     const ws = XLSX.utils.aoa_to_sheet([headers, []]);
                     ws["!cols"] = headers.map(() => ({ wch: 14 }));
                     ws["!autofilter"] = { ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}1` };
@@ -16741,7 +16741,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </button>
                 <button
                   onClick={() => {
-                    const headers = ["담당기숙사명", "지역", "건물명", "기숙사주소", "동", "호수", "설치위치", "공동현관", "세대현관", "담당관리자", "계약만료일", "남은일수", "비품명", "수량", "모델명", "메이커", "구매액", "구매일", "지급일", "매각일", "비고"];
+                    const headers = getTemplateHeaders("inventory");
                     const ws = XLSX.utils.aoa_to_sheet([headers, []]);
                     ws["!cols"] = headers.map(() => ({ wch: 14 }));
                     ws["!autofilter"] = { ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}1` };
