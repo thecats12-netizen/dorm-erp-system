@@ -1446,17 +1446,18 @@ const CIVIL_DEFENSE_AGE_START = 36;   // 전역일이 없을 때 연령 기반 �
 const MILITARY_NONE = { category: "대상아님" as const, reserveYear: 0, civilYear: 0, trainingYear: 0 };
 type MilitaryStatus = { category: "예비군" | "민방위" | "대상아님"; reserveYear: number; civilYear: number; trainingYear: number };
 
-// 전역일 기준 예비군 연차(전역연도=1년차). 미전역/미입력이면 null.
+// 전역일 기준 예비군 연차. 업무 규칙: 전역 당해연도=0(미편성), 전역 익년=1년차.
+//  예) 2022 전역 → 2023=1, 2024=2, 2025=3, 2026=4. 미전역/미입력이면 null.
 function getReserveYearRaw(person: MilitaryPersonnel, referenceYear?: number): number | null {
   if (!person.dischargeDate) return null;
   const dischargeDate = new Date(person.dischargeDate);
   if (Number.isNaN(dischargeDate.getTime())) return null;
   const referenceDate = referenceYear ? new Date(referenceYear, 11, 31) : new Date();
   if (dischargeDate > referenceDate) return null; // 아직 미전역(현역)
-  return referenceDate.getFullYear() - dischargeDate.getFullYear() + 1;
+  return referenceDate.getFullYear() - dischargeDate.getFullYear();
 }
 
-// 전역연도=1 기준 누적 연차(equivYear)로부터 예비군/민방위/대상아님 판정.
+// 전역 익년=1 기준 누적 연차(equivYear)로부터 예비군/민방위/대상아님 판정.
 // 1~8 예비군, 9년차부터 민방위(=equivYear-8년차), 연령(또는 상한) 초과 시 대상아님.
 function fromReserveEquivYear(equivYear: number, age: number | null): MilitaryStatus {
   if (equivYear >= 1 && equivYear <= RESERVE_MAX_YEAR) {
