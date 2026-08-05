@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { SelectInput, SearchableSelect } from "./FormControls";
 import { formatDong, formatRoomHo } from "../utils/formatUtils";
 import type { OperationalDorm, LoginUser } from "../types";
@@ -75,38 +75,45 @@ export default function FilteredDormSelector({
   // 표시 상태 해석: 배정 모드에서는 statusByDormId 우선, 없으면 leaseStatus.
   const resolveStatus = (d: OperationalDorm): string => statusByDormId?.[d.id] || d.leaseStatus || "사용중";
 
-  let filteredDorms: OperationalDorm[];
-  if (assignMode) {
-    // 과거(종료/해지) 기숙사는 "종료/해지 포함" 선택 시에만 풀에 추가.
-    const includePast = statusFilter === "종료/해지 포함";
-    const pool = [
-      ...getAccessibleOperationalDorms(currentUserParam, domsParam),
-      ...(includePast ? getAccessibleOperationalDorms(currentUserParam, pastDorms) : []),
-    ];
-    filteredDorms = pool.filter((dorm) => {
-      if (siteFilter !== "전체" && dorm.site !== siteFilter) return false;
-      if (genderFilter !== "전체" && dorm.gender !== genderFilter) return false;
-      const s = resolveStatus(dorm);
-      if (statusFilter === "전체") return s !== "종료" && s !== "해지"; // 기본: 활성만(과거 숨김)
-      if (statusFilter === "종료/해지 포함") return true;               // 과거 포함 전체
-      return s === statusFilter;                                          // 개별 상태
-    });
-  } else {
-    // 기존 동작: 종료/해지 제외 + (전체/사용중) leaseStatus 필터.
-    const accessibleDorms = getAccessibleOperationalDorms(currentUserParam, domsParam).filter(
-      (d) => d.leaseStatus !== "해지"
-    );
-    filteredDorms = filterDormsBySiteGender(accessibleDorms, siteFilter, genderFilter, statusFilter);
-  }
-
   // 선택된 dorm 을 찾을 때 과거 포함 전체 풀에서 조회(라벨/onChange 정확도).
-  const allDorms = assignMode ? [...domsParam, ...pastDorms] : domsParam;
+  const allDorms = useMemo(
+    () => (assignMode ? [...domsParam, ...pastDorms] : domsParam),
+    [assignMode, domsParam, pastDorms]
+  );
 
-  // 배정 모드: 현재 선택된 기숙사가 필터에서 가려졌더라도 옵션에는 항상 보이게(빈칸 방지).
-  if (assignMode && value && !filteredDorms.find((d) => d.id === value)) {
-    const sel = allDorms.find((d) => d.id === value);
-    if (sel) filteredDorms = [sel, ...filteredDorms];
-  }
+  // 필터링된 기숙사 목록 — useMemo 로 배열 identity 고정(매 렌더 재생성 방지 → 드롭다운 open 유지·useEffect 반복 방지).
+  const filteredDorms = useMemo<OperationalDorm[]>(() => {
+    let list: OperationalDorm[];
+    if (assignMode) {
+      // 과거(종료/해지) 기숙사는 "종료/해지 포함" 선택 시에만 풀에 추가.
+      const includePast = statusFilter === "종료/해지 포함";
+      const pool = [
+        ...getAccessibleOperationalDorms(currentUserParam, domsParam),
+        ...(includePast ? getAccessibleOperationalDorms(currentUserParam, pastDorms) : []),
+      ];
+      list = pool.filter((dorm) => {
+        if (siteFilter !== "전체" && dorm.site !== siteFilter) return false;
+        if (genderFilter !== "전체" && dorm.gender !== genderFilter) return false;
+        const s = resolveStatus(dorm);
+        if (statusFilter === "전체") return s !== "종료" && s !== "해지"; // 기본: 활성만(과거 숨김)
+        if (statusFilter === "종료/해지 포함") return true;               // 과거 포함 전체
+        return s === statusFilter;                                          // 개별 상태
+      });
+    } else {
+      // 기존 동작: 종료/해지 제외 + (전체/사용중) leaseStatus 필터.
+      const accessibleDorms = getAccessibleOperationalDorms(currentUserParam, domsParam).filter(
+        (d) => d.leaseStatus !== "해지"
+      );
+      list = filterDormsBySiteGender(accessibleDorms, siteFilter, genderFilter, statusFilter);
+    }
+    // 배정 모드: 현재 선택된 기숙사가 필터에서 가려졌더라도 옵션에는 항상 보이게(빈칸 방지).
+    if (assignMode && value && !list.find((d) => d.id === value)) {
+      const sel = allDorms.find((d) => d.id === value);
+      if (sel) list = [sel, ...list];
+    }
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assignMode, statusFilter, siteFilter, genderFilter, currentUserParam, domsParam, pastDorms, statusByDormId, value, allDorms]);
 
   useEffect(() => {
     // 배정 모드: 기존 선택(과거/종료 기숙사 포함)이 현재 필터에서 가려져도 자동 해제하지 않음
@@ -123,6 +130,21 @@ export default function FilteredDormSelector({
   const statusOptions = assignMode
     ? ["전체", "공실", "사용중", "만실", "만료예정", "종료/해지 포함"]
     : ["전체", "사용중"];
+
+  // 옵션/표시라벨도 useMemo 로 고정(JSX 인라인 map 제거 → SearchableSelect 로 새 배열이 매 렌더 전달되지 않음).
+  const dormOptions = useMemo(() => ["", ...filteredDorms.map((d) => d.id)], [filteredDorms]);
+  const dormDisplayOptions = useMemo(
+    () => [
+      "미배정",
+      ...filteredDorms.map((d) =>
+        assignMode
+          ? `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)} [${resolveStatus(d)}]`
+          : `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`
+      ),
+    ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filteredDorms, assignMode, statusByDormId]
+  );
 
   return (
     <div className="space-y-4">
@@ -152,15 +174,8 @@ export default function FilteredDormSelector({
             const selected = allDorms.find((d) => d.id === v);
             onChange(v, selected);
           }}
-          options={["", ...filteredDorms.map((d) => d.id)]}
-          displayOptions={[
-            "미배정",
-            ...filteredDorms.map((d) =>
-              assignMode
-                ? `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)} [${resolveStatus(d)}]`
-                : `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`
-            ),
-          ]}
+          options={dormOptions}
+          displayOptions={dormDisplayOptions}
         />
       </div>
     </div>

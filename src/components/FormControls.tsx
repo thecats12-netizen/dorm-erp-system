@@ -72,6 +72,18 @@ export function FilterSelect({ label, value, onChange, options }: { label: strin
 export function SearchableSelect({ label, value, onChange, options, displayOptions }: { label: string; value: string; onChange: (v: string) => void; options: string[]; displayOptions?: string[] }) {
   const [searchTerm, setSearchTerm] = useState("");
   const [isOpen, setIsOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // 열려 있을 때만 외부 클릭(mousedown) 감지 → 컴포넌트 내부(입력창·목록·스크롤바) 조작은 닫지 않는다.
+  //  기존 onBlur 즉시 닫힘은 목록 스크롤바 드래그 시 입력창 blur 로 드롭다운이 닫히는 원인이었음.
+  useEffect(() => {
+    if (!isOpen) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setIsOpen(false);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [isOpen]);
 
   const filteredIndices = options
     .map((option, index) => ({ option, index }))
@@ -83,7 +95,7 @@ export function SearchableSelect({ label, value, onChange, options, displayOptio
   const selectedDisplay = displayOptions ? displayOptions[options.indexOf(value)] : value;
 
   return (
-    <div className="relative notranslate" translate="no" lang="en">
+    <div ref={rootRef} className="relative notranslate" translate="no" lang="en">
       <label className="mb-2 block text-sm font-medium text-slate-700">{label}</label>
       <div className="relative">
         <input
@@ -94,7 +106,6 @@ export function SearchableSelect({ label, value, onChange, options, displayOptio
             setIsOpen(true);
           }}
           onFocus={() => setIsOpen(true)}
-          onBlur={() => setTimeout(() => setIsOpen(false), 200)}
           className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400 notranslate"
           translate="no"
           placeholder="검색해서 선택하세요"
