@@ -74,6 +74,8 @@ export default function ExamMasterGrid({
   const refColumns = useMemo(() => config.columns.filter((c) => c.type === "ref"), [config]);
   // 목록/Excel/검색에 쓰는 컬럼(필터 전용 transient 제외). 폼(등록/수정)은 transient 포함 전체를 렌더.
   const tableColumns = useMemo(() => config.columns.filter((c) => !c.transient), [config]);
+  // 목록 표시 전용 파생 컬럼(예: 장비 목록의 그룹/제품군). 저장/Excel/정렬/검색 대상이 아니며 헤더는 tableColumns 앞에 표시.
+  const derivedColumns = config.derived ?? [];
 
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
@@ -185,6 +187,24 @@ export default function ExamMasterGrid({
       return (opt?.name && String(opt.name).trim()) || opt?.label || "-";
     }
     return cellText(col, row);
+  };
+
+  // 파생 표시(그룹/제품군) 전용: 이미 로드된 참조를 id→옵션 Map 으로 만들어 행마다 조회 없이 이름을 찾는다(추가 Supabase 호출 없음).
+  const refById = useMemo(() => {
+    const m: Record<string, Map<string, RefOpt>> = {};
+    for (const [t, opts] of Object.entries(refMap)) m[t] = new Map(opts.map((o) => [o.id, o]));
+    return m;
+  }, [refMap]);
+  // process_id → 공정 → group_id/category_id → 이름. 관계를 못 찾으면 자연스러운 한글 폴백(UUID 미노출).
+  const derivedText = (col: NonNullable<ExamEntityConfig["derived"]>[number], row: ExamRow): string => {
+    const srcId = String(row[col.from] ?? "");
+    if (!srcId) return col.missing;                 // 상위 FK 자체가 없음(예: 공정 미연결)
+    const src = refById[col.via]?.get(srcId);
+    if (!src) return col.missing;                    // 참조를 못 찾음(예: 공정 확인 필요)
+    const parentId = String((src as Record<string, unknown>)[col.pick] ?? "");
+    if (!parentId) return col.fallback;              // 상위 미지정(예: 그룹/제품군 미지정)
+    const parent = refById[col.nameFrom]?.get(parentId);
+    return (parent && ((parent.name && String(parent.name).trim()) || parent.label)) || col.fallback;
   };
 
   // 한 옵션이 상위 폼 선택에 부합하는지 판정(기본 FK → null 이면 fallback 상위로 역추적).
@@ -671,6 +691,10 @@ export default function ExamMasterGrid({
         <table className="w-full text-left text-sm">
           <thead className={`sticky top-0 z-[1] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
             <tr>
+              {/* 파생 표시 컬럼(그룹/제품군): 표시 전용이므로 정렬 대상에서 제외(기존 정렬 동작 불변). */}
+              {derivedColumns.map((c) => (
+                <th key={c.key} className="select-none whitespace-nowrap px-3 py-2">{c.label}</th>
+              ))}
               {tableColumns.map((c) => (
                 <th key={c.key} onClick={() => toggleSort(c.key)} className="cursor-pointer select-none whitespace-nowrap px-3 py-2 hover:underline">
                   {c.label}{sortKey === c.key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
@@ -685,6 +709,10 @@ export default function ExamMasterGrid({
               <tr key={String(r.id)} aria-selected={ri === activeIdx} title={canEdit ? "클릭하여 수정" : undefined}
                 onClick={() => { setActiveIdx(ri); if (canEdit) openEdit(r); }}
                 className={`${ri === activeIdx ? (darkMode ? "ring-1 ring-inset ring-blue-500 bg-slate-800/60" : "ring-1 ring-inset ring-blue-400 bg-blue-50/60") : ""} border-t ${canEdit ? "cursor-pointer" : ""} ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+                {/* 파생 표시(그룹/제품군): 길면 말줄임 + title(전체값 툴팁). 좁은 화면은 테이블 컨테이너 가로 스크롤. */}
+                {derivedColumns.map((c) => { const t = derivedText(c, r); return (
+                  <td key={c.key} className="px-3 py-2"><span className="block max-w-[160px] truncate" title={t}>{t}</span></td>
+                ); })}
                 {tableColumns.map((c) => <td key={c.key} className="whitespace-nowrap px-3 py-2">{cellDisplay(c, r)}</td>)}
                 <td className="px-3 py-2">
                   <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${r.is_active === false ? "bg-slate-200 text-slate-500" : "bg-emerald-100 text-emerald-700"}`}>{r.is_active === false ? "미사용" : "사용"}</span>
@@ -707,7 +735,7 @@ export default function ExamMasterGrid({
               </tr>
             ))}
             {!loading && filtered.length === 0 && (
-              <tr><td colSpan={tableColumns.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>
+              <tr><td colSpan={derivedColumns.length + tableColumns.length + 2} className="px-3 py-10 text-center text-slate-500">데이터가 없습니다.</td></tr>
             )}
           </tbody>
         </table>

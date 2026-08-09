@@ -20,12 +20,26 @@ export type ExamColumn = {
   //  (해당 테이블에 저장 컬럼이 없는 상위 단계를 안전하게 드릴다운하기 위함 — 없는 컬럼 강제 저장 방지)
   transient?: boolean;
 };
+// 목록 표시 전용 "파생" 컬럼: DB 컬럼이 없어도 이미 로드된 참조(refMap)만으로 상위 계층 이름을 보여준다.
+//   예) 장비 목록의 그룹/제품군 — exam_equipment 에 컬럼 추가 없이 process_id → 공정 → group_id/category_id 이름을 표시.
+//   저장/Excel/정렬/검색 대상이 아니며(순수 표시), UUID 는 노출하지 않는다. 관계를 못 찾으면 자연스러운 한글 폴백.
+export type ExamDerivedColumn = {
+  key: string;                 // 표시용 키(저장 안 함)
+  label: string;              // 헤더
+  from: string;               // 이 행에서 상위를 역추적할 시작 FK(예: "process_id")
+  via: ExamMasterTable;       // from 이 가리키는 참조 테이블(예: exam_processes)
+  pick: "group_id" | "category_id"; // via 행에서 꺼낼 상위 FK
+  nameFrom: ExamMasterTable;  // pick 값을 이름으로 변환할 테이블(예: exam_groups)
+  fallback: string;           // pick 값이 없을 때(예: "그룹 미지정")
+  missing: string;            // from/via 를 못 찾을 때(예: "공정 확인 필요")
+};
 export type ExamEntityConfig = {
   key: string;      // 하위 탭 키
   title: string;    // 화면 표시 제목
   table: ExamMasterTable;
   columns: ExamColumn[];
   hidden?: boolean; // 탭/등록 흐름에서 제외(테이블·데이터·config 는 유지 · 하위호환/역추적용). 예: 제품/파트.
+  derived?: ExamDerivedColumn[]; // 목록 표시 전용 파생 컬럼(저장/Excel/정렬 대상 아님). 헤더는 columns 앞에 표시.
 };
 
 // 인증 기준관리 하위 기준정보/기준 엔티티 정의. 시험 규칙(취득/달성/유효기간/목표)은 exam_rules 에서 관리(하드코딩 금지).
@@ -89,6 +103,13 @@ export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
   },
   {
     key: "equipment", title: "장비 목록", table: "exam_equipment",
+    // [표시 전용] 동일 공정명·코드가 다른 그룹/제품군에 존재할 수 있어, 장비 목록에 상위 그룹·제품군을 함께 표시한다.
+    //  exam_equipment 에는 컬럼을 추가하지 않고 process_id → 공정(refMap) → group_id/category_id 이름을 파생 표시한다.
+    //  공정 옵션의 group_id/category_id 는 그리드 로드시 legacy part 로도 역채움되므로 추가 조회가 필요 없다.
+    derived: [
+      { key: "_group_name", label: "그룹", from: "process_id", via: "exam_processes", pick: "group_id", nameFrom: "exam_groups", fallback: "그룹 미지정", missing: "공정 확인 필요" },
+      { key: "_cat_name", label: "제품군", from: "process_id", via: "exam_processes", pick: "category_id", nameFrom: "exam_categories", fallback: "제품군 미지정", missing: "공정 확인 필요" },
+    ],
     columns: [
       // [계층 역전] 그룹 → 제품군(그룹 소속) → 공정(제품군 소속) 순서로 필터, 저장은 process_id(불변).
       //  _group → _cat(category.group_id) → 공정(process.category_id, 없으면 group_id fallback) → process_id 저장.
