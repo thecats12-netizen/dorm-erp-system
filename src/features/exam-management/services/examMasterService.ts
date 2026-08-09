@@ -34,6 +34,13 @@ export const MASTER_SCOPED_KEYS: Record<string, string[]> = {
   exam_rules: ["process_id", "level_id", "rule_type"],// 공정+단계+기준구분 1건(달성기준 기간겹침은 별도 검증)
 };
 // code/rule_type 등 문자열 키 정규화(code 는 대문자, rule_type 은 공백 무시로 "달성 기준"/"달성기준" 동일 취급).
+// 계층 핵심 컬럼 — DB 에 없으면 조용히 제거하지 않고 명확한 오류로 저장을 실패시킨다(상위 연결 손실 방지).
+//  20260754(exam_processes.group_id/category_id) 등 적용 후에는 컬럼이 존재하므로 정상 저장된다.
+const HIERARCHY_CORE_COLUMNS: Record<string, string[]> = {
+  exam_processes: ["group_id", "category_id"],
+  exam_categories: ["group_id"],
+  exam_equipment: ["process_id"],
+};
 const normScoped = (k: string, v: unknown) => k === "code" ? String(v ?? "").trim().toUpperCase() : k === "rule_type" ? String(v ?? "").replace(/\s/g, "") : String(v ?? "");
 // 같은 scoped identity 의 기존(미삭제) 행 id 반환. 키 필드가 하나라도 비면 판정 불가 → null(INSERT). 자기 자신 제외.
 export function findScopedExistingId(existing: ExamRow[], table: string, row: ExamRow): string | null {
@@ -188,7 +195,14 @@ export async function upsertExamRow(table: ExamMasterTable, row: ExamRow, tenant
     const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown };
     const missing = String(e?.message ?? "").match(/could not find the '([^']+)' column/i)?.[1]
       ?? (String(e?.code ?? "") === "PGRST204" ? String(e?.message ?? "").match(/'([^']+)'/)?.[1] : undefined);
-    if (missing && Object.prototype.hasOwnProperty.call(working, missing)) { delete (working as Record<string, unknown>)[missing]; stripped.push(missing); continue; }
+    if (missing && Object.prototype.hasOwnProperty.call(working, missing)) {
+      // 계층 핵심 컬럼(공정 group_id/category_id 등)은 조용히 제거하지 않는다 → 상위 연결 손실을 막고 명확히 실패.
+      if ((HIERARCHY_CORE_COLUMNS[table] ?? []).includes(missing)) {
+        console.error("[examMasterService] 계층 핵심 컬럼 미적용:", { table, missing });
+        throw new Error("상위 계층(그룹/제품군/공정) 연결 컬럼이 데이터베이스에 없어 저장할 수 없습니다.\nDB 스키마(컬럼) 적용이 필요합니다. 관리자에게 문의해 주세요.");
+      }
+      delete (working as Record<string, unknown>)[missing]; stripped.push(missing); continue;
+    }
     console.error("[examMasterService] upsertExamRow 실패:", {
       table, action: isNew ? "insert(upsert)" : "update(upsert)", method: "POST",
       request: `POST /rest/v1/${table}?on_conflict=id&select=*`,
