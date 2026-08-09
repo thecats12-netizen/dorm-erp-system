@@ -5,6 +5,7 @@ import EquipmentStageRulesPage from "./EquipmentStageRulesPage";
 import ProcessCriteriaRulesPage from "./ProcessCriteriaRulesPage";
 import EmployeeCertificationPreviewPage from "./EmployeeCertificationPreviewPage";
 import PmCandidateGeneratorPage from "./PmCandidateGeneratorPage";
+import IntegratedExcelImportModal from "../components/IntegratedExcelImportModal";
 import { downloadExamMasterTemplate, downloadExamMasterCurrent, loadExamMasterCounts } from "../services/examMasterBundleService";
 
 // ExamMasterGrid(config union) 로 다루지 않는 커스텀 하위 탭 key(설비별 인증단계 · 공정별 달성기준 · 직원 Preview · PM 후보 생성).
@@ -40,6 +41,7 @@ export default function ExamRulesPage({
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
   const [includeInactive, setIncludeInactive] = useState(false);
+  const [showIntegratedImport, setShowIntegratedImport] = useState(false);
 
   const refreshCounts = useCallback(() => {
     loadExamMasterCounts(tenantId).then(setCounts).catch(() => setCounts({}));
@@ -68,15 +70,21 @@ export default function ExamRulesPage({
           <h2 className="text-lg font-semibold">인증 기준관리</h2>
           <p className="text-sm text-slate-500">시험관리 · 기준정보 및 취득/달성/유효기간/목표 기준을 관리합니다.</p>
         </div>
-        {/* 통합 Excel: 양식/현재데이터 다운로드. 통합 업로드(트랜잭션 저장)는 다음 단계에서 제공. */}
+        {/* 통합 Excel: 양식/현재데이터 다운로드 + 통합 등록. */}
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1 text-xs text-slate-500">
             <input type="checkbox" checked={includeInactive} onChange={(e) => setIncludeInactive(e.target.checked)} />미사용 포함
           </label>
           <button type="button" className={btnCls} onClick={downloadExamMasterTemplate}>통합 양식 다운로드</button>
           <button type="button" className={btnCls} disabled={busy} onClick={() => void exportCurrent()}>{busy ? "내보내는 중…" : "현재 데이터 통합 다운로드"}</button>
+          {canEdit && <button type="button" className={btnCls} onClick={() => setShowIntegratedImport(true)}>통합 Excel 등록</button>}
         </div>
       </div>
+      {showIntegratedImport && (
+        <IntegratedExcelImportModal darkMode={darkMode} tenantId={tenantId} userId={userId}
+          onClose={() => setShowIntegratedImport(false)}
+          onDone={() => { refreshCounts(); onToast?.("통합 Excel 등록을 처리했습니다."); }} />
+      )}
 
       {/* 등록 순서 + 항목별 요약 카운트 */}
       <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-800/40" : "border-slate-200 bg-slate-50"}`}>

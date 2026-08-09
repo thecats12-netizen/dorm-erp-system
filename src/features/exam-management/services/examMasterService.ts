@@ -23,6 +23,25 @@ export type ExamPersonnelChildTable = "exam_applications" | "exam_results" | "pm
 
 export type ExamRow = Record<string, unknown> & { id?: string };
 
+// 부모 스코프 식별자(중복/신규·수정 판정 공통) — tenant 제외, code 는 대문자 비교.
+//  다른 부모 스코프의 같은 code 는 별개 행(절대 update 금지)임을 이 키로 보장한다.
+export const MASTER_SCOPED_KEYS: Record<string, string[]> = {
+  exam_groups: ["code"],                              // tenant 전역(독립)
+  exam_categories: ["group_id", "code"],              // 같은 그룹 내
+  exam_processes: ["group_id", "category_id", "code"],// 같은 그룹+제품군 내
+  exam_equipment: ["process_id", "code"],             // 같은 공정 내
+  exam_levels: ["code"],
+};
+const normScoped = (k: string, v: unknown) => (k === "code" ? String(v ?? "").trim().toUpperCase() : String(v ?? ""));
+// 같은 scoped identity 의 기존(미삭제) 행 id 반환. 없거나 code 없으면 null(→ INSERT). 자기 자신 제외.
+export function findScopedExistingId(existing: ExamRow[], table: string, row: ExamRow): string | null {
+  const keys = MASTER_SCOPED_KEYS[table]; if (!keys) return null;
+  if (normScoped("code", row.code) === "") return null;               // 코드 없으면 판정 불가 → 신규
+  const hit = existing.find((r) => String(r.id ?? "") !== String(row.id ?? "") && !r.deleted_at
+    && keys.every((k) => normScoped(k, r[k]) === normScoped(k, row[k])));
+  return hit ? String(hit.id) : null;
+}
+
 const nowIso = () => new Date().toISOString();
 
 export const examSupabaseReady = () => isSupabaseAvailable();

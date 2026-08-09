@@ -5,7 +5,7 @@ import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import type { ExamColumn, ExamEntityConfig } from "../examMasterConfigs";
 import {
   listExamRows, upsertExamRow, softDeleteExamRow, setExamRowActive,
-  writeExamAudit, listExamAudit, examSupabaseReady, translateExamWriteError, isExamTableMissing, type ExamRow, type ExamMasterTable,
+  writeExamAudit, listExamAudit, examSupabaseReady, translateExamWriteError, isExamTableMissing, findScopedExistingId, type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 
 // 참조 옵션은 라벨뿐 아니라 상위 FK(category_id/group_id/part_id/process_id)와 활성여부를 함께 싣는다(종속 선택용).
@@ -584,7 +584,13 @@ export default function ExamMasterGrid({
           if (c.required && !v) rowErr = rowErr || `${c.label} 누락`;
         }
         if (rowErr) rowErrors.push({ row: idx + 2, reason: rowErr }); // +2: 헤더 1행 + 1-based
-        else toSave.push(row);
+        else {
+          // [scoped 신규/수정] 같은 부모 스코프 identity(code)가 있으면 그 행을 UPDATE, 없으면 INSERT.
+          //  다른 부모 스코프의 같은 code 는 별개 행으로 취급(update 안 함).
+          const existId = findScopedExistingId(rows, config.table, row);
+          if (existId) row.id = existId;
+          toSave.push(row);
+        }
       });
 
       // D. 저장(행별 오류를 잡아 전체가 멈추지 않게 하고, 실제 Supabase 오류는 콘솔에만 남긴다).
