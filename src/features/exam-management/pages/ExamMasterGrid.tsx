@@ -615,9 +615,16 @@ export default function ExamMasterGrid({
         console.groupEnd();
       }
 
-      // 오류 행 상세는 화면에도 최소 표시(최대 5건).
-      const errPreview = [...rowErrors, ...saveErrors.map((s) => ({ row: 0, reason: s.reason }))].slice(0, 5)
-        .map((e) => (e.row ? `${e.row}행: ${e.reason}` : e.reason)).join(" · ");
+      // 오류 상세는 "같은 사유"를 묶어 행 범위로 표시(동일 문구 반복 방지 · 최대 5개 사유).
+      const byReason = new Map<string, number[]>();
+      for (const e of [...rowErrors, ...saveErrors.map((s) => ({ row: 0, reason: s.reason }))]) {
+        (byReason.get(e.reason) ?? byReason.set(e.reason, []).get(e.reason)!).push(e.row);
+      }
+      const errPreview = [...byReason.entries()].slice(0, 5).map(([reason, rowsArr]) => {
+        const rs = rowsArr.filter(Boolean).sort((a, b) => a - b);
+        const range = rs.length === 0 ? "" : rs.length === 1 ? `${rs[0]}행: ` : `${rs[0]}~${rs[rs.length - 1]}행 등 ${rs.length}건: `;
+        return `${range}${reason}`;
+      }).join(" · ");
 
       // [7] 성공/실패 건수 구분 토스트.
       if (ok > 0 && failCount === 0) onToast?.(`${config.title} Excel ${ok}건을 등록했습니다.`);

@@ -13,18 +13,18 @@ import { normalizeCriteria } from "../engines/criteriaEvaluator";
 const IMPORT_ORDER = ["groups", "categories", "processes", "equipment", "levels", "rules"] as const;
 type CfgKey = (typeof IMPORT_ORDER)[number];
 type SheetKey = CfgKey | "stage" | "criteria";
-// 08/09 커스텀 테이블 시트 별칭.
-const STAGE_ALIASES = ["08_설비별인증단계", "설비별인증단계", "설비별 인증단계"];
-const CRITERIA_ALIASES = ["09_공정별달성기준", "공정별달성기준", "공정별 달성기준"];
+// 07/08 커스텀 테이블 시트 별칭(신규 표준 + 구버전 08/09).
+const STAGE_ALIASES = ["07_설비별인증단계", "08_설비별인증단계", "설비별인증단계", "설비별 인증단계"];
+const CRITERIA_ALIASES = ["08_공정별달성기준", "09_공정별달성기준", "공정별달성기준", "공정별 달성기준"];
 
 // 시트 별칭: 신규 표준 + 구버전. 정규화 후 매칭.
 const SHEET_ALIASES: Record<CfgKey, string[]> = {
   groups: ["01_그룹", "그룹", "02_그룹"],
   categories: ["02_제품군", "제품군", "01_제품군"],
-  processes: ["04_공정", "공정", "03_공정"],
-  equipment: ["05_장비목록", "장비목록", "05_장비", "장비"],
-  levels: ["06_인증레벨", "인증레벨", "인증 레벨"],
-  rules: ["07_인증규칙", "인증규칙", "인증 규칙"],
+  processes: ["03_공정", "04_공정", "공정"],
+  equipment: ["04_장비목록", "05_장비목록", "장비목록", "05_장비", "장비"],
+  levels: ["05_인증레벨", "06_인증레벨", "인증레벨", "인증 레벨"],
+  rules: ["06_인증규칙", "07_인증규칙", "인증규칙", "인증 규칙"],
 };
 // 통합 등록 미지원 커스텀 시트(→ 처리보류 안내). 현재 08·09 모두 지원 → 비어 있음.
 const HOLD_SHEET_ALIASES: Record<string, string[]> = {};

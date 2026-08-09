@@ -178,23 +178,28 @@ export async function upsertExamRow(table: ExamMasterTable, row: ExamRow, tenant
     throw new Error("로그인 세션이 만료되었습니다.\n다시 로그인한 후 저장해주세요.");
   }
 
-  const { data, error } = await supabase.from(table).upsert(payload, { onConflict: "id" }).select().single();
-  if (error) {
-    // [진단] 실제 Supabase 응답을 개발 콘솔에 그대로 남긴다. access_token/anon key 등 민감정보는 출력하지 않는다.
-    // 권한/인증(401·403) 오류는 자동 재시도하지 않고 즉시 실패시킨다.
+  // DB 스키마 캐시에 없는 컬럼(PGRST204: 미적용 migration 의 group_id/category_id 등)은 payload 에서 제거 후 재시도.
+  //  → 실제 존재하는 컬럼만으로 저장(동적 화이트리스트). 컬럼이 적용되면 자동으로 전체 저장.
+  const working: ExamRow = { ...payload };
+  const stripped: string[] = [];
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const { data, error } = await supabase.from(table).upsert(working, { onConflict: "id" }).select().single();
+    if (!error) { if (stripped.length) console.warn("[examMasterService] DB 미적용 컬럼 제외 후 저장:", { table, stripped }); return data as ExamRow; }
     const e = error as { code?: unknown; message?: string; details?: unknown; hint?: unknown; status?: unknown };
+    const missing = String(e?.message ?? "").match(/could not find the '([^']+)' column/i)?.[1]
+      ?? (String(e?.code ?? "") === "PGRST204" ? String(e?.message ?? "").match(/'([^']+)'/)?.[1] : undefined);
+    if (missing && Object.prototype.hasOwnProperty.call(working, missing)) { delete (working as Record<string, unknown>)[missing]; stripped.push(missing); continue; }
     console.error("[examMasterService] upsertExamRow 실패:", {
       table, action: isNew ? "insert(upsert)" : "update(upsert)", method: "POST",
       request: `POST /rest/v1/${table}?on_conflict=id&select=*`,
       code: e?.code ?? "(unknown)", status: e?.status ?? "(unknown)",
       message: e?.message, details: e?.details ?? "(none)", hint: e?.hint ?? "(none)",
-      userId, tenantId, rowId: id,
-      payloadKeys: Object.keys(payload),        // 값이 아닌 key 목록만 출력
+      userId, tenantId, rowId: id, payloadKeys: Object.keys(working), stripped,
       hasSession: true, sessionUserId: sess.session.user?.id ?? "(none)",
     });
     throw new Error(translateExamWriteError(error));
   }
-  return data as ExamRow;
+  throw new Error("데이터베이스 컬럼 설정을 확인해 주세요. 일부 컬럼이 아직 적용되지 않았습니다.");
 }
 
 // 저장 오류 → 사용자 메시지. 세션만료 / 권한부족 / tenant 불일치 / 일반 실패를 구분한다.

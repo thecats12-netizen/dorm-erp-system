@@ -9,17 +9,19 @@ import { listEquipmentStageRules } from "./equipmentStageRuleService";
 import { listProcessCriteriaRules } from "./processCriteriaRuleService";
 import { criteriaToFormState } from "../utils/criteriaFormMapper";
 
-// [계층 역전] EXAM_ENTITY_CONFIGS 순서(그룹→제품군→공정→장비→인증레벨→인증규칙)에 맞춘 시트명.
+// [단일 source of truth] 라인/제품파트(hidden)는 통합 Excel 3기능 모두에서 제외 → 표시 config 만 사용.
+const VISIBLE_CONFIGS = EXAM_ENTITY_CONFIGS.filter((c) => !c.hidden);
+// 표준 시트명(그룹→제품군→공정→장비→인증레벨→인증규칙→07 설비별인증단계→08 공정별달성기준).
 const SHEET_LABEL: Record<string, string> = {
-  groups: "01_그룹", categories: "02_제품군", parts: "03_제품파트", processes: "04_공정",
-  equipment: "05_장비목록", levels: "06_인증레벨", rules: "07_인증규칙",
+  groups: "01_그룹", categories: "02_제품군", processes: "03_공정",
+  equipment: "04_장비목록", levels: "05_인증레벨", rules: "06_인증규칙",
 };
 const sheetNameFor = (cfg: ExamEntityConfig, i: number) => SHEET_LABEL[cfg.key] || `${String(i + 1).padStart(2, "0")}_${cfg.title}`;
 
 // 참조 컬럼(ref)은 사람이 읽는 이름으로 출력한다. 필요한 참조 테이블만 로드해 id→라벨 맵 구성.
 async function loadRefMaps(tenantId: string): Promise<Record<string, Map<string, string>>> {
   const refTables = new Set<ExamMasterTable>();
-  EXAM_ENTITY_CONFIGS.forEach((c) => c.columns.forEach((col) => { if (col.type === "ref" && col.refTable) refTables.add(col.refTable); }));
+  VISIBLE_CONFIGS.forEach((c) => c.columns.forEach((col) => { if (col.type === "ref" && col.refTable) refTables.add(col.refTable); }));
   const maps: Record<string, Map<string, string>> = {};
   await Promise.all([...refTables].map(async (t) => {
     const rows = await listExamRows(t, tenantId).catch(() => [] as ExamRow[]);
@@ -42,7 +44,7 @@ const cellValue = (col: ExamColumn, r: ExamRow, refMaps: Record<string, Map<stri
 const headersFor = (cfg: ExamEntityConfig) => [...cfg.columns.map((c) => c.label + (c.required ? " *" : "")), "사용여부"];
 
 // 08_설비별인증단계(커스텀 테이블 exam_equipment_stage_rules). 참조는 "코드 · 이름" 결합형(round-trip 호환).
-const STAGE_SHEET = "08_설비별인증단계";
+const STAGE_SHEET = "07_설비별인증단계";
 const stageHeaders = () => ["그룹 *", "제품군 *", "공정 *", "설비 *", "인증단계 *", "주력설비여부", "적용시작일", "적용종료일", "정렬", "비고", "사용여부"];
 async function stageDataSheet(tenantId: string, refMaps: Record<string, Map<string, string>>, includeInactive: boolean): Promise<{ ws: XLSX.WorkSheet; count: number }> {
   const equipMap = new Map<string, string>();
@@ -65,7 +67,7 @@ async function stageDataSheet(tenantId: string, refMaps: Record<string, Map<stri
 }
 
 // 09_공정별달성기준(exam_rules 달성기준). criteria(jsonb)를 관리형 원자 컬럼으로 풀어 출력(groups/unknown 은 노출 안 함 — 보존은 재등록 UPDATE 시).
-const CRITERIA_SHEET = "09_공정별달성기준";
+const CRITERIA_SHEET = "08_공정별달성기준";
 const criteriaHeaders = () => ["그룹 *", "제품군 *", "공정 *", "인증단계 *", "조건방식", "최소설비수", "최소주력설비수", "최소취득률", "최소근속개월", "단계간경과개월", "누적경과개월", "선행단계", "필수설비", "예외허용", "적용시작일", "적용종료일", "표시문구", "관리자메모", "변경사유", "사용여부"];
 const codeById = (rows: ExamRow[]) => new Map(rows.map((r) => [String(r.id), String(r.code ?? "")]));
 async function criteriaDataSheet(tenantId: string, refMaps: Record<string, Map<string, string>>, includeInactive: boolean): Promise<{ ws: XLSX.WorkSheet; count: number }> {
@@ -110,7 +112,7 @@ function guideSheet(): XLSX.WorkSheet {
     ["· 파일에 없는 기존 데이터는 삭제되지 않습니다(비활성은 명시적으로 '미사용' 입력 시에만)."],
     [""],
     ["[인증 규칙 · 장비 인증 방식 허용값] 1대 / 전체 / 대표 장비 / 장비군 / 개별 인증"],
-    ["[시트] 01_그룹 · 02_제품군 · 04_공정 · 05_장비목록 · 06_인증레벨 · 07_인증규칙"],
+    ["[시트] 01_그룹 · 02_제품군 · 03_공정 · 04_장비목록 · 05_인증레벨 · 06_인증규칙 · 07_설비별인증단계 · 08_공정별달성기준"],
   ];
   return XLSX.utils.aoa_to_sheet(aoa);
 }
@@ -119,7 +121,7 @@ function guideSheet(): XLSX.WorkSheet {
 export function downloadExamMasterTemplate(): void {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, guideSheet(), "00_작성안내");
-  EXAM_ENTITY_CONFIGS.forEach((cfg, i) => {
+  VISIBLE_CONFIGS.forEach((cfg, i) => {
     const ws = XLSX.utils.aoa_to_sheet([headersFor(cfg)]); // 헤더만
     XLSX.utils.book_append_sheet(wb, ws, sheetNameFor(cfg, i));
   });
@@ -134,8 +136,8 @@ export async function downloadExamMasterCurrent(tenantId: string, includeInactiv
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, guideSheet(), "00_작성안내");
   const counts: Record<string, number> = {};
-  for (let i = 0; i < EXAM_ENTITY_CONFIGS.length; i++) {
-    const cfg = EXAM_ENTITY_CONFIGS[i];
+  for (let i = 0; i < VISIBLE_CONFIGS.length; i++) {
+    const cfg = VISIBLE_CONFIGS[i];
     const rows = (await listExamRows(cfg.table, tenantId).catch(() => [] as ExamRow[]))
       .filter((r) => includeInactive || r.is_active !== false);
     counts[cfg.key] = rows.length;
@@ -162,7 +164,7 @@ export async function downloadExamMasterCurrent(tenantId: string, includeInactiv
 // 상단 요약 카운트(현재 tenant · 활성 기준). 등록 순서 진행 상태 표시에 사용.
 export async function loadExamMasterCounts(tenantId: string, includeInactive = false): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
-  await Promise.all(EXAM_ENTITY_CONFIGS.map(async (cfg) => {
+  await Promise.all(VISIBLE_CONFIGS.map(async (cfg) => {
     const rows = await listExamRows(cfg.table, tenantId).catch(() => [] as ExamRow[]);
     out[cfg.key] = rows.filter((r) => includeInactive || r.is_active !== false).length;
   }));
