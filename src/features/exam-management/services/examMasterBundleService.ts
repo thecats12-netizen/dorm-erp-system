@@ -6,10 +6,10 @@ import * as XLSX from "xlsx";
 import { EXAM_ENTITY_CONFIGS, type ExamEntityConfig, type ExamColumn } from "../examMasterConfigs";
 import { listExamRows, type ExamMasterTable, type ExamRow } from "./examMasterService";
 
-// EXAM_ENTITY_CONFIGS 순서(제품군→그룹→제품파트→공정→장비→인증레벨→인증규칙)에 맞춘 시트명.
+// [계층 역전] EXAM_ENTITY_CONFIGS 순서(그룹→제품군→공정→장비→인증레벨→인증규칙)에 맞춘 시트명.
 const SHEET_LABEL: Record<string, string> = {
-  categories: "01_제품군", groups: "02_그룹", parts: "03_제품파트", processes: "04_공정",
-  equipment: "05_장비", levels: "06_인증레벨", rules: "07_인증규칙",
+  groups: "01_그룹", categories: "02_제품군", parts: "03_제품파트", processes: "04_공정",
+  equipment: "05_장비목록", levels: "06_인증레벨", rules: "07_인증규칙",
 };
 const sheetNameFor = (cfg: ExamEntityConfig, i: number) => SHEET_LABEL[cfg.key] || `${String(i + 1).padStart(2, "0")}_${cfg.title}`;
 
@@ -43,7 +43,7 @@ function guideSheet(): XLSX.WorkSheet {
   const aoa: string[][] = [
     ["시험관리 · 인증 기준관리 통합 등록 양식"],
     [""],
-    ["[등록 순서] 제품군 → 그룹 → 제품/파트 → 공정 → 장비 → 인증 레벨 → 인증 규칙"],
+    ["[등록 순서] 그룹 → 제품군 → 공정 → 장비 → 인증 레벨 → 인증 규칙"],
     ["상위 시트를 먼저 채우고, 하위 시트의 상위 항목은 상위 시트의 '코드' 또는 표시명(코드 · 이름)으로 참조합니다."],
     [""],
     ["[공통 규칙]"],
@@ -55,7 +55,7 @@ function guideSheet(): XLSX.WorkSheet {
     ["· 파일에 없는 기존 데이터는 삭제되지 않습니다(비활성은 명시적으로 '미사용' 입력 시에만)."],
     [""],
     ["[인증 규칙 · 장비 인증 방식 허용값] 1대 / 전체 / 대표 장비 / 장비군 / 개별 인증"],
-    ["[시트] 01_제품군 · 02_그룹 · 03_제품파트 · 04_공정 · 05_장비 · 06_인증레벨 · 07_인증규칙"],
+    ["[시트] 01_그룹 · 02_제품군 · 04_공정 · 05_장비목록 · 06_인증레벨 · 07_인증규칙"],
   ];
   return XLSX.utils.aoa_to_sheet(aoa);
 }

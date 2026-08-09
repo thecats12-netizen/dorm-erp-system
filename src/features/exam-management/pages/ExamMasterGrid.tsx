@@ -366,18 +366,19 @@ export default function ExamMasterGrid({
   const hasCol = (k: string) => config.columns.some((c) => c.key === k);
   const suggestCode = (name: string) => String(name).trim().toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
   const nextSort = () => rows.reduce((mx, r) => Math.max(mx, Number(r.sort_order) || 0), 0) + 1;
-  // [요구사항 5] 코드·품명 중복 검사는 "부모 범위" 기준(전역 unique 금지).
-  //   제품군(exam_categories): tenant 전역 · 그룹: category_id · 제품/파트: group_id · 공정: part_id · 장비: process_id.
-  //   범위 필드가 없는 표(levels/rules 등)는 기존대로 tenant 전역 검사.
-  const CODE_SCOPE_PARENT: Record<string, string | undefined> = {
-    exam_categories: undefined, // 전역
-    exam_groups: "category_id",
-    exam_parts: "group_id",
-    exam_processes: "group_id", // [Line 전환] 공정 코드 중복 검사 기준: 부모 그룹(part_id → group_id)
-    exam_equipment: "process_id",
+  // [요구사항 5·계층 역전] 코드·품명 중복 검사는 "부모 스코프" 기준(전역 unique 금지).
+  //   그룹: tenant 전역(독립 마스터) · 제품군: group_id · 공정: group_id+category_id · 장비: process_id.
+  //   다른 부모 스코프면 같은 코드/이름 허용(예: 1그룹/CVD 와 2그룹/CVD).
+  //   범위 필드가 없는 표(levels/rules 등)는 tenant 전역 검사.
+  const CODE_SCOPE_PARENT: Record<string, string[] | undefined> = {
+    exam_groups: undefined,                         // tenant 전역(독립)
+    exam_categories: ["group_id"],                  // 같은 그룹 내에서만
+    exam_parts: ["group_id"],                       // (hidden·legacy)
+    exam_processes: ["group_id", "category_id"],    // 같은 그룹+제품군 내에서만
+    exam_equipment: ["process_id"],                 // 같은 공정 내에서만
   };
-  const scopeField = config.table in CODE_SCOPE_PARENT ? CODE_SCOPE_PARENT[config.table] : undefined;
-  const sameScope = (r: ExamRow) => !scopeField || String(r[scopeField] ?? "") === String(editRow?.[scopeField] ?? "");
+  const scopeFields = config.table in CODE_SCOPE_PARENT ? CODE_SCOPE_PARENT[config.table] : undefined;
+  const sameScope = (r: ExamRow) => !scopeFields || scopeFields.every((f) => String(r[f] ?? "") === String(editRow?.[f] ?? ""));
   const codeDup = useMemo(() => {
     if (!editRow || !hasCol("code")) return false;
     const v = String(editRow.code ?? "").trim().toUpperCase(); if (!v) return false;
@@ -522,7 +523,6 @@ export default function ExamMasterGrid({
       };
       const cats = active(refMap["exam_categories"] || []);
       const groups = active(refMap["exam_groups"] || []);
-      const parts = active(refMap["exam_parts"] || []);
       const procs = active(refMap["exam_processes"] || []);
 
       raw.forEach((r, idx) => {
@@ -531,10 +531,9 @@ export default function ExamMasterGrid({
         const cell = (label: string) => (rowByNorm.has(normHeader(label)) ? rowByNorm.get(normHeader(label)) : "");
         const cellPath = (labels: string[]) => { for (const l of labels) { const v = String(cell(l) ?? "").trim(); if (v) return v; } return ""; };
 
-        // 상위 경로 해석(제품군→그룹→제품/파트→공정). "적용 …"(인증 규칙) 헤더도 함께 인식.
-        const catRaw = cellPath(["제품군", "적용 제품군"]);
+        // [계층 역전] 상위 경로 해석: 그룹(독립) → 제품군(그룹 소속) → 공정(제품군 소속, group fallback). "적용 …"(인증 규칙) 헤더도 인식.
         const grpRaw = cellPath(["그룹", "적용 그룹"]);
-        const partRaw = cellPath(["제품/파트", "적용 제품/파트"]);
+        const catRaw = cellPath(["제품군", "적용 제품군"]);
         const procRaw = cellPath(["공정", "적용 공정"]);
         const chain: { category_id: string; group_id: string; part_id: string; process_id: string; error: string } = { category_id: "", group_id: "", part_id: "", process_id: "", error: "" };
         const resolveLevel = (rawVal: string, cands: RefOpt[], label: string, pathPrefix: string): string => {
@@ -544,18 +543,19 @@ export default function ExamMasterGrid({
           if (ids.length > 1) { chain.error = chain.error || `${pathPrefix ? `‘${pathPrefix}’ 아래에 ` : ""}동일한 ${label} ‘${rawVal}’이(가) 여러 건 존재합니다`; refFailed++; return ""; }
           return ids[0];
         };
-        if (catRaw) chain.category_id = resolveLevel(catRaw, cats, "제품군", "");
-        if (!chain.error && grpRaw) {
-          if (!chain.category_id) chain.error = `그룹 ‘${grpRaw}’의 상위 제품군을 확인할 수 없습니다`;
-          else chain.group_id = resolveLevel(grpRaw, groups.filter((g) => eqId(g.category_id, chain.category_id)), "그룹", catRaw);
-        }
-        if (!chain.error && partRaw) {
-          if (!chain.group_id) chain.error = `제품/파트 ‘${partRaw}’의 상위 그룹을 확인할 수 없습니다`;
-          else chain.part_id = resolveLevel(partRaw, parts.filter((p) => eqId(p.group_id, chain.group_id)), "제품/파트", `${catRaw} > ${grpRaw}`);
+        if (grpRaw) chain.group_id = resolveLevel(grpRaw, groups, "그룹", "");
+        if (!chain.error && catRaw) {
+          if (!chain.group_id) chain.error = `제품군 ‘${catRaw}’의 상위 그룹을 확인할 수 없습니다`;
+          else chain.category_id = resolveLevel(catRaw, cats.filter((c) => eqId(c.group_id, chain.group_id)), "제품군", grpRaw);
         }
         if (!chain.error && procRaw) {
-          if (!chain.part_id) chain.error = `공정 ‘${procRaw}’의 상위 제품/파트를 확인할 수 없습니다`;
-          else chain.process_id = resolveLevel(procRaw, procs.filter((p) => eqId(p.part_id, chain.part_id)), "공정", `${catRaw} > ${grpRaw} > ${partRaw}`);
+          if (!chain.group_id) chain.error = `공정 ‘${procRaw}’의 상위 그룹을 확인할 수 없습니다`;
+          else {
+            const cands = chain.category_id
+              ? procs.filter((p) => eqId(p.category_id, chain.category_id) || (!p.category_id && eqId(p.group_id, chain.group_id)))
+              : procs.filter((p) => eqId(p.group_id, chain.group_id));
+            chain.process_id = resolveLevel(procRaw, cands, "공정", chain.category_id ? `${grpRaw} > ${catRaw}` : grpRaw);
+          }
         }
 
         const row: ExamRow = {};
