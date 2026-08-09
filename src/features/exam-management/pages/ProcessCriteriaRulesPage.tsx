@@ -61,7 +61,8 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
     .sort((a, b) => a.rank - b.rank), [m.levels]);
   const groupOpts = useMemo(() => m.groups.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.groups]);
   // 제품군 목록: 선택한 그룹에 속한 항목만(그룹→제품군 계층). DB 상 그룹이 제품군에 속하므로 선택 그룹의 category 로 한정.
-  const catOpts = useMemo(() => { const gc = fGroup ? String(groupById.get(fGroup)?.category_id ?? "") : ""; return m.categories.filter((r) => r.is_active !== false && (!gc || String(r.id) === gc)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })); }, [m.categories, fGroup, groupById]);
+  // [계층 역전] 제품군은 그룹 소속(category.group_id)으로 필터 — 선택 그룹의 제품군만 표시.
+  const catOpts = useMemo(() => m.categories.filter((r) => r.is_active !== false && (!fGroup || String(r.group_id ?? "") === fGroup)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.categories, fGroup]);
   const procOpts = useMemo(() => m.processes.filter((r) => r.is_active !== false && (!fGroup || String(r.group_id ?? "") === fGroup)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.processes, fGroup]);
   const formMaster: ProcCriteriaMaster = useMemo(() => ({ groups: m.groups, processes: m.processes, equipment: m.equipment, groupById, catById, procById, equipById, levelOpts }), [m.groups, m.processes, m.equipment, groupById, catById, procById, equipById, levelOpts]);
 

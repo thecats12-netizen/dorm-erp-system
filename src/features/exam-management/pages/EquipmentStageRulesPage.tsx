@@ -58,7 +58,10 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
     return src.map((r) => ({ id: String(r.id), name: String(r.name ?? "").trim() || String(r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko"));
   }, [master.levels]);
   const groupOpts = useMemo(() => master.groups.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.groups]);
-  const procOptsFor = (groupId: string) => master.processes.filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
+  // [계층 역전] 제품군은 그룹 소속(category.group_id), 공정은 제품군 소속(process.category_id, 없으면 group_id fallback).
+  const catOptsFor = (groupId: string) => master.categories.filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  const procOptsForGroup = (groupId: string) => master.processes.filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId || String(catById.get(String(r.category_id ?? ""))?.group_id ?? "") === groupId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
+  const procOptsForCat = (catId: string, groupId: string) => master.processes.filter((r) => r.is_active !== false && (catId ? (String(r.category_id ?? "") === catId || (!r.category_id && String(r.group_id ?? "") === groupId)) : false)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
   const equipOptsFor = (processId: string) => master.equipment.filter((r) => r.is_active !== false && (!processId || String(r.process_id ?? "") === processId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
 
   const filtered = useMemo(() => {
@@ -83,18 +86,21 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
   const openNew = () => setEditRow({ is_active: true, is_core_equipment: false });
   const save = async () => {
     if (!editRow) return;
-    const gid = String(editRow.group_id ?? ""), pid = String(editRow.process_id ?? ""), eid = String(editRow.equipment_id ?? ""), lid = String(editRow.level_id ?? "");
+    const gid = String(editRow.group_id ?? ""), cid = String(editRow.category_id ?? ""), pid = String(editRow.process_id ?? ""), eid = String(editRow.equipment_id ?? ""), lid = String(editRow.level_id ?? "");
     if (!gid) { setError("그룹을 선택해 주세요."); return; }
+    if (!cid) { setError("제품군을 선택해 주세요."); return; }
     if (!pid) { setError("공정을 선택해 주세요."); return; }
     if (!eid) { setError("설비를 선택해 주세요."); return; }
     if (!lid) { setError("기준단계를 선택해 주세요."); return; }
+    // 계층 일치: 제품군이 선택 그룹 소속인지(category.group_id === 그룹). legacy(group_id 미지정) 제품군은 통과.
+    const cat = catById.get(cid); const catG = String(cat?.group_id ?? "");
+    if (cat && catG && catG !== gid) { setError("선택한 제품군이 해당 그룹에 속하지 않습니다."); return; }
     const eq = equipById.get(eid); if (eq && String(eq.process_id ?? "") !== pid) { setError("선택한 설비가 해당 공정에 속하지 않습니다."); return; }
     const from = String(editRow.effective_from ?? ""), to = String(editRow.effective_to ?? "");
     if (from && to && from > to) { setError("적용 시작일이 종료일보다 늦을 수 없습니다."); return; }
     setSaving(true); setError(null);
     try {
-      const proc = procById.get(pid);
-      await upsertEquipmentStageRule({ ...editRow, group_id: gid, process_id: pid, equipment_id: eid, level_id: lid, category_id: (editRow.category_id as string) ?? (proc?.category_id as string) ?? (groupById.get(gid)?.category_id as string) ?? null }, tenantId, userId);
+      await upsertEquipmentStageRule({ ...editRow, group_id: gid, category_id: cid, process_id: pid, equipment_id: eid, level_id: lid }, tenantId, userId);
       setEditRow(null); onToast?.("설비별 인증단계 기준을 저장했습니다."); await reload();
     } catch (err) { setError((err as { message?: string })?.message || "저장하지 못했습니다."); }
     finally { setSaving(false); }
@@ -106,6 +112,7 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
   const btn = darkMode ? "inline-flex items-center justify-center rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800" : "inline-flex items-center justify-center rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100";
   const e = editRow;
   const eGroup = String(e?.group_id ?? "");
+  const eCat = String(e?.category_id ?? "");
   const eProc = String(e?.process_id ?? "");
 
   return (
@@ -117,7 +124,7 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
 
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <select value={fGroup} onChange={(ev) => { setFGroup(ev.target.value); setFProcess(""); setPage(1); }} className={inputCls}><option value="">그룹: 전체</option>{groupOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
-        <select value={fProcess} onChange={(ev) => { setFProcess(ev.target.value); setPage(1); }} className={inputCls}><option value="">공정: 전체</option>{procOptsFor(fGroup).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
+        <select value={fProcess} onChange={(ev) => { setFProcess(ev.target.value); setPage(1); }} className={inputCls}><option value="">공정: 전체</option>{procOptsForGroup(fGroup).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
         <select value={fLevel} onChange={(ev) => { setFLevel(ev.target.value); setPage(1); }} className={inputCls}><option value="">기준단계: 전체</option>{levelOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
         <select value={fCore} onChange={(ev) => { setFCore(ev.target.value); setPage(1); }} className={inputCls}><option value="">주력: 전체</option><option value="core">주력설비</option><option value="normal">일반</option></select>
         <select value={fActive} onChange={(ev) => { setFActive(ev.target.value); setPage(1); }} className={inputCls}><option value="">사용: 전체</option><option value="on">사용</option><option value="off">미사용</option></select>
@@ -170,11 +177,11 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
             <h3 className="mb-4 text-lg font-semibold">{e.id ? "설비별 인증단계 수정" : "설비별 인증단계 등록"}</h3>
             <div className="grid grid-cols-2 gap-3">
               <div className="col-span-2"><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">그룹 <span className="text-rose-500">*</span></label>
-                <select className={`${inputCls} w-full`} value={eGroup} onChange={(ev) => { const g = groupById.get(ev.target.value); setEditRow((f) => ({ ...(f || {}), group_id: ev.target.value || null, category_id: (g?.category_id as string) ?? null, process_id: null, equipment_id: null })); }}><option value="">선택</option>{groupOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
-              <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">제품군</label>
-                <div className={`${inputCls} w-full ${darkMode ? "bg-slate-800/60 text-slate-400" : "bg-slate-100 text-slate-500"}`}>{nm(catById, e.category_id)}</div></div>
+                <select className={`${inputCls} w-full`} value={eGroup} onChange={(ev) => { setEditRow((f) => ({ ...(f || {}), group_id: ev.target.value || null, category_id: null, process_id: null, equipment_id: null })); }}><option value="">선택</option>{groupOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
+              <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">제품군 <span className="text-rose-500">*</span></label>
+                <select className={`${inputCls} w-full`} value={eCat} disabled={!eGroup} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), category_id: ev.target.value || null, process_id: null, equipment_id: null }))}><option value="">{eGroup ? "선택" : "그룹 먼저"}</option>{catOptsFor(eGroup).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
               <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">공정 <span className="text-rose-500">*</span></label>
-                <select className={`${inputCls} w-full`} value={eProc} disabled={!eGroup} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), process_id: ev.target.value || null, equipment_id: null }))}><option value="">{eGroup ? "선택" : "그룹 먼저"}</option>{procOptsFor(eGroup).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
+                <select className={`${inputCls} w-full`} value={eProc} disabled={!eCat} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), process_id: ev.target.value || null, equipment_id: null }))}><option value="">{eCat ? "선택" : "제품군 먼저"}</option>{procOptsForCat(eCat, eGroup).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
               <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">설비 <span className="text-rose-500">*</span></label>
                 <select className={`${inputCls} w-full`} value={String(e.equipment_id ?? "")} disabled={!eProc} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), equipment_id: ev.target.value || null }))}><option value="">{eProc ? "선택" : "공정 먼저"}</option>{equipOptsFor(eProc).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
               <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">기준단계 <span className="text-rose-500">*</span></label>

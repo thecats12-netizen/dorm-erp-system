@@ -16,7 +16,6 @@ type Props = {
   onClose: () => void; onSubmit: (payload: ExamRow, reason: string) => Promise<void>;
 };
 
-const nm = (m: Map<string, ExamRow>, id: unknown) => { const r = m.get(String(id ?? "")); return r ? (String(r.name ?? "").trim() || String(r.code ?? "").trim() || "-") : "-"; };
 const numInput = (v: number | "") => (v === "" ? "" : String(v));
 const parseNum = (s: string): number | "" => { const t = s.replace(/[^0-9.]/g, ""); if (t === "") return ""; const n = Number(t); return Number.isFinite(n) ? n : ""; };
 
@@ -26,8 +25,10 @@ export default function ProcessCriteriaRuleForm({ darkMode, master, row, onClose
   const originalHasGroups = (original.groups?.length ?? 0) > 0;
 
   const [processId, setProcessId] = useState(String(row.process_id ?? ""));
-  const initGroup = master.procById.get(processId)?.group_id;
-  const [groupId, setGroupId] = useState(String(initGroup ?? ""));
+  const initProc = master.procById.get(processId);
+  const initCat = String(initProc?.category_id ?? "");
+  const [groupId, setGroupId] = useState(String(initProc?.group_id ?? master.catById.get(initCat)?.group_id ?? ""));
+  const [categoryId, setCategoryId] = useState(initCat);
   const [levelId, setLevelId] = useState(String(row.level_id ?? ""));
   const [notes, setNotes] = useState(String(row.notes ?? ""));
   const [isActive, setIsActive] = useState(row.is_active !== false);
@@ -42,8 +43,9 @@ export default function ProcessCriteriaRuleForm({ darkMode, master, row, onClose
   const set = <K extends keyof ProcessCriteriaFormState>(k: K, v: ProcessCriteriaFormState[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const groupOpts = useMemo(() => master.groups.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.groups]);
-  const procOpts = useMemo(() => master.processes.filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [master.processes, groupId]);
-  const catId = master.procById.get(processId)?.category_id ?? master.groupById.get(groupId)?.category_id;
+  // [계층 역전] 제품군은 그룹 소속(category.group_id), 공정은 제품군 소속(process.category_id, 없으면 group_id fallback).
+  const catOpts = useMemo(() => [...master.catById.values()].filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.catById, groupId]);
+  const procOpts = useMemo(() => master.processes.filter((r) => r.is_active !== false && (categoryId ? (String(r.category_id ?? "") === categoryId || (!r.category_id && String(r.group_id ?? "") === groupId)) : false)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [master.processes, categoryId, groupId]);
 
   // 공정 소속 설비(선택된 필수설비는 비활성이어도 유지 표시). 검색: 코드+이름.
   const equipList = useMemo(() => {
@@ -70,8 +72,16 @@ export default function ProcessCriteriaRuleForm({ darkMode, master, row, onClose
 
   const collectErrors = (): string[] => {
     const e: string[] = [];
+    if (!groupId) e.push("그룹을 선택해 주세요.");
+    if (!categoryId) e.push("제품군을 선택해 주세요.");
     if (!processId) e.push("공정을 선택해 주세요.");
     if (!levelId) e.push("인증단계를 선택해 주세요.");
+    // 계층 일치: 선택 공정이 선택 제품군 소속인지(process.category_id === category, legacy 는 group_id fallback).
+    if (processId && categoryId) {
+      const proc = master.procById.get(processId);
+      const pCat = String(proc?.category_id ?? "");
+      if (proc && pCat && pCat !== categoryId) e.push("선택한 공정이 해당 제품군에 속하지 않습니다.");
+    }
     const nums: [number | "", string][] = [[form.minEquipmentCount, "최소 설비 수"], [form.minCoreEquipmentCount, "최소 주력설비 수"], [form.minTenureMonths, "최소 근속개월"], [form.minElapsedMonths, "단계간 경과개월"], [form.cumulativeElapsedMonths, "누적 경과개월"]];
     for (const [v, label] of nums) if (v !== "" && v < 0) e.push(`${label}은(는) 음수가 될 수 없습니다.`);
     if (form.minCompletionRate !== "" && (form.minCompletionRate < 0 || form.minCompletionRate > 100)) e.push("최소 취득률은 0~100 사이여야 합니다.");
@@ -99,7 +109,6 @@ export default function ProcessCriteriaRuleForm({ darkMode, master, row, onClose
   };
 
   const inp = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-2 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm outline-none";
-  const ro = darkMode ? "rounded-lg border border-slate-700 bg-slate-800/60 px-2.5 py-2 text-sm text-slate-400" : "rounded-lg border border-slate-200 bg-slate-100 px-2.5 py-2 text-sm text-slate-500";
   const lbl = "mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300";
   const btn = darkMode ? "rounded-xl border border-slate-600 px-3 py-2 text-xs font-medium hover:bg-slate-800" : "rounded-xl border border-slate-300 px-3 py-2 text-xs font-medium hover:bg-slate-100";
   // 숫자 필드 렌더(컴포넌트가 아닌 함수 — 렌더 중 컴포넌트 생성 방지). 미입력("")과 0 을 구분.
@@ -122,10 +131,11 @@ export default function ProcessCriteriaRuleForm({ darkMode, master, row, onClose
 
         <div className="grid grid-cols-2 gap-3">
           <div><label className={lbl}>그룹 <span className="text-rose-500">*</span></label>
-            <select className={`${inp} w-full`} value={groupId} onChange={(ev) => { setGroupId(ev.target.value); setProcessId(""); set("requiredEquipmentIds", []); }}><option value="">선택</option>{groupOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
-          <div><label className={lbl}>제품군</label><div className={`${ro} w-full`}>{nm(master.catById, catId)}</div></div>
+            <select className={`${inp} w-full`} value={groupId} onChange={(ev) => { setGroupId(ev.target.value); setCategoryId(""); setProcessId(""); set("requiredEquipmentIds", []); }}><option value="">선택</option>{groupOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
+          <div><label className={lbl}>제품군 <span className="text-rose-500">*</span></label>
+            <select className={`${inp} w-full`} value={categoryId} disabled={!groupId} onChange={(ev) => { setCategoryId(ev.target.value); setProcessId(""); set("requiredEquipmentIds", []); }}><option value="">{groupId ? "선택" : "그룹 먼저"}</option>{catOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
           <div><label className={lbl}>공정 <span className="text-rose-500">*</span></label>
-            <select className={`${inp} w-full`} value={processId} disabled={!groupId} onChange={(ev) => { setProcessId(ev.target.value); set("requiredEquipmentIds", []); }}><option value="">{groupId ? "선택" : "그룹 먼저"}</option>{procOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
+            <select className={`${inp} w-full`} value={processId} disabled={!categoryId} onChange={(ev) => { setProcessId(ev.target.value); set("requiredEquipmentIds", []); }}><option value="">{categoryId ? "선택" : "제품군 먼저"}</option>{procOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
           <div><label className={lbl}>인증단계 <span className="text-rose-500">*</span></label>
             <select className={`${inp} w-full`} value={levelId} onChange={(ev) => setLevelId(ev.target.value)}><option value="">선택</option>{master.levelOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
 
