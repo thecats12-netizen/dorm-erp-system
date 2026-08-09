@@ -49,6 +49,10 @@ export default function ExamMasterGrid({
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [activeFilter, setActiveFilter] = useState<"전체" | "사용" | "미사용">("전체");
+  // 장비 목록 조회용 계단식 필터(그룹→제품군→공정). 표시 전용 — 저장 데이터 불변. 파생 계층이 있는 탭(장비)에서만 노출.
+  const [filterGroup, setFilterGroup] = useState("");
+  const [filterCat, setFilterCat] = useState("");
+  const [filterProc, setFilterProc] = useState("");
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [editRow, setEditRow] = useState<ExamRow | null>(null);
@@ -207,6 +211,27 @@ export default function ExamMasterGrid({
     return (parent && ((parent.name && String(parent.name).trim()) || parent.label)) || col.fallback;
   };
 
+  // 조회용 계단식 필터 옵션(이미 로드된 refMap 재사용 · 추가 DB 호출 없음). 상위 선택에 종속해 하위만 표시.
+  const hierFilterOn = derivedColumns.length > 0; // 파생 계층(그룹/제품군) 컬럼이 있는 탭(장비)에서만 필터 노출
+  const optName = (o: RefOpt) => (o.name && String(o.name).trim()) || o.label;
+  const filterGroupOpts = useMemo(() => (refMap["exam_groups"] || []).filter((o) => o.is_active), [refMap]);
+  const filterCatOpts = useMemo(
+    () => (refMap["exam_categories"] || []).filter((o) => o.is_active && (!filterGroup || String(o.group_id ?? "") === filterGroup)),
+    [refMap, filterGroup],
+  );
+  const filterProcOpts = useMemo(
+    () => (refMap["exam_processes"] || []).filter((o) => {
+      if (!o.is_active) return false;
+      if (filterCat) return String(o.category_id ?? "") === filterCat;      // 제품군 선택 시 그 제품군 공정만
+      if (filterGroup) return String(o.group_id ?? "") === filterGroup;     // 그룹만 선택 시 그 그룹 공정만
+      return true;                                                          // 전체
+    }),
+    [refMap, filterGroup, filterCat],
+  );
+  // 상위 변경 시 하위 초기화(그룹 변경 → 제품군·공정 초기화, 제품군 변경 → 공정 초기화).
+  const changeFilterGroup = (v: string) => { setFilterGroup(v); setFilterCat(""); setFilterProc(""); };
+  const changeFilterCat = (v: string) => { setFilterCat(v); setFilterProc(""); };
+
   // 한 옵션이 상위 폼 선택에 부합하는지 판정(기본 FK → null 이면 fallback 상위로 역추적).
   const matchesFilter = (col: ExamColumn, opt: RefOpt, edit: ExamRow | null): boolean => {
     const fb = col.filterBy;
@@ -285,6 +310,14 @@ export default function ExamMasterGrid({
     const list = rows.filter((r) => {
       if (activeFilter === "사용" && r.is_active === false) return false;
       if (activeFilter === "미사용" && r.is_active !== false) return false;
+      // 계단식 필터(조회 전용): process_id → 공정 → group_id/category_id 를 refMap 으로 판정(행별 DB 호출 없음).
+      if (hierFilterOn && (filterGroup || filterCat || filterProc)) {
+        const pid = String(r.process_id ?? "");
+        const p = pid ? refById["exam_processes"]?.get(pid) : undefined;
+        if (filterGroup && String(p?.group_id ?? "") !== filterGroup) return false;
+        if (filterCat && String(p?.category_id ?? "") !== filterCat) return false;
+        if (filterProc && pid !== filterProc) return false;
+      }
       if (q) {
         const text = tableColumns.map((c) => cellText(c, r)).join(" ").toLowerCase();
         if (!text.includes(q)) return false;
@@ -304,7 +337,7 @@ export default function ExamMasterGrid({
     }
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, search, activeFilter, sortKey, sortDir, refMap, config.columns]);
+  }, [rows, search, activeFilter, filterGroup, filterCat, filterProc, sortKey, sortDir, refMap, config.columns]);
 
   const toggleSort = (k: string) => {
     if (sortKey !== k) { setSortKey(k); setSortDir("asc"); }
@@ -665,12 +698,29 @@ export default function ExamMasterGrid({
     <div>
       {/* 툴바 */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="검색" className={`${inputCls} min-w-[160px]`} />
+        {/* 조회용 계단식 필터(그룹 → 제품군 → 공정): 표시 전용 · 상위 변경 시 하위 초기화 · 저장 데이터 불변. */}
+        {hierFilterOn && (
+          <>
+            <select value={filterGroup} onChange={(e) => changeFilterGroup(e.target.value)} aria-label="그룹 필터" className={inputCls}>
+              <option value="">그룹: 전체</option>
+              {filterGroupOpts.map((o) => <option key={o.id} value={o.id}>{optName(o)}</option>)}
+            </select>
+            <select value={filterCat} onChange={(e) => changeFilterCat(e.target.value)} aria-label="제품군 필터" className={inputCls}>
+              <option value="">제품군: 전체</option>
+              {filterCatOpts.map((o) => <option key={o.id} value={o.id}>{optName(o)}</option>)}
+            </select>
+            <select value={filterProc} onChange={(e) => setFilterProc(e.target.value)} aria-label="공정 필터" className={inputCls}>
+              <option value="">공정: 전체</option>
+              {filterProcOpts.map((o) => <option key={o.id} value={o.id}>{optName(o)}</option>)}
+            </select>
+          </>
+        )}
         <select value={activeFilter} onChange={(e) => setActiveFilter(e.target.value as "전체" | "사용" | "미사용")} className={inputCls}>
           <option value="전체">사용여부: 전체</option>
           <option value="사용">사용</option>
           <option value="미사용">미사용</option>
         </select>
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="검색" className={`${inputCls} min-w-[160px]`} />
         <span className="ml-auto flex flex-wrap gap-1.5">
           <button className={btn} onClick={exportExcel}>Excel 내보내기</button>
           {canEdit && (
