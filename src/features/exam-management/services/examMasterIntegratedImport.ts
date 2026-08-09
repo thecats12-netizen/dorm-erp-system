@@ -57,14 +57,16 @@ function resolveRef(pool: ExamRow[], raw: string, scope: (r: ExamRow) => boolean
 
 // 통합 분석(미리보기). pool = 기존 DB + 이 파일에서 앞 시트가 만들 신규 행(스코프 해석용). 저장은 하지 않음.
 export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: string): Promise<IntegratedAnalysis> {
-  const [groups, cats, procs, levels] = await Promise.all([
+  const [groups, cats, procs, levels, rules] = await Promise.all([
     listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
+    listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
   ]);
   // 해석용 풀(기존 + 앞 시트 신규를 계속 누적). code/name/부모FK 만 있으면 됨.
-  const pool: Record<CfgKey, ExamRow[]> = { groups: [...groups], categories: [...cats], processes: [...procs], equipment: [], levels: [...levels], rules: [] };
+  //  exam_rules 는 scoped 신규/수정(process+level+rule_type) 판정을 위해 기존 행을 함께 적재.
+  const pool: Record<CfgKey, ExamRow[]> = { groups: [...groups], categories: [...cats], processes: [...procs], equipment: [], levels: [...levels], rules: [...rules] };
   const recognized = new Set<string>();
   const sheets: SheetPlan[] = [];
 

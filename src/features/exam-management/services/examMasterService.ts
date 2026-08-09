@@ -31,12 +31,14 @@ export const MASTER_SCOPED_KEYS: Record<string, string[]> = {
   exam_processes: ["group_id", "category_id", "code"],// 같은 그룹+제품군 내
   exam_equipment: ["process_id", "code"],             // 같은 공정 내
   exam_levels: ["code"],
+  exam_rules: ["process_id", "level_id", "rule_type"],// 공정+단계+기준구분 1건(달성기준 기간겹침은 별도 검증)
 };
-const normScoped = (k: string, v: unknown) => (k === "code" ? String(v ?? "").trim().toUpperCase() : String(v ?? ""));
-// 같은 scoped identity 의 기존(미삭제) 행 id 반환. 없거나 code 없으면 null(→ INSERT). 자기 자신 제외.
+// code/rule_type 등 문자열 키 정규화(code 는 대문자, rule_type 은 공백 무시로 "달성 기준"/"달성기준" 동일 취급).
+const normScoped = (k: string, v: unknown) => k === "code" ? String(v ?? "").trim().toUpperCase() : k === "rule_type" ? String(v ?? "").replace(/\s/g, "") : String(v ?? "");
+// 같은 scoped identity 의 기존(미삭제) 행 id 반환. 키 필드가 하나라도 비면 판정 불가 → null(INSERT). 자기 자신 제외.
 export function findScopedExistingId(existing: ExamRow[], table: string, row: ExamRow): string | null {
   const keys = MASTER_SCOPED_KEYS[table]; if (!keys) return null;
-  if (normScoped("code", row.code) === "") return null;               // 코드 없으면 판정 불가 → 신규
+  if (keys.some((k) => normScoped(k, row[k]) === "")) return null;
   const hit = existing.find((r) => String(r.id ?? "") !== String(row.id ?? "") && !r.deleted_at
     && keys.every((k) => normScoped(k, r[k]) === normScoped(k, row[k])));
   return hit ? String(hit.id) : null;
