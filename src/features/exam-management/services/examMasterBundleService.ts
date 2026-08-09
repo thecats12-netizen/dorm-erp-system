@@ -6,6 +6,8 @@ import * as XLSX from "xlsx";
 import { EXAM_ENTITY_CONFIGS, type ExamEntityConfig, type ExamColumn } from "../examMasterConfigs";
 import { listExamRows, type ExamMasterTable, type ExamRow } from "./examMasterService";
 import { listEquipmentStageRules } from "./equipmentStageRuleService";
+import { listProcessCriteriaRules } from "./processCriteriaRuleService";
+import { criteriaToFormState } from "../utils/criteriaFormMapper";
 
 // [계층 역전] EXAM_ENTITY_CONFIGS 순서(그룹→제품군→공정→장비→인증레벨→인증규칙)에 맞춘 시트명.
 const SHEET_LABEL: Record<string, string> = {
@@ -62,6 +64,35 @@ async function stageDataSheet(tenantId: string, refMaps: Record<string, Map<stri
   return { ws: json.length ? XLSX.utils.json_to_sheet(json) : XLSX.utils.aoa_to_sheet([stageHeaders()]), count: rows.length };
 }
 
+// 09_공정별달성기준(exam_rules 달성기준). criteria(jsonb)를 관리형 원자 컬럼으로 풀어 출력(groups/unknown 은 노출 안 함 — 보존은 재등록 UPDATE 시).
+const CRITERIA_SHEET = "09_공정별달성기준";
+const criteriaHeaders = () => ["그룹 *", "제품군 *", "공정 *", "인증단계 *", "조건방식", "최소설비수", "최소주력설비수", "최소취득률", "최소근속개월", "단계간경과개월", "누적경과개월", "선행단계", "필수설비", "예외허용", "적용시작일", "적용종료일", "표시문구", "관리자메모", "변경사유", "사용여부"];
+const codeById = (rows: ExamRow[]) => new Map(rows.map((r) => [String(r.id), String(r.code ?? "")]));
+async function criteriaDataSheet(tenantId: string, refMaps: Record<string, Map<string, string>>, includeInactive: boolean): Promise<{ ws: XLSX.WorkSheet; count: number }> {
+  const levelCode = codeById(await listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]));
+  const equipCode = codeById(await listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]));
+  const rows = (await listProcessCriteriaRules(tenantId).catch(() => [] as ExamRow[])).filter((r) => !r.deleted_at && (includeInactive || r.is_active !== false));
+  const json = rows.map((r) => {
+    const f = criteriaToFormState(r.criteria);
+    return {
+      "그룹 *": refMaps["exam_groups"]?.get(String(r.group_id ?? "")) ?? "",
+      "제품군 *": refMaps["exam_categories"]?.get(String(r.category_id ?? "")) ?? "",
+      "공정 *": refMaps["exam_processes"]?.get(String(r.process_id ?? "")) ?? "",
+      "인증단계 *": refMaps["exam_levels"]?.get(String(r.level_id ?? "")) ?? "",
+      "조건방식": f.operator,
+      "최소설비수": f.minEquipmentCount, "최소주력설비수": f.minCoreEquipmentCount, "최소취득률": f.minCompletionRate,
+      "최소근속개월": f.minTenureMonths, "단계간경과개월": f.minElapsedMonths, "누적경과개월": f.cumulativeElapsedMonths,
+      "선행단계": f.prerequisiteLevelIds.map((id) => levelCode.get(id) || "").filter(Boolean).join("|"),
+      "필수설비": f.requiredEquipmentIds.map((id) => equipCode.get(id) || "").filter(Boolean).join("|"),
+      "예외허용": f.allowException ? "Y" : "N",
+      "적용시작일": f.effectiveFrom, "적용종료일": f.effectiveTo, "표시문구": f.labelKo,
+      "관리자메모": r.notes ?? "", "변경사유": "",
+      "사용여부": r.is_active === false ? "미사용" : "사용",
+    };
+  });
+  return { ws: json.length ? XLSX.utils.json_to_sheet(json) : XLSX.utils.aoa_to_sheet([criteriaHeaders()]), count: rows.length };
+}
+
 // 00_작성안내 시트(안내/규칙).
 function guideSheet(): XLSX.WorkSheet {
   const aoa: string[][] = [
@@ -93,6 +124,7 @@ export function downloadExamMasterTemplate(): void {
     XLSX.utils.book_append_sheet(wb, ws, sheetNameFor(cfg, i));
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([stageHeaders()]), STAGE_SHEET); // 08_설비별인증단계
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([criteriaHeaders()]), CRITERIA_SHEET); // 09_공정별달성기준
   XLSX.writeFile(wb, "시험관리_인증기준_통합등록양식.xlsx");
 }
 
@@ -120,6 +152,9 @@ export async function downloadExamMasterCurrent(tenantId: string, includeInactiv
   const stage = await stageDataSheet(tenantId, refMaps, includeInactive);
   counts["stageRules"] = stage.count;
   XLSX.utils.book_append_sheet(wb, stage.ws, STAGE_SHEET);
+  const crit = await criteriaDataSheet(tenantId, refMaps, includeInactive);
+  counts["criteriaRules"] = crit.count;
+  XLSX.utils.book_append_sheet(wb, crit.ws, CRITERIA_SHEET);
   XLSX.writeFile(wb, `시험관리_인증기준_현재데이터_${new Date().toISOString().slice(0, 10)}.xlsx`);
   return { counts };
 }

@@ -5,13 +5,17 @@ import * as XLSX from "xlsx";
 import { EXAM_ENTITY_CONFIGS, type ExamEntityConfig } from "../examMasterConfigs";
 import { listExamRows, upsertExamRow, writeExamAudit, findScopedExistingId, type ExamRow, type ExamMasterTable } from "./examMasterService";
 import { listEquipmentStageRules, upsertEquipmentStageRule } from "./equipmentStageRuleService";
+import { listProcessCriteriaRules, upsertProcessCriteriaRule } from "./processCriteriaRuleService";
+import { formStateToCriteria, type ProcessCriteriaFormState } from "../utils/criteriaFormMapper";
+import { normalizeCriteria } from "../engines/criteriaEvaluator";
 
 // FK 의존 처리 순서(상위 → 하위).
 const IMPORT_ORDER = ["groups", "categories", "processes", "equipment", "levels", "rules"] as const;
 type CfgKey = (typeof IMPORT_ORDER)[number];
-type SheetKey = CfgKey | "stage";
-// 08_설비별인증단계(커스텀 테이블) 시트 별칭.
+type SheetKey = CfgKey | "stage" | "criteria";
+// 08/09 커스텀 테이블 시트 별칭.
 const STAGE_ALIASES = ["08_설비별인증단계", "설비별인증단계", "설비별 인증단계"];
+const CRITERIA_ALIASES = ["09_공정별달성기준", "공정별달성기준", "공정별 달성기준"];
 
 // 시트 별칭: 신규 표준 + 구버전. 정규화 후 매칭.
 const SHEET_ALIASES: Record<CfgKey, string[]> = {
@@ -22,10 +26,8 @@ const SHEET_ALIASES: Record<CfgKey, string[]> = {
   levels: ["06_인증레벨", "인증레벨", "인증 레벨"],
   rules: ["07_인증규칙", "인증규칙", "인증 규칙"],
 };
-// 아직 통합 등록 미지원 커스텀 시트(→ 처리보류 안내). 09_공정별달성기준은 다음 단계.
-const HOLD_SHEET_ALIASES: Record<string, string[]> = {
-  "공정별 달성기준": ["09_공정별달성기준", "공정별달성기준", "공정별 달성기준"],
-};
+// 통합 등록 미지원 커스텀 시트(→ 처리보류 안내). 현재 08·09 모두 지원 → 비어 있음.
+const HOLD_SHEET_ALIASES: Record<string, string[]> = {};
 
 const norm = (s: string) => String(s ?? "").replace(new RegExp("[​-‍﻿]", "g"), "").replace(/\s+/g, "").trim().toLowerCase();
 const up = (v: unknown) => String(v ?? "").trim().toUpperCase();
@@ -60,7 +62,7 @@ function resolveRef(pool: ExamRow[], raw: string, scope: (r: ExamRow) => boolean
 
 // 통합 분석(미리보기). pool = 기존 DB + 이 파일에서 앞 시트가 만들 신규 행(스코프 해석용). 저장은 하지 않음.
 export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: string): Promise<IntegratedAnalysis> {
-  const [groups, cats, procs, levels, rules, equip, stageExisting] = await Promise.all([
+  const [groups, cats, procs, levels, rules, equip, stageExisting, criteriaExisting] = await Promise.all([
     listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
@@ -68,6 +70,7 @@ export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: str
     listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]),
     listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[]),
+    listProcessCriteriaRules(tenantId).catch(() => [] as ExamRow[]),
   ]);
   // 해석용 풀(기존 + 앞 시트 신규를 계속 누적). code/name/부모FK 만 있으면 됨.
   //  exam_rules 는 scoped 신규/수정(process+level+rule_type) 판정을 위해 기존 행을 함께 적재.
@@ -208,10 +211,93 @@ export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: str
   }
   sheets.push(stagePlan);
 
+  // ── 09_공정별달성기준(exam_rules 달성기준 · criteria jsonb) ──────────────────
+  //  criteria 손실 금지: UPDATE 는 기존 criteria 를 original 로 넘겨 formStateToCriteria 가 unknown/groups 보존.
+  const critSheetName = wb.SheetNames.find((sn) => CRITERIA_ALIASES.map(norm).includes(norm(sn))) ?? null;
+  if (critSheetName) recognized.add(norm(critSheetName));
+  const critPlan: SheetPlan = { key: "criteria", title: "공정별 달성기준", sheetName: critSheetName, total: 0, counts: emptyCounts(), rows: [] };
+  if (critSheetName) {
+    const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[critSheetName], { defval: "" });
+    critPlan.total = raw.length;
+    const seen = new Set<string>();
+    const levelByCode = new Map(pool.levels.map((l) => [up(l.code), l] as const));
+    const rankOf = (id: string) => Number(pool.levels.find((l) => String(l.id) === id)?.rank_order ?? 0);
+    const numCell = (v: string): number | "" => { const t = v.trim(); if (t === "") return ""; const n = Number(t.replace(/[^0-9.-]/g, "")); return Number.isFinite(n) ? n : ""; };
+    const ymd = (v: string) => { const m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(v.trim()); return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : ""; };
+    raw.forEach((r, idx) => {
+      const rowNo = idx + 2;
+      const cell = (label: string) => { const hit = Object.entries(r).find(([k]) => norm(k) === norm(label)); return hit ? txt(hit[1]) : ""; };
+      let err = "";
+      const g = cell("그룹") ? resolveRef(pool.groups, cell("그룹"), () => true) : { id: null as string | null };
+      if (!g.id) err = `그룹 ‘${cell("그룹")}’을(를) 찾을 수 없습니다`;
+      const c = !err && cell("제품군") ? resolveRef(pool.categories, cell("제품군"), (r2) => String(r2.group_id ?? "") === g.id) : { id: null as string | null };
+      if (!err && !c.id) err = `제품군 ‘${cell("제품군")}’이(가) 선택 그룹에 없습니다`;
+      const p = !err && cell("공정") ? resolveRef(pool.processes, cell("공정"), (r2) => String(r2.category_id ?? "") === c.id || (!r2.category_id && String(r2.group_id ?? "") === g.id)) : { id: null as string | null };
+      if (!err && !p.id) err = `공정 ‘${cell("공정")}’을(를) 선택 그룹/제품군에서 찾을 수 없습니다`;
+      const lv = !err && cell("인증단계") ? resolveRef(pool.levels, cell("인증단계"), () => true) : { id: null as string | null };
+      if (!err && !lv.id) err = `인증단계 ‘${cell("인증단계")}’을(를) 찾을 수 없습니다`;
+
+      // 선행단계(코드 | 구분) → level id. 자기/상위 rank 금지.
+      const prereqIds: string[] = [];
+      if (!err && cell("선행단계")) {
+        for (const code of cell("선행단계").split("|").map((s) => s.trim()).filter(Boolean)) {
+          const l = levelByCode.get(up(code)); if (!l) { err = `선행단계 ‘${code}’을(를) 찾을 수 없습니다`; break; }
+          if (String(l.id) === lv.id) { err = "현재 단계 자기 자신은 선행단계로 사용할 수 없습니다"; break; }
+          if (lv.id && rankOf(String(l.id)) >= rankOf(lv.id)) { err = `선행단계 ‘${code}’는 현재 단계의 상위 단계라 사용할 수 없습니다`; break; }
+          prereqIds.push(String(l.id));
+        }
+      }
+      // 필수설비(코드 | 구분) → 선택 공정 소속 설비 id.
+      const reqIds: string[] = [];
+      if (!err && cell("필수설비")) {
+        for (const code of cell("필수설비").split("|").map((s) => s.trim()).filter(Boolean)) {
+          const e = pool.equipment.find((x) => String(x.process_id ?? "") === p.id && up(x.code) === up(code) && !x.deleted_at);
+          if (!e) { err = `필수설비 ‘${code}’은(는) 선택한 공정 소속이 아닙니다`; break; }
+          reqIds.push(String(e.id));
+        }
+      }
+      const rate = numCell(cell("최소취득률"));
+      if (!err && rate !== "" && (rate < 0 || rate > 100)) err = "취득률은 0~100 사이여야 합니다";
+      const nums = { eq: numCell(cell("최소설비수")), core: numCell(cell("최소주력설비수")), ten: numCell(cell("최소근속개월")), el: numCell(cell("단계간경과개월")), cum: numCell(cell("누적경과개월")) };
+      if (!err && Object.values(nums).some((n) => n !== "" && (n as number) < 0)) err = "개수/개월은 음수가 될 수 없습니다";
+      const effFrom = ymd(cell("적용시작일")), effTo = ymd(cell("적용종료일"));
+      if (!err && cell("적용시작일") && !effFrom) err = "적용시작일 형식이 올바르지 않습니다(YYYY-MM-DD)";
+      if (!err && effFrom && effTo && effFrom > effTo) err = "적용시작일이 종료일보다 늦을 수 없습니다";
+
+      const form: ProcessCriteriaFormState = {
+        operator: /^or$/i.test(cell("조건방식")) ? "OR" : "AND",
+        minEquipmentCount: nums.eq, minCoreEquipmentCount: nums.core, minCompletionRate: rate,
+        requiredEquipmentIds: reqIds, prerequisiteLevelIds: prereqIds,
+        minTenureMonths: nums.ten, minElapsedMonths: nums.el, cumulativeElapsedMonths: nums.cum,
+        allowException: /^(y|예|true|o)$/i.test(cell("예외허용")), effectiveFrom: effFrom, effectiveTo: effTo, labelKo: cell("표시문구"),
+      };
+      let action: RowAction; let reason: string | undefined;
+      if (err) { action = "error"; reason = err; }
+      else {
+        const sk = `${p.id}|${lv.id}|${effFrom}|${effTo}`;
+        if (seen.has(sk)) { action = "dup"; reason = "파일 내 동일 공정·단계·기간 중복"; }
+        else {
+          seen.add(sk);
+          // scoped: process+level+동일 기간 → 기존 달성기준 UPDATE(기존 criteria 보존 병합). 없으면 신규.
+          const exist = criteriaExisting.find((x) => !x.deleted_at && String(x.process_id ?? "") === p.id && String(x.level_id ?? "") === lv.id && String(normalizeCriteria(x.criteria).effective_from ?? "") === effFrom && String(normalizeCriteria(x.criteria).effective_to ?? "") === effTo);
+          const criteria = formStateToCriteria(form, exist ? exist.criteria : {}); // UPDATE 시 unknown/groups 보존
+          const payload: ExamRow = { process_id: p.id, level_id: lv.id, notes: cell("관리자메모") || null, is_active: !/^(미사용|n|no|false|x)$/i.test(cell("사용여부")), criteria: criteria as unknown as ExamRow[keyof ExamRow], __reason: cell("변경사유") || undefined };
+          if (exist) { action = "update"; payload.id = String(exist.id); } else action = "new";
+          critPlan.rows.push({ rowNo, action, reason, payload });
+          critPlan.counts[action]++;
+          return;
+        }
+      }
+      critPlan.counts[action]++;
+      critPlan.rows.push({ rowNo, action, reason });
+    });
+  }
+  sheets.push(critPlan);
+
   // 상위 시트 오류 → 하위 시트 처리보류 표시(상위에 error 가 있으면 그 아래 계층은 보류 경고).
   const holdSheets: string[] = [];
   const errAbove = (idx: number) => sheets.slice(0, idx).some((s) => s.counts.error > 0 && (s.key === "groups" || s.key === "categories" || s.key === "processes"));
-  sheets.forEach((s, i) => { if (i > 0 && s.total > 0 && errAbove(i) && (s.key === "categories" || s.key === "processes" || s.key === "equipment" || s.key === "stage")) holdSheets.push(s.title); });
+  sheets.forEach((s, i) => { if (i > 0 && s.total > 0 && errAbove(i) && (s.key === "categories" || s.key === "processes" || s.key === "equipment" || s.key === "stage" || s.key === "criteria")) holdSheets.push(s.title); });
 
   // 미지원(커스텀) 시트 인식 → 별도 보류 안내.
   const unknownSheets: string[] = [];
@@ -269,6 +355,23 @@ export async function commitIntegratedWorkbook(analysis: IntegratedAnalysis, ten
         if (stagedId) delete payload.id;
         try { await upsertEquipmentStageRule(payload, tenantId, userId); if (rp.action === "new") created++; else updated++; }
         catch { errors++; } // 유효기간 겹침(EXCLUDE) 등 → 오류 집계(원문 비노출)
+      }
+    }
+  }
+
+  // 09_공정별달성기준 — 상위 오류 시 보류. processCriteriaRuleService 재사용(overlap·audit·criteria 보존).
+  const critPlan = analysis.sheets.find((s) => s.key === "criteria");
+  if (critPlan && critPlan.sheetName) {
+    if (upstreamError.groups || upstreamError.categories || upstreamError.processes) {
+      skipped += critPlan.counts.new + critPlan.counts.update;
+    } else {
+      for (const rp of critPlan.rows) {
+        if (rp.action !== "new" && rp.action !== "update") { if (rp.action === "error") errors++; continue; }
+        const payload: ExamRow = { ...rp.payload };
+        for (const f of ["process_id", "level_id"]) { const v = String(payload[f] ?? ""); if (v && idRemap.has(v)) payload[f] = idRemap.get(v); }
+        const reason = typeof payload.__reason === "string" ? payload.__reason : undefined; delete payload.__reason;
+        try { await upsertProcessCriteriaRule(payload, tenantId, userId, reason ? { reason } : undefined); if (rp.action === "new") created++; else updated++; }
+        catch { errors++; } // 기간 겹침 등 → 오류 집계(원문 비노출)
       }
     }
   }
