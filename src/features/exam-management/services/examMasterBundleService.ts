@@ -5,6 +5,7 @@
 import * as XLSX from "xlsx";
 import { EXAM_ENTITY_CONFIGS, type ExamEntityConfig, type ExamColumn } from "../examMasterConfigs";
 import { listExamRows, type ExamMasterTable, type ExamRow } from "./examMasterService";
+import { listEquipmentStageRules } from "./equipmentStageRuleService";
 
 // [계층 역전] EXAM_ENTITY_CONFIGS 순서(그룹→제품군→공정→장비→인증레벨→인증규칙)에 맞춘 시트명.
 const SHEET_LABEL: Record<string, string> = {
@@ -38,6 +39,29 @@ const cellValue = (col: ExamColumn, r: ExamRow, refMaps: Record<string, Map<stri
 // 각 엔티티 시트의 헤더(컬럼 라벨 + 사용여부). 코드/이름은 config 에 이미 포함.
 const headersFor = (cfg: ExamEntityConfig) => [...cfg.columns.map((c) => c.label + (c.required ? " *" : "")), "사용여부"];
 
+// 08_설비별인증단계(커스텀 테이블 exam_equipment_stage_rules). 참조는 "코드 · 이름" 결합형(round-trip 호환).
+const STAGE_SHEET = "08_설비별인증단계";
+const stageHeaders = () => ["그룹 *", "제품군 *", "공정 *", "설비 *", "인증단계 *", "주력설비여부", "적용시작일", "적용종료일", "정렬", "비고", "사용여부"];
+async function stageDataSheet(tenantId: string, refMaps: Record<string, Map<string, string>>, includeInactive: boolean): Promise<{ ws: XLSX.WorkSheet; count: number }> {
+  const equipMap = new Map<string, string>();
+  (await listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[])).forEach((r) => equipMap.set(String(r.id), [r.code, r.name].filter(Boolean).join(" · ") || String(r.name ?? r.id)));
+  const rows = (await listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[])).filter((r) => !r.deleted_at && (includeInactive || r.is_active !== false));
+  const json = rows.map((r) => ({
+    "그룹 *": refMaps["exam_groups"]?.get(String(r.group_id ?? "")) ?? "",
+    "제품군 *": refMaps["exam_categories"]?.get(String(r.category_id ?? "")) ?? "",
+    "공정 *": refMaps["exam_processes"]?.get(String(r.process_id ?? "")) ?? "",
+    "설비 *": equipMap.get(String(r.equipment_id ?? "")) ?? "",
+    "인증단계 *": refMaps["exam_levels"]?.get(String(r.level_id ?? "")) ?? "",
+    "주력설비여부": r.is_core_equipment === true ? "Y" : "N",
+    "적용시작일": r.effective_from ? String(r.effective_from).slice(0, 10) : "",
+    "적용종료일": r.effective_to ? String(r.effective_to).slice(0, 10) : "",
+    "정렬": r.sort_order ?? "",
+    "비고": r.notes ?? "",
+    "사용여부": r.is_active === false ? "미사용" : "사용",
+  }));
+  return { ws: json.length ? XLSX.utils.json_to_sheet(json) : XLSX.utils.aoa_to_sheet([stageHeaders()]), count: rows.length };
+}
+
 // 00_작성안내 시트(안내/규칙).
 function guideSheet(): XLSX.WorkSheet {
   const aoa: string[][] = [
@@ -68,6 +92,7 @@ export function downloadExamMasterTemplate(): void {
     const ws = XLSX.utils.aoa_to_sheet([headersFor(cfg)]); // 헤더만
     XLSX.utils.book_append_sheet(wb, ws, sheetNameFor(cfg, i));
   });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([stageHeaders()]), STAGE_SHEET); // 08_설비별인증단계
   XLSX.writeFile(wb, "시험관리_인증기준_통합등록양식.xlsx");
 }
 
@@ -91,6 +116,10 @@ export async function downloadExamMasterCurrent(tenantId: string, includeInactiv
     const ws = json.length ? XLSX.utils.json_to_sheet(json) : XLSX.utils.aoa_to_sheet([headersFor(cfg)]);
     XLSX.utils.book_append_sheet(wb, ws, sheetNameFor(cfg, i));
   }
+  // 08_설비별인증단계(커스텀 테이블) — 현재 데이터.
+  const stage = await stageDataSheet(tenantId, refMaps, includeInactive);
+  counts["stageRules"] = stage.count;
+  XLSX.utils.book_append_sheet(wb, stage.ws, STAGE_SHEET);
   XLSX.writeFile(wb, `시험관리_인증기준_현재데이터_${new Date().toISOString().slice(0, 10)}.xlsx`);
   return { counts };
 }

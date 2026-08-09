@@ -4,10 +4,14 @@
 import * as XLSX from "xlsx";
 import { EXAM_ENTITY_CONFIGS, type ExamEntityConfig } from "../examMasterConfigs";
 import { listExamRows, upsertExamRow, writeExamAudit, findScopedExistingId, type ExamRow, type ExamMasterTable } from "./examMasterService";
+import { listEquipmentStageRules, upsertEquipmentStageRule } from "./equipmentStageRuleService";
 
 // FK 의존 처리 순서(상위 → 하위).
 const IMPORT_ORDER = ["groups", "categories", "processes", "equipment", "levels", "rules"] as const;
 type CfgKey = (typeof IMPORT_ORDER)[number];
+type SheetKey = CfgKey | "stage";
+// 08_설비별인증단계(커스텀 테이블) 시트 별칭.
+const STAGE_ALIASES = ["08_설비별인증단계", "설비별인증단계", "설비별 인증단계"];
 
 // 시트 별칭: 신규 표준 + 구버전. 정규화 후 매칭.
 const SHEET_ALIASES: Record<CfgKey, string[]> = {
@@ -18,9 +22,8 @@ const SHEET_ALIASES: Record<CfgKey, string[]> = {
   levels: ["06_인증레벨", "인증레벨", "인증 레벨"],
   rules: ["07_인증규칙", "인증규칙", "인증 규칙"],
 };
-// 커스텀 테이블 시트(통합 등록 미지원 → 처리보류 표시).
+// 아직 통합 등록 미지원 커스텀 시트(→ 처리보류 안내). 09_공정별달성기준은 다음 단계.
 const HOLD_SHEET_ALIASES: Record<string, string[]> = {
-  "설비별 인증단계": ["08_설비별인증단계", "설비별인증단계", "설비별 인증단계"],
   "공정별 달성기준": ["09_공정별달성기준", "공정별달성기준", "공정별 달성기준"],
 };
 
@@ -32,7 +35,7 @@ const parseRef = (v: unknown) => { const p = String(v ?? "").replace(/\s+/g, " "
 
 export type RowAction = "new" | "update" | "dup" | "error" | "hold";
 export type RowPlan = { rowNo: number; action: RowAction; reason?: string; payload?: ExamRow };
-export type SheetPlan = { key: CfgKey; title: string; sheetName: string | null; total: number; counts: Record<RowAction, number>; rows: RowPlan[] };
+export type SheetPlan = { key: SheetKey; title: string; sheetName: string | null; total: number; counts: Record<RowAction, number>; rows: RowPlan[] };
 export type IntegratedAnalysis = { sheets: SheetPlan[]; unknownSheets: string[]; holdSheets: string[]; ok: boolean };
 
 const cfgOf = (key: CfgKey) => EXAM_ENTITY_CONFIGS.find((c) => c.key === key) as ExamEntityConfig;
@@ -57,16 +60,18 @@ function resolveRef(pool: ExamRow[], raw: string, scope: (r: ExamRow) => boolean
 
 // 통합 분석(미리보기). pool = 기존 DB + 이 파일에서 앞 시트가 만들 신규 행(스코프 해석용). 저장은 하지 않음.
 export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: string): Promise<IntegratedAnalysis> {
-  const [groups, cats, procs, levels, rules] = await Promise.all([
+  const [groups, cats, procs, levels, rules, equip, stageExisting] = await Promise.all([
     listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
     listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
+    listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]),
+    listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[]),
   ]);
   // 해석용 풀(기존 + 앞 시트 신규를 계속 누적). code/name/부모FK 만 있으면 됨.
   //  exam_rules 는 scoped 신규/수정(process+level+rule_type) 판정을 위해 기존 행을 함께 적재.
-  const pool: Record<CfgKey, ExamRow[]> = { groups: [...groups], categories: [...cats], processes: [...procs], equipment: [], levels: [...levels], rules: [...rules] };
+  const pool: Record<CfgKey, ExamRow[]> = { groups: [...groups], categories: [...cats], processes: [...procs], equipment: [...equip], levels: [...levels], rules: [...rules] };
   const recognized = new Set<string>();
   const sheets: SheetPlan[] = [];
 
@@ -148,10 +153,65 @@ export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: str
     sheets.push(plan);
   }
 
+  // ── 08_설비별인증단계(커스텀 테이블) ─────────────────────────────────────────
+  // 그룹→제품군→공정→설비→인증단계 해석 후 exam_equipment_stage_rules 로 저장(commit 에서 서비스 재사용).
+  const stageSheet = wb.SheetNames.find((sn) => STAGE_ALIASES.map(norm).includes(norm(sn))) ?? null;
+  if (stageSheet) recognized.add(norm(stageSheet));
+  const stagePlan: SheetPlan = { key: "stage", title: "설비별 인증단계", sheetName: stageSheet, total: 0, counts: emptyCounts(), rows: [] };
+  if (stageSheet) {
+    const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[stageSheet], { defval: "" });
+    stagePlan.total = raw.length;
+    const seen = new Set<string>();
+    const ymd = (v: string) => { const m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(v.trim()); return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : ""; };
+    raw.forEach((r, idx) => {
+      const rowNo = idx + 2;
+      const cell = (label: string) => { const hit = Object.entries(r).find(([k]) => norm(k) === norm(label)); return hit ? txt(hit[1]) : ""; };
+      let err = "";
+      const grpRaw = cell("그룹"), catRaw = cell("제품군"), procRaw = cell("공정"), eqRaw = cell("설비"), lvlRaw = cell("인증단계");
+      const g = grpRaw ? resolveRef(pool.groups, grpRaw, () => true) : { id: null as string | null };
+      if (!g.id) err = `그룹 ‘${grpRaw}’을(를) 찾을 수 없습니다`;
+      const c = !err && catRaw ? resolveRef(pool.categories, catRaw, (r2) => String(r2.group_id ?? "") === g.id) : { id: null as string | null };
+      if (!err && !c.id) err = `제품군 ‘${catRaw}’이(가) 선택 그룹에 없습니다`;
+      const p = !err && procRaw ? resolveRef(pool.processes, procRaw, (r2) => String(r2.category_id ?? "") === c.id || (!r2.category_id && String(r2.group_id ?? "") === g.id)) : { id: null as string | null };
+      if (!err && !p.id) err = `공정 ‘${procRaw}’을(를) 선택 제품군에서 찾을 수 없습니다`;
+      const eq = !err && eqRaw ? resolveRef(pool.equipment, eqRaw, (r2) => String(r2.process_id ?? "") === p.id) : { id: null as string | null };
+      if (!err && !eq.id) err = `설비 ‘${eqRaw}’을(를) 선택한 공정에서 찾을 수 없습니다`;
+      const lv = !err && lvlRaw ? resolveRef(pool.levels, lvlRaw, () => true) : { id: null as string | null };
+      if (!err && !lv.id) err = `인증단계 ‘${lvlRaw}’을(를) 찾을 수 없습니다`;
+      const coreRaw = cell("주력설비여부");
+      if (!err && coreRaw && !/^(y|n|예|아니오|아니요|true|false|o|x)$/i.test(coreRaw)) err = "주력설비여부는 Y/N 이어야 합니다";
+      const effFrom = ymd(cell("적용시작일")), effTo = ymd(cell("적용종료일"));
+      if (!err && cell("적용시작일") && !effFrom) err = "적용시작일 형식이 올바르지 않습니다(YYYY-MM-DD)";
+      if (!err && cell("적용종료일") && !effTo) err = "적용종료일 형식이 올바르지 않습니다(YYYY-MM-DD)";
+      if (!err && effFrom && effTo && effFrom > effTo) err = "적용시작일이 종료일보다 늦을 수 없습니다";
+
+      const payload: ExamRow = {
+        tenant_id: tenantId, group_id: g.id, category_id: c.id, process_id: p.id, equipment_id: eq.id, level_id: lv.id,
+        is_core_equipment: /^(y|예|true|o)$/i.test(coreRaw), effective_from: effFrom || null, effective_to: effTo || null,
+        sort_order: cell("정렬") === "" ? null : Number(cell("정렬").replace(/[^0-9.-]/g, "")) || null,
+        notes: cell("비고") || null, is_active: !/^(미사용|n|no|false|x)$/i.test(cell("사용여부")),
+      };
+      let action: RowAction; let reason: string | undefined;
+      if (err) { action = "error"; reason = err; }
+      else {
+        const sk = `${p.id}|${eq.id}|${lv.id}|${effFrom}|${effTo}`;
+        if (seen.has(sk)) { action = "dup"; reason = "파일 내 동일 설비·단계·기간 중복"; }
+        else {
+          seen.add(sk);
+          const exist = stageExisting.find((s) => !s.deleted_at && String(s.process_id ?? "") === p.id && String(s.equipment_id ?? "") === eq.id && String(s.level_id ?? "") === lv.id && String(s.effective_from ?? "").slice(0, 10) === effFrom && String(s.effective_to ?? "").slice(0, 10) === effTo);
+          if (exist) { action = "update"; payload.id = String(exist.id); } else action = "new";
+        }
+      }
+      stagePlan.counts[action]++;
+      stagePlan.rows.push({ rowNo, action, reason, payload: action === "new" || action === "update" ? payload : undefined });
+    });
+  }
+  sheets.push(stagePlan);
+
   // 상위 시트 오류 → 하위 시트 처리보류 표시(상위에 error 가 있으면 그 아래 계층은 보류 경고).
   const holdSheets: string[] = [];
   const errAbove = (idx: number) => sheets.slice(0, idx).some((s) => s.counts.error > 0 && (s.key === "groups" || s.key === "categories" || s.key === "processes"));
-  sheets.forEach((s, i) => { if (i > 0 && s.total > 0 && errAbove(i) && (s.key === "categories" || s.key === "processes" || s.key === "equipment")) holdSheets.push(s.title); });
+  sheets.forEach((s, i) => { if (i > 0 && s.total > 0 && errAbove(i) && (s.key === "categories" || s.key === "processes" || s.key === "equipment" || s.key === "stage")) holdSheets.push(s.title); });
 
   // 미지원(커스텀) 시트 인식 → 별도 보류 안내.
   const unknownSheets: string[] = [];
@@ -192,6 +252,24 @@ export async function commitIntegratedWorkbook(analysis: IntegratedAnalysis, ten
         if (stagedId) idRemap.set(stagedId, String(saved.id));
         if (rp.action === "new") created++; else updated++;
       } catch { errors++; if (key === "groups") upstreamError.groups = true; if (key === "categories") upstreamError.categories = true; if (key === "processes") upstreamError.processes = true; }
+    }
+  }
+
+  // 08_설비별인증단계 — 상위(그룹/제품군/공정) 오류 시 보류. equipmentStageRuleService 재사용(overlap·audit·RLS 내장).
+  const stagePlan = analysis.sheets.find((s) => s.key === "stage");
+  if (stagePlan && stagePlan.sheetName) {
+    if (upstreamError.groups || upstreamError.categories || upstreamError.processes) {
+      skipped += stagePlan.counts.new + stagePlan.counts.update;
+    } else {
+      for (const rp of stagePlan.rows) {
+        if (rp.action !== "new" && rp.action !== "update") { if (rp.action === "error") errors++; continue; }
+        const payload: ExamRow = { ...rp.payload };
+        for (const f of ["group_id", "category_id", "process_id", "equipment_id"]) { const v = String(payload[f] ?? ""); if (v && idRemap.has(v)) payload[f] = idRemap.get(v); }
+        const stagedId = typeof payload.id === "string" && payload.id.startsWith("__staged_") ? payload.id : null;
+        if (stagedId) delete payload.id;
+        try { await upsertEquipmentStageRule(payload, tenantId, userId); if (rp.action === "new") created++; else updated++; }
+        catch { errors++; } // 유효기간 겹침(EXCLUDE) 등 → 오류 집계(원문 비노출)
+      }
     }
   }
   return { created, updated, skipped, errors, message: `생성 ${created} · 수정 ${updated} · 보류 ${skipped} · 오류 ${errors}` };
