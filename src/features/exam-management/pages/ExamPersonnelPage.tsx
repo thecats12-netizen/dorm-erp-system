@@ -160,6 +160,21 @@ export default function ExamPersonnelPage({
     }));
   };
 
+  // 기준정보 연동 현재 선택 도출(복원·검증·옵션 공용 · 단일 resolve). 저장값에서 신계층(그룹→제품군→공정) 우선으로 그룹/제품군/공정 id 역추적.
+  //  우선순위: 사용자가 방금 고른 transient(_group_id/_cat_id) → 공정.group_id/category_id(신 컬럼) → legacy(파트/그룹.category_id) → 이름 매칭(텍스트 전용 legacy).
+  //  ⚠ 인증 기준관리와 동일한 관계(exam_categories.group_id / exam_processes.group_id·category_id)를 source of truth 로 사용. 별도 관계 생성 금지.
+  const deriveHier = useCallback((e: ExamRow) => {
+    const byId = (arr: MRef[], id: unknown) => arr.find((o) => o.id === String(id ?? ""));
+    const byName = (arr: MRef[], nm: unknown) => { const s = String(nm ?? "").trim(); return s ? arr.find((o) => o.name.trim() === s) : undefined; };
+    const proc = byId(master.processes, e.process_id);
+    const partId = String(e.part_id ?? "") || String(proc?.part_id ?? "");
+    const part = byId(master.parts, partId);
+    const groupId = String(e._group_id ?? "") || String(proc?.group_id ?? "") || String(part?.group_id ?? "") || String(byName(master.groups, e.group_name)?.id ?? "");
+    const group = byId(master.groups, groupId);
+    const catId = String(e._cat_id ?? "") || String(proc?.category_id ?? "") || String(part?.category_id ?? "") || String(group?.category_id ?? "") || String(byName(master.categories, e.product_group)?.id ?? "");
+    return { proc, part, group, groupId, catId, procId: String(e.process_id ?? "") };
+  }, [master]);
+
   // 미저장 변경 보호 + 앱 공통 닫기(ESC·뒤로가기·최상위 우선) 연동.
   const [editBase, setEditBase] = useState("");
   const editKey = editRow ? String(editRow.id ?? "__new__") : "";
@@ -232,14 +247,27 @@ export default function ExamPersonnelPage({
   const saveRow = async () => {
     if (!editRow) return;
     for (const c of COLS) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
-    // 기준정보 연동 무결성: [Line 전환] 공정↔그룹만 검증(제품/파트 단계 제거). 기존 part_id 는 검증하지 않고 보존.
+    // [신계층 무결성] 기준정보 연동(그룹→제품군→공정)을 실제 FK 관계로 검증(프론트 표시만 신뢰하지 않음).
+    //  · 전부 미선택(기준정보 미연동)은 허용 — 기존 인력/legacy 데이터 편집을 막지 않음(데이터 손상 금지).
+    //  · 하나라도 선택하면 셋 모두 선택 + 상하위 관계 일치 필수(부분/불일치 저장 차단).
+    //  · 신 FK(exam_categories.group_id / exam_processes.group_id·category_id)가 없는 legacy 값은 통과(안전 fallback).
     {
-      const selProc = master.processes.find((o) => o.id === String(editRow.process_id ?? ""));
-      const gId = String(editRow._group_id ?? "");
-      // 공정.group_id(직접) 또는 공정→파트→그룹 역추적으로 그룹 일치 확인. 둘 다 없으면(레거시) 통과.
-      if (selProc && gId) {
-        const procGroup = String(selProc.group_id ?? "") || String(master.parts.find((p) => p.id === String(selProc.part_id ?? ""))?.group_id ?? "");
-        if (procGroup && procGroup !== gId) { setError("선택한 공정은 해당 그룹에 속하지 않습니다."); return; }
+      const { groupId, catId, procId } = deriveHier(editRow);
+      // 트리오 필수 게이트: "이번 편집에서 cascade 를 실제로 사용했을 때"만 강제(transient _group_id/_cat_id).
+      //  → 기존 텍스트 전용(그룹/제품군 직접입력) legacy 데이터의 이름·기타 필드 수정은 막지 않는다(데이터 손상 금지).
+      const engaged = !!(String(editRow._group_id ?? "") || String(editRow._cat_id ?? ""));
+      if (engaged && !(groupId && catId && procId)) { setError("그룹, 제품군, 공정을 모두 선택해 주세요."); return; }
+      if (groupId && catId) {
+        const cat = master.categories.find((o) => o.id === catId);
+        if (cat && cat.group_id && String(cat.group_id) !== groupId) { setError("선택한 제품군이 해당 그룹에 속하지 않습니다."); return; }
+      }
+      if (procId) {
+        const proc = master.processes.find((o) => o.id === procId);
+        if (proc) {
+          const procGroup = String(proc.group_id ?? "") || String(master.parts.find((p) => p.id === String(proc.part_id ?? ""))?.group_id ?? "");
+          if (groupId && procGroup && procGroup !== groupId) { setError("선택한 공정이 해당 그룹에 속하지 않습니다."); return; }
+          if (catId && proc.category_id && String(proc.category_id) !== catId) { setError("선택한 공정이 해당 제품군에 속하지 않습니다."); return; }
+        }
       }
     }
     setSaving(true); setError(null);
@@ -425,25 +453,24 @@ export default function ExamPersonnelPage({
     if (!editRow) return null;
     const e = editRow;
     const byId = (arr: MRef[], id: unknown) => arr.find((o) => o.id === String(id ?? ""));
-    const byName = (arr: MRef[], nm: unknown) => { const s = String(nm ?? "").trim(); return s ? arr.find((o) => o.name.trim() === s) : undefined; };
-    // 현재 선택 id 역추적: transient → FK(part_id/process_id) → 이름 매칭
-    const proc = byId(master.processes, e.process_id);
-    const partId = String(e.part_id ?? "") || String(proc?.part_id ?? "");
-    const part = byId(master.parts, partId);
-    const groupId = String(e._group_id ?? "") || String(part?.group_id ?? "") || String(byName(master.groups, e.group_name)?.id ?? "");
-    const group = byId(master.groups, groupId);
-    const catId = String(e._cat_id ?? "") || String(group?.category_id ?? "") || String(part?.category_id ?? "") || String(byName(master.categories, e.product_group)?.id ?? "");
-
-    const catOpts = master.categories.filter((o) => o.is_active || o.id === catId);
-    const groupOpts = master.groups.filter((o) => (o.is_active || o.id === groupId) && (!catId || String(o.category_id ?? "") === catId));
-    // [Line 전환] 공정을 "그룹" 기준으로 필터(제품/파트 단계 제거). 공정.group_id(직접) 우선, 없으면 공정→파트→그룹 역추적(레거시).
+    // 현재 선택 id 역추적(단일 resolve 재사용). [신계층] 그룹(독립) → 제품군(그룹 소속) → 공정(그룹+제품군 소속).
+    const { groupId, catId } = deriveHier(e);
+    // [신계층] 제품군: 선택 그룹의 category(exam_categories.group_id === groupId)만. 그룹 미선택 시 표시 안 함. 현재값은 항상 포함.
+    const catOpts = master.categories.filter((o) => (o.is_active || o.id === catId) && (!!groupId && (String(o.group_id ?? "") === groupId || o.id === catId)));
+    // [신계층] 그룹: 독립 최상위 → 전체 활성(제품군에 종속되지 않음). 현재값 포함.
+    const groupOpts = master.groups.filter((o) => o.is_active || o.id === groupId);
+    // [신계층] 공정: 선택 제품군(exam_processes.category_id === catId)만. category_id 없는 legacy 공정은 그룹(group_id) 일치로 fallback.
     const procGroupOf = (o: MRef) => String(o.group_id ?? "") || String(master.parts.find((p) => p.id === String(o.part_id ?? ""))?.group_id ?? "");
-    const procOpts = master.processes.filter((o) => (o.is_active || o.id === String(e.process_id ?? "")) && (!groupId || procGroupOf(o) === groupId));
+    const procMatch = (o: MRef) => catId
+      ? (String(o.category_id ?? "") === catId || (!o.category_id && !!groupId && procGroupOf(o) === groupId))
+      : false; // 제품군 미선택 시 공정 목록 비움(선택 강제)
+    const procOpts = master.processes.filter((o) => (o.is_active || o.id === String(e.process_id ?? "")) && (procMatch(o) || o.id === String(e.process_id ?? "")));
 
     const set = (patch: Partial<ExamRow>) => setEditRow((f) => ({ ...(f || {}), ...patch }));
-    // 제품군/그룹 변경 시 공정만 초기화. 기존 part_id/part_name 은 보존(자동 null 금지 · 레거시/Excel 호환).
-    const onCat = (id: string) => { const c = byId(master.categories, id); set({ _cat_id: id || null, product_group: c ? c.name : e.product_group, _group_id: null, group_name: null, process_id: null }); };
-    const onGroup = (id: string) => { const g = byId(master.groups, id); set({ _group_id: id || null, group_name: g ? g.name : null, _cat_id: g?.category_id ?? e._cat_id ?? null, process_id: null }); };
+    // [신계층 cascade reset] 그룹 변경 → 제품군·공정 초기화. 기존 part_id/part_name 은 보존(자동 null 금지 · legacy/Excel 호환).
+    const onGroup = (id: string) => { const g = byId(master.groups, id); set({ _group_id: id || null, group_name: g ? g.name : null, _cat_id: null, product_group: null, process_id: null }); };
+    // [신계층 cascade reset] 제품군 변경 → 공정만 초기화(그룹 유지 · 제품군은 그룹의 하위).
+    const onCat = (id: string) => { const c = byId(master.categories, id); set({ _cat_id: id || null, product_group: c ? c.name : null, process_id: null }); };
     const onProc = (id: string) => set({ process_id: id || null });
 
     const box = (label: string, hint: string, node: ReactNode) => (
@@ -452,6 +479,7 @@ export default function ExamPersonnelPage({
     // 표시(label)만 품명/이름으로: 상위 드롭다운으로 이미 범위가 좁혀졌으므로 코드·상위경로는 반복 표시하지 않는다.
     //  저장값(o.id)·FK 는 불변. name 이 없을 때만 기존 label 로 안전 폴백.
     const opt = (o: MRef) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}{o.is_active ? "" : " (미사용)"}</option>;
+    const selCls = (disabled: boolean) => `${inputCls} w-full ${disabled ? "cursor-not-allowed opacity-60" : ""}`;
     return (
       <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
         <div className="mb-2 text-xs font-semibold text-slate-500">기준정보 연동 <span className="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-[0.6rem] text-slate-600 dark:bg-slate-700 dark:text-slate-300">빠른 선택 시 그룹·제품군·공정 자동 반영 · 이후 개별 수정 가능</span></div>
@@ -468,10 +496,10 @@ export default function ExamPersonnelPage({
           </div>
         )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {/* [순서 통일] 그룹 → 제품군 → 공정. 종속 로직(제품군→그룹 filter)은 유지 · 그룹 선택 시 제품군 자동 반영. */}
-          {box("그룹", "", <select className={`${inputCls} w-full`} value={groupId} onChange={(ev) => onGroup(ev.target.value)}><option value="">선택</option>{groupOpts.map(opt)}</select>)}
-          {box("제품군", "", <select className={`${inputCls} w-full`} value={catId} onChange={(ev) => onCat(ev.target.value)}><option value="">선택</option>{catOpts.map(opt)}</select>)}
-          {box("공정", !groupId ? "그룹을 먼저 선택하면 좁혀집니다." : "", <select className={`${inputCls} w-full`} value={String(e.process_id ?? "")} onChange={(ev) => onProc(ev.target.value)}><option value="">선택</option>{procOpts.map(opt)}</select>)}
+          {/* [신계층] 그룹(최상위·독립) → 제품군(그룹 선택 시 활성) → 공정(제품군 선택 시 활성). 상위 변경 시 하위 초기화. */}
+          {box("그룹", "", <select className={selCls(false)} value={groupId} onChange={(ev) => onGroup(ev.target.value)}><option value="">그룹을 선택하세요</option>{groupOpts.map(opt)}</select>)}
+          {box("제품군", !groupId ? "그룹을 먼저 선택하세요." : "", <select className={selCls(!groupId)} disabled={!groupId} value={catId} onChange={(ev) => onCat(ev.target.value)}><option value="">제품군을 선택하세요</option>{catOpts.map(opt)}</select>)}
+          {box("공정", !groupId ? "" : !catId ? "제품군을 먼저 선택하세요." : "", <select className={selCls(!catId)} disabled={!catId} value={String(e.process_id ?? "")} onChange={(ev) => onProc(ev.target.value)}><option value="">공정을 선택하세요</option>{procOpts.map(opt)}</select>)}
         </div>
       </div>
     );
