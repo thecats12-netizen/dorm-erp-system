@@ -4,7 +4,7 @@
 //  · 통합 업로드(파싱/검증/미리보기/트랜잭션 저장)는 별도 단계(RPC 필요)에서 구현한다.
 import * as XLSX from "xlsx";
 import { EXAM_ENTITY_CONFIGS, type ExamEntityConfig, type ExamColumn } from "../examMasterConfigs";
-import { listExamRows, type ExamMasterTable, type ExamRow } from "./examMasterService";
+import { listExamRows, buildProcessRefIndex, resolveEquipmentHierarchy, type ExamMasterTable, type ExamProcessRef, type ExamRow } from "./examMasterService";
 import { listEquipmentStageRules } from "./equipmentStageRuleService";
 import { listProcessCriteriaRules } from "./processCriteriaRuleService";
 import { criteriaToFormState } from "../utils/criteriaFormMapper";
@@ -40,8 +40,15 @@ const cellValue = (col: ExamColumn, r: ExamRow, refMaps: Record<string, Map<stri
   return String(v);
 };
 
-// 각 엔티티 시트의 헤더(컬럼 라벨 + 사용여부). 코드/이름은 config 에 이미 포함.
-const headersFor = (cfg: ExamEntityConfig) => [...cfg.columns.map((c) => c.label + (c.required ? " *" : "")), "사용여부"];
+// 시트에 실제로 출력하는 컬럼(필터 전용 transient 제외). 파생 컬럼(그룹/제품군)은 앞에 별도로 붙인다.
+//  ⚠ transient(_group/_cat)를 그대로 출력하면 장비 row 에는 해당 필드가 없어 값이 항상 빈칸이 된다(통합 다운로드 그룹/제품군 공백 원인).
+const visibleCols = (cfg: ExamEntityConfig) => cfg.columns.filter((c) => !c.transient);
+// 각 엔티티 시트의 헤더(파생 컬럼 라벨 + 실출력 컬럼 라벨 + 사용여부). 코드/이름은 config 에 이미 포함.
+const headersFor = (cfg: ExamEntityConfig) => [
+  ...(cfg.derived ?? []).map((d) => d.label),
+  ...visibleCols(cfg).map((c) => c.label + (c.required ? " *" : "")),
+  "사용여부",
+];
 
 // 08_설비별인증단계(커스텀 테이블 exam_equipment_stage_rules). 참조는 "코드 · 이름" 결합형(round-trip 호환).
 const STAGE_SHEET = "07_설비별인증단계";
@@ -133,6 +140,19 @@ export function downloadExamMasterTemplate(): void {
 // 현재 데이터 통합 다운로드(현재 tenant · 권한 범위는 RLS 가 강제). includeInactive: 미사용 포함 여부.
 export async function downloadExamMasterCurrent(tenantId: string, includeInactive = false): Promise<{ counts: Record<string, number> }> {
   const refMaps = await loadRefMaps(tenantId);
+  // 파생 컬럼(장비의 그룹/제품군)을 위한 공정 인덱스(공정→group_id/category_id, legacy part 보완). 화면과 동일한 단일 resolver 사용.
+  const needHier = VISIBLE_CONFIGS.some((c) => c.derived?.length);
+  let procIndex = new Map<string, ExamProcessRef>();
+  if (needHier) {
+    const [procRows, partRows] = await Promise.all([
+      listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
+      listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
+    ]);
+    procIndex = buildProcessRefIndex(procRows, partRows);
+  }
+  const groupLabelById = new Map<string, string>([...(refMaps["exam_groups"]?.entries() ?? [])]);
+  const categoryLabelById = new Map<string, string>([...(refMaps["exam_categories"]?.entries() ?? [])]);
+  const hierRefs = { processById: procIndex, groupLabelById, categoryLabelById };
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, guideSheet(), "00_작성안내");
   const counts: Record<string, number> = {};
@@ -143,7 +163,12 @@ export async function downloadExamMasterCurrent(tenantId: string, includeInactiv
     counts[cfg.key] = rows.length;
     const json = rows.map((r) => {
       const o: Record<string, string> = {};
-      cfg.columns.forEach((c) => { o[c.label] = cellValue(c, r, refMaps); });
+      // 파생 컬럼(그룹/제품군): process_id → 공정 → group_id/category_id 라벨. UUID 미노출.
+      if (cfg.derived?.length) {
+        const h = resolveEquipmentHierarchy(r, hierRefs);
+        cfg.derived.forEach((d) => { o[d.label] = d.pick === "group_id" ? h.group : h.category; });
+      }
+      visibleCols(cfg).forEach((c) => { o[c.label] = cellValue(c, r, refMaps); });
       o["사용여부"] = r.is_active === false ? "미사용" : "사용";
       return o;
     });

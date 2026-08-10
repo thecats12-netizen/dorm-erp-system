@@ -5,7 +5,8 @@ import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import type { ExamColumn, ExamEntityConfig } from "../examMasterConfigs";
 import {
   listExamRows, upsertExamRow, softDeleteExamRow, setExamRowActive,
-  writeExamAudit, listExamAudit, examSupabaseReady, translateExamWriteError, isExamTableMissing, findScopedExistingId, type ExamRow, type ExamMasterTable,
+  writeExamAudit, listExamAudit, examSupabaseReady, translateExamWriteError, isExamTableMissing, findScopedExistingId,
+  examRefLabel, resolveEquipmentHierarchy, type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 
 // 참조 옵션은 라벨뿐 아니라 상위 FK(category_id/group_id/part_id/process_id)와 활성여부를 함께 싣는다(종속 선택용).
@@ -517,9 +518,18 @@ export default function ExamMasterGrid({
   };
 
   const exportExcel = () => {
+    // 장비 목록: 그룹/제품군 파생 컬럼을 앞에 붙이고, 공정 셀은 "공정만"(상위경로 결합 금지). 통합 다운로드와 동일한 단일 resolver 재사용.
+    const equipRefs = derivedColumns.length ? {
+      processById: new Map((refMap["exam_processes"] || []).map((o) => [o.id, { group_id: o.group_id ?? null, category_id: o.category_id ?? null, label: examRefLabel(o) }])),
+      groupLabelById: new Map((refMap["exam_groups"] || []).map((o) => [o.id, examRefLabel(o)])),
+      categoryLabelById: new Map((refMap["exam_categories"] || []).map((o) => [o.id, examRefLabel(o)])),
+    } : null;
     const data = filtered.map((r) => {
       const o: Record<string, string> = {};
-      tableColumns.forEach((c) => { o[c.label] = cellText(c, r); });
+      const h = equipRefs ? resolveEquipmentHierarchy(r, equipRefs) : null;
+      derivedColumns.forEach((d) => { o[d.label] = h ? (d.pick === "group_id" ? h.group : h.category) : ""; });
+      // 공정 컬럼은 파생 resolver 의 순수 라벨(코드·이름)로 대체해 "CVD · CVD · 평택 · 기술1그룹" 결합 문자열을 방지.
+      tableColumns.forEach((c) => { o[c.label] = (h && c.key === "process_id") ? h.process : cellText(c, r); });
       o["사용여부"] = r.is_active === false ? "미사용" : "사용";
       return o;
     });

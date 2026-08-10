@@ -51,6 +51,56 @@ export function findScopedExistingId(existing: ExamRow[], table: string, row: Ex
   return hit ? String(hit.id) : null;
 }
 
+// ── 장비 상위 계층 단일 resolver ─────────────────────────────────────────────
+//  장비(exam_equipment)의 그룹/제품군/공정을 "DB 관계"로만 도출하는 단일 기준. 화면 파생표시·단일 Excel·통합 Excel 이 공유한다.
+//   equipment.process_id → exam_processes → (group_id → exam_groups) / (category_id → exam_categories).
+//  ⚠ 별도의 Excel 전용 계층 추론을 만들지 않는다. 행마다 DB 조회하지 않고, 미리 만든 Map 만 사용한다(추가 호출 0).
+//  표시 문자열은 "코드 · 이름"(Excel canonical). 신규 데이터는 process.group_id/category_id 를 우선 사용하고,
+//   값이 없는 legacy 공정은 buildProcessRefIndex 가 exam_parts 로 보완한 값을 그대로 쓴다(별도 fallback 로직 중복 금지).
+export type ExamProcessRef = { group_id: string | null; category_id: string | null; label: string };
+export type EquipHierarchyRefs = {
+  processById: Map<string, ExamProcessRef>;
+  groupLabelById: Map<string, string>;
+  categoryLabelById: Map<string, string>;
+};
+export type EquipHierarchy = { group: string; category: string; process: string };
+
+// "코드 · 이름" 표시 라벨(둘 다 없으면 id). §16 상위경로가 붙지 않은 순수 라벨을 만든다(Excel canonical).
+export function examRefLabel(row: { code?: unknown; name?: unknown; id?: unknown }): string {
+  return [row.code, row.name].map((v) => String(v ?? "").trim()).filter(Boolean).join(" · ") || String(row.name ?? row.id ?? "");
+}
+// id → "코드 · 이름" Map. 참조 컬럼(그룹/제품군 등) 라벨 조회용.
+export function buildExamLabelMap(rows: ExamRow[]): Map<string, string> {
+  return new Map(rows.map((r) => [String(r.id), examRefLabel(r)]));
+}
+// 공정 id → {group_id, category_id, label}. 신규 group_id/category_id 우선, 없으면 legacy part(part_id→part.group_id/category_id)로 보완.
+export function buildProcessRefIndex(processRows: ExamRow[], partRows: ExamRow[] = []): Map<string, ExamProcessRef> {
+  const partById = new Map(partRows.map((p) => [String(p.id), p]));
+  const m = new Map<string, ExamProcessRef>();
+  for (const p of processRows) {
+    let gid = p.group_id ? String(p.group_id) : null;
+    let cid = p.category_id ? String(p.category_id) : null;
+    if ((!gid || !cid) && p.part_id) {
+      const pt = partById.get(String(p.part_id));
+      if (pt) { if (!gid && pt.group_id) gid = String(pt.group_id); if (!cid && pt.category_id) cid = String(pt.category_id); }
+    }
+    m.set(String(p.id), { group_id: gid, category_id: cid, label: examRefLabel(p) });
+  }
+  return m;
+}
+// 장비 1행의 그룹/제품군/공정 라벨을 도출(추가 DB 호출 없음). 관계를 못 찾으면 빈 문자열(Excel) — 화면 폴백문구는 호출측이 처리.
+export function resolveEquipmentHierarchy(equip: ExamRow, refs: EquipHierarchyRefs): EquipHierarchy {
+  const pid = String(equip.process_id ?? "");
+  const p = pid ? refs.processById.get(pid) : undefined;
+  const gid = String(p?.group_id ?? "");
+  const cid = String(p?.category_id ?? "");
+  return {
+    group: gid ? (refs.groupLabelById.get(gid) ?? "") : "",
+    category: cid ? (refs.categoryLabelById.get(cid) ?? "") : "",
+    process: p?.label ?? "",
+  };
+}
+
 const nowIso = () => new Date().toISOString();
 
 export const examSupabaseReady = () => isSupabaseAvailable();
