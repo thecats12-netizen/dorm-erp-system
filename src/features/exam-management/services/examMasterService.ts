@@ -219,6 +219,11 @@ export async function listExamRefOptions(table: ExamMasterTable, tenantId: strin
 export async function upsertExamRow(table: ExamMasterTable, row: ExamRow, tenantId: string, userId: string): Promise<ExamRow> {
   if (!supabase) throw new Error("Supabase 미설정");
   const isNew = !row.id;
+  // [안전보강] 장비 계층(그룹→제품군→공정→장비): 공정 없는 "신규" 장비 저장 금지(process_id null INSERT 차단).
+  //  기존 legacy(process_id null) 행의 수정(UPDATE)은 막지 않는다 — 기존 데이터 보존(삭제/변경 금지).
+  if (table === "exam_equipment" && isNew && !String(row.process_id ?? "").trim()) {
+    throw new Error("장비를 등록하려면 그룹·제품군·공정을 먼저 지정해야 합니다.");
+  }
   const id = row.id || (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`);
   const payload: ExamRow = {
     ...row,

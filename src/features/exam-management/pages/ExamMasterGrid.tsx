@@ -453,6 +453,8 @@ export default function ExamMasterGrid({
       if (c.transient) continue; // 필터 전용 필드는 저장/필수 대상 아님
       if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
     }
+    // [장비 안전보강] 계층(그룹→제품군→공정→장비)상 공정 없는 장비 저장 금지. 신규/수정 공통으로 화면에서 먼저 차단.
+    if (config.table === "exam_equipment" && !String(editRow.process_id ?? "").trim()) { setError("공정을 선택해 주세요."); return; }
     // [인증 규칙 전용] 기준 구분→제품군→그룹→공정 전체 선택 필수(제품/파트 단계 제거). 적용 라인은 선택.
     if (isRules) {
       if (!String(editRow.rule_type ?? "").trim()) { setError("기준 구분을 선택해 주세요."); return; }
@@ -646,6 +648,8 @@ export default function ExamMasterGrid({
           }
           if (c.required && !v) rowErr = rowErr || `${c.label} 누락`;
         }
+        // [장비 안전보강] 공정 미해석 장비 행은 저장하지 않는다(process_id null INSERT 금지).
+        if (!rowErr && config.table === "exam_equipment" && !String(row.process_id ?? "").trim()) rowErr = "장비를 등록하려면 그룹·제품군·공정을 먼저 지정해야 합니다";
         if (rowErr) rowErrors.push({ row: idx + 2, reason: rowErr }); // +2: 헤더 1행 + 1-based
         else {
           // [scoped 신규/수정] 같은 부모 스코프 identity(code)가 있으면 그 행을 UPDATE, 없으면 INSERT.

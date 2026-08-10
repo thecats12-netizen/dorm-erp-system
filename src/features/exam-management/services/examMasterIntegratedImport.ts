@@ -110,6 +110,8 @@ export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: str
         const p = resolveRef(pool.processes, procRaw, cand); if (!p.id) err ||= `공정 ‘${procRaw}’을(를) 찾을 수 없습니다`; else pId = p.id;
       }
 
+      // [장비 안전보강] 계층(그룹→제품군→공정→장비)상 공정 없는 장비는 저장 금지(process_id null INSERT 차단).
+      if (key === "equipment" && !err && !pId) err ||= "장비를 등록하려면 그룹·제품군·공정을 먼저 지정해야 합니다";
       // 표(config) 비-transient 컬럼 값 채우기(부모 FK 는 위 해석값 사용).
       for (const col of cfg.columns) {
         if (col.transient) continue;
