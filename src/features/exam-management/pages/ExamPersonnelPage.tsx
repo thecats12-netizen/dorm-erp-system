@@ -248,15 +248,16 @@ export default function ExamPersonnelPage({
     if (!editRow) return;
     for (const c of COLS) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
     // [신계층 무결성] 기준정보 연동(그룹→제품군→공정)을 실제 FK 관계로 검증(프론트 표시만 신뢰하지 않음).
-    //  · 전부 미선택(기준정보 미연동)은 허용 — 기존 인력/legacy 데이터 편집을 막지 않음(데이터 손상 금지).
-    //  · 하나라도 선택하면 셋 모두 선택 + 상하위 관계 일치 필수(부분/불일치 저장 차단).
+    //  [정책 확정] 신규 등록(isNew)은 그룹/제품군/공정 모두 필수. 기존 행은 cascade 를 실제 변경(engaged)한 경우에만 3개 필수.
+    //  · 기존 legacy 미연동 데이터의 이름/사번 등 단순 수정은 허용(데이터 손상 금지).
+    //  · 관계 불일치(제품군↔그룹, 공정↔그룹/제품군)는 신규/기존 무관 항상 차단.
     //  · 신 FK(exam_categories.group_id / exam_processes.group_id·category_id)가 없는 legacy 값은 통과(안전 fallback).
     {
       const { groupId, catId, procId } = deriveHier(editRow);
-      // 트리오 필수 게이트: "이번 편집에서 cascade 를 실제로 사용했을 때"만 강제(transient _group_id/_cat_id).
-      //  → 기존 텍스트 전용(그룹/제품군 직접입력) legacy 데이터의 이름·기타 필드 수정은 막지 않는다(데이터 손상 금지).
+      // 트리오 필수 게이트: 신규(isNew) 또는 이번 편집에서 cascade 를 실제 사용(transient _group_id/_cat_id)했을 때 강제.
       const engaged = !!(String(editRow._group_id ?? "") || String(editRow._cat_id ?? ""));
-      if (engaged && !(groupId && catId && procId)) { setError("그룹, 제품군, 공정을 모두 선택해 주세요."); return; }
+      const requireTrio = !editRow.id || engaged; // isNew || engaged
+      if (requireTrio && !(groupId && catId && procId)) { setError("그룹, 제품군, 공정을 모두 선택해 주세요."); return; }
       if (groupId && catId) {
         const cat = master.categories.find((o) => o.id === catId);
         if (cat && cat.group_id && String(cat.group_id) !== groupId) { setError("선택한 제품군이 해당 그룹에 속하지 않습니다."); return; }

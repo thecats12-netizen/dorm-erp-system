@@ -410,6 +410,57 @@ export function resolveAcquisitionTiming(
 }
 
 // ─────────────────────────────────────────────────────────────
+// 공정별 달성기준(criteria) 기반 조기/정상/지연취득 판정 (목표취득일 산정 → 실제 취득일 비교)
+// ─────────────────────────────────────────────────────────────
+
+// (목표취득일 산정에는 파일 하단에 이미 정의된 addMonthsYmd 를 재사용한다 — 함수 선언 호이스팅.)
+export type AchievementTiming = { value: "조기취득" | "정상취득" | "지연취득" | ""; targetDate: string; operator: "AND" | "OR"; reasons: string[]; insufficient: boolean; insufficientReason: string };
+
+// 공정별 달성기준 criteria + 사원 기준일로 목표취득일을 산정하고 실제 인증취득일과 비교해 조기/정상/지연을 판정한다.
+//  · 목표취득일 후보: 누적경과개월/최소근속개월 = 입사일 기준, 단계간경과개월 = 선행단계 인증취득일 기준.
+//  · 조건방식 AND → 모든 조건 충족 필요 → 가장 늦은 목표일이 기준(base 하나라도 없으면 판정 불가).
+//    OR → 하나만 충족하면 됨 → 계산 가능한 것 중 가장 이른 목표일. 전부 불가면 판정 불가.
+//  · 판정 불가(기준정보/기준일/인증취득일 부족)면 value="" (기존 '선택' 유지 · 임의 정상 처리 금지). ±허용범위 없음.
+export function deriveAchievementTiming(input: {
+  criteria?: Record<string, unknown> | null; hireDate?: unknown; prereqAcquiredDate?: unknown; certAcquiredDate?: unknown;
+}): AchievementTiming {
+  const operator: "AND" | "OR" = (input.criteria?.operator === "OR") ? "OR" : "AND";
+  const insuff = (reason: string): AchievementTiming => ({ value: "", targetDate: "", operator, reasons: [], insufficient: true, insufficientReason: reason });
+  const c = input.criteria;
+  if (!c) return insuff("공정별 달성기준 없음");
+  const acq = toYmd(input.certAcquiredDate);
+  if (!acq) return insuff("인증 취득일 없음");
+  const hire = toYmd(input.hireDate);
+  const prereq = toYmd(input.prereqAcquiredDate);
+  const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
+  const cumM = num(c.cumulative_elapsed_months);
+  const tenM = num(c.min_tenure_months);
+  const elapM = num(c.min_elapsed_months);
+
+  // 조건별 목표일 후보(개월 기준 지정된 것만). base 없으면 date="" (계산 불가).
+  const parts: Array<{ label: string; date: string }> = [];
+  if (cumM != null) parts.push({ label: `누적경과 ${cumM}개월(입사일 기준)`, date: hire ? addMonthsYmd(hire, cumM) : "" });
+  if (tenM != null) parts.push({ label: `최소근속 ${tenM}개월(입사일 기준)`, date: hire ? addMonthsYmd(hire, tenM) : "" });
+  if (elapM != null) parts.push({ label: `단계간경과 ${elapM}개월(선행단계 취득일 기준)`, date: prereq ? addMonthsYmd(prereq, elapM) : "" });
+  if (parts.length === 0) return insuff("목표취득일 산정 기준(개월)이 없음");
+
+  const missing = parts.filter((p) => !p.date);
+  const computable = parts.filter((p) => p.date);
+  let target = "";
+  if (operator === "AND") {
+    if (missing.length) return insuff(`기준일 부족: ${missing.map((m) => m.label).join(", ")}`); // 하나라도 계산 불가 → 판정 보류
+    target = computable.map((p) => p.date).sort().slice(-1)[0]; // 가장 늦은 목표일(모두 충족해야 하므로)
+  } else {
+    if (computable.length === 0) return insuff("기준일 부족(선행 취득일/입사일 없음)");
+    target = computable.map((p) => p.date).sort()[0]; // 가장 이른 목표일(하나만 충족하면 됨)
+  }
+
+  const reasons = [`조건방식 ${operator}`, ...computable.map((p) => `${p.label} → ${p.date}`), `목표취득일 ${target} · 실제취득일 ${acq}`];
+  const value: AchievementTiming["value"] = acq < target ? "조기취득" : acq > target ? "지연취득" : "정상취득";
+  return { value, targetDate: target, operator, reasons: [...reasons, value], insufficient: false, insufficientReason: "" };
+}
+
+// ─────────────────────────────────────────────────────────────
 // D.M 자동계산 (공정 조합·필수 설비·필수 PM Level·유효/만료·제품군/파트 기준 반영)
 // ─────────────────────────────────────────────────────────────
 

@@ -362,8 +362,9 @@ export default function ExamMasterGrid({
     let groupId = savedHier("exam_groups");
     let partId = savedHier("exam_parts");
     const processId = savedHier("exam_processes");
-    // 공정에서 그룹 복원: 공정.group_id(직접) 우선, 없으면 공정→파트→그룹 역추적(레거시 호환).
-    if (processId) { const p = find("exam_processes", processId); if (!groupId) groupId = String(p?.group_id ?? ""); if (!partId) partId = String(p?.part_id ?? ""); }
+    // 공정에서 그룹·제품군 복원: 공정.group_id/category_id(신 컬럼·FK 직접) 우선 → 없으면 공정→파트→그룹(레거시 호환).
+    //  ⚠ 제품군은 반드시 process_id 가 가리키는 exam_processes.category_id 로 복원한다(공정명 문자열로 역추론 금지 → FLASH-CVD/DRAM-CVD 혼동 방지).
+    if (processId) { const p = find("exam_processes", processId); if (!groupId) groupId = String(p?.group_id ?? ""); if (!categoryId) categoryId = String(p?.category_id ?? ""); if (!partId) partId = String(p?.part_id ?? ""); }
     if (!groupId && partId) { const pt = find("exam_parts", partId); groupId = String(pt?.group_id ?? ""); if (!categoryId) categoryId = String(pt?.category_id ?? ""); }
     if (!categoryId && groupId) { const g = find("exam_groups", groupId); categoryId = String(g?.category_id ?? ""); }
     const scope: ExamRow = {};

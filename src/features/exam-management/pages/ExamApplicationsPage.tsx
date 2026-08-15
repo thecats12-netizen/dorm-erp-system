@@ -7,7 +7,8 @@ import {
   writeExamAudit, listExamAudit, isDuplicateApplication, examSupabaseReady, makeExcelRowReader,
   type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
-import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, resolveAcquisitionTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, type ExamCandidate } from "../services/examAutomationService";
+import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, deriveAchievementTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, type ExamCandidate, type AchievementTiming } from "../services/examAutomationService";
+import { normalizeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { loadMyExamPermissions, type MyExamPermissions } from "../services/examPermissionService";
 // [4단계] 공통 사원선택 + 라이선스 요약(조회 전용, 추가 UI). 기존 사번 select/필드/저장은 그대로 유지.
 import EmployeeSelector from "../components/EmployeeSelector";
@@ -326,6 +327,33 @@ export default function ExamApplicationsPage({
     return { levelName, hasRule: !!rule, prereqName, prereqMet, employed, requireWritten, requirePractical, requiredEquip, validMonths, autoPromote, timingMonths, isDm, expectedLevel: levelName, nextPm };
   }, [editRow?.level_id, rules, refMap, selectedPerson]);
 
+  // ── 조기/지연취득 자동판정: 공정별 달성기준(exam_rules · rule_type "달성기준")을 FK(process_id+level_id)로 매칭 ──
+  //  · 공정은 이름이 아닌 선택 설비의 process_id(FK)로 식별 → FLASH-CVD/DRAM-CVD 혼동 없음.
+  const isAchieveRule = (r: ExamRow) => String(r.rule_type ?? "").replace(/\s/g, "") === "달성기준";
+  const appProcessId = (row: ExamRow) => String(row.process_id ?? "") || String(equipmentRows.find((e) => String(e.id) === String(row.equipment_id ?? ""))?.process_id ?? "");
+  const matchAchievementCriteria = (row: ExamRow): Record<string, unknown> | null => {
+    const pid = appProcessId(row), lvl = String(row.level_id ?? "");
+    if (!pid || !lvl) return null;
+    const cands = rules.filter((r) => isAchieveRule(r) && String(r.process_id ?? "") === pid && String(r.level_id ?? "") === lvl && !r.deleted_at);
+    if (!cands.length) return null;
+    const at = new Date((ymd(row.cert_acquired_date) || new Date().toISOString().slice(0, 10)) + "T00:00:00");
+    const eff = cands.find((r) => isCriteriaEffective(normalizeCriteria(r.criteria), at)) ?? cands[0];
+    return eff ? (normalizeCriteria(eff.criteria) as unknown as Record<string, unknown>) : null;
+  };
+  // 선행단계 인증취득일(가장 늦은 것) — 같은 사원의 응시행 중 선행 level_id + 인증취득일 보유분.
+  const latestPrereqAcq = (prereqIds: string[], employeeNo: string): string => {
+    if (!prereqIds.length || !employeeNo) return "";
+    const dates = rows.filter((r) => String(r.employee_no ?? "") === employeeNo && prereqIds.includes(String(r.level_id ?? "")) && ymd(r.cert_acquired_date)).map((r) => ymd(r.cert_acquired_date)).sort();
+    return dates.length ? dates[dates.length - 1] : "";
+  };
+  // [공용 계산] 조기/정상/지연취득 판정(모달 표시·저장 공용). 기준정보 부족 시 value="" (선택 유지).
+  const computeAppTiming = (row: ExamRow): AchievementTiming => {
+    const criteria = matchAchievementCriteria(row);
+    const person = personnel.find((p) => String(p.employee_no ?? "") === String(row.employee_no ?? ""));
+    const prereqIds = criteria && Array.isArray(criteria.prerequisite_level_ids) ? (criteria.prerequisite_level_ids as unknown[]).map(String) : [];
+    return deriveAchievementTiming({ criteria, hireDate: person?.hire_date, prereqAcquiredDate: latestPrereqAcq(prereqIds, String(row.employee_no ?? "")), certAcquiredDate: row.cert_acquired_date });
+  };
+
   // 저장 시 자동계산(사용자가 직접 계산하지 않음): 진행 날짜 → 인증 취득일/취득여부/PM Level/D.M 공정.
   //  기존 자동화 함수(examAutomationService)와 화면 표시 규칙(certOf)을 그대로 재사용한다.
   const computeDerivedFields = (row: ExamRow): ExamRow => {
@@ -360,10 +388,12 @@ export default function ExamApplicationsPage({
       if (autoStatus) next.status = autoStatus;
     }
 
-    // ④ 조기/지연취득: 비어 있을 때만 자동(수동 선택 보존). 취득일 때만 판정.
-    if (acquired && !String(next.timing_status ?? "").trim()) {
-      const t = resolveAcquisitionTiming(next, rules).value;
-      if (t) next.timing_status = t;
+    // ④ 조기/지연취득: 비어 있을 때만 자동(수동 선택 보존). 공정별 달성기준(FK 매칭)+실제 취득일로 판정.
+    //  ⚠ 저장은 TIMING_OPTIONS(조기/정상/지연취득)만 허용. 판정 불가(기준정보/기준일/인증취득일 부족)면
+    //     비우고(선택 유지) 임의 정상 처리하지 않는다. 새로운 상태값(미판정 등)은 만들지 않는다.
+    if (!String(next.timing_status ?? "").trim()) {
+      const t = computeAppTiming(next).value;
+      if (TIMING_OPTIONS.includes(t)) next.timing_status = t;
     }
 
     // ⑤ PM Level(후보) / D.M 공정: 연결 인력(연명부) 기준 자동계산.
@@ -376,6 +406,14 @@ export default function ExamApplicationsPage({
     }
     return next;
   };
+
+  // [자동값 미리보기] 저장 시 적용될 자동계산 결과(응시상태/조기·지연취득 등)를 모달에 그대로 표시 → 표시값과 저장값 불일치 방지(display == save).
+  //  computeDerivedFields 와 동일 함수 사용(계산식 중복 금지). rules/personnel 변경 시 갱신.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const autoPreview = useMemo(() => (editRow ? computeDerivedFields(editRow) : null), [editRow, rules, personnel]);
+  // 조기/지연 자동판정 상세(판정 불가 사유 안내용). 표시값 자체는 autoPreview.timing_status 를 사용.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const timingAuto = useMemo(() => (editRow ? computeAppTiming(editRow) : null), [editRow, rules, personnel, equipmentRows, rows]);
 
   const filterOptions = useMemo(() => {
     const m: Record<string, string[]> = {};
@@ -796,12 +834,13 @@ export default function ExamApplicationsPage({
                           );
                         })()
                           : c.key === "timing_status" ? (() => {
-                            // 저장된 조기/지연 값은 그대로 두고, 취득 시점 자동판정을 배지+툴팁(근거)으로 보조 표시.
-                            const t = resolveAcquisitionTiming(r, rules);
+                            // 저장된 조기/지연 값은 그대로 두고, 공정별 달성기준 기반 자동판정을 배지+툴팁(근거)으로 보조 표시.
+                            const t = computeAppTiming(r);
+                            const tip = t.insufficient ? `자동 판정 보류: ${t.insufficientReason}` : `자동판정 근거: ${t.reasons.join(", ") || "-"}`;
                             return (
                               <span className="inline-flex items-center gap-1">
                                 <span>{cellText(c, r)}</span>
-                                <span title={`자동판정 근거: ${t.reasons.join(", ") || "-"}${t.warnings.length ? " · " + t.warnings.join(", ") : ""}`} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동:{t.value}</span>
+                                <span title={tip} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동:{t.value || "선택"}</span>
                               </span>
                             );
                           })()
@@ -940,8 +979,24 @@ export default function ExamApplicationsPage({
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {COLS.filter((c) => c.type !== "cert").map((c) => (
                 <div key={c.key}>
-                  <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}{AUTO_READONLY.has(c.key) && <span className="ml-1 text-[0.6rem] font-normal text-slate-400">(사번 자동)</span>}</label>
-                  {c.key === "seq_no" ? (
+                  <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}{AUTO_READONLY.has(c.key) && <span className="ml-1 text-[0.6rem] font-normal text-slate-400">(사번 자동)</span>}{(c.key === "status" || c.key === "timing_status") && <span className="ml-1 rounded bg-slate-200 px-1 py-0.5 text-[0.55rem] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">자동</span>}</label>
+                  {c.key === "timing_status" ? (
+                    // [자동] 조기/지연취득: 공정별 달성기준(FK 매칭)+인증취득일로 자동 판정. 판정 불가 시 기존 "선택" 유지(새 상태값 안 만듦 · 임의 정상 금지).
+                    <>
+                      <div className={`${inputCls} w-full flex items-center justify-between gap-2 ${darkMode ? "bg-slate-800/60 text-slate-300" : "bg-slate-100 text-slate-600"}`} title="조기/지연취득은 공정별 달성기준과 인증취득일로 자동 판정됩니다">
+                        <span>{(autoPreview && String(autoPreview.timing_status ?? "").trim()) || "선택"}</span>
+                      </div>
+                      {(!(autoPreview && String(autoPreview.timing_status ?? "").trim()) && timingAuto?.insufficient) && (
+                        <p className="mt-1 text-[0.65rem] text-amber-600">자동 판정에 필요한 기준정보가 부족합니다.</p>
+                      )}
+                    </>
+                  ) : c.key === "status" ? (
+                    // [자동] 응시상태: 진행 날짜로 자동 계산(빈 값 = 자동값 저장). 필요 시 관리자가 특수 상태(취소/재응시/연기 등)를 수동 지정 가능.
+                    <select className={`${inputCls} w-full`} value={String(editRow.status ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), status: e.target.value || null }))}>
+                      <option value="">자동({AUTO_STATUS_MAP[calculateExamStatus(editRow).value] ?? "예정"})</option>
+                      {STATUS_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  ) : c.key === "seq_no" ? (
                     // 연번: 사용자 입력 불가. 신규는 저장 시 자동 생성, 수정은 기존 연번을 읽기전용 표시.
                     <div className={`${inputCls} w-full ${darkMode ? "bg-slate-800/60 text-slate-400" : "bg-slate-100 text-slate-500"}`} title="연번은 저장 시 자동 생성됩니다">
                       {editRow.id
