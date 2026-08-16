@@ -4,10 +4,10 @@ import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overla
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import {
   listExamRows, listExamRefOptions, upsertExamRow, softDeleteExamRow,
-  writeExamAudit, listExamAudit, isDuplicateApplication, examSupabaseReady, makeExcelRowReader,
+  writeExamAudit, listExamAudit, isDuplicateApplication, listApplicationsByEmployee, examSupabaseReady, makeExcelRowReader,
   type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
-import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, deriveAchievementTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, type ExamCandidate, type AchievementTiming } from "../services/examAutomationService";
+import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, deriveAchievementTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, isInProgressStatus, applicationMatchesTarget, type ExamCandidate, type AchievementTiming } from "../services/examAutomationService";
 import { normalizeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { loadMyExamPermissions, type MyExamPermissions } from "../services/examPermissionService";
 // [4단계] 공통 사원선택 + 라이선스 요약(조회 전용, 추가 UI). 기존 사번 select/필드/저장은 그대로 유지.
@@ -582,29 +582,48 @@ export default function ExamApplicationsPage({
     } catch (e) { setError((e as { message?: string })?.message || "일괄 변경 실패."); }
   };
 
-  // 응시 후보 자동계산(인력현황+인증기준). 공정 담당자는 허용 공정 후보만.
+  // 목표 인증단계(텍스트: Single/M1~ 등) → exam_levels FK id 해석(이름/라벨 매칭). 없으면 null(텍스트 폴백).
+  const levelIdByName = (name: string): string | null => {
+    const t = String(name ?? "").trim().toLowerCase().replace(/\s+/g, "");
+    if (!t) return null;
+    const opts = refMap["exam_levels"] || [];
+    const hit = opts.find((o) => {
+      const lbl = String(o.label ?? "").toLowerCase().replace(/\s+/g, "");
+      const nm = String(o.name ?? "").toLowerCase().replace(/\s+/g, "");
+      return nm === t || lbl === t || new RegExp(`(^|[^a-z0-9])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`, "i").test(lbl);
+    });
+    return hit ? hit.id : null;
+  };
+
+  // [공용] 응시 후보 목록 계산 + 공정 권한 필터(최신 exam_applications 반영). openCandidates·등록 후 갱신에서 재사용.
+  const computeCandidateList = useCallback(async (): Promise<ExamCandidate[]> => {
+    const freshApps = await listExamRows("exam_applications", tenantId).catch(() => rows);
+    const list = buildExamCandidates(personnel as Record<string, unknown>[], freshApps as Record<string, unknown>[], rules as Record<string, unknown>[]);
+    try {
+      const perms: MyExamPermissions = await loadMyExamPermissions(tenantId);
+      if (!perms.isAdmin && !perms.isViewerAll) {
+        const procOpts = await listExamRefOptions("exam_processes", tenantId);
+        const mapProc = (label: string) => { const hit = procOpts.find((o) => o.label === label || o.label.includes(label)); return hit ? hit.id : null; };
+        return list.filter((c) => perms.can(c.process ? mapProc(c.process) : null, "create"));
+      }
+    } catch { /* 권한 로드 실패 시 전체 표시(관리자 가정) */ }
+    return list;
+  }, [tenantId, personnel, rows, rules]);
+
+  // 응시 후보 자동계산(인력현황+인증기준). 이미 동일 단계 활성 응시가 있는 사원은 buildExamCandidates 가 notInProgress=false 로 제외(1차 차단).
   const openCandidates = async () => {
     setShowCand(true); setCandLoading(true); setCandSel(new Set());
     try {
-      const list = buildExamCandidates(personnel as Record<string, unknown>[], rows as Record<string, unknown>[], rules as Record<string, unknown>[]);
-      let filtered = list;
-      try {
-        const perms: MyExamPermissions = await loadMyExamPermissions(tenantId);
-        if (!perms.isAdmin && !perms.isViewerAll) {
-          const procOpts = await listExamRefOptions("exam_processes", tenantId);
-          const mapProc = (label: string) => { const hit = procOpts.find((o) => o.label === label || o.label.includes(label)); return hit ? hit.id : null; };
-          filtered = list.filter((c) => perms.can(c.process ? mapProc(c.process) : null, "create"));
-        }
-      } catch { /* 권한 로드 실패 시 전체 표시(관리자 가정) */ }
-      // 자동 선택: 응시 가능한 후보만 기본 체크
-      setCands(filtered);
-      setCandSel(new Set(filtered.filter((c) => c.eligible).map(candKey)));
+      const list = await computeCandidateList();
+      setCands(list);
+      setCandSel(new Set(list.filter((c) => c.eligible).map(candKey))); // 응시 가능만 기본 체크
     } finally { setCandLoading(false); }
   };
 
   // 관리자 승인 → 응시 등록(상태 '승인대기'). 후보는 자동계산이지만 등록은 승인 필요.
-  //  · 다건을 개별 처리하고 성공/실패를 분리 집계한다(한 건 실패로 전체를 성공/실패 처리하지 않음).
-  //  · 저장 전 필수값(사번·성명)을 검증해 잘못된 요청을 Supabase 로 보내지 않는다.
+  //  · in-flight guard(candApplying)로 연속 클릭 중복 방지. 다건은 개별 처리·성공/실패 분리 집계.
+  //  · [2차·최종 백스톱] 저장 직전 DB 최신 데이터로 활성 응시 중복 재확인(다른 관리자 동시 등록 방지).
+  //  · 생성행에 목표단계 식별(category_code=목표, level_id/process_id FK)을 저장 → 후보 재계산 시 중복 제외 인식.
   const approveCandidates = async () => {
     const chosen = cands.filter((c) => candSel.has(candKey(c)) && c.eligible);
     if (candApplying || chosen.length === 0) return;
@@ -619,9 +638,20 @@ export default function ExamApplicationsPage({
         // 필수값 검증(요청 전 차단).
         if (!String(c.employee_no || "").trim()) { failures.push({ ref, reason: "대상자 사번이 없습니다." }); continue; }
         if (!String(c.name || "").trim()) { failures.push({ ref, reason: "대상자 성명이 없습니다." }); continue; }
+        const person = personnel.find((p) => String(p.employee_no ?? "") === String(c.employee_no ?? ""));
+        const processId = person?.process_id ? String(person.process_id) : null; // 공정 FK(FLASH-CVD/DRAM-CVD 구분)
+        const levelId = levelIdByName(c.target_level);                          // 인증단계 FK(있으면)
+        // [2차·최종 백스톱] DB 최신 기준 활성 중복 재확인(취소/불합격/인증취득은 활성 아님 → 재응시/다음단계 허용).
+        const existing = await listApplicationsByEmployee(tenantId, String(c.employee_no)).catch(() => [] as ExamRow[]);
+        if (existing.some((a) => isInProgressStatus(a.status) && applicationMatchesTarget(a, { processId, levelId, targetLevel: c.target_level }))) {
+          failures.push({ ref, reason: "이미 동일 공정·인증단계의 진행 중인 응시가 있습니다." }); continue;
+        }
         const payload: ExamRow = {
           employee_no: c.employee_no, name: c.name, group_name: c.group_name,
           product: c.product, process: c.process, pm_level: c.current_level, status: "승인대기",
+          category_code: c.target_level,                                        // 목표 단계 식별(후보 재계산 중복 인식)
+          level_id: levelId, process_id: processId,                             // FK 식별(정확 중복 판정)
+          personnel_id: person?.id ? String(person.id) : null,
           // [라인 스냅샷] 이미 로드된 personnel 에서 사번→line_id(행별 재조회 없음). process 로 추정하지 않음.
           line_id: personnelLineByEmp.get(String(c.employee_no ?? "").trim()) ?? null,
         };
@@ -633,14 +663,17 @@ export default function ExamApplicationsPage({
       }
     }
     setCandApplying(false);
+    // 등록 후 후보 목록 즉시 갱신(등록분은 활성 응시가 되어 제외됨) + 목록/집계 refresh.
+    if (ok > 0) {
+      await reload();
+      try { const refreshed = await computeCandidateList(); setCands(refreshed); setCandSel(new Set()); } catch { /* 갱신 실패 무시 */ }
+    }
     // 결과 UX: 전체 성공 / 부분 성공 / 전체 실패 구분.
     if (ok > 0 && failures.length === 0) {
       onToast?.(`응시 대상 ${ok}건을 승인대기로 등록했습니다.`);
-      setShowCand(false); await reload();
     } else if (ok > 0 && failures.length > 0) {
       onToast?.(`응시 대상 ${ok}건 등록, ${failures.length}건 실패했습니다.`);
       setError(`일부 등록 실패(${failures.length}건):\n` + failures.map((f) => `· ${f.ref}: ${f.reason}`).join("\n"));
-      await reload();
     } else {
       setError(`응시 등록에 실패했습니다(${failures.length}건):\n` + failures.map((f) => `· ${f.ref}: ${f.reason}`).join("\n"));
     }

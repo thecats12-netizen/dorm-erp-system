@@ -444,6 +444,16 @@ export async function isDuplicateEmployeeNo(tenantId: string, employeeNo: string
 }
 
 // 시험 응시 중복 확인(미삭제, 본인 제외): 동일 사원번호 + 동일 구분코드. true = 중복.
+// 후보 승인 등록 직전 최신 중복 검증용 — 해당 사원의 미삭제 응시행을 반환(활성/대상 판정은 호출부에서 isInProgressStatus/applicationMatchesTarget).
+//  · category_code 만으로 막지 않는다(취소/불합격 후 재응시 허용). 상태·FK 는 호출부에서 판정.
+export async function listApplicationsByEmployee(tenantId: string, employeeNo: string): Promise<ExamRow[]> {
+  if (!supabase || !String(employeeNo || "").trim()) return [];
+  const { data, error } = await supabase.from("exam_applications").select("*")
+    .eq("tenant_id", tenantId).eq("employee_no", employeeNo).is("deleted_at", null);
+  if (error) throw new Error(translateSupabaseError(error.message || String(error)));
+  return (data as ExamRow[]) || [];
+}
+
 export async function isDuplicateApplication(tenantId: string, employeeNo: string, categoryCode: string, excludeId?: string): Promise<boolean> {
   if (!supabase || !String(employeeNo || "").trim() || !String(categoryCode || "").trim()) return false;
   let q = supabase.from("exam_applications").select("id")

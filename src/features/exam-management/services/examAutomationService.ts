@@ -772,6 +772,16 @@ const candMatchesLevel = (a: ExamApplicationRecord, level: string): boolean => {
   const bag = `${asText(a.pm_level)} ${asText(a.category)} ${asText(a.category_code)} ${asText(a.level_id)}`;
   return new RegExp(`(^|[^a-z0-9])${level.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`, "i").test(bag);
 };
+// [중복 방지 공용] 활성(진행 중) 상태 판정 — candInProgress 재사용(신규 enum 없음). 취소/불합격/인증취득/재응시는 활성 아님.
+export const isInProgressStatus = (status: unknown): boolean => candInProgress(asText(status));
+// [중복 방지 공용] 응시행이 대상(공정+인증단계)과 동일 대상인지. FK(process_id+level_id)가 있으면 정확 매칭(FLASH-CVD/DRAM-CVD 구분),
+//  없으면 목표단계 텍스트로 폴백(legacy). 이름 문자열만으로 공정을 판정하지 않는다(process_id 우선).
+export function applicationMatchesTarget(app: ExamApplicationRecord, target: { processId?: string | null; levelId?: string | null; targetLevel?: string }): boolean {
+  const pid = asText(target.processId), lid = asText(target.levelId);
+  if (pid && lid) return asText(app.process_id) === pid && asText(app.level_id) === lid;
+  if (lid) return asText(app.level_id) === lid;
+  return target.targetLevel ? candMatchesLevel(app, target.targetLevel) : false;
+}
 // exam_rules 에서 재시험 제한기간(개월) 추출. 없으면 null.
 function extractRetestGapMonths(rules?: ExamApplicationRecord[]): number | null {
   if (!Array.isArray(rules)) return null;
