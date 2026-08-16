@@ -222,7 +222,6 @@ export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: str
     const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[critSheetName], { defval: "" });
     critPlan.total = raw.length;
     const seen = new Set<string>();
-    const levelByCode = new Map(pool.levels.map((l) => [up(l.code), l] as const));
     const rankOf = (id: string) => Number(pool.levels.find((l) => String(l.id) === id)?.rank_order ?? 0);
     const numCell = (v: string): number | "" => { const t = v.trim(); if (t === "") return ""; const n = Number(t.replace(/[^0-9.-]/g, "")); return Number.isFinite(n) ? n : ""; };
     const ymd = (v: string) => { const m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(v.trim()); return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : ""; };
@@ -239,23 +238,25 @@ export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: str
       const lv = !err && cell("인증단계") ? resolveRef(pool.levels, cell("인증단계"), () => true) : { id: null as string | null };
       if (!err && !lv.id) err = `인증단계 ‘${cell("인증단계")}’을(를) 찾을 수 없습니다`;
 
-      // 선행단계(코드 | 구분) → level id. 자기/상위 rank 금지.
+      // 선행단계(코드 | "코드 · 이름" 혼용) → level id. 인증단계와 동일 resolveRef 사용(코드·이름 파싱 · 동일 master identity).
+      //  ⚠ 값이 "Y072 · Single" 처럼 "코드 · 이름" 형태여도 정확 해석(코드-only 조회 실패로 인한 대량 오류 방지). 애매매칭은 resolveRef 가 오류 처리.
       const prereqIds: string[] = [];
       if (!err && cell("선행단계")) {
-        for (const code of cell("선행단계").split("|").map((s) => s.trim()).filter(Boolean)) {
-          const l = levelByCode.get(up(code)); if (!l) { err = `선행단계 ‘${code}’을(를) 찾을 수 없습니다`; break; }
-          if (String(l.id) === lv.id) { err = "현재 단계 자기 자신은 선행단계로 사용할 수 없습니다"; break; }
-          if (lv.id && rankOf(String(l.id)) >= rankOf(lv.id)) { err = `선행단계 ‘${code}’는 현재 단계의 상위 단계라 사용할 수 없습니다`; break; }
-          prereqIds.push(String(l.id));
+        for (const token of cell("선행단계").split("|").map((s) => s.trim()).filter(Boolean)) {
+          const rr = resolveRef(pool.levels, token, () => true);
+          if (!rr.id) { err = rr.err === "many" ? `선행단계 ‘${token}’이(가) 여러 건 존재합니다` : `선행단계 ‘${token}’을(를) 찾을 수 없습니다`; break; }
+          if (rr.id === lv.id) { err = "현재 단계 자기 자신은 선행단계로 사용할 수 없습니다"; break; }
+          if (lv.id && rankOf(rr.id) >= rankOf(lv.id)) { err = `선행단계 ‘${token}’는 현재 단계의 상위 단계라 사용할 수 없습니다`; break; }
+          prereqIds.push(rr.id);
         }
       }
-      // 필수설비(코드 | 구분) → 선택 공정 소속 설비 id.
+      // 필수설비(코드 | "코드 · 이름" 혼용) → 선택 공정 소속 설비 id. 공정 scope(process_id) 유지(FLASH-CVD/DRAM-CVD 구분).
       const reqIds: string[] = [];
       if (!err && cell("필수설비")) {
-        for (const code of cell("필수설비").split("|").map((s) => s.trim()).filter(Boolean)) {
-          const e = pool.equipment.find((x) => String(x.process_id ?? "") === p.id && up(x.code) === up(code) && !x.deleted_at);
-          if (!e) { err = `필수설비 ‘${code}’은(는) 선택한 공정 소속이 아닙니다`; break; }
-          reqIds.push(String(e.id));
+        for (const token of cell("필수설비").split("|").map((s) => s.trim()).filter(Boolean)) {
+          const rr = resolveRef(pool.equipment, token, (x) => String(x.process_id ?? "") === p.id);
+          if (!rr.id) { err = rr.err === "many" ? `필수설비 ‘${token}’이(가) 선택 공정에 여러 건 존재합니다` : `필수설비 ‘${token}’은(는) 선택한 공정 소속이 아닙니다`; break; }
+          reqIds.push(rr.id);
         }
       }
       const rate = numCell(cell("최소취득률"));
