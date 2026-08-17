@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
 import { calculateDmLevel, calculateCertExpiry, buildDmCandidates } from "../services/examAutomationService";
+import { normalizeCertificationLevel } from "../utils/certificationLevel";
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import * as XLSX from "xlsx";
 import {
@@ -149,21 +150,13 @@ export default function ExamDmCertificationsPage({
     return out;
   };
 
-  // dm_stage/dm_level → exam_levels.id 해석. 활성 레벨 내에서 code 또는 name 이 정확히 유일 매칭될 때만 연결.
-  // 0건 또는 2건 이상이면 null 반환(호출부에서 저장 차단). 이름 단독 임의 매칭 금지 — 정확 일치만 허용.
+  // dm_stage/dm_level → exam_levels.id 해석. 공용 resolver(FK>code>name>alias exact) 사용.
+  //  화면 표기명(Single Job/M1~M4 등)이 현재 master(Y072/Single, Y073/Multi 1 …)와 코드/이름이 달라도 alias 로 정확 연결.
+  //  0건이면 null(호출부에서 저장 차단). fuzzy/첫 번째 level 사용 금지.
   const resolveLevelId = (row: ExamRow): string | null => {
     const existing = String(row.level_id ?? "").trim();
-    if (existing) return existing; // 이미 FK 로 연결됨(마스터 데이터 기준) → 유지.
-    const active = levels.filter((l) => l.is_active !== false && !l.deleted_at);
-    const norm = (s: unknown) => String(s ?? "").trim().toLowerCase();
-    const candidates = [String(row.dm_level ?? "").trim(), String(row.dm_stage ?? "").trim()].filter(Boolean);
-    for (const cand of candidates) {
-      const key = cand.toLowerCase();
-      const matches = active.filter((l) => norm(l.code) === key || norm(l.name) === key);
-      const uniqueIds = Array.from(new Set(matches.map((m) => String(m.id))));
-      if (uniqueIds.length === 1) return uniqueIds[0];
-    }
-    return null;
+    if (existing) return existing; // 이미 FK 로 연결됨 → 유지.
+    return normalizeCertificationLevel(row.dm_level, levels) || normalizeCertificationLevel(row.dm_stage, levels);
   };
 
   const reload = useCallback(async () => {
@@ -202,6 +195,7 @@ export default function ExamDmCertificationsPage({
         const toCreate = cands.filter((c) => c.targetStageIdx > c.currentStageIdx && c.acquirable && scopeOk(c.personnel_id) && !activeKey.has(`${c.employee_no}|${c.dm_stage}`));
         if (toCreate.length) {
           let created = 0, skipped = 0;
+          const skippedInputs = new Set<string>(); // 실패한 실제 입력값(관리자 안내용)
           for (const c of toCreate) {
             const draft: ExamRow = {
               employee_no: c.employee_no, name: c.name, personnel_id: c.personnel_id,
@@ -210,15 +204,16 @@ export default function ExamDmCertificationsPage({
               dual_multi: c.dual_multi, approval_status: "대기",
               notes: c.master_candidate ? "Master 후보(관리자 승인 필요)" : null,
             };
-            // level_id(NOT NULL) 미해석 후보는 자동 생성 건너뜀(null 요청 금지). 필요 시 수동 등록에서 레벨 지정.
+            // level_id(NOT NULL) 미해석 후보는 자동 생성 건너뜀(null 요청 금지). "첫 번째 level 사용" 같은 임의 fallback 금지.
             const levelId = resolveLevelId(draft);
-            if (!levelId) { skipped++; continue; }
+            if (!levelId) { skipped++; const bad = String(c.dm_level ?? "").trim() || String(c.dm_stage ?? "").trim(); if (bad) skippedInputs.add(bad); continue; }
             await upsertExamRow("dm_certifications", sanitizeDmCertificationPayload({ ...draft, level_id: levelId }), tenantId, userId);
             created++;
           }
+          const badList = Array.from(skippedInputs).map((s) => `‘${s}’`).join(", ");
           setAutoInfo(created
-            ? `승인대기 D.M 후보 ${created}건을 자동 생성했습니다(승인 전에는 확정 집계 제외).${skipped ? ` 레벨 기준정보 미연결 ${skipped}건은 건너뜀.` : ""}`
-            : (skipped ? `자동 생성 대상 ${skipped}건이 인증 레벨 기준정보에 연결되지 않아 건너뛰었습니다. 인증 레벨 기준정보를 확인해 주세요.` : ""));
+            ? `승인대기 D.M 후보 ${created}건을 자동 생성했습니다(승인 전에는 확정 집계 제외).${skipped ? ` 인증 단계 ${badList}을(를) 현재 인증레벨 기준정보에서 연결하지 못해 ${skipped}건은 건너뜀.` : ""}`
+            : (skipped ? `인증 단계 ${badList}을(를) 현재 인증레벨 기준정보에서 연결하지 못했습니다. 인증 레벨 기준정보(코드/이름)를 확인해 주세요.` : ""));
           if (created) finalRows = await listExamRows("dm_certifications", tenantId);
         } else setAutoInfo("");
       }

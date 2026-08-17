@@ -7,6 +7,7 @@ import {
   isDuplicateEmployeeNo, listByPersonnel, examSupabaseReady, makeExcelRowReader, type ExamRow, type ExamPersonnelChildTable,
 } from "../services/examMasterService";
 import { calculatePmLevel } from "../services/examAutomationService";
+import { normalizeCertificationLevel, acquiredLevelIds } from "../utils/certificationLevel";
 // [자동 라이선스 관리] 인력 저장 후 employee_license_plan 자동 생성(추가 전용·비차단). 기존 저장 흐름 무변경.
 import { generatePlanForEmployeeAuto } from "../services/licensePlanService";
 // [3단계] 인력현황 등록 UX: 공통 사원선택 + 자동입력(조회 전용 기반). 다른 화면 미변경.
@@ -82,6 +83,8 @@ export default function ExamPersonnelPage({
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [rules, setRules] = useState<ExamRow[]>([]); // exam_rules(PM 승급 요건 검증용)
+  const [apps, setApps] = useState<ExamRow[]>([]);       // exam_applications(인증취득 이력 → 단계 표시 계산)
+  const [levelsRaw, setLevelsRaw] = useState<ExamRow[]>([]); // exam_levels master(raw · code/name/rank)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -193,11 +196,13 @@ export default function ExamPersonnelPage({
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
-      const [people, ruleRows] = await Promise.all([
+      const [people, ruleRows, appRows, levelRows] = await Promise.all([
         listExamRows("exam_personnel", tenantId),
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),  // 인증취득 이력(단계 표시 계산)
+        listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),        // 인증레벨 master(raw · code/name/rank)
       ]);
-      setRows(people); setRules(ruleRows);
+      setRows(people); setRules(ruleRows); setApps(appRows); setLevelsRaw(levelRows);
     }
     catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
@@ -206,6 +211,49 @@ export default function ExamPersonnelPage({
   // 최초 로드(내부 비동기 — 렌더 캐스케이드 아님).
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void reload(); }, [reload]);
+
+  // [단계 표시 정합화] Single Job/M1~M4/인증Level 을 personnel flag 가 아니라 실제 인증취득 응시이력으로 계산.
+  //  · FK(level_id)→exam_levels→현재 master(Y072~Y076) 또는 legacy category_code alias 로 resolve(공용 resolver).
+  //  · 취득 판정은 응시관리 canonical(isApplicationAcquired). 우선순위: 응시취득 이력 > legacy personnel flag. UUID 미노출.
+  //  · 행마다 조회 없이 batch(apps/levels) + useMemo(대량 인력 대응).
+  const legacyTruthy = (v: unknown) => { if (typeof v === "boolean") return v; const s = String(v ?? "").trim().toLowerCase(); return !!s && !["0", "false", "n", "no", "x", "-", "없음", "미이수", "미취득"].includes(s); };
+  //  · [process scope 확정] personnel.process_id 가 있으면 동일 process_id 취득 응시이력만 인정(다른 공정 이력·flag 로 충족 금지).
+  //    personnel.process_id 가 null 인 legacy 인력만 전 공정 + personnel flag 폴백 허용.
+  const stageDisplay = useMemo(() => {
+    const sid = {
+      single_job: normalizeCertificationLevel("Single", levelsRaw),
+      m1: normalizeCertificationLevel("M1", levelsRaw), m2: normalizeCertificationLevel("M2", levelsRaw),
+      m3: normalizeCertificationLevel("M3", levelsRaw), m4: normalizeCertificationLevel("M4", levelsRaw),
+    };
+    const rankById = new Map(levelsRaw.map((l) => [String(l.id), Number(l.rank_order ?? 0)]));
+    const nameById = new Map(levelsRaw.map((l) => [String(l.id), String(l.name ?? l.code ?? "")]));
+    const m = new Map<string, { single_job: boolean; m1: boolean; m2: boolean; m3: boolean; m4: boolean; cert_level: string; flagFallback: boolean }>();
+    const personByEmp = new Map<string, ExamRow>();
+    for (const r of rows) { const e = String(r.employee_no ?? ""); if (e && !personByEmp.has(e)) personByEmp.set(e, r); }
+    for (const [emp, prow] of personByEmp) {
+      const pid = String(prow.process_id ?? "");
+      const acq = acquiredLevelIds(apps, emp, levelsRaw, pid ? { processId: pid } : undefined); // pid 있으면 동일 공정만
+      let bestId = "", bestRank = -Infinity;
+      for (const id of acq) { const rk = rankById.get(id) ?? 0; if (rk > bestRank) { bestRank = rk; bestId = id; } }
+      m.set(emp, {
+        single_job: !!sid.single_job && acq.has(sid.single_job),
+        m1: !!sid.m1 && acq.has(sid.m1), m2: !!sid.m2 && acq.has(sid.m2),
+        m3: !!sid.m3 && acq.has(sid.m3), m4: !!sid.m4 && acq.has(sid.m4),
+        cert_level: bestId ? (nameById.get(bestId) || "") : "",
+        flagFallback: !pid, // process_id 없는 legacy 인력만 personnel flag 폴백 허용
+      });
+    }
+    return m;
+  }, [apps, levelsRaw, rows]);
+  const STAGE_KEYS = new Set(["single_job", "m1", "m2", "m3", "m4"]);
+  // 단계/인증Level 셀 표시: 동일 공정 응시취득 이력 우선. legacy flag 폴백은 process_id 없는 인력에만.
+  const stageCell = (c: Col, r: ExamRow): string => {
+    const comp = stageDisplay.get(String(r.employee_no ?? ""));
+    const allowFlag = comp?.flagFallback !== false; // comp 없음(미계산)도 안전하게 legacy 동작
+    if (c.key === "cert_level") { const v = comp?.cert_level && comp.cert_level.trim(); return v || (allowFlag ? cellText(c, r) : "-"); }
+    if (STAGE_KEYS.has(c.key)) { const held = comp ? (comp as unknown as Record<string, boolean>)[c.key] : false; return (held || (allowFlag && legacyTruthy(r[c.key]))) ? "○" : "-"; }
+    return cellText(c, r);
+  };
 
   const filterOptions = useMemo(() => {
     const m: Record<string, string[]> = {};
@@ -569,7 +617,7 @@ export default function ExamPersonnelPage({
                           <span title={`자동계산 근거: ${pm.reasons.join(", ") || "-"}`} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동:{pm.value}</span>
                         </span>
                       );
-                    })() : cellText(c, r)}
+                    })() : stageCell(c, r)}
                   </td>
                 ))}
                 <td className="whitespace-nowrap px-2.5 py-2">{tenureText(r.hire_date)}</td>
@@ -646,7 +694,7 @@ export default function ExamPersonnelPage({
                   {AUTO_COLS.map((c) => (
                     <div key={c.key} className={`rounded-lg border px-2 py-1.5 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
                       <div className="text-[0.6rem] uppercase tracking-wide text-slate-400">{c.label}</div>
-                      <div className="mt-0.5 text-sm">{cellText(c, editRow) || "-"}</div>
+                      <div className="mt-0.5 text-sm">{stageCell(c, editRow) || "-"}</div>
                     </div>
                   ))}
                 </div>
@@ -684,7 +732,7 @@ export default function ExamPersonnelPage({
               {COLS.map((c) => (
                 <div key={c.key} className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                   <div className="text-[0.65rem] uppercase tracking-wide text-slate-400">{c.label}</div>
-                  <div className="mt-0.5">{cellText(c, detailRow)}</div>
+                  <div className="mt-0.5">{stageCell(c, detailRow)}</div>
                 </div>
               ))}
               <div className={`rounded-lg border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
