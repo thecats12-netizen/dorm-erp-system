@@ -48,7 +48,8 @@ export function exportSimulationExcel(m: SimExportModel): void {
 
 function buildPrintHtml(m: SimExportModel): string {
   const monthHdr = m.months.map((n) => `<th>${n}월</th>`).join("");
-  const bodyRows = m.rows.map((r) => `<tr><td class="lbl">${esc(r.label)}</td>${r.values.map((v) => `<td>${esc(v)}</td>`).join("")}</tr>`).join("");
+  // 일반 행=가운데(기본 CSS), "예상 공실손실" 금액 행의 데이터 셀만 오른쪽 정렬. 구분(lbl)은 가운데.
+  const bodyRows = m.rows.map((r) => { const c = r.label === "예상 공실손실" ? ' class="money"' : ""; return `<tr><td class="lbl">${esc(r.label)}</td>${r.values.map((v) => `<td${c}>${esc(v)}</td>`).join("")}</tr>`; }).join("");
   const kpiHtml = m.kpis.map((k) => `<div class="kpi"><div class="kl">${esc(k.label)}</div><div class="kv">${esc(k.value)}</div></div>`).join("");
   const adjRows = m.adjustments.length
     ? m.adjustments.map((a) => `<tr><td>${esc(a.ym)}</td><td>${esc(a.region)}</td><td>${esc(a.gender)}</td><td>${esc(a.type)}</td><td>${esc(a.quantity)}</td><td>${esc(a.repeatUntil)}</td><td>${esc(a.notes)}</td></tr>`).join("")
@@ -66,10 +67,11 @@ function buildPrintHtml(m: SimExportModel): string {
       .kpi{border:1px solid #cbd5e1;border-radius:6px;padding:4px 9px;min-width:78px}
       .kl{font-size:9px;color:#64748b}.kv{font-size:13px;font-weight:700}
       table{border-collapse:collapse;width:100%;margin-bottom:6px}
-      th,td{border:1px solid #cbd5e1;padding:3px 5px;text-align:right}
-      td.lbl{text-align:left;font-weight:600;white-space:nowrap}
-      th{background:#eef2f7;text-align:right}th:first-child{text-align:left}
-      td.muted{text-align:center;color:#888}
+      th,td{border:1px solid #cbd5e1;padding:3px 5px;text-align:center;vertical-align:middle;font-variant-numeric:tabular-nums}
+      td.lbl{font-weight:600;white-space:nowrap}
+      th{background:#eef2f7}
+      td.money{text-align:right;padding-right:8px}
+      td.muted{color:#888}
       tr{page-break-inside:avoid}thead{display:table-header-group}
     </style>
     <h1>월별 TO 시뮬레이션</h1>

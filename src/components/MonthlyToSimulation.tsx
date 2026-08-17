@@ -162,7 +162,7 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
 
   type FCell = typeof forecast[number];
   const dash = (n: number, sign = false) => n === 0 ? "-" : sign && n > 0 ? `+${n}` : String(n);
-  const ROWS: Array<{ label: string; get: (r: FCell) => string; tone?: (r: FCell) => string; muted?: boolean }> = [
+  const ROWS: Array<{ label: string; get: (r: FCell) => string; tone?: (r: FCell) => string; muted?: boolean; numRight?: boolean }> = [
     { label: "기숙사(채)", get: (r) => String(r.dormCount), muted: true },
     { label: "계획 TO", get: (r) => String(r.planTo), muted: true },
     { label: "기준 거주자(현황)", get: (r) => String(r.anchorResidents), muted: true },
@@ -178,7 +178,7 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
     { label: "예상 TO", get: (r) => String(r.to) },
     { label: "예상 잔여TO", get: (r) => String(r.remain), tone: (r) => remainTone(r.remain) },
     { label: "예상 입주율", get: (r) => `${r.occ}%` },
-    { label: "예상 공실손실", get: (r) => won(r.loss) },
+    { label: "예상 공실손실", get: (r) => won(r.loss), numRight: true }, // 금액 → 데이터 셀만 오른쪽 정렬
   ];
 
   // 화면/Excel/PDF/인쇄 공용 단일 모델(ROWS·forecast·kpi 재사용 → display == export). DB 재조회 없음.
@@ -267,16 +267,16 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
 
       {/* 12개월 표 (모바일 가로 스크롤) */}
       <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
-        <table className="w-full min-w-[900px] text-left text-xs">
+        <table className="w-full min-w-[900px] text-center text-xs tabular-nums [&_th]:align-middle [&_td]:align-middle">
           <thead className={darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}>
-            <tr><th className="sticky left-0 z-[1] bg-inherit px-2.5 py-2">구분</th>{MONTHS.map((m) => <th key={m} className="px-2.5 py-2 text-right">{m}월</th>)}</tr>
+            <tr><th className="sticky left-0 z-[1] bg-inherit px-2.5 py-2 text-center">구분</th>{MONTHS.map((m) => <th key={m} className="px-2.5 py-2 text-center">{m}월</th>)}</tr>
           </thead>
           <tbody>
             {/* 값 출처(§8): 과거=이력 재구성 · 현재월=현재 현황(파랑) · 미래=예상(연함) */}
             <tr className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
               <td className="sticky left-0 z-[1] whitespace-nowrap bg-inherit px-2.5 py-1 text-[0.6rem] font-medium text-slate-400">출처</td>
               {forecast.map((r) => (
-                <td key={r.month} className={`px-2.5 py-1 text-right text-[0.6rem] ${r.sourceType === "current" ? "font-semibold text-blue-600" : r.sourceType === "future" ? "text-slate-400" : "text-slate-500"}`}
+                <td key={r.month} className={`px-2.5 py-1 text-[0.6rem] ${r.sourceType === "current" ? "font-semibold text-blue-600" : r.sourceType === "future" ? "text-slate-400" : "text-slate-500"}`}
                   title={r.sourceType === "history" ? (r.isEstimatePast ? "데이터 부족 → 추정" : "과거 이력 재구성(계약/입주 날짜 기준)") : r.sourceType === "current" ? "현재 현황(운영 source of truth)" : "미래 예상(forecast)"}>
                   {r.sourceType === "history" ? (r.isEstimatePast ? "추정" : "이력") : r.sourceType === "current" ? "현재" : "예상"}
                 </td>
@@ -286,7 +286,7 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
               <tr key={row.label} className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"} ${row.label === "최종 예상 거주자" ? (darkMode ? "bg-slate-800/40" : "bg-slate-50") : ""}`}>
                 <td className={`sticky left-0 z-[1] whitespace-nowrap bg-inherit px-2.5 py-2 font-medium ${row.muted ? "text-slate-400" : ""}`}>{row.label}</td>
                 {forecast.map((r) => (
-                  <td key={r.month} className={`px-2.5 py-2 text-right ${row.tone ? row.tone(r) : ""}`}
+                  <td key={r.month} className={`px-2.5 py-2 ${row.numRight ? "text-right pr-4" : ""} ${row.tone ? row.tone(r) : ""}`}
                     title={row.label === "최종 예상 거주자" ? `${r.isEstimatePast ? "과거월 역산 추정 · " : ""}기준 예상 ${r.baseResidents} · 시나리오 ${r.scenarioRes >= 0 ? "+" : ""}${r.scenarioRes} = ${r.finalResidents}`
                       : row.label === "예상 TO" ? `계획 TO ${r.planTo} · 임차 해지예정 -${r.terminationCumulative}(누적) · 시나리오 TO ${r.to - (r.planTo - r.terminationCumulative) >= 0 ? "+" : ""}${r.to - (r.planTo - r.terminationCumulative)} = ${r.to}`
                       : row.label === "임차 해지예정" ? (r.terminationTO ? `${r.month}월 해지 확정 계약 capacity 합 -${r.terminationTO} TO(누적 -${r.terminationCumulative})` : "해지 예정 없음")
@@ -299,7 +299,7 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
             {/* 기준안 대비(거주자): base forecast 대비 시나리오 순증감 */}
             <tr className={`border-t ${darkMode ? "border-slate-700 bg-slate-800/40" : "border-slate-100 bg-slate-50"}`}>
               <td className="sticky left-0 z-[1] whitespace-nowrap bg-inherit px-2.5 py-2 font-medium text-slate-500">기준안 대비</td>
-              {forecast.map((r) => { const d = r.finalResidents - r.baseResidents; return <td key={r.month} className={`px-2.5 py-2 text-right ${d > 0 ? "text-emerald-600" : d < 0 ? "text-rose-600" : "text-slate-400"}`}>{d > 0 ? `+${d}` : d}</td>; })}
+              {forecast.map((r) => { const d = r.finalResidents - r.baseResidents; return <td key={r.month} className={`px-2.5 py-2 ${d > 0 ? "text-emerald-600" : d < 0 ? "text-rose-600" : "text-slate-400"}`}>{d > 0 ? `+${d}` : d}</td>; })}
             </tr>
           </tbody>
         </table>
