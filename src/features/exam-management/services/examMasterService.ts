@@ -101,6 +101,19 @@ export function resolveEquipmentHierarchy(equip: ExamRow, refs: EquipHierarchyRe
   };
 }
 
+// [수정 폼 공용] 수정 대상이 이미 참조하는 기존 인증레벨(level_id·선행단계 등)을 옵션 목록에 포함시키기 위해,
+//  캐노니컬 필터(예: PM tier / 코드 화이트리스트) 밖의 legacy level 중 "참조되지만 목록에 없는" 행을 반환한다.
+//  ⚠ FK 를 다른 UUID 로 재매핑하지 않는다(원본 level_id 보존). 화면은 반환값을 자기 옵션 형태로 매핑해 뒤에 덧붙인다.
+export function referencedLevelsNotIn(allLevels: ExamRow[], presentIds: Set<string>, refIds: Array<string | null | undefined>): ExamRow[] {
+  const out: ExamRow[] = []; const seen = new Set(presentIds);
+  for (const id of refIds) {
+    const s = String(id ?? ""); if (!s || seen.has(s)) continue;
+    const lv = allLevels.find((r) => String(r.id) === s);
+    if (lv) { out.push(lv); seen.add(s); }
+  }
+  return out;
+}
+
 const nowIso = () => new Date().toISOString();
 
 export const examSupabaseReady = () => isSupabaseAvailable();

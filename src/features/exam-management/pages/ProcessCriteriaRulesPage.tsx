@@ -1,7 +1,7 @@
 // 공정별 달성기준 CRUD — exam_rules(rule_type="달성 기준"). criteria(jsonb) 기반 목록/필터/폼.
 //  그룹·제품군은 공정에서 파생(스키마 컬럼 없음). 서비스/엔진/폼 재사용 · DB 미적용 안전.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { listExamRows, examSupabaseReady, type ExamRow } from "../services/examMasterService";
+import { listExamRows, examSupabaseReady, referencedLevelsNotIn, type ExamRow } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
 import { normalizeCriteria, describeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { listProcessCriteriaRules, upsertProcessCriteriaRule, softDeleteProcessCriteriaRule, restoreProcessCriteriaRule } from "../services/processCriteriaRuleService";
@@ -64,7 +64,18 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
   // [계층 역전] 제품군은 그룹 소속(category.group_id)으로 필터 — 선택 그룹의 제품군만 표시.
   const catOpts = useMemo(() => m.categories.filter((r) => r.is_active !== false && (!fGroup || String(r.group_id ?? "") === fGroup)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.categories, fGroup]);
   const procOpts = useMemo(() => m.processes.filter((r) => r.is_active !== false && (!fGroup || String(r.group_id ?? "") === fGroup)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.processes, fGroup]);
-  const formMaster: ProcCriteriaMaster = useMemo(() => ({ groups: m.groups, processes: m.processes, equipment: m.equipment, groupById, catById, procById, equipById, levelOpts }), [m.groups, m.processes, m.equipment, groupById, catById, procById, equipById, levelOpts]);
+  // [수정 복원] 수정 대상이 참조하는 기존 인증단계·선행단계가 캐노니컬(LEVEL_CODES) 밖 legacy(Y072~ 등)여도 옵션에 포함
+  //  → dropdown 이 "선택"으로 풀리지 않게. FK 재매핑 없음(원본 level_id 보존). "(기존)" 표기로 legacy 임을 구분.
+  const formLevelOpts = useMemo(() => {
+    if (!editRow) return levelOpts;
+    const present = new Set(levelOpts.map((o) => o.id));
+    const prereq = (normalizeCriteria(editRow.criteria).prerequisite_level_ids as string[] | undefined) ?? [];
+    const extra = referencedLevelsNotIn(m.levels, present, [editRow.level_id as string, ...prereq]);
+    if (!extra.length) return levelOpts;
+    const mapped = extra.map((r) => ({ id: String(r.id), name: `${String(r.name ?? "").trim() || String(r.code ?? "")} (기존)`, code: String(r.code ?? ""), rank: Number(r.rank_order ?? 0) }));
+    return [...levelOpts, ...mapped].sort((a, b) => a.rank - b.rank);
+  }, [editRow, levelOpts, m.levels]);
+  const formMaster: ProcCriteriaMaster = useMemo(() => ({ groups: m.groups, processes: m.processes, equipment: m.equipment, groupById, catById, procById, equipById, levelOpts: formLevelOpts }), [m.groups, m.processes, m.equipment, groupById, catById, procById, equipById, formLevelOpts]);
 
   // 행 파생: criteria 정규화 + 공정→그룹/제품군.
   const enriched = useMemo(() => rows.map((r) => {

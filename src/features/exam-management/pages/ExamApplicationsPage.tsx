@@ -646,6 +646,12 @@ export default function ExamApplicationsPage({
         if (existing.some((a) => isInProgressStatus(a.status) && applicationMatchesTarget(a, { processId, levelId, targetLevel: c.target_level }))) {
           failures.push({ ref, reason: "이미 동일 공정·인증단계의 진행 중인 응시가 있습니다." }); continue;
         }
+        // [409 방지] DB partial unique(ux_exam_applications_emp_catcode: tenant+employee_no+category_code, deleted_at null)와 충돌 예방.
+        //  동일 구분코드 미삭제 응시(완료/이력 포함)가 있으면 raw 23505 대신 명확 안내로 실패 처리(그 대상만) — INSERT 자체를 보내지 않음.
+        //  ※ 재응시/재취득은 기존 이력에서 진행. 이 legacy unique 의 다단계/재응시 호환은 아래 migration 계획으로 별도 보고(이번엔 index 미변경).
+        if (existing.some((a) => !a.deleted_at && String(a.category_code ?? "") === String(c.target_level ?? ""))) {
+          failures.push({ ref, reason: `동일 구분코드(${c.target_level})의 응시 이력이 이미 있어 신규 등록할 수 없습니다.` }); continue;
+        }
         const payload: ExamRow = {
           employee_no: c.employee_no, name: c.name, group_name: c.group_name,
           product: c.product, process: c.process, pm_level: c.current_level, status: "승인대기",
@@ -1023,13 +1029,19 @@ export default function ExamApplicationsPage({
                         <p className="mt-1 text-[0.65rem] text-amber-600">자동 판정에 필요한 기준정보가 부족합니다.</p>
                       )}
                     </>
-                  ) : c.key === "status" ? (
-                    // [자동] 응시상태: 진행 날짜로 자동 계산(빈 값 = 자동값 저장). 필요 시 관리자가 특수 상태(취소/재응시/연기 등)를 수동 지정 가능.
-                    <select className={`${inputCls} w-full`} value={String(editRow.status ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), status: e.target.value || null }))}>
-                      <option value="">자동({AUTO_STATUS_MAP[calculateExamStatus(editRow).value] ?? "예정"})</option>
-                      {STATUS_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
-                    </select>
-                  ) : c.key === "seq_no" ? (
+                  ) : c.key === "status" ? (() => {
+                    // [자동] 응시상태: 자동모드(빈값/"예정")에서는 진행 날짜로 계산된 상태(autoPreview 단일 source)를 선택값처럼 즉시 표시.
+                    //  저장값에는 계산값(예: "필기 합격")만 들어가고 "자동(…)" 문자열은 저장하지 않음. 수동 상태(취소/재응시/연기/불합격 등)는 그대로 보존.
+                    const autoMode = !String(editRow.status ?? "").trim() || String(editRow.status) === "예정";
+                    const autoVal = (autoPreview && String(autoPreview.status ?? "").trim()) || "예정";
+                    return (
+                      <select className={`${inputCls} w-full`} value={autoMode ? "__auto__" : String(editRow.status)}
+                        onChange={(e) => { const v = e.target.value; setEditRow((f) => ({ ...(f || {}), status: v === "__auto__" ? null : v })); }}>
+                        <option value="__auto__">자동({autoVal})</option>
+                        {STATUS_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    );
+                  })() : c.key === "seq_no" ? (
                     // 연번: 사용자 입력 불가. 신규는 저장 시 자동 생성, 수정은 기존 연번을 읽기전용 표시.
                     <div className={`${inputCls} w-full ${darkMode ? "bg-slate-800/60 text-slate-400" : "bg-slate-100 text-slate-500"}`} title="연번은 저장 시 자동 생성됩니다">
                       {editRow.id

@@ -1,7 +1,7 @@
 // 설비별 인증단계 CRUD — exam_equipment_stage_rules. 그룹→제품군→공정→설비 종속 선택 + 기준단계(PM tier).
 //  criteria 엔진의 판단 입력(설비 1개 취득=공정 확정 아님). 서비스 재사용 · 한글 표시 · DB 미적용 안전.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { listExamRows, examSupabaseReady, type ExamRow } from "../services/examMasterService";
+import { listExamRows, examSupabaseReady, referencedLevelsNotIn, type ExamRow } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
 import { listEquipmentStageRules, upsertEquipmentStageRule, softDeleteEquipmentStageRule, restoreEquipmentStageRule } from "../services/equipmentStageRuleService";
 
@@ -57,6 +57,14 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
     const src = (pm.length ? pm : master.levels.filter((r) => r.is_active !== false));
     return src.map((r) => ({ id: String(r.id), name: String(r.name ?? "").trim() || String(r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko"));
   }, [master.levels]);
+  // [수정 복원] 수정 대상의 기존 기준단계(level_id)가 PM tier 필터 밖 legacy 여도 옵션에 포함 → "선택"으로 풀리지 않게(FK 재매핑 없음).
+  const formLevelOpts = useMemo(() => {
+    if (!editRow) return levelOpts;
+    const present = new Set(levelOpts.map((o) => o.id));
+    const extra = referencedLevelsNotIn(master.levels, present, [editRow.level_id as string]);
+    if (!extra.length) return levelOpts;
+    return [...levelOpts, ...extra.map((r) => ({ id: String(r.id), name: `${String(r.name ?? "").trim() || String(r.code ?? "")} (기존)` }))].sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  }, [editRow, levelOpts, master.levels]);
   const groupOpts = useMemo(() => master.groups.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.groups]);
   // [계층 역전] 제품군은 그룹 소속(category.group_id), 공정은 제품군 소속(process.category_id, 없으면 group_id fallback).
   const catOptsFor = (groupId: string) => master.categories.filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko"));
@@ -185,7 +193,7 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
               <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">설비 <span className="text-rose-500">*</span></label>
                 <select className={`${inputCls} w-full`} value={String(e.equipment_id ?? "")} disabled={!eProc} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), equipment_id: ev.target.value || null }))}><option value="">{eProc ? "선택" : "공정 먼저"}</option>{equipOptsFor(eProc).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
               <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">기준단계 <span className="text-rose-500">*</span></label>
-                <select className={`${inputCls} w-full`} value={String(e.level_id ?? "")} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), level_id: ev.target.value || null }))}><option value="">선택</option>{levelOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
+                <select className={`${inputCls} w-full`} value={String(e.level_id ?? "")} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), level_id: ev.target.value || null }))}><option value="">선택</option>{formLevelOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>
               <div className="flex items-end"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={e.is_core_equipment === true} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), is_core_equipment: ev.target.checked }))} />주력설비</label></div>
               <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">적용 시작일</label><input type="date" className={`${inputCls} w-full`} value={String(e.effective_from ?? "").slice(0, 10)} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), effective_from: ev.target.value || null }))} /></div>
               <div><label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">적용 종료일</label><input type="date" className={`${inputCls} w-full`} value={String(e.effective_to ?? "").slice(0, 10)} onChange={(ev) => setEditRow((f) => ({ ...(f || {}), effective_to: ev.target.value || null }))} /></div>
