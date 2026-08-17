@@ -8600,6 +8600,9 @@ export default function App() {
             actualMoveOutDate: getActualMoveOutDate(o) || h.actualMoveOutDate,
             expectedMoveOutDate: (o as any).expectedMoveOutDate || h.expectedMoveOutDate,
             moveOutDueDate: (o as any).moveOutDueDate || h.moveOutDate,
+            // 천안이동: Occupant 타입엔 천안이동일 컬럼이 없어 동기화 시 유실됨 → 연결된 신입사원의 천안이동일을 보완(없을 때만).
+            //   (천안이동 집계 전용 · 다른 카테고리 날짜/로직 불변)
+            cheonanMoveDate: getCheonanMoveDate(o) || getCheonanMoveDate(h),
           } as Occupant;
         }),
         ...newHires
