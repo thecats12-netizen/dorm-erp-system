@@ -1,7 +1,7 @@
 // 설비별 인증단계 CRUD — exam_equipment_stage_rules. 그룹→제품군→공정→설비 종속 선택 + 기준단계(PM tier).
 //  criteria 엔진의 판단 입력(설비 1개 취득=공정 확정 아님). 서비스 재사용 · 한글 표시 · DB 미적용 안전.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { listExamRows, examSupabaseReady, referencedLevelsNotIn, type ExamRow } from "../services/examMasterService";
+import { listExamRows, examSupabaseReady, type ExamRow } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
 import { listEquipmentStageRules, upsertEquipmentStageRule, softDeleteEquipmentStageRule, restoreEquipmentStageRule } from "../services/equipmentStageRuleService";
 
@@ -51,19 +51,18 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
   const levelById = useMemo(() => map(master.levels), [master.levels]);
   const nm = (m: Map<string, ExamRow>, id: unknown) => { const r = m.get(String(id ?? "")); return r ? (String(r.name ?? "").trim() || String(r.code ?? "").trim() || "-") : "-"; };
   const code = (m: Map<string, ExamRow>, id: unknown) => { const r = m.get(String(id ?? "")); return r ? String(r.code ?? "").trim() : ""; };
-  // 기준단계: PM tier 우선(없으면 전체 활성 · rank_order 순).
-  const levelOpts = useMemo(() => {
-    const pm = master.levels.filter((r) => r.is_active !== false && String(r.tier ?? "") === "PM");
-    const src = (pm.length ? pm : master.levels.filter((r) => r.is_active !== false));
-    return src.map((r) => ({ id: String(r.id), name: String(r.name ?? "").trim() || String(r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko"));
-  }, [master.levels]);
-  // [수정 복원] 수정 대상의 기존 기준단계(level_id)가 PM tier 필터 밖 legacy 여도 옵션에 포함 → "선택"으로 풀리지 않게(FK 재매핑 없음).
+  // [source of truth] 인증 레벨 화면과 동일하게 활성 exam_levels 전체를 기준단계 옵션으로 사용(tier 하드코딩 필터 제거 · rank_order 순).
+  const levelOpts = useMemo(() => master.levels.filter((r) => r.is_active !== false)
+    .map((r) => ({ id: String(r.id), name: String(r.name ?? "").trim() || String(r.code ?? ""), rank: Number(r.rank_order ?? 0) }))
+    .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name, "ko")), [master.levels]);
+  // [수정 복원] 수정 대상의 기존 기준단계(level_id)가 현재 활성 목록 밖(비활성/삭제)이면 옵션에 포함 → "선택"으로 풀리지 않게(FK 재매핑 없음).
   const formLevelOpts = useMemo(() => {
     if (!editRow) return levelOpts;
-    const present = new Set(levelOpts.map((o) => o.id));
-    const extra = referencedLevelsNotIn(master.levels, present, [editRow.level_id as string]);
-    if (!extra.length) return levelOpts;
-    return [...levelOpts, ...extra.map((r) => ({ id: String(r.id), name: `${String(r.name ?? "").trim() || String(r.code ?? "")} (기존)` }))].sort((a, b) => a.name.localeCompare(b.name, "ko"));
+    const id = String(editRow.level_id ?? "");
+    if (!id || levelOpts.some((o) => o.id === id)) return levelOpts;
+    const lv = master.levels.find((r) => String(r.id) === id);
+    const extra = lv ? { id, name: `${String(lv.name ?? "").trim() || String(lv.code ?? "")} (미사용)`, rank: Number(lv.rank_order ?? 900) } : { id, name: "삭제된 기준(현재값 보존)", rank: 999 };
+    return [...levelOpts, extra].sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name, "ko"));
   }, [editRow, levelOpts, master.levels]);
   const groupOpts = useMemo(() => master.groups.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.groups]);
   // [계층 역전] 제품군은 그룹 소속(category.group_id), 공정은 제품군 소속(process.category_id, 없으면 group_id fallback).

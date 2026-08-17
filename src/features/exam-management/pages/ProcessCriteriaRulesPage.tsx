@@ -1,14 +1,13 @@
 // 공정별 달성기준 CRUD — exam_rules(rule_type="달성 기준"). criteria(jsonb) 기반 목록/필터/폼.
 //  그룹·제품군은 공정에서 파생(스키마 컬럼 없음). 서비스/엔진/폼 재사용 · DB 미적용 안전.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { listExamRows, examSupabaseReady, referencedLevelsNotIn, type ExamRow } from "../services/examMasterService";
+import { listExamRows, examSupabaseReady, type ExamRow } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
 import { normalizeCriteria, describeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { listProcessCriteriaRules, upsertProcessCriteriaRule, softDeleteProcessCriteriaRule, restoreProcessCriteriaRule } from "../services/processCriteriaRuleService";
 import ProcessCriteriaRuleForm, { type ProcCriteriaMaster } from "../components/ProcessCriteriaRuleForm";
 
 const PAGE_SIZE = 20;
-const LEVEL_CODES = new Set(["SINGLE", "M1", "M2", "M3", "M4"]);
 const dash = (v: unknown) => { const s = String(v ?? "").trim(); return s || "-"; };
 type Props = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void };
 
@@ -56,7 +55,8 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
   const levelById = useMemo(() => asMap(m.levels), [m.levels]);
   const nm = (map: Map<string, ExamRow>, id: unknown) => { const r = map.get(String(id ?? "")); return r ? (String(r.name ?? "").trim() || String(r.code ?? "").trim() || "-") : "-"; };
 
-  const levelOpts = useMemo(() => m.levels.filter((r) => r.is_active !== false && LEVEL_CODES.has(String(r.code ?? "").toUpperCase()))
+  // [source of truth] 인증 레벨 화면과 동일하게 현재 tenant 의 활성 exam_levels 전체를 canonical 옵션으로 사용(하드코딩 whitelist 제거).
+  const levelOpts = useMemo(() => m.levels.filter((r) => r.is_active !== false)
     .map((r) => ({ id: String(r.id), name: String(r.name ?? "").trim() || String(r.code ?? ""), code: String(r.code ?? ""), rank: Number(r.rank_order ?? 0) }))
     .sort((a, b) => a.rank - b.rank), [m.levels]);
   const groupOpts = useMemo(() => m.groups.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.groups]);
@@ -70,10 +70,17 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
     if (!editRow) return levelOpts;
     const present = new Set(levelOpts.map((o) => o.id));
     const prereq = (normalizeCriteria(editRow.criteria).prerequisite_level_ids as string[] | undefined) ?? [];
-    const extra = referencedLevelsNotIn(m.levels, present, [editRow.level_id as string, ...prereq]);
+    const refIds = [String(editRow.level_id ?? ""), ...prereq].filter(Boolean);
+    const extra: typeof levelOpts = [];
+    for (const id of refIds) {
+      if (present.has(id)) continue; // 현재 활성 master 에 있으면 정상 옵션(추가 안 함)
+      present.add(id);
+      const lv = m.levels.find((r) => String(r.id) === id); // 비삭제(활성+비활성)
+      if (lv) extra.push({ id, name: `${String(lv.name ?? "").trim() || String(lv.code ?? "")} (미사용)`, code: String(lv.code ?? ""), rank: Number(lv.rank_order ?? 900) });
+      else extra.push({ id, name: "삭제된 기준(현재값 보존)", code: "", rank: 999 }); // 존재하지 않는 FK → 명확 표시 · 자동 재매핑 금지
+    }
     if (!extra.length) return levelOpts;
-    const mapped = extra.map((r) => ({ id: String(r.id), name: `${String(r.name ?? "").trim() || String(r.code ?? "")} (기존)`, code: String(r.code ?? ""), rank: Number(r.rank_order ?? 0) }));
-    return [...levelOpts, ...mapped].sort((a, b) => a.rank - b.rank);
+    return [...levelOpts, ...extra].sort((a, b) => a.rank - b.rank);
   }, [editRow, levelOpts, m.levels]);
   const formMaster: ProcCriteriaMaster = useMemo(() => ({ groups: m.groups, processes: m.processes, equipment: m.equipment, groupById, catById, procById, equipById, levelOpts: formLevelOpts }), [m.groups, m.processes, m.equipment, groupById, catById, procById, equipById, formLevelOpts]);
 

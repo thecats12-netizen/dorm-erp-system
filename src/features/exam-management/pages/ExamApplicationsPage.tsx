@@ -14,6 +14,7 @@ import { loadMyExamPermissions, type MyExamPermissions } from "../services/examP
 import EmployeeSelector from "../components/EmployeeSelector";
 import { loadEmployeeAutofill } from "../services/employeeAutofillService";
 import { completeStageByCode } from "../services/licensePlanService";
+import { listEquipmentStageRules } from "../services/equipmentStageRuleService";
 import { createEquipmentCertificationCandidateFromApplication } from "../services/equipmentCertificationService";
 import PracticalEvalTab from "./PracticalEvalTab";
 import { formatExamSequence, examSequenceYear } from "../utils/formatExamSequence";
@@ -112,6 +113,7 @@ export default function ExamApplicationsPage({
   const [personnel, setPersonnel] = useState<ExamRow[]>([]);       // exam_personnel(사번 선택/자동입력용)
   const [lineRows, setLineRows] = useState<ExamRow[]>([]);         // [라인 스냅샷] 현재 tenant exam_lines(표시·검증용 · 행별 재조회 없음)
   const [equipmentRows, setEquipmentRows] = useState<ExamRow[]>([]); // exam_equipment(인증단계별 설비 필터용 — process_id 보유)
+  const [stageRules, setStageRules] = useState<ExamRow[]>([]);        // exam_equipment_stage_rules(process_id+level_id 별 허용 설비)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -165,15 +167,16 @@ export default function ExamApplicationsPage({
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
-      const [data, refs, ruleRows, people, equip, lines] = await Promise.all([
+      const [data, refs, ruleRows, people, equip, lines, stageR] = await Promise.all([
         listExamRows("exam_applications", tenantId),
         Promise.all(refCols.map(async (c) => [c.refTable as string, await listExamRefOptions(c.refTable as ExamMasterTable, tenantId)] as const)),
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]), // 인증취득 요건(없으면 기본값)
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]), // 사번 선택/자동입력
         listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]), // 인증단계별 설비 필터(process_id)
         listExamRows("exam_lines", tenantId).catch(() => [] as ExamRow[]),   // [라인 스냅샷] 현재 tenant 라인(미적용 시 [] → 표시만 비고)
+        listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[]),      // 설비별 인증단계(process_id+level_id 허용 설비)
       ]);
-      setRows(data); setRefMap(Object.fromEntries(refs)); setRules(ruleRows); setPersonnel(people); setEquipmentRows(equip); setLineRows(lines);
+      setRows(data); setRefMap(Object.fromEntries(refs)); setRules(ruleRows); setPersonnel(people); setEquipmentRows(equip); setLineRows(lines); setStageRules(stageR);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId, refCols, refreshKey]);
@@ -212,22 +215,35 @@ export default function ExamApplicationsPage({
     });
   };
 
-  // 선택된 인증단계(level_id)에 연결된 공정(process_id) 집합 — exam_rules 기준. 매핑 없으면 null(전체 설비 표시).
-  const levelProcessIds = useMemo(() => {
-    const lvl = String(editRow?.level_id ?? "");
-    if (!lvl) return null;
-    const ids = new Set(rules.filter((r) => String(r.level_id ?? "") === lvl && r.process_id).map((r) => String(r.process_id)));
-    return ids.size ? ids : null;
-  }, [editRow?.level_id, rules]);
+  // 설비 id→process_id(FK) 맵. 현재 응시행의 공정(FK): 응시행 process_id 우선, 없으면 사번(personnel)의 process_id.
+  const equipProcessMap = useMemo(() => new Map(equipmentRows.map((e) => [String(e.id), String(e.process_id ?? "")])), [equipmentRows]);
+  const currentProcessId = useMemo(() => {
+    const direct = String(editRow?.process_id ?? "");
+    if (direct) return direct;
+    const p = personnel.find((x) => String(x.employee_no ?? "") === String(editRow?.employee_no ?? ""));
+    return String(p?.process_id ?? "");
+  }, [editRow?.process_id, editRow?.employee_no, personnel]);
 
-  // 인증 설비 드롭다운 옵션 — 인증단계 선택 시 해당 공정의 설비만, 미선택/매핑없음이면 전체 표시(폴백).
-  const equipmentOptions = useMemo(() => {
+  // 인증 설비 옵션 + scope 안내/불일치. FK(process_id, level_id) 기준 — 공정명 문자열 미사용(FLASH-CVD/DRAM-CVD 구분).
+  //  단계 미선택 → 공정 소속 설비 / 단계 선택 + 규칙>0 → process+level 허용 설비 / 규칙 0건 → 공정 소속 fallback(전체 회사 설비 금지) + 안내.
+  //  기존 저장 equipment_id 는 scope 밖이어도 항상 포함(수정 시 유실 방지) · mismatch 경고.
+  const equipScope = useMemo(() => {
     const all = refMap["exam_equipment"] || [];
-    if (!levelProcessIds) return all;
-    const allowed = new Set(equipmentRows.filter((e) => levelProcessIds.has(String(e.process_id ?? ""))).map((e) => String(e.id)));
-    const cur = String(editRow?.equipment_id ?? ""); // 현재 선택값은 항상 보이도록(수정 시 유실 방지)
-    return all.filter((o) => allowed.has(o.id) || o.id === cur);
-  }, [refMap, levelProcessIds, equipmentRows, editRow?.equipment_id]);
+    const cur = String(editRow?.equipment_id ?? "");
+    const curOpt = all.find((o) => o.id === cur);
+    const withCur = (list: RefOpt[]) => (cur && curOpt && !list.some((o) => o.id === cur)) ? [curOpt, ...list] : list;
+    const pid = currentProcessId;
+    if (!pid) return { list: withCur([]), note: "공정 정보가 없어 인증 설비를 좁힐 수 없습니다. 사번(공정)을 먼저 선택해 주세요.", mismatch: !!cur };
+    const procEquip = all.filter((o) => equipProcessMap.get(o.id) === pid); // 공정 소속(FK)
+    const lvl = String(editRow?.level_id ?? "");
+    if (lvl) {
+      const allowed = new Set(stageRules.filter((s) => !s.deleted_at && String(s.process_id ?? "") === pid && String(s.level_id ?? "") === lvl).map((s) => String(s.equipment_id)));
+      if (allowed.size > 0) return { list: withCur(procEquip.filter((o) => allowed.has(o.id))), note: "", mismatch: !!cur && !allowed.has(cur) };
+      return { list: withCur(procEquip), note: "해당 공정·인증단계에 등록된 인증 설비가 없습니다. (공정 소속 설비로 표시)", mismatch: !!cur && !procEquip.some((o) => o.id === cur) };
+    }
+    return { list: withCur(procEquip), note: "", mismatch: !!cur && !procEquip.some((o) => o.id === cur) };
+  }, [refMap, editRow?.equipment_id, editRow?.level_id, currentProcessId, equipProcessMap, stageRules]);
+  const equipmentOptions = equipScope.list;
 
   // 선택된 사번의 인력(연명부) 레코드 — 재직여부/기존 인증 단계/이력 요약 표시용.
   const selectedPerson = useMemo(
@@ -1061,8 +1077,12 @@ export default function ExamApplicationsPage({
                     // 인증단계 변경 시 설비 선택 초기화(단계별 설비만 표시되도록).
                     <select className={`${inputCls} w-full`} value={String(editRow.level_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), level_id: e.target.value || null, equipment_id: null }))}><option value="">선택</option>{(refMap["exam_levels"] || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
                   ) : c.key === "equipment_id" ? (
-                    // 인증 설비: 선택된 인증단계에 연결된 공정의 설비만 표시. 표시는 품명/설비명 우선(저장값 equipment_id 불변, name 없으면 label 폴백).
-                    <select className={`${inputCls} w-full`} value={String(editRow.equipment_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), equipment_id: e.target.value || null }))}><option value="">선택</option>{equipmentOptions.map((o) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}</option>)}</select>
+                    // 인증 설비: 공정(process_id FK) + 인증단계(level_id) 기준 설비만. 표시는 품명/설비명 우선(저장값 equipment_id 불변).
+                    <>
+                      <select className={`${inputCls} w-full`} value={String(editRow.equipment_id ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), equipment_id: e.target.value || null }))}><option value="">선택</option>{equipmentOptions.map((o) => <option key={o.id} value={o.id}>{(o.name && o.name.trim()) || o.label}{equipScope.mismatch && String(editRow.equipment_id ?? "") === o.id ? " (기존/기준 미일치)" : ""}</option>)}</select>
+                      {equipScope.note && <p className="mt-1 text-[0.7rem] text-amber-600">{equipScope.note}</p>}
+                      {equipScope.mismatch && <p className="mt-1 text-[0.7rem] text-amber-600">기존 인증 설비가 현재 공정/인증단계 기준과 일치하지 않습니다. 변경하지 않으면 기존 값이 유지됩니다.</p>}
+                    </>
                   ) : c.type === "ref" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}><option value="">선택</option>{(refMap[c.refTable as string] || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
                   ) : c.type === "select" ? (
