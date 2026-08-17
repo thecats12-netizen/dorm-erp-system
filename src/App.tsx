@@ -6967,6 +6967,12 @@ export default function App() {
       moveOutDueDate: o.moveOutDueDate, expectedMoveOutDate: o.expectedMoveOutDate, actualMoveOutDate: o.actualMoveOutDate,
     })), [normalizedOccupants]);
 
+  // [월별 TO 시뮬레이션] 임차 만기/추가임차(채) 산정용 계약(미삭제). dormId 대신 건물+동+호 조합 키로 distinct 채수 집계.
+  const simContracts = useMemo(() => dormContracts
+    .filter((c) => !c.isDeleted && !c.deletedAt && !c.isPermanentDeleted)
+    .map((c) => ({ site: c.site, gender: c.gender as string, dormId: `${c.buildingName ?? ""}|${c.dong ?? ""}|${c.roomHo ?? ""}`, contractStart: c.contractStart, contractEnd: c.contractEnd, contractStatus: c.contractStatus, contractType: c.contractType })),
+    [dormContracts]);
+
   // 호실키(건물+동+호 정규화)별 "현재 거주자 수" 맵. 배정 신입사원 포함(normalizedOccupants),
   // 실제 퇴실/삭제 제외(isCurrentResidentOccupant). occupant 엔 호실 정보가 없으므로 dorm 을 경유해 키로 집계.
   // → 계약↔입주자 매칭이 dorm_id 불일치여도 "건물+동+호" 기준으로 정확히 카운트(공실 오판 방지).
@@ -20337,10 +20343,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
             {simSubMenu === "monthlyTo" && (
               <MonthlyToSimulation
-                base={(["평택", "천안"] as const).flatMap((site) => (["남", "여"] as const).map((g) => { const s = getRegionStats(site, g); return { site, gender: g, capacity: s.totalCapacity, currentResidents: s.currentResidents }; }))}
+                base={(["평택", "천안"] as const).flatMap((site) => (["남", "여"] as const).map((g) => { const s = getRegionStats(site, g); return { site, gender: g, capacity: s.totalCapacity, currentResidents: s.currentResidents, dormCount: s.dormCount }; }))}
                 occupants={simOccupants}
+                contracts={simContracts}
                 darkMode={theme.darkMode}
                 defaultVacancyCost={simCostSettings.utilityPerResident}
+                tenantId={tenantId}
+                userId={currentUser?.id ?? ""}
+                canEdit={canEditData(currentUser)}
               />
             )}
             {simSubMenu === "monthly" && (<>

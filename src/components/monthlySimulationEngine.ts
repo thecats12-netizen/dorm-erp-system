@@ -11,6 +11,9 @@ export type SimOccupant = {
   moveOutDueDate?: string; expectedMoveOutDate?: string; actualMoveOutDate?: string;
 };
 
+// 기숙사 임차 계약(채수 이벤트 산정용). contractStatus/contractType 으로 실질 만기/신규 구분(연장·재계약 제외).
+export type SimContract = { site: string; gender: string; dormId: string; contractStart?: string; contractEnd?: string; contractStatus?: string; contractType?: string };
+
 const isMidway = (o: SimOccupant): boolean => {
   const due = o.moveOutDueDate || o.expectedMoveOutDate;
   return !!o.actualMoveOutDate && (!due || o.actualMoveOutDate < due); // 실제퇴실 < 예정 → 중도퇴거
@@ -25,6 +28,9 @@ export type MonthCell = {
   otherDelta: number;          // 기타 확정 증감(중도퇴거 + 천안이동, 음수)
   baseResidents: number;       // 기준 예상 거주자(base forecast · 시나리오 제외)
   isEstimatePast: boolean;     // 과거월 역산 추정 여부
+  dormBase: number;            // 기숙사(채) 기준값(현재 활성 기숙사수 flat · 정원/채수 이력 없음)
+  leaseExpiry: number;         // 임차 만기(채) — 해당 월 계약종료 distinct dormId(정보성)
+  leaseAdd: number;            // 추가임차(채) — 해당 월 신규 계약시작 distinct dormId(연장/재계약 제외 · 정보성)
 };
 
 // "YYYY-MM..." → {y, m}. 형식오류 시 null(연도 무관 · 연/월 함께 반환 → 연도 경계 처리).
@@ -40,11 +46,25 @@ const ymOf = (s: string | undefined): { y: number; m: number } | null => {
 export function buildBaseForecast(input: {
   occupants: SimOccupant[]; year: number; region: "전체" | string; gender: "전체" | "남" | "여";
   capacity: number; currentResidents: number; nowYear: number; nowMonth: number;
+  dormCount?: number; contracts?: SimContract[];
 }): MonthCell[] {
   const { year, region, gender, capacity, currentResidents, nowYear } = input;
   const nowMonth = Math.min(12, Math.max(1, input.nowMonth));
-  const scope = (input.occupants || []).filter((o) =>
-    (region === "전체" || o.site === region) && (gender === "전체" || o.gender === gender));
+  const dormBase = input.dormCount ?? 0;
+  const scopeMatch = (site: string, g: string) => (region === "전체" || site === region) && (gender === "전체" || g === gender);
+  const scope = (input.occupants || []).filter((o) => scopeMatch(o.site, o.gender));
+
+  // 임차 만기(채)/추가임차(채): 선택연도 월별 distinct dormId(정보성 · 기숙사수에 자동 netting 하지 않음).
+  //  임차만기 = contractEnd 월 · 연장/공실 제외(진행중/종료/해지/만료예정). 추가임차 = contractStart 월 · 신규만(연장/재계약/해지후신규 제외).
+  const leSet: Set<string>[] = Array.from({ length: 13 }, () => new Set<string>());
+  const laSet: Set<string>[] = Array.from({ length: 13 }, () => new Set<string>());
+  for (const c of input.contracts || []) {
+    if (!scopeMatch(c.site, c.gender)) continue;
+    const de = ymOf(c.contractEnd);
+    if (de && de.y === year && !/연장|공실/.test(String(c.contractStatus ?? "")) && c.dormId) leSet[de.m].add(String(c.dormId));
+    const ds = ymOf(c.contractStart);
+    if (ds && ds.y === year && !/연장|재계약|해지후신규/.test(String(c.contractType ?? "")) && c.dormId) laSet[ds.m].add(String(c.dormId));
+  }
 
   // (연도-월)별 이벤트 집계(연도 무관 — 연도 경계/미래연도 anchor 계산용). 중복 방지 가드 포함.
   const nMap = new Map<string, number>(), eMap = new Map<string, number>(), oMap = new Map<string, number>();
@@ -86,21 +106,23 @@ export function buildBaseForecast(input: {
       month: m, planTo: capacity, anchorResidents: currentResidents,
       newMoveIn: d.n, expiry: d.e, otherDelta: -d.o, baseResidents: baseRes[m],
       isEstimatePast: pastYear || (year === nowYear && m < anchor),
+      dormBase, leaseExpiry: leSet[m].size, leaseAdd: laSet[m].size,
     };
   });
 }
 
-// 시나리오 조정 → 월별 (거주자 델타, TO 델타). base 와 분리(중복 금지). 반복(from~until) 누적.
-export type ScenarioAdj = { month: number; resDeltaEach: number; toDeltaEach: number; repeatUntil?: number | null };
-export function scenarioDeltaAtMonth(adjs: ScenarioAdj[], m: number): { res: number; to: number } {
-  let res = 0, to = 0;
+// 시나리오 조정 → 월별 (거주자 델타, TO 델타, 기숙사 채수 델타). base 와 분리(중복 금지). 반복(from~until) 누적.
+//  ⚠ 채수(dorm) 변화와 TO 변화는 별개(1채당 TO 상이) — 기숙사 +N채가 TO 를 임의로 바꾸지 않는다.
+export type ScenarioAdj = { month: number; resDeltaEach: number; toDeltaEach: number; dormDeltaEach?: number; repeatUntil?: number | null };
+export function scenarioDeltaAtMonth(adjs: ScenarioAdj[], m: number): { res: number; to: number; dorm: number } {
+  let res = 0, to = 0, dorm = 0;
   for (const a of adjs) {
-    const from = a.month;
+    const from = a.month; const dd = a.dormDeltaEach ?? 0;
     if (a.repeatUntil && a.repeatUntil >= from) {
-      if (m >= from) { const times = Math.min(m, a.repeatUntil) - from + 1; res += a.resDeltaEach * times; to += a.toDeltaEach * times; }
-    } else if (m >= from) { res += a.resDeltaEach; to += a.toDeltaEach; }
+      if (m >= from) { const times = Math.min(m, a.repeatUntil) - from + 1; res += a.resDeltaEach * times; to += a.toDeltaEach * times; dorm += dd * times; }
+    } else if (m >= from) { res += a.resDeltaEach; to += a.toDeltaEach; dorm += dd; }
   }
-  return { res, to };
+  return { res, to, dorm };
 }
 
 // 월별 입주율/공실/공실손실(순수).

@@ -2,46 +2,51 @@
 //  · 기존 운영 데이터(지역/성별별 정원=TO, 현재 거주자)를 base 로 받아 1~12월을 한 화면에 표시.
 //  · 사용자가 특정 연도/월에 증감 가정을 입력하면 이후 월에 누적 반영 → 실시간 재계산(useMemo · 행별 DB 호출 없음).
 //  · 원본 DB/운영 데이터는 변경하지 않음(가정값은 이 컴포넌트 local state). 저장(Supabase)·차트·Excel/PDF 는 2·3차.
-import { useMemo, useState } from "react";
-import { buildBaseForecast, scenarioDeltaAtMonth, calcMonthly, type SimOccupant, type ScenarioAdj } from "./monthlySimulationEngine";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { buildBaseForecast, scenarioDeltaAtMonth, calcMonthly, type SimOccupant, type SimContract, type ScenarioAdj } from "./monthlySimulationEngine";
+import { listScenarios, createScenario, renameScenario, deleteScenario, setDefaultScenario, listAdjustments, replaceAdjustments, duplicateScenario, type OpSimScenario, type OpSimAdjustment } from "../services/operationSimulationService";
 
-export type SimBaseStat = { site: string; gender: "남" | "여"; capacity: number; currentResidents: number };
-export type { SimOccupant } from "./monthlySimulationEngine";
+export type SimBaseStat = { site: string; gender: "남" | "여"; capacity: number; currentResidents: number; dormCount: number };
+export type { SimOccupant, SimContract } from "./monthlySimulationEngine";
 type RegionSel = "전체" | string;
 type GenderSel = "전체" | "남" | "여";
 
-// 시나리오 유형 → 인원(거주자)/TO 증감 방향. 부호는 quantity(양수 입력) × 방향.
+// 시나리오 유형 → 인원(거주자)/TO/기숙사(채) 증감 방향. 부호는 quantity(양수 입력) × 방향.
+//  ※ 기숙사 추가/해지는 "채수"만 변경(TO 자동 변경 없음 — 1채당 TO 상이). TO 는 TO 추가/감소·추가입차·해지 증가로 별도 조정.
 const ADJ_TYPES = [
   "직접 인원 증감", "신규입주 증가", "신규입주 감소", "퇴거 증가", "퇴거 감소",
   "천안이동 증가", "천안이동 감소", "해지 증가", "추가입차", "TO 추가", "TO 감소",
+  "기숙사 추가", "기숙사 해지",
 ] as const;
 type AdjType = typeof ADJ_TYPES[number];
 type Adjustment = {
   id: string; month: number; region: RegionSel; gender: GenderSel;
   type: AdjType; quantity: number; repeatUntil?: number | null; notes?: string;
 };
-// 유형별 (거주자 델타, TO 델타) — quantity 는 항상 양수 입력, 방향은 아래 부호.
-const applyDelta = (t: AdjType, q: number): { res: number; to: number } => {
+// 유형별 (거주자 델타, TO 델타, 기숙사 채수 델타) — quantity 는 항상 양수 입력, 방향은 아래 부호.
+const applyDelta = (t: AdjType, q: number): { res: number; to: number; dorm: number } => {
   switch (t) {
-    case "직접 인원 증감": return { res: q, to: 0 };      // q 는 +/- 직접(입력에서 부호 허용)
-    case "신규입주 증가": return { res: q, to: 0 };
-    case "신규입주 감소": return { res: -q, to: 0 };
-    case "퇴거 증가": return { res: -q, to: 0 };
-    case "퇴거 감소": return { res: q, to: 0 };
-    case "천안이동 증가": return { res: -q, to: 0 };
-    case "천안이동 감소": return { res: q, to: 0 };
-    case "해지 증가": return { res: 0, to: -q };
-    case "추가입차": return { res: 0, to: q };
-    case "TO 추가": return { res: 0, to: q };
-    case "TO 감소": return { res: 0, to: -q };
-    default: return { res: 0, to: 0 };
+    case "직접 인원 증감": return { res: q, to: 0, dorm: 0 };  // q 는 +/- 직접(입력에서 부호 허용)
+    case "신규입주 증가": return { res: q, to: 0, dorm: 0 };
+    case "신규입주 감소": return { res: -q, to: 0, dorm: 0 };
+    case "퇴거 증가": return { res: -q, to: 0, dorm: 0 };
+    case "퇴거 감소": return { res: q, to: 0, dorm: 0 };
+    case "천안이동 증가": return { res: -q, to: 0, dorm: 0 };
+    case "천안이동 감소": return { res: q, to: 0, dorm: 0 };
+    case "해지 증가": return { res: 0, to: -q, dorm: 0 };
+    case "추가입차": return { res: 0, to: q, dorm: 0 };
+    case "TO 추가": return { res: 0, to: q, dorm: 0 };
+    case "TO 감소": return { res: 0, to: -q, dorm: 0 };
+    case "기숙사 추가": return { res: 0, to: 0, dorm: q };
+    case "기숙사 해지": return { res: 0, to: 0, dorm: -q };
+    default: return { res: 0, to: 0, dorm: 0 };
   }
 };
 
 const won = (n: number) => `${Math.round(n).toLocaleString()}원`;
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 
-export default function MonthlyToSimulation({ base, occupants = [], darkMode, defaultVacancyCost = 0 }: { base: SimBaseStat[]; occupants?: SimOccupant[]; darkMode: boolean; defaultVacancyCost?: number }) {
+export default function MonthlyToSimulation({ base, occupants = [], contracts = [], darkMode, defaultVacancyCost = 0, tenantId = "", userId = "", canEdit = false }: { base: SimBaseStat[]; occupants?: SimOccupant[]; contracts?: SimContract[]; darkMode: boolean; defaultVacancyCost?: number; tenantId?: string; userId?: string; canEdit?: boolean }) {
   const now = new Date();
   const [year, setYear] = useState(String(now.getFullYear()));
   const [region, setRegion] = useState<RegionSel>("전체");
@@ -56,41 +61,79 @@ export default function MonthlyToSimulation({ base, occupants = [], darkMode, de
   // 선택 scope(지역/성별) base 집계.
   const baseAgg = useMemo(() => {
     const rows = base.filter((b) => (region === "전체" || b.site === region) && (gender === "전체" || b.gender === gender));
-    return { capacity: rows.reduce((s, r) => s + (r.capacity || 0), 0), residents: rows.reduce((s, r) => s + (r.currentResidents || 0), 0) };
+    return { capacity: rows.reduce((s, r) => s + (r.capacity || 0), 0), residents: rows.reduce((s, r) => s + (r.currentResidents || 0), 0), dormCount: rows.reduce((s, r) => s + (r.dormCount || 0), 0) };
   }, [base, region, gender]);
 
   // 현재 scope 에 적용되는 시나리오(지역/성별 일치 또는 전체).
-  const scopedAdj = useMemo(() => scenarios.filter((a) =>
-    (a.region === "전체" || region === "전체" || a.region === region) &&
-    (a.gender === "전체" || gender === "전체" || a.gender === gender)
-  ), [scenarios, region, gender]);
-
   // 앵커 표기: 현재연도=현재월, 그 외=1월(과거는 추정 flat / 미래는 현재월부터 연속 투영). 엔진이 연도별 anchor 를 내부 계산.
   const anchorMonth = Number(year) === now.getFullYear() ? now.getMonth() + 1 : 1;
   const futureYear = Number(year) > now.getFullYear();
-
-  // base forecast(DB 등록 입주/만료/중도/이동 날짜 → 월별 기준 거주자) + scenario(사용자 가정) 분리 결합.
-  const forecast = useMemo(() => {
-    const cells = buildBaseForecast({ occupants, year: Number(year), region, gender, capacity: baseAgg.capacity, currentResidents: baseAgg.residents, nowYear: now.getFullYear(), nowMonth: now.getMonth() + 1 });
-    const adjs: ScenarioAdj[] = scopedAdj.map((a) => { const d = applyDelta(a.type, a.quantity); return { month: a.month, resDeltaEach: d.res, toDeltaEach: d.to, repeatUntil: a.repeatUntil }; });
-    return cells.map((c) => {
-      const sc = scenarioDeltaAtMonth(adjs, c.month);
-      const to = Math.max(0, c.planTo + sc.to);
-      const finalResidents = Math.max(0, c.baseResidents + sc.res);
-      const mm = calcMonthly(to, finalResidents, vacancyCost);
-      return { ...c, to, scenarioRes: sc.res, finalResidents, ...mm };
-    });
-  }, [occupants, year, region, gender, baseAgg, scopedAdj, vacancyCost, anchorMonth]);
   const hasOccupants = occupants.length > 0;
 
-  const kpi = useMemo(() => {
-    const s = forecast;
-    return {
-      startTo: s[0].to, endTo: s[11].to, curRes: baseAgg.residents, endRes: s[11].finalResidents,
-      minRemain: Math.min(...s.map((r) => r.remain)), maxShortage: Math.max(...s.map((r) => r.shortage)),
-      occAvg: Math.round((s.reduce((a, r) => a + r.occ, 0) / 12) * 10) / 10, loss: s.reduce((a, r) => a + r.loss, 0),
-    };
-  }, [forecast, baseAgg]);
+  // base forecast(DB 등록 이벤트만) — 시나리오 무관 · 한 번만 계산(비교에서도 동일 base 재사용).
+  const baseCells = useMemo(() => buildBaseForecast({ occupants, contracts, dormCount: baseAgg.dormCount, year: Number(year), region, gender, capacity: baseAgg.capacity, currentResidents: baseAgg.residents, nowYear: now.getFullYear(), nowMonth: now.getMonth() + 1 }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [occupants, contracts, year, region, gender, baseAgg]);
+
+  // base + 주어진 시나리오 조정(현재 scope 필터) 결합 → 월별 셀. 메인/비교 공용. 채수(dorm)와 TO 는 별개 계산.
+  const buildCells = useCallback((adjs: Adjustment[]) => {
+    const scoped = adjs.filter((a) => (a.region === "전체" || region === "전체" || a.region === region) && (a.gender === "전체" || gender === "전체" || a.gender === gender));
+    const sadj: ScenarioAdj[] = scoped.map((a) => { const d = applyDelta(a.type, a.quantity); return { month: a.month, resDeltaEach: d.res, toDeltaEach: d.to, dormDeltaEach: d.dorm, repeatUntil: a.repeatUntil }; });
+    return baseCells.map((c) => {
+      const sc = scenarioDeltaAtMonth(sadj, c.month);
+      const to = Math.max(0, c.planTo + sc.to);
+      const finalResidents = Math.max(0, c.baseResidents + sc.res);
+      const dormCount = Math.max(0, c.dormBase + sc.dorm);
+      return { ...c, to, scenarioRes: sc.res, finalResidents, dormCount, ...calcMonthly(to, finalResidents, vacancyCost) };
+    });
+  }, [baseCells, region, gender, vacancyCost]);
+  const kpiOf = (cells: ReturnType<typeof buildCells>) => ({
+    endRes: cells[11].finalResidents, minRemain: Math.min(...cells.map((r) => r.remain)),
+    maxShortage: Math.max(...cells.map((r) => r.shortage)), occAvg: Math.round((cells.reduce((a, r) => a + r.occ, 0) / 12) * 10) / 10,
+    loss: cells.reduce((a, r) => a + r.loss, 0),
+  });
+
+  const forecast = useMemo(() => buildCells(scenarios), [buildCells, scenarios]);
+  const kpi = useMemo(() => ({ ...kpiOf(forecast), startTo: forecast[0].to, endTo: forecast[11].to, curRes: baseAgg.residents, dormNow: baseAgg.dormCount, dormEnd: forecast[11].dormCount, leaseTotal: forecast.reduce((a, r) => a + r.leaseExpiry, 0), addTotal: forecast.reduce((a, r) => a + r.leaseAdd, 0) }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [forecast, baseAgg]);
+
+  // ── 저장 시나리오(Supabase · adjustments 만 저장 · RLS tenant/소유) ──
+  const [savedList, setSavedList] = useState<OpSimScenario[]>([]);
+  const [savedId, setSavedId] = useState("");
+  const [dbReady, setDbReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [compareOn, setCompareOn] = useState(false);
+  const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [compareRows, setCompareRows] = useState<Array<{ id: string; name: string; endRes: number; minRemain: number; maxShortage: number; occAvg: number; loss: number }>>([]);
+  const toDb = (a: Adjustment): OpSimAdjustment => ({ target_year: Number(year), target_month: a.month, region: a.region, gender: a.gender, dormitory_id: null, adjustment_type: a.type, quantity: a.quantity, repeat_until_year: a.repeatUntil ? Number(year) : null, repeat_until_month: a.repeatUntil ?? null, notes: a.notes ?? null });
+  const fromDb = (a: OpSimAdjustment): Adjustment => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, month: a.target_month, region: (a.region as RegionSel) ?? "전체", gender: (a.gender as GenderSel) ?? "전체", type: a.adjustment_type as AdjType, quantity: a.quantity, repeatUntil: a.repeat_until_month ?? null, notes: a.notes ?? undefined });
+  const refreshSaved = useCallback(async () => {
+    if (!tenantId) { setDbReady(false); return; }
+    const list = await listScenarios(tenantId, Number(year)); setSavedList(list); setDbReady(true);
+  }, [tenantId, year]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { void refreshSaved(); }, [refreshSaved]);
+  const loadScenario = async (id: string) => { setSavedId(id); if (!id) return; setScenarios((await listAdjustments(id)).map(fromDb)); };
+  const guard = () => canEdit && dbReady && !busy;
+  const saveCurrent = async () => { if (!guard() || !savedId) return; setBusy(true); await replaceAdjustments(tenantId, userId, savedId, scenarios.map(toDb)); setBusy(false); };
+  const newScenario = async () => { if (!guard()) return; const name = window.prompt("새 시나리오 이름", `시나리오 ${savedList.length + 1}`); if (!name) return; setBusy(true); const s = await createScenario(tenantId, userId, { name, baseYear: Number(year) }); if (s) { if (scenarios.length) await replaceAdjustments(tenantId, userId, s.id, scenarios.map(toDb)); await refreshSaved(); setSavedId(s.id); } setBusy(false); };
+  const dupScenario = async () => { if (!guard() || !savedId) return; const name = window.prompt("복제본 이름", `${savedList.find((x) => x.id === savedId)?.name ?? "시나리오"} 복제`); if (!name) return; setBusy(true); const s = await duplicateScenario(tenantId, userId, savedId, name); if (s) { await refreshSaved(); await loadScenario(s.id); } setBusy(false); };
+  const renameCur = async () => { if (!guard() || !savedId) return; const name = window.prompt("이름 변경", savedList.find((x) => x.id === savedId)?.name ?? ""); if (!name) return; setBusy(true); await renameScenario(savedId, name, userId); await refreshSaved(); setBusy(false); };
+  const delCur = async () => { if (!guard() || !savedId) return; if (!window.confirm("이 시나리오를 삭제할까요?")) return; setBusy(true); await deleteScenario(savedId); setSavedId(""); setScenarios([]); await refreshSaved(); setBusy(false); };
+  const setDefaultCur = async () => { if (!guard() || !savedId) return; setBusy(true); await setDefaultScenario(tenantId, Number(year), savedId, userId); await refreshSaved(); setBusy(false); };
+  // 비교: 기준안 + 선택 시나리오(최대 3) KPI(현재 scope/연도 기준 재계산).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!compareOn) { setCompareRows([]); return; }
+      const rows = [{ id: "__base__", name: "기준안(현황)", ...kpiOf(buildCells([])) }];
+      for (const id of compareIds.slice(0, 3)) { const adjs = (await listAdjustments(id)).map(fromDb); rows.push({ id, name: savedList.find((x) => x.id === id)?.name ?? "시나리오", ...kpiOf(buildCells(adjs)) }); }
+      if (alive) setCompareRows(rows);
+    })();
+    return () => { alive = false; };
+  }, [compareOn, compareIds, buildCells, savedList]);
 
   const card = darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50";
   const inputCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
@@ -106,11 +149,14 @@ export default function MonthlyToSimulation({ base, occupants = [], darkMode, de
   type FCell = typeof forecast[number];
   const dash = (n: number, sign = false) => n === 0 ? "-" : sign && n > 0 ? `+${n}` : String(n);
   const ROWS: Array<{ label: string; get: (r: FCell) => string; tone?: (r: FCell) => string; muted?: boolean }> = [
+    { label: "기숙사(채)", get: (r) => String(r.dormCount), muted: true },
     { label: "계획 TO", get: (r) => String(r.planTo), muted: true },
     { label: "기준 거주자(현황)", get: (r) => String(r.anchorResidents), muted: true },
     { label: "신규입주 예정", get: (r) => dash(r.newMoveIn, true) },
     { label: "만료 예정", get: (r) => r.expiry ? `-${r.expiry}` : "-" },
     { label: "기타 확정 증감", get: (r) => dash(r.otherDelta, true) },
+    { label: "임차 만기(채)", get: (r) => r.leaseExpiry ? String(r.leaseExpiry) : "-", muted: true },
+    { label: "추가임차(채)", get: (r) => r.leaseAdd ? String(r.leaseAdd) : "-", muted: true },
     { label: "기준 예상 거주자", get: (r) => String(r.baseResidents), tone: (r) => r.isEstimatePast ? "text-slate-400 italic" : "" },
     { label: "시나리오 증감", get: (r) => dash(r.scenarioRes, true), tone: (r) => r.scenarioRes ? "text-blue-600" : "" },
     { label: "최종 예상 거주자", get: (r) => String(r.finalResidents) },
@@ -123,6 +169,48 @@ export default function MonthlyToSimulation({ base, occupants = [], darkMode, de
   return (
     <div>
       <div className="mb-1"><h2 className="text-lg font-semibold">월별 TO 시뮬레이션</h2><p className="text-sm text-slate-500">기존 운영 데이터를 기준으로 1~12월 TO·거주자·잔여TO·입주율·공실손실을 가정값으로 시뮬레이션합니다. (원본 데이터 불변)</p></div>
+
+      {/* 시나리오 저장/불러오기/복제/비교 (adjustments 만 저장 · base는 현재 운영데이터로 재계산) */}
+      {tenantId && (
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          <select value={savedId} onChange={(e) => void loadScenario(e.target.value)} className={inputCls} disabled={!dbReady}>
+            <option value="">{dbReady ? "시나리오 선택(미저장 작업)" : "저장 기능 준비 안 됨(DB 미적용)"}</option>
+            {savedList.map((s) => <option key={s.id} value={s.id}>{s.is_default ? "★ " : ""}{s.name}</option>)}
+          </select>
+          {canEdit && dbReady && (<>
+            <button className={btn} onClick={() => void newScenario()} disabled={busy}>새 시나리오</button>
+            <button className={btn} onClick={() => void saveCurrent()} disabled={busy || !savedId}>저장</button>
+            <button className={btn} onClick={() => void dupScenario()} disabled={busy || !savedId}>복제</button>
+            <button className={btn} onClick={() => void renameCur()} disabled={busy || !savedId}>이름 변경</button>
+            <button className={btn} onClick={() => void delCur()} disabled={busy || !savedId}>삭제</button>
+            <button className={btn} onClick={() => void setDefaultCur()} disabled={busy || !savedId}>기본안 설정</button>
+          </>)}
+          <button className={btn} onClick={() => setCompareOn((v) => !v)}>{compareOn ? "비교 닫기" : "비교"}</button>
+          <span className="text-[0.65rem] text-slate-400">※ 현재 운영데이터 기준 재계산 {canEdit ? "" : "· 조회 전용"}</span>
+        </div>
+      )}
+      {compareOn && (
+        <div className={`mb-4 rounded-2xl border p-3 ${card}`}>
+          <div className="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="font-semibold text-slate-500">시나리오 비교(최대 3)</span>
+            {savedList.map((s) => { const on = compareIds.includes(s.id); return (
+              <button key={s.id} onClick={() => setCompareIds((p) => on ? p.filter((x) => x !== s.id) : (p.length < 3 ? [...p, s.id] : p))} className={`rounded-lg px-2 py-1 ${on ? "bg-blue-600 text-white" : (darkMode ? "border border-slate-600" : "border border-slate-300")}`}>{s.name}</button>
+            ); })}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className={darkMode ? "text-slate-400" : "text-slate-500"}><tr>{["시나리오", "연말 예상거주자", "최저 잔여TO", "최대 부족인원", "평균 입주율", "예상 공실손실"].map((h, i) => <th key={h} className={`px-2 py-1 ${i ? "text-right" : ""}`}>{h}</th>)}</tr></thead>
+              <tbody>{compareRows.map((r) => (
+                <tr key={r.id} className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+                  <td className="px-2 py-1 font-medium">{r.name}</td><td className="px-2 py-1 text-right">{r.endRes}</td>
+                  <td className={`px-2 py-1 text-right ${remainTone(r.minRemain)}`}>{r.minRemain}</td><td className="px-2 py-1 text-right">{r.maxShortage}</td>
+                  <td className="px-2 py-1 text-right">{r.occAvg}%</td><td className="px-2 py-1 text-right">{won(r.loss)}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* 툴바 */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -137,8 +225,8 @@ export default function MonthlyToSimulation({ base, occupants = [], darkMode, de
       </div>
 
       {/* KPI */}
-      <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-        {([["연초 TO", String(kpi.startTo)], ["연말 예상 TO", String(kpi.endTo)], ["현재 거주자", String(kpi.curRes)], ["연말 예상 거주자", String(kpi.endRes)], ["최저 잔여TO", String(kpi.minRemain)], ["최대 부족인원", String(kpi.maxShortage)], ["평균 입주율", `${kpi.occAvg}%`], ["예상 공실손실(연)", won(kpi.loss)]] as Array<[string, string]>).map(([l, v]) => (
+      <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+        {([["현재 기숙사수", `${kpi.dormNow}채`], ["연말 예상 기숙사수", `${kpi.dormEnd}채`], ["연초 TO", String(kpi.startTo)], ["연말 예상 TO", String(kpi.endTo)], ["현재 거주자", String(kpi.curRes)], ["연말 예상 거주자", String(kpi.endRes)], ["최저 잔여TO", String(kpi.minRemain)], ["최대 부족인원", String(kpi.maxShortage)], ["평균 입주율", `${kpi.occAvg}%`], ["연중 임차만기(채)", `${kpi.leaseTotal}채`], ["연중 추가임차(채)", `${kpi.addTotal}채`], ["예상 공실손실(연)", won(kpi.loss)]] as Array<[string, string]>).map(([l, v]) => (
           <div key={l} className={`rounded-2xl border p-3 ${card}`}><div className="text-[0.6rem] uppercase tracking-wide text-slate-400">{l}</div><div className="mt-0.5 text-base font-semibold">{v}</div></div>
         ))}
       </div>
@@ -155,7 +243,8 @@ export default function MonthlyToSimulation({ base, occupants = [], darkMode, de
                 <td className={`sticky left-0 z-[1] whitespace-nowrap bg-inherit px-2.5 py-2 font-medium ${row.muted ? "text-slate-400" : ""}`}>{row.label}</td>
                 {forecast.map((r) => (
                   <td key={r.month} className={`px-2.5 py-2 text-right ${row.tone ? row.tone(r) : ""}`}
-                    title={row.label === "최종 예상 거주자" ? `${r.isEstimatePast ? "과거월 역산 추정 · " : ""}기준 예상 ${r.baseResidents} · 시나리오 ${r.scenarioRes >= 0 ? "+" : ""}${r.scenarioRes} = ${r.finalResidents}` : undefined}>
+                    title={row.label === "최종 예상 거주자" ? `${r.isEstimatePast ? "과거월 역산 추정 · " : ""}기준 예상 ${r.baseResidents} · 시나리오 ${r.scenarioRes >= 0 ? "+" : ""}${r.scenarioRes} = ${r.finalResidents}`
+                      : row.label === "기숙사(채)" ? `현재 활성 ${r.dormBase}채 · 시나리오 채수 ${r.dormCount - r.dormBase >= 0 ? "+" : ""}${r.dormCount - r.dormBase} · (임차만기 ${r.leaseExpiry}채/추가임차 ${r.leaseAdd}채는 정보성)` : undefined}>
                     {row.get(r)}
                   </td>
                 ))}
@@ -171,7 +260,7 @@ export default function MonthlyToSimulation({ base, occupants = [], darkMode, de
       </div>
 
       <div className="mt-1 text-[0.65rem] text-slate-400">
-        ※ 계획 TO는 현재 등록 정원 기준(정원 이력 미보관). 신규입주/만료/기타 증감은 등록된 (예정)일자 기반 base forecast이며 시나리오와 분리 계산됩니다. {futureYear ? "선택연도는 현재월부터 미래 이벤트를 연속 투영합니다." : Number(year) < now.getFullYear() ? "과거연도는 월말 스냅샷 부재로 추정(전월 유지)." : `${anchorMonth}월(앵커) 이전은 역산 추정(기울임 표시).`} {hasOccupants ? "" : "입주자 데이터 미연동 → base는 현황 유지."}
+        ※ 기숙사(채)는 현재 활성 기숙사수 flat + 시나리오 채수만 반영(정원/채수 이력 미보관 · 임차만기/추가임차는 정보성 · 연장/이어짐 판별 불확실로 자동 차감 안 함). 계획 TO는 현재 등록 정원 기준. 신규입주/만료/기타 증감은 등록된 (예정)일자 기반 base forecast이며 시나리오와 분리 계산됩니다. {futureYear ? "선택연도는 현재월부터 미래 이벤트를 연속 투영합니다." : Number(year) < now.getFullYear() ? "과거연도는 월말 스냅샷 부재로 추정(전월 유지)." : `${anchorMonth}월(앵커) 이전은 역산 추정(기울임 표시).`} {hasOccupants ? "" : "입주자 데이터 미연동 → base는 현황 유지."}
       </div>
 
       {/* 시나리오 목록 */}
