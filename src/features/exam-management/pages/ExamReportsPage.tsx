@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
+import { TrendChart, BarDistribution, Donut, Collapsible } from "../components/ExamReportCharts";
+import { RC } from "../components/examReportColors";
 
 const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 const str = (v: unknown) => (v === null || v === undefined ? "" : String(v));
@@ -13,10 +15,32 @@ const isAcquired = (a: ExamRow) => !!a.practical_pass_date || str(a.status) === 
 const isPass = (a: ExamRow) => !isFail(a) && (isAcquired(a) || /합격/.test(str(a.status)));
 const expiryState = (r: ExamRow) => { const s = ymd(r.expiry_date); if (!s) return "-"; const d = Math.floor((new Date(s).getTime() - Date.now()) / 86400000); return d < 0 ? "만료" : d <= 30 ? "만료예정" : "유효"; };
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// 분포(인증 인원 = 취득 사원 distinct) 집계 · 상위 12개.
+const distinctAcquiredBy = (rows: ExamRow[], keyFn: (r: ExamRow) => string) => {
+  const m = new Map<string, Set<string>>();
+  rows.forEach((r) => { if (!isAcquired(r)) return; const k = keyFn(r) || "(미지정)"; (m.get(k) ?? m.set(k, new Set<string>()).get(k)!).add(str(r.employee_no)); });
+  return Array.from(m.entries()).map(([label, s]) => ({ label, value: s.size })).sort((a, b) => b.value - a.value).slice(0, 12);
+};
 
 type Column = { label: string; get: (r: ExamRow) => string };
 type Report = { columns: Column[]; rows: ExamRow[]; wide?: boolean };
 const MONTHS = Array.from({ length: 12 }, (_, i) => `m${i + 1}`);
+
+// [단계 대시보드] 인증단계 선택형 보고. 기존 표 보고서는 유지하고 상단에 단계별 KPI·월별추이·상세를 추가(읽기/집계 전용).
+const STAGES = ["전체", "Single", "M1", "M2", "M3", "M4", "Dual Multi", "육성 재보수"] as const;
+type Stage = typeof STAGES[number];
+// 2차: 꺾은선/세로 막대/가로 막대/누적 막대/영역/도넛/혼합(동일 data source, 표현만 변경). 렌더는 ExamReportCharts.
+const CHART_TYPES = ["꺾은선", "세로 막대", "가로 막대", "누적 막대", "영역", "도넛", "혼합"] as const;
+type ChartType = typeof CHART_TYPES[number];
+
+// 단계 라벨 판정(인증단계 이름/코드 기준 · 문자열만으로 공정 판정 안 함). Dual Multi 는 D.M 계열 라벨.
+const levelIsStage = (label: string, s: Stage): boolean => {
+  const L = String(label ?? "").toLowerCase();
+  if (s === "Single") return /(^|[^a-z0-9])single([^a-z0-9]|$)/.test(L);
+  if (/^M[1-4]$/.test(s)) return new RegExp(`(^|[^a-z0-9])${s.toLowerCase()}([^a-z0-9]|$)`).test(L);
+  if (s === "Dual Multi") return /dual|d\.?m|master/.test(L);
+  return false;
+};
 
 const REPORT_TYPES = [
   "전체 인증 현황", "그룹별 인증 현황", "파트별 인증 현황", "공정별 인증 현황",
@@ -38,6 +62,8 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<ReportType>("전체 인증 현황");
   const [search, setSearch] = useState("");
+  const [stage, setStage] = useState<Stage>("전체");           // [단계 대시보드] 선택 인증단계
+  const [chartType, setChartType] = useState<ChartType>("꺾은선"); // 월별추이 차트 유형
   // equipment 는 id 로 저장(표시는 이름 매핑). 기본 "전체" → 기존 집계/합계 불변. [라인 UI 제외]
   const [f, setF] = useState({ year: "전체", month: "전체", group: "전체", product: "전체", part: "전체", process: "전체", equipment: "전체", level: "전체" });
 
@@ -103,6 +129,126 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
     (f.year === "전체" || str(r.year) === f.year) && (f.group === "전체" || str(r.group_name) === f.group) &&
     (f.product === "전체" || str(r.product_group) === f.product) && (f.part === "전체" || str(r.part_name) === f.part) && (f.level === "전체" || levelLabel(r.level_id) === f.level)
   ), [monthly, f, levelLabel]);
+
+  // ── [단계 대시보드] 선택 단계 기준 집계(기존 필터 fApps/fCerts 재사용 · 추가 조회 없음) ──
+  const timingOf = (a: ExamRow) => str(a.timing_status);
+  // [육성 재보수 정의] 합집합: 인증 만료 예정/만료(dm_certifications) + 재시험/재응시 응시(exam_applications).
+  //  전용 컬럼(유지교육) 부재 → 현재 데이터(만료일/유효기간/응시상태)로만 계산. 대상 사번 집합.
+  const maintenanceEmpNos = useMemo(() => {
+    const set = new Set<string>();
+    fCerts.forEach((c) => { if (["만료예정", "만료"].includes(expiryState(c))) { const e = str(c.employee_no); if (e) set.add(e); } });
+    fApps.forEach((a) => { if (/재응시|재시험/.test(str(a.status))) { const e = str(a.employee_no); if (e) set.add(e); } });
+    return set;
+  }, [fCerts, fApps]);
+  // 선택 단계에 해당하는 응시행. Single/M1~M4/Dual Multi 는 인증단계 라벨, 육성 재보수는 위 합집합(만료+재응시).
+  const stageApps = useMemo(() => {
+    if (stage === "전체") return fApps;
+    if (stage === "육성 재보수") return fApps.filter((a) => /재응시|재시험/.test(str(a.status)) || maintenanceEmpNos.has(str(a.employee_no)));
+    return fApps.filter((a) => levelIsStage(levelLabel(a.level_id), stage) || (stage === "Dual Multi" ? (a.dual_multi === true || truthy(a.dual_multi)) : false));
+  }, [fApps, stage, levelLabel, maintenanceEmpNos]);
+  // 선택 단계 KPI. 대상=응시행(단계), 취득=인증취득, 미취득=대상-취득, 조기/정상/지연=timing_status.
+  const stageKpi = useMemo(() => {
+    const uniqEmp = new Set(stageApps.map((a) => str(a.employee_no)).filter(Boolean));
+    const acquired = stageApps.filter(isAcquired).length;
+    const target = stageApps.length;
+    // 목표/실적(연간): 선택 단계 레벨의 연간목표 target_count 합 vs 월간실적 누계 합.
+    const stageTargets = fTargets.filter((t) => stage === "전체" || levelIsStage(levelLabel(t.level_id), stage));
+    const stageMonthly = fMonthly.filter((t) => stage === "전체" || levelIsStage(levelLabel(t.level_id), stage));
+    const planTotal = stageTargets.reduce((s, t) => s + num(t.target_count), 0);
+    const actualTotal = stageMonthly.reduce((s, t) => s + MONTHS.reduce((x, k) => x + num(t[k]), 0), 0);
+    return {
+      persons: uniqEmp.size, target, acquired, notAcquired: Math.max(0, target - acquired),
+      early: stageApps.filter((a) => /조기/.test(timingOf(a))).length,
+      normal: stageApps.filter((a) => /정상/.test(timingOf(a))).length,
+      late: stageApps.filter((a) => /지연/.test(timingOf(a))).length,
+      rate: pct(acquired, target), planTotal, actualTotal, planRate: pct(actualTotal, planTotal),
+    };
+  }, [stageApps, fTargets, fMonthly, stage, levelLabel]);
+  // 월별 계획/실적 시리즈(12개월). 실적=월간실적 m1~m12 합, 계획=연간목표를 12개월 균등 분배(월별 계획 컬럼 부재 · 근사, 보고서에 명시).
+  const monthlySeries = useMemo(() => {
+    const stageMonthly = fMonthly.filter((t) => stage === "전체" || levelIsStage(levelLabel(t.level_id), stage));
+    const stageTargets = fTargets.filter((t) => stage === "전체" || levelIsStage(levelLabel(t.level_id), stage));
+    const actual = MONTHS.map((k) => stageMonthly.reduce((s, t) => s + num(t[k]), 0));
+    const planAnnual = stageTargets.reduce((s, t) => s + num(t.target_count), 0);
+    const plan = MONTHS.map(() => Math.round((planAnnual / 12) * 10) / 10); // 균등 분배 근사
+    return { plan, actual };
+  }, [fMonthly, fTargets, stage, levelLabel]);
+
+  // 보조 차트 분포(선택 단계 기준).
+  const groupDist = useMemo(() => distinctAcquiredBy(stageApps, (r) => str(r.group_name)), [stageApps]);
+  const productDist = useMemo(() => distinctAcquiredBy(stageApps, (r) => str(r.product)), [stageApps]);
+  const processDist = useMemo(() => distinctAcquiredBy(stageApps, (r) => str(r.process)), [stageApps]);
+  const statusDist = useMemo(() => {
+    const m = new Map<string, number>();
+    stageApps.forEach((r) => { const k = str(r.status) || "(미지정)"; m.set(k, (m.get(k) ?? 0) + 1); });
+    return Array.from(m.entries()).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+  }, [stageApps]);
+  const timingDonut = useMemo(() => [
+    { label: "조기취득", value: stageKpi.early, color: RC.early },
+    { label: "정상취득", value: stageKpi.normal, color: RC.normal },
+    { label: "지연취득", value: stageKpi.late, color: RC.late },
+  ], [stageKpi]);
+  const targetVsActual = useMemo(() => [{ label: "목표(연간)", value: stageKpi.planTotal }, { label: "실적(누계)", value: stageKpi.actualTotal }], [stageKpi]);
+
+  // 전월/전년 동월 대비(선택 연·월 + 단계 기준 · 월간실적). 값 없으면 "-".
+  const kpiCompare = useMemo(() => {
+    if (f.year === "전체" || f.month === "전체") return { mom: "-", yoy: "-" };
+    const y = Number(f.year), mi = Number(f.month);
+    const sumFor = (yr: number, monthIdx: number) => monthly.filter((t) =>
+      str(t.year) === String(yr) && (stage === "전체" || levelIsStage(levelLabel(t.level_id), stage)) &&
+      (f.group === "전체" || str(t.group_name) === f.group) && (f.product === "전체" || str(t.product_group) === f.product)
+    ).reduce((s, t) => s + num(t[`m${monthIdx}`]), 0);
+    const cur = sumFor(y, mi), prev = mi > 1 ? sumFor(y, mi - 1) : sumFor(y - 1, 12), lastY = sumFor(y - 1, mi);
+    const sign = (d: number) => `${d >= 0 ? "+" : ""}${d}`;
+    return { mom: sign(cur - prev), yoy: sign(cur - lastY) };
+  }, [monthly, f, stage, levelLabel]);
+
+  // 계단식 필터 옵션(그룹→제품군→공정): 상위 선택에 해당하는 하위만.
+  const productOptsF = useMemo(() => Array.from(new Set([
+    ...personnel.filter((r) => f.group === "전체" || str(r.group_name) === f.group).map((r) => str(r.product_group)),
+    ...apps.filter((r) => f.group === "전체" || str(r.group_name) === f.group).map((r) => str(r.product)),
+  ].filter(Boolean))).sort(), [personnel, apps, f.group]);
+  const processOptsF = useMemo(() => Array.from(new Set(apps.filter((r) =>
+    (f.group === "전체" || str(r.group_name) === f.group) && (f.product === "전체" || str(r.product) === f.product)
+  ).map((r) => str(r.process)).filter(Boolean))).sort(), [apps, f.group, f.product]);
+
+  // 보조 차트 접기/펼치기.
+  const [openAux, setOpenAux] = useState<Record<string, boolean>>({ group: true, product: true, process: false, timing: true, status: false, target: false });
+  const toggleAux = (k: string) => setOpenAux((p) => ({ ...p, [k]: !p[k] }));
+
+  // 단계 상세 테이블: 검색/정렬/페이지네이션.
+  const [dSearch, setDSearch] = useState("");
+  const [dSort, setDSort] = useState<{ key: string; dir: "asc" | "desc" } | null>(null);
+  const [dPage, setDPage] = useState(1);
+  const [dSize, setDSize] = useState(20);
+  const detailCols: Array<{ key: string; label: string; get: (r: ExamRow) => string }> = [
+    { key: "employee_no", label: "사번", get: (r) => str(r.employee_no) },
+    { key: "name", label: "성명", get: (r) => str(r.name) },
+    { key: "group_name", label: "그룹", get: (r) => str(r.group_name) },
+    { key: "product", label: "제품군", get: (r) => str(r.product) },
+    { key: "process", label: "공정", get: (r) => str(r.process) },
+    { key: "level", label: "인증단계", get: (r) => levelLabel(r.level_id) },
+    { key: "equipment", label: "인증설비", get: (r) => equipMap.get(str(r.equipment_id)) || "-" },
+    { key: "status", label: "응시상태", get: (r) => str(r.status) },
+    { key: "cert", label: "인증취득일", get: (r) => ymd(r.cert_acquired_date || r.practical_pass_date) },
+    { key: "timing", label: "조기/지연", get: (r) => str(r.timing_status) },
+    { key: "pm_level", label: "PM Level", get: (r) => str(r.pm_level) },
+    { key: "dm", label: "D.M", get: (r) => str(r.dm_process) },
+  ];
+  const detailRows = useMemo(() => {
+    const q = dSearch.trim().toLowerCase();
+    let list = q ? stageApps.filter((r) => detailCols.some((c) => c.get(r).toLowerCase().includes(q))) : stageApps;
+    if (dSort) {
+      const col = detailCols.find((c) => c.key === dSort.key); const dir = dSort.dir === "asc" ? 1 : -1;
+      list = [...list].sort((a, b) => (col ? col.get(a).localeCompare(col.get(b), "ko") : 0) * dir);
+    }
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stageApps, dSearch, dSort, levelLabel, equipMap]);
+  const dPageCount = Math.max(1, Math.ceil(detailRows.length / dSize));
+  const dCur = Math.min(dPage, dPageCount);
+  const detailPaged = detailRows.slice((dCur - 1) * dSize, dCur * dSize);
+  const toggleDSort = (k: string) => setDSort((p) => p?.key === k ? (p.dir === "asc" ? { key: k, dir: "desc" } : null) : { key: k, dir: "asc" });
 
   // 집계 헬퍼.
   const aggFlags = (rows: ExamRow[], keyFn: (r: ExamRow) => string): ExamRow[] => {
@@ -249,13 +395,16 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
               {list.map((o) => <option key={o} value={o}>{key === "month" ? `${Number(o)}월` : o}</option>)}
             </select>
           ))}
-          {/* [라인 UI 제외] 라인 필터 없음. [순서 통일] 그룹 → 제품군 → 공정. */}
-          {([["group", "그룹", opts.groups], ["product", "제품군", opts.products], ["process", "공정", opts.processes]] as Array<[keyof typeof f, string, string[]]>).map(([key, label, list]) => (
-            <select key={key} value={f[key]} onChange={(e) => setF((p) => ({ ...p, [key]: e.target.value }))} className={selCls}>
-              <option value="전체">{label}: 전체</option>
-              {list.map((o) => <option key={o} value={o}>{o}</option>)}
-            </select>
-          ))}
+          {/* [계단식] 그룹 → 제품군 → 공정. 상위 변경 시 하위 초기화(하위 옵션은 상위 선택에 해당하는 값만). */}
+          <select value={f.group} onChange={(e) => setF((p) => ({ ...p, group: e.target.value, product: "전체", process: "전체" }))} className={selCls}>
+            <option value="전체">그룹: 전체</option>{opts.groups.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+          <select value={f.product} onChange={(e) => setF((p) => ({ ...p, product: e.target.value, process: "전체" }))} className={selCls}>
+            <option value="전체">제품군: 전체</option>{productOptsF.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+          <select value={f.process} onChange={(e) => setF((p) => ({ ...p, process: e.target.value }))} className={selCls}>
+            <option value="전체">공정: 전체</option>{processOptsF.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
           {/* 장비(응시데이터 equipment_id 기준 · id 저장/이름 표시). */}
           <select value={f.equipment} onChange={(e) => setF((p) => ({ ...p, equipment: e.target.value }))} className={selCls}>
             <option value="전체">장비: 전체</option>
@@ -275,6 +424,96 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
           <button className={btn} onClick={openPrint}>PDF</button>
           <button className={btn} onClick={openPrint}>인쇄</button>
           <span className="ml-auto text-xs text-slate-500">출력일 {today} · 작성자 {authorName} · 총 {rows.length}건</span>
+        </div>
+      </section>
+
+      {/* ── [단계 대시보드] 인증단계 선택형 KPI · 월별 계획/실적 · 상세(읽기/집계 전용) ── */}
+      <section className={section}>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap gap-1.5">
+            {STAGES.map((s) => (
+              <button key={s} onClick={() => setStage(s)} className={`rounded-full px-3 py-1.5 text-xs font-medium transition ${stage === s ? "bg-blue-600 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{s}</button>
+            ))}
+          </div>
+          <span className="text-xs text-slate-500">단계 기준 집계 · 상단 필터(연도/그룹/제품군/공정/레벨) 함께 적용</span>
+        </div>
+
+        {/* KPI 카드 */}
+        <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          {([
+            ["인증 대상자", str(stageKpi.persons), ""],
+            ["응시(대상) 건", str(stageKpi.target), ""],
+            ["인증 취득", str(stageKpi.acquired), "text-emerald-600"],
+            ["미취득", str(stageKpi.notAcquired), "text-rose-600"],
+            ["취득률", `${stageKpi.rate}%`, ""],
+            ["목표(연간)", str(stageKpi.planTotal), ""],
+            ["실적(누계)", str(stageKpi.actualTotal), ""],
+            ["목표 대비", (stageKpi.actualTotal - stageKpi.planTotal >= 0 ? "+" : "") + str(stageKpi.actualTotal - stageKpi.planTotal), ""],
+            ["전월 대비", kpiCompare.mom, ""],
+            ["전년 동월", kpiCompare.yoy, ""],
+            ["조기/정상/지연", `${stageKpi.early}/${stageKpi.normal}/${stageKpi.late}`, ""],
+            ["달성률", `${stageKpi.planRate}%`, ""],
+          ] as Array<[string, string, string]>).map(([label, val, tone]) => (
+            <div key={label} className={`rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
+              <div className="text-[0.65rem] uppercase tracking-wide text-slate-400">{label}</div>
+              <div className={`mt-0.5 text-lg font-semibold ${tone}`}>{val}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* 월별 계획/실적 메인 차트 + 유형 선택 */}
+        <div className={`mb-4 rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-white"}`}>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-slate-600 dark:text-slate-300">월별 계획/실적 <span className="text-xs font-normal text-slate-400">({stage})</span></div>
+            <div className="flex items-center gap-2">
+              <span className="flex items-center gap-1 text-xs text-slate-500"><span className="inline-block h-2 w-3 rounded-sm" style={{ background: RC.plan }} />계획 <span className="ml-1 inline-block h-2 w-3 rounded-sm" style={{ background: RC.actual }} />실적</span>
+              <select value={chartType} onChange={(e) => setChartType(e.target.value as ChartType)} className={selCls}>
+                {CHART_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          </div>
+          <TrendChart type={chartType} plan={monthlySeries.plan} actual={monthlySeries.actual} darkMode={darkMode} />
+          <div className="mt-1 text-[0.65rem] text-slate-400">※ 월별 계획은 연간목표를 12개월 균등 분배한 근사값입니다(월별 계획 컬럼 부재). 실적은 월간실적 합계.</div>
+        </div>
+
+        {/* 보조 차트(접기/펼치기 · 2열) */}
+        <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <Collapsible title="그룹별 인증 인원" open={openAux.group} onToggle={() => toggleAux("group")} darkMode={darkMode}><BarDistribution items={groupDist} color={RC.bar} darkMode={darkMode} /></Collapsible>
+          <Collapsible title="제품군별 인증 인원" open={openAux.product} onToggle={() => toggleAux("product")} darkMode={darkMode}><BarDistribution items={productDist} color={RC.plan} darkMode={darkMode} /></Collapsible>
+          <Collapsible title="공정별 인증 인원" open={openAux.process} onToggle={() => toggleAux("process")} darkMode={darkMode}><BarDistribution items={processDist} color={RC.actual} darkMode={darkMode} /></Collapsible>
+          <Collapsible title="조기/정상/지연 비율" open={openAux.timing} onToggle={() => toggleAux("timing")} darkMode={darkMode}><Donut items={timingDonut} darkMode={darkMode} /></Collapsible>
+          <Collapsible title="응시상태 분포" open={openAux.status} onToggle={() => toggleAux("status")} darkMode={darkMode}><BarDistribution items={statusDist} color={RC.normal} darkMode={darkMode} /></Collapsible>
+          <Collapsible title="목표 대비 실적" open={openAux.target} onToggle={() => toggleAux("target")} darkMode={darkMode}><BarDistribution items={targetVsActual} color={RC.late} darkMode={darkMode} /></Collapsible>
+        </div>
+
+        {/* 단계 상세 테이블(검색·정렬·페이지네이션) */}
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <input value={dSearch} onChange={(e) => { setDSearch(e.target.value); setDPage(1); }} placeholder="상세 검색" className={`${selCls} min-w-[180px]`} />
+          <select value={dSize} onChange={(e) => { setDSize(Number(e.target.value)); setDPage(1); }} className={selCls}>{[20, 50, 100].map((n) => <option key={n} value={n}>{n}건씩</option>)}</select>
+          <span className="ml-auto text-xs text-slate-500">단계: {stage} · 총 {detailRows.length}건{stage === "육성 재보수" ? " · (육성 재보수 = 만료/만료예정 + 재응시 · 업무 정의 확인 요망)" : ""}</span>
+        </div>
+        <div className="max-h-[46vh] overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
+          <table className="w-full text-left text-xs">
+            <thead className={`sticky top-0 z-[1] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}`}>
+              <tr>{detailCols.map((c) => <th key={c.key} onClick={() => toggleDSort(c.key)} className="cursor-pointer select-none whitespace-nowrap px-2.5 py-2 hover:underline">{c.label}{dSort?.key === c.key ? (dSort.dir === "asc" ? " ▲" : " ▼") : ""}</th>)}</tr>
+            </thead>
+            <tbody>
+              {detailPaged.map((r, i) => (
+                <tr key={str(r.id) || i} className={`border-t ${darkMode ? "border-slate-700 hover:bg-slate-800/60" : "border-slate-100 hover:bg-slate-50"}`}>
+                  {detailCols.map((c) => <td key={c.key} className="whitespace-nowrap px-2.5 py-2">{c.get(r) || "-"}</td>)}
+                </tr>
+              ))}
+              {detailRows.length === 0 && <tr><td colSpan={detailCols.length} className="px-3 py-10 text-center text-slate-400">해당 단계 데이터가 없습니다.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
+          <span>총 {detailRows.length}건</span>
+          <span className="flex items-center gap-2">
+            <button className={btn} disabled={dCur <= 1} onClick={() => setDPage(dCur - 1)}>이전</button>
+            <span>{dCur} / {dPageCount}</span>
+            <button className={btn} disabled={dCur >= dPageCount} onClick={() => setDPage(dCur + 1)}>다음</button>
+          </span>
         </div>
       </section>
 
