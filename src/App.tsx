@@ -120,6 +120,7 @@ import FilteredDormSelector from "./components/FilteredDormSelector";
 import ContractFilesSection from "./components/ContractFilesSection";
 import DormitoryContractsTab from "./components/DormitoryContractsTab";
 import FilePreviewModal, { type FilePreviewTarget } from "./components/FilePreviewModal";
+import MonthlyToSimulation from "./components/MonthlyToSimulation";
 import SimMemberGridModal, { type SimMemberRow } from "./components/SimMemberGridModal";
 import ReportView, { type ReportConfig } from "./components/ReportView";
 import ExamManagementPage from "./features/exam-management/pages/ExamManagementPage";
@@ -2862,6 +2863,7 @@ export default function App() {
   const [_simulationBaseDate, _setSimulationBaseDate] = useState<string>(new Date().toISOString().slice(0, 10));
   const [simulationYear, setSimulationYear] = useState<string>(new Date().getFullYear().toString());
   const [simulationMonth, setSimulationMonth] = useState<string>((new Date().getMonth() + 1).toString().padStart(2, "0"));
+  const [simSubMenu, setSimSubMenu] = useState<"monthly" | "monthlyTo">("monthly"); // 운영시뮬레이션 소메뉴
   const [dormContractSearch, setDormContractSearch] = useState("");
   const [dormContractSiteFilter, setDormContractSiteFilter] = useState<Site | "전체">("전체");
   // 계약 상태 필터는 표시 상태(getContractDisplayStatus)와 동일 값 사용: 공실/사용중/만실/만료예정/연장/종료/해지.
@@ -6954,6 +6956,16 @@ export default function App() {
     const occupancyRate = totalCapacity > 0 ? Math.round((currentResidents / totalCapacity) * 100) : 0;
     return { dormCount: regionDorms.length, totalCapacity, currentResidents, vacancy, occupancyRate };
   };
+
+  // [월별 TO 시뮬레이션] base forecast 입력용 정규화 입주자(미삭제) — 지역/성별/입주·퇴실(예정)일자. 원본 불변 · 1회 memo(행별 DB 호출 없음).
+  const simOccupants = useMemo(() => normalizedOccupants
+    .filter((o) => !o.isDeleted && !o.deletedAt && !o.isPermanentDeleted)
+    .map((o) => ({
+      site: o.site, gender: o.gender, status: String(o.status ?? ""),
+      isResident: o.status === "거주중" || o.status === "만료예정",
+      moveInDate: o.moveInDate, expectedMoveInDate: o.expectedMoveInDate,
+      moveOutDueDate: o.moveOutDueDate, expectedMoveOutDate: o.expectedMoveOutDate, actualMoveOutDate: o.actualMoveOutDate,
+    })), [normalizedOccupants]);
 
   // 호실키(건물+동+호 정규화)별 "현재 거주자 수" 맵. 배정 신입사원 포함(normalizedOccupants),
   // 실제 퇴실/삭제 제외(isCurrentResidentOccupant). occupant 엔 호실 정보가 없으므로 dorm 을 경유해 키로 집계.
@@ -20317,6 +20329,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
         {activeTab === "simulation" && (
           <section className={`rounded-3xl p-5 shadow-sm ring-1 ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
+            {/* [소메뉴] 월별 운영 시뮬레이션(기존) / 월별 TO 시뮬레이션(신규) */}
+            <div className="mb-4 flex flex-wrap gap-1.5">
+              {([["monthly", "월별 운영 시뮬레이션"], ["monthlyTo", "월별 TO 시뮬레이션"]] as const).map(([k, label]) => (
+                <button key={k} onClick={() => setSimSubMenu(k)} className={`rounded-xl px-3 py-1.5 text-xs font-medium transition ${simSubMenu === k ? "bg-blue-600 text-white" : (theme.darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{label}</button>
+              ))}
+            </div>
+            {simSubMenu === "monthlyTo" && (
+              <MonthlyToSimulation
+                base={(["평택", "천안"] as const).flatMap((site) => (["남", "여"] as const).map((g) => { const s = getRegionStats(site, g); return { site, gender: g, capacity: s.totalCapacity, currentResidents: s.currentResidents }; }))}
+                occupants={simOccupants}
+                darkMode={theme.darkMode}
+                defaultVacancyCost={simCostSettings.utilityPerResident}
+              />
+            )}
+            {simSubMenu === "monthly" && (<>
             <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold">월별 운영 시뮬레이션</h2>
@@ -20573,6 +20600,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <Download className="h-4 w-4" /> 지역별 통계 다운로드
               </button>
             </div>
+            </>)}
           </section>
         )}
 
