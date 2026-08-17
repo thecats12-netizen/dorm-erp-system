@@ -121,6 +121,7 @@ import ContractFilesSection from "./components/ContractFilesSection";
 import DormitoryContractsTab from "./components/DormitoryContractsTab";
 import FilePreviewModal, { type FilePreviewTarget } from "./components/FilePreviewModal";
 import MonthlyToSimulation from "./components/MonthlyToSimulation";
+import { normalizeRoomKey } from "./components/monthlySimulationEngine";
 import SimMemberGridModal, { type SimMemberRow } from "./components/SimMemberGridModal";
 import ReportView, { type ReportConfig } from "./components/ReportView";
 import ExamManagementPage from "./features/exam-management/pages/ExamManagementPage";
@@ -6961,16 +6962,17 @@ export default function App() {
   const simOccupants = useMemo(() => normalizedOccupants
     .filter((o) => !o.isDeleted && !o.deletedAt && !o.isPermanentDeleted)
     .map((o) => ({
-      site: o.site, gender: o.gender, status: String(o.status ?? ""),
+      id: o.id, site: o.site, gender: o.gender, status: String(o.status ?? ""),
       isResident: o.status === "거주중" || o.status === "만료예정",
       moveInDate: o.moveInDate, expectedMoveInDate: o.expectedMoveInDate,
       moveOutDueDate: o.moveOutDueDate, expectedMoveOutDate: o.expectedMoveOutDate, actualMoveOutDate: o.actualMoveOutDate,
     })), [normalizedOccupants]);
 
-  // [월별 TO 시뮬레이션] 임차 만기/추가임차(채) 산정용 계약(미삭제). dormId 대신 건물+동+호 조합 키로 distinct 채수 집계.
+  // [월별 TO 시뮬레이션] 임차 만기/추가임차(채)·임차 해지예정(TO) 산정용 계약(미삭제). dormId 대신 정규화 룸키(건물|동|호)로 distinct.
+  //  ⚠ 해지 계약도 포함해야 임차 해지예정 TO 차감이 가능(operationalDorms 는 해지 제외이므로 엔진에서 가산 후 차감).
   const simContracts = useMemo(() => dormContracts
     .filter((c) => !c.isDeleted && !c.deletedAt && !c.isPermanentDeleted)
-    .map((c) => ({ site: c.site, gender: c.gender as string, dormId: `${c.buildingName ?? ""}|${c.dong ?? ""}|${c.roomHo ?? ""}`, contractStart: c.contractStart, contractEnd: c.contractEnd, contractStatus: c.contractStatus, contractType: c.contractType })),
+    .map((c) => ({ id: c.id, site: c.site, gender: c.gender as string, dormId: normalizeRoomKey(c.buildingName, c.dong, c.roomHo), capacity: c.capacity, contractStart: c.contractStart, contractEnd: c.contractEnd, contractStatus: c.contractStatus, contractType: c.contractType })),
     [dormContracts]);
 
   // 호실키(건물+동+호 정규화)별 "현재 거주자 수" 맵. 배정 신입사원 포함(normalizedOccupants),
