@@ -329,7 +329,26 @@ export default function ExamApplicationsPage({
       const cur = `${p.current_pm_level ?? ""} ${p.cert_level ?? ""}`.toLowerCase();
       return cur.includes(ln);
     };
-    const prereqMet = !prereqId || holds(prereqName);
+    // [선행 충족 우선순위] 응시이력 FK/공정 > legacy 응시행 exact fallback > personnel flag.
+    //  · 취득 판정은 기존 certOf(취득/미취득) + status "인증 취득" + 인증취득일 재사용(새 판정식 없음). 삭제행/자기 자신/불합격·취소 제외.
+    //  · matchesPrereq: level_id(FK) 정확 비교 우선. level_id 없는 legacy 행만 현재 master 선행 코드/이름으로 exact resolve(fuzzy 금지).
+    //  · 공정 scope: 양쪽 process_id 존재 시 동일 요구(legacy process 부재는 통과). 취득 이력이 "있으나 공정 불일치"면 flag 로 구제하지 않음.
+    //  · personnel flag(single_job 등)는 FK 확인이 불가능한 경우(관련 취득 이력 자체가 없음)에만 제한적 폴백.
+    let prereqMet: boolean;
+    if (!prereqId) prereqMet = true;
+    else {
+      const emp = String(editRow?.employee_no ?? "");
+      const opt = levelOpts.find((o) => o.id === prereqId);
+      const pCode = opt ? String(opt.label).split("·")[0].trim().toLowerCase() : "";
+      const pName = opt ? (String((opt as { name?: string }).name ?? "").trim().toLowerCase() || String(opt.label).split("·")[1]?.trim().toLowerCase() || "") : "";
+      const acquiredApp = (a: ExamRow) => certOf(a) === "취득" || String(a.status ?? "") === "인증 취득" || !!ymd(a.cert_acquired_date);
+      const matchesPrereq = (a: ExamRow) => { const lid = String(a.level_id ?? ""); if (lid) return lid === prereqId; const cc = String(a.category_code ?? "").trim().toLowerCase(); return !!cc && (cc === pCode || cc === pName); };
+      const processOk = (a: ExamRow) => !currentProcessId || !a.process_id || String(a.process_id) === currentProcessId;
+      const cand = emp ? rows.filter((a) => !a.deleted_at && String(a.employee_no ?? "") === emp && String(a.id ?? "") !== String(editRow?.id ?? "") && acquiredApp(a) && matchesPrereq(a)) : [];
+      if (cand.some(processOk)) prereqMet = true;        // 응시이력 FK/공정 충족(legacy process 부재 포함)
+      else if (cand.length > 0) prereqMet = false;       // 취득 이력은 있으나 공정 불일치 → personnel flag 로 구제 금지(정책 E)
+      else prereqMet = holds(prereqName);                // 관련 취득 이력 없음 → personnel flag 제한적 폴백(정책 D)
+    }
     const employed = isEmployed(p?.employment_status);
     const requireWritten = rule?.require_written === true;
     const requirePractical = rule?.require_practical === true;
@@ -341,7 +360,7 @@ export default function ExamApplicationsPage({
     const idx = PM_STAGES.findIndex((s) => levelName.toLowerCase().replace(/\s+/g, "").includes(s.toLowerCase()));
     const nextPm = idx >= 0 && idx < PM_STAGES.length - 1 ? PM_STAGES[idx + 1] : (idx === PM_STAGES.length - 1 ? "최고 단계" : "-");
     return { levelName, hasRule: !!rule, prereqName, prereqMet, employed, requireWritten, requirePractical, requiredEquip, validMonths, autoPromote, timingMonths, isDm, expectedLevel: levelName, nextPm };
-  }, [editRow?.level_id, rules, refMap, selectedPerson]);
+  }, [editRow?.level_id, editRow?.employee_no, editRow?.id, rows, currentProcessId, rules, refMap, selectedPerson]);
 
   // ── 조기/지연취득 자동판정: 공정별 달성기준(exam_rules · rule_type "달성기준")을 FK(process_id+level_id)로 매칭 ──
   //  · 공정은 이름이 아닌 선택 설비의 process_id(FK)로 식별 → FLASH-CVD/DRAM-CVD 혼동 없음.
