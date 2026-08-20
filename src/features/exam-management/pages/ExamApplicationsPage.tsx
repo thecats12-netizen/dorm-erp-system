@@ -102,6 +102,17 @@ const certOf = (r: ExamRow): "취득" | "미취득" => {
   return r.practical_pass_date ? "취득" : "미취득";
 };
 
+// 시험 응시/취득 판정 규칙 선택: "취득 기준"만 사용(달성/목표/유효기간 규칙이 취득 판정에 오매칭되지 않도록).
+//  · "취득 기준" 우선. 없으면 rule_type 공백 등 legacy 행만 폴백(달성/목표/유효기간 명시행은 제외) → 기존 취득 규칙 회귀 방지.
+const rtNorm = (r: ExamRow) => String(r.rule_type ?? "").replace(/\s/g, "");
+const isOtherRuleType = (r: ExamRow) => { const t = rtNorm(r); return t === "달성기준" || t === "목표기준" || t === "시험유효기간"; };
+const findAcquireRule = (rules: ExamRow[], levelId: unknown): ExamRow | null => {
+  const lv = String(levelId ?? ""); if (!lv) return null;
+  return rules.find((r) => rtNorm(r) === "취득기준" && String(r.level_id ?? "") === lv)
+    || rules.find((r) => !isOtherRuleType(r) && String(r.level_id ?? "") === lv)
+    || null;
+};
+
 export default function ExamApplicationsPage({
   darkMode, canEdit, tenantId, userId, onToast, refreshKey,
 }: {
@@ -316,7 +327,7 @@ export default function ExamApplicationsPage({
     if (!lvlId) return null;
     const levelOpts = refMap["exam_levels"] || [];
     const levelName = levelOpts.find((o) => o.id === lvlId)?.label || "";
-    const rule = rules.find((r) => String(r.level_id ?? "") === lvlId) || null;
+    const rule = findAcquireRule(rules, lvlId); // 취득 기준만(달성/목표/유효기간 제외)
     const prereqId = String(rule?.prerequisite_level_id ?? "");
     const prereqName = prereqId ? (levelOpts.find((o) => o.id === prereqId)?.label || "") : "";
     const p = selectedPerson;
@@ -394,7 +405,7 @@ export default function ExamApplicationsPage({
   const computeDerivedFields = (row: ExamRow): ExamRow => {
     const next: ExamRow = { ...row };
     // 인증 기준관리(exam_rules) — 선택 인증단계의 필기/실기 필요 여부(규칙 없으면 기존 규칙: 실기 합격 = 취득).
-    const rule = rules.find((r) => String(r.level_id ?? "") === String(next.level_id ?? "")) || null;
+    const rule = findAcquireRule(rules, next.level_id); // 취득 기준만(달성/목표/유효기간 제외)
     const requireWritten = rule?.require_written === true;
     const requirePractical = rule?.require_practical === true;
     const writtenPass = ymd(next.written_pass_date);

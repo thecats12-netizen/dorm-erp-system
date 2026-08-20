@@ -68,7 +68,7 @@ export default function ExamRulesPage({
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">인증 기준관리</h2>
-          <p className="text-sm text-slate-500">시험관리 · 기준정보 및 취득/달성/유효기간/목표 기준을 관리합니다.</p>
+          <p className="text-sm text-slate-500">시험관리 · 기준정보 및 취득 기준·시험 유효기간·목표 기준을 관리합니다. 공정별 달성 조건은 ‘공정별 달성기준’ 탭에서 관리합니다.</p>
         </div>
         {/* 통합 Excel: 양식/현재데이터 다운로드 + 통합 등록. */}
         <div className="flex flex-wrap items-center gap-2">

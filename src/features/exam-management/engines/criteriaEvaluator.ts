@@ -113,7 +113,10 @@ export function evaluateCriteria(raw: unknown, subj: EvaluationSubject, summary:
   const all = [topLeaf, ...groupRes];
   const op: "AND" | "OR" = c.operator === "OR" ? "OR" : "AND";
   const nonEmpty = all.filter((r) => r.met.length + r.missing.length > 0);
-  const passed = nonEmpty.length === 0 ? true : (op === "AND" ? nonEmpty.every((r) => r.passed) : nonEmpty.some((r) => r.passed));
+  // 평가 가능한 조건이 하나도 없으면(달성 기준 미등록 · criteria null/{}/조건 공백) 자동 통과 금지 — 명확한 사유 반환.
+  //  정상 criteria(조건 1개 이상)는 기존 판정 그대로(회귀 없음).
+  if (nonEmpty.length === 0) return { passed: false, met: [], missing: ["달성 조건이 정의되지 않았습니다."] };
+  const passed = op === "AND" ? nonEmpty.every((r) => r.passed) : nonEmpty.some((r) => r.passed);
   return { passed, met: all.flatMap((r) => r.met), missing: all.flatMap((r) => r.missing) };
 }
 

@@ -838,12 +838,19 @@ export default function ExamMasterGrid({
                       <option value="false">아니오</option>
                       <option value="true">예</option>
                     </select>
-                  ) : c.type === "select" ? (
-                    <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => { if (isRules && c.key === "rule_type") changeRuleType(e.target.value); else setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null })); }}>
+                  ) : c.type === "select" ? (() => {
+                    // 현재 저장값이 옵션 목록에 없으면(예: 신규 선택에서 제외된 legacy rule_type="달성 기준") 그 값을 "(기존)"으로 보존 표시.
+                    //  → 기존 row 수정 시 select 가 빈값으로 풀려 강제로 다른 type 이 되는 것을 방지(데이터 손상 방지).
+                    const cur = String(editRow[c.key] ?? "");
+                    const baseOpts = c.options || [];
+                    const opts = cur && !baseOpts.includes(cur) ? [...baseOpts, cur] : baseOpts;
+                    return (
+                    <select className={`${inputCls} w-full`} value={cur} onChange={(e) => { if (isRules && c.key === "rule_type") changeRuleType(e.target.value); else setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null })); }}>
                       <option value="">선택</option>
-                      {(c.options || []).map((o) => <option key={o} value={o}>{o}</option>)}
+                      {opts.map((o) => <option key={o} value={o}>{o === cur && !baseOpts.includes(o) ? `${o} (기존)` : o}</option>)}
                     </select>
-                  ) : c.key === "code" ? (
+                    );
+                  })() : c.key === "code" ? (
                     <div>
                       <div className="flex items-center gap-1">
                         <input type="text" className={`${inputCls} w-full`} value={String(editRow.code ?? "")}

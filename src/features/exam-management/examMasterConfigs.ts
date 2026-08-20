@@ -135,7 +135,8 @@ export const EXAM_ENTITY_CONFIGS: ExamEntityConfig[] = [
   {
     key: "rules", title: "인증 규칙", table: "exam_rules",
     columns: [
-      { key: "rule_type", label: "기준 구분", type: "select", options: ["취득 기준", "달성 기준", "시험 유효기간", "목표 기준"], required: true },
+      // "달성 기준"은 여기서 신규 선택 불가(공정별 달성기준 탭에서 criteria 로 등록). 기존 rule_type="달성 기준" row 는 보존·조회·수정(그리드 select 가 legacy 값 유지).
+      { key: "rule_type", label: "기준 구분", type: "select", options: ["취득 기준", "시험 유효기간", "목표 기준"], required: true },
       // [라인 UI 제외] "적용 라인" select 제거. exam_rules.line_id 컬럼/저장값은 보존(수정 시 non-config 필드로 유지 · null 덮어쓰기 없음).
       // [계층 역전] 적용 그룹 → 제품군(그룹 소속) → 공정(제품군 소속). 제품군은 category.group_id 로 필터.
       { key: "group_id", label: "적용 그룹", type: "ref", refTable: "exam_groups" },
