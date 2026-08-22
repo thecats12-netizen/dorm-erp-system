@@ -6,6 +6,7 @@ import { loadMyExamPermissions } from "../services/examPermissionService";
 import { normalizeCriteria, describeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { listProcessCriteriaRules, upsertProcessCriteriaRule, softDeleteProcessCriteriaRule, restoreProcessCriteriaRule } from "../services/processCriteriaRuleService";
 import ProcessCriteriaRuleForm, { type ProcCriteriaMaster } from "../components/ProcessCriteriaRuleForm";
+import CriteriaAuditModal from "../components/CriteriaAuditModal";
 
 const PAGE_SIZE = 20;
 const dash = (v: unknown) => { const s = String(v ?? "").trim(); return s || "-"; };
@@ -24,6 +25,7 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
   const [editRow, setEditRow] = useState<ExamRow | null>(null);
   const [detail, setDetail] = useState<ExamRow | null>(null);
   const [confirmDel, setConfirmDel] = useState<ExamRow | null>(null);
+  const [auditOpen, setAuditOpen] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onSearch = (v: string) => { setSearch(v); if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(() => { setDebounced(v); setPage(1); }, 200); };
 
@@ -132,8 +134,12 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
     <div>
       <div className="mb-3 flex items-center justify-between gap-2">
         <p className="text-sm text-slate-500">공정별 Single/M1~M4 달성기준(criteria). 설비 취득·주력·취득률·선행단계 등을 조합해 단계 충족 조건을 정의합니다.</p>
-        {canEdit && <button className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800" onClick={() => setEditRow({ is_active: true })}>기준 추가</button>}
+        <div className="flex items-center gap-2">
+          <button className={btn} onClick={() => setAuditOpen(true)}>단계 기준 정합성 검사</button>
+          {canEdit && <button className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800" onClick={() => setEditRow({ is_active: true })}>기준 추가</button>}
+        </div>
       </div>
+      {auditOpen && <CriteriaAuditModal darkMode={darkMode} tenantId={tenantId} onClose={() => setAuditOpen(false)} />}
 
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <select value={fGroup} onChange={(ev) => { setFGroup(ev.target.value); setFCat(""); setFProc(""); setPage(1); }} className={inp}><option value="">그룹: 전체</option>{groupOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
