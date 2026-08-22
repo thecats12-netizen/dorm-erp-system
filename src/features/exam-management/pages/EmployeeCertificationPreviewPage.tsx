@@ -6,9 +6,9 @@ import type { EmployeeLite } from "../types/employeeLookup";
 import type { ExamRow } from "../services/examMasterService";
 import type { EvaluationSubject, StageEligibility } from "../types/certificationCriteria";
 import { calculateEquipmentSummary, calculateProcessStageEligibility, describeCriteria, isCriteriaEffective, normalizeCriteria } from "../engines/criteriaEvaluator";
+import { selectPmStageLevels } from "../utils/certificationLevel";
 import { loadPreviewMaster, loadPersonnelCertState, type PreviewMaster, type PersonnelCertState } from "../services/certificationPreviewService";
 
-const LEVEL_CODES = new Set(["SINGLE", "M1", "M2", "M3", "M4"]);
 type Props = { darkMode: boolean; tenantId: string; onToast?: (m: string) => void };
 
 // 로컬 timezone 변환 없이 Y-M-D 문자열 → [y,m,d]. 형식 불일치면 null.
@@ -77,11 +77,9 @@ export default function EmployeeCertificationPreviewPage({ darkMode, tenantId, o
   }, [master]);
   const nm = (m: Map<string, ExamRow>, id: unknown) => { const r = m.get(String(id ?? "")); return r ? (String(r.name ?? "").trim() || String(r.code ?? "").trim() || "-") : "-"; };
 
-  // 엔진용 PM 단계(Single~M4) — rank 오름차순.
-  const pmLevels = useMemo(() => (master?.levels ?? [])
-    .filter((r) => r.is_active !== false && LEVEL_CODES.has(String(r.code ?? "").toUpperCase()))
-    .map((r) => ({ id: String(r.id), code: String(r.code ?? "").toUpperCase(), rank_order: Number(r.rank_order ?? 0), requires_approval: r.requires_approval !== false, auto_promote: r.auto_promote === true }))
-    .sort((a, b) => a.rank_order - b.rank_order), [master]);
+  // 엔진용 PM 단계(Single~Multi 4) — 코드 하드코딩 없이 name/rank_order 로 선택(pmCandidate 와 공용 helper). rank 오름차순.
+  const pmLevels = useMemo(() => selectPmStageLevels(master?.levels ?? [])
+    .map((r) => ({ id: String(r.id), code: String(r.code ?? "").toUpperCase(), rank_order: Number(r.rank_order ?? 0), requires_approval: r.requires_approval !== false, auto_promote: r.auto_promote === true })), [master]);
 
   const equipProcess = useMemo(() => new Map((master?.equipment ?? []).map((e) => [String(e.id), String(e.process_id ?? "")])), [master]);
 

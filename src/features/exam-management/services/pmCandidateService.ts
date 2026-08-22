@@ -6,10 +6,10 @@ import { listExamRows, type ExamRow } from "./examMasterService";
 import { listEquipmentStageRules } from "./equipmentStageRuleService";
 import { listProcessCriteriaRules } from "./processCriteriaRuleService";
 import { calculateEquipmentSummary, calculateProcessStageEligibility, isCriteriaEffective, normalizeCriteria } from "../engines/criteriaEvaluator";
+import { selectPmStageLevels } from "../utils/certificationLevel";
 import type { EvaluationSubject } from "../types/certificationCriteria";
 
 const ENGINE_VERSION = "pm-stage-eligibility/v1";
-const LEVEL_CODES = new Set(["SINGLE", "M1", "M2", "M3", "M4"]);
 const todayYmd = () => new Date().toISOString().slice(0, 10);
 
 export type PmCandidateResult = { created: number; existing: number; ineligible: number; reevalExcluded: number; confirmedHeld: number; errors: number; message: string };
@@ -45,10 +45,9 @@ export async function generatePmCandidates(tenantId: string, userId: string): Pr
   ]);
   if (certRes.error) return { ...empty, message: "설비 취득 데이터를 불러오려면 시험관리 DB 설정이 필요합니다." };
 
-  const pmLevels = levels
-    .filter((r) => r.is_active !== false && LEVEL_CODES.has(String(r.code ?? "").toUpperCase()))
-    .map((r) => ({ id: String(r.id), code: String(r.code ?? "").toUpperCase(), rank_order: Number(r.rank_order ?? 0), requires_approval: r.requires_approval !== false, auto_promote: r.auto_promote === true }))
-    .sort((a, b) => a.rank_order - b.rank_order);
+  // PM 단계(Single~Multi 4) = 코드 하드코딩 없이 활성 exam_levels 를 name/rank_order 로 선택(공용 helper).
+  const pmLevels = selectPmStageLevels(levels)
+    .map((r) => ({ id: String(r.id), code: String(r.code ?? "").toUpperCase(), rank_order: Number(r.rank_order ?? 0), requires_approval: r.requires_approval !== false, auto_promote: r.auto_promote === true }));
   if (pmLevels.length === 0) return { ...empty, message: "PM 단계(Single~M4) 기준정보가 없습니다. 인증 레벨 seed 적용이 필요합니다." };
   const topLevel = pmLevels[pmLevels.length - 1];
   const maxPmRank = topLevel.rank_order;
