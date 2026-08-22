@@ -1,5 +1,7 @@
-// 단계 기준 정합성 검사(공정별 달성기준 ↔ 설비별 인증단계) 결과 타입 — 조회/미리보기 전용(저장·수정 없음).
+// 단계 기준 정합성 검사(공정별 달성기준 ↔ 설비별 인증단계) 결과 타입.
 //  ⚠ 모든 식별은 equipment_id/level_id FK 기준(장비명 문자열 매칭 금지). UI 표시는 장비명/코드(UUID 비노출).
+//  ⚠ 선택 적용은 사용자가 체크한 행만 · 미리보기 후 · 기존 서비스(upsert)로 감사/tenant/RLS 준수. 자동 일괄수정/삭제 없음.
+import type { Criteria } from "./certificationCriteria";
 
 export type AuditStatus =
   | "정상"
@@ -47,6 +49,13 @@ export interface CriteriaAuditRow {
   status: AuditStatus;               // 대표 상태(가장 심각)
   flags: AuditStatus[];              // 감지된 모든 상태
   notes: string[];                   // 추가 진단 설명(장비명 기준)
+
+  // ── 선택 적용(권장값) ──
+  applicable: boolean;               // 자동 적용 가능 여부(아래 blockReason 없을 때만)
+  blockReason: string | null;        // 적용 불가 사유(Single 정책 미확정·중복·불일치·복잡 groups 등)
+  recommendedCriteria: Criteria | null; // 적용 시 저장할 criteria(불가 시 null)
+  targetRuleId: string | null;       // 갱신 대상 exam_rules id(null = 신규 등록)
+  changes: string[];                 // 변경 요약(장비명 기준, 현재→권장)
 }
 
 export interface CriteriaAuditResult {

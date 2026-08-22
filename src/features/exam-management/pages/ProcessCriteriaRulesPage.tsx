@@ -141,7 +141,7 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
           {canEdit && <button className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800" onClick={() => setEditRow({ is_active: true })}>기준 추가</button>}
         </div>
       </div>
-      {auditOpen && <CriteriaAuditModal darkMode={darkMode} tenantId={tenantId} onClose={() => setAuditOpen(false)} />}
+      {auditOpen && <CriteriaAuditModal darkMode={darkMode} tenantId={tenantId} userId={userId} canEdit={canEdit} onClose={() => setAuditOpen(false)} onApplied={() => void reload()} />}
 
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <select value={fGroup} onChange={(ev) => { setFGroup(ev.target.value); setFCat(""); setFProc(""); setPage(1); }} className={inp}><option value="">그룹: 전체</option>{groupOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>

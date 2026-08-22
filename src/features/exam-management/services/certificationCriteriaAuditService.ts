@@ -7,11 +7,22 @@ import { listProcessCriteriaRules } from "./processCriteriaRuleService";
 import { normalizeCriteria } from "../engines/criteriaEvaluator";
 import { selectPmStageLevels, canonicalPmStageName } from "../utils/certificationLevel";
 import type { AuditEquip, AuditStatus, CriteriaAuditRow, CriteriaAuditResult } from "../types/criteriaAudit";
+import type { Criteria } from "../types/certificationCriteria";
 
 const S = (v: unknown) => String(v ?? "");
 const active = (r: ExamRow) => r.is_active !== false && !r.deleted_at;
 const nmeOf = (r?: ExamRow) => r ? (S(r.name).trim() || S(r.code).trim() || "-") : "-";
 const sameSet = (a: string[], b: string[]) => a.length === b.length && new Set(a).size === new Set([...a, ...b]).size;
+
+// 자동 적용 대상 상태(그 외 상태는 적용 대상 아님).
+const APPLY_STATUSES = new Set<AuditStatus>(["필수설비 누락", "불필요 설비 포함", "선행단계 오류", "미등록", "min_equipment_count 사용 위험", "criteria 중복"]);
+const MEANINGFUL_LEAF_KEYS = ["min_equipment_count", "min_core_equipment_count", "min_completion_rate", "prerequisite_level_ids", "min_tenure_months", "min_elapsed_months", "cumulative_elapsed_months", "required_process_ids", "required_category_ids"];
+// groups 가 "설비별 단일 required leaf(Single OR)" 단순 구조인지 — 아니면 복잡 legacy 로 보고 자동 적용 차단.
+function isSimpleSingleOrGroups(c: Criteria): boolean {
+  const g = c.groups ?? []; if (!g.length) return false;
+  return g.every((grp) => (grp.groups?.length ?? 0) === 0 && (grp.conditions ?? []).length > 0
+    && (grp.conditions ?? []).every((cond) => Array.isArray(cond.required_equipment_ids) && !MEANINGFUL_LEAF_KEYS.some((k) => (cond as Record<string, unknown>)[k] != null)));
+}
 
 // 대표 상태(가장 심각한 것 1개) 선정 순서.
 const STATUS_ORDER: AuditStatus[] = [
@@ -115,6 +126,33 @@ export async function runCriteriaAudit(tenantId: string): Promise<CriteriaAuditR
       }
       if (invalidStageCount) notes.push(`장비 master 부재/비활성/공정 불일치로 제외된 단계 설비 ${invalidStageCount}건.`);
 
+      const status = pickStatus(flags);
+      // ── 선택 적용용 권장 criteria + 자동적용 가능 여부(차단 조건 우선) ──
+      let recommendedCriteria: Criteria | null = null; let applicable = false; let blockReason: string | null = null;
+      const changes: string[] = []; const targetRuleId = chosen ? String(chosen.id) : null;
+      const complexGroups = !!c && (c.groups?.length ?? 0) > 0 && !isSimpleSingleOrGroups(c);
+      if (stageEquip.length === 0) blockReason = "단계 설비 미등록 — 설비별 인증단계 먼저 등록";
+      else if (invalidStageCount > 0) blockReason = "stage rule↔장비 공정 불일치/비활성 참조 — 수동 확인";
+      else if (curRows.length > 1) blockReason = "criteria 중복 — 유지할 행 확정 필요(자동 삭제 금지)";
+      else if (isSingle && stageEquip.length >= 2) blockReason = "Single 다중설비 — any-1/전부 정책 미확정";
+      else if (complexGroups) blockReason = "복잡한 legacy groups — 수동 확인";
+      if (!blockReason && APPLY_STATUSES.has(status)) {
+        // Multi/Single(1개): required_equipment_ids = 단계 설비 전체, prerequisite = 이전 단계. min_equipment_count/groups 제거. 나머지 필드 보존.
+        const base: Criteria = c ? { ...c } : {};
+        delete base.min_equipment_count; delete base.groups; delete base.required_equipment_ids; delete base.prerequisite_level_ids;
+        base.operator = "AND";
+        const ids = expectedEquip.map((e) => e.id);
+        if (ids.length) base.required_equipment_ids = ids;
+        if (expectedPrereqLevelIds.length) base.prerequisite_level_ids = expectedPrereqLevelIds;
+        recommendedCriteria = base; applicable = true;
+        if (missing.length) changes.push(`필수설비 추가: ${missing.map((m) => m.name).join(", ")}`);
+        if (extra.length) changes.push(`필수설비 제거: ${extra.map((x) => x.name).join(", ")}`);
+        if (!prereqMatch) changes.push(`선행단계: ${currentPrereqNames.join(", ") || "-"} → ${expectedPrereqNames.join(", ") || "-"}`);
+        if (currentMinEquipmentCount != null) changes.push(`min_equipment_count 제거(${currentMinEquipmentCount})`);
+        if (!chosen) changes.push("criteria 신규 등록");
+        if (!changes.length) changes.push("구조 정규화(required_equipment_ids AND)");
+      }
+
       rows.push({
         key: `${pid}|${lid}`,
         groupName: nmeOf(groupById.get(S(p.group_id))), categoryName: nmeOf(catById.get(S(p.category_id))),
@@ -124,7 +162,8 @@ export async function runCriteriaAudit(tenantId: string): Promise<CriteriaAuditR
         currentExists: !!chosen, currentRowCount: curRows.length, currentRequired,
         currentPrereqLevelIds, currentPrereqNames, currentMinEquipmentCount,
         missing, extra, singleNeedsGroups,
-        status: pickStatus(flags), flags, notes,
+        status, flags, notes,
+        applicable, blockReason, recommendedCriteria, targetRuleId, changes,
       });
     }
   }
