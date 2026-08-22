@@ -82,18 +82,38 @@ export default function ProcessCriteriaRuleForm({ darkMode, master, row, onClose
   }, [original]);
   const [singleMode, setSingleMode] = useState<"any1" | "all">(initSingle.mode);
   const [singleEquip, setSingleEquip] = useState<string[]>(initSingle.equip);
-  // 단계 설비(설비별 인증단계 · 공정+단계 scope). 선택값이 목록 밖(비활성 등)이어도 유지 표시.
+  // 공정 내 PM 단계(Single~Multi 4) level_id 집합 — Single 후보 범위 산정용(코드 하드코딩 없이 canonical 로 판별).
+  const pmLevelIdSet = useMemo(() => new Set(master.levelOpts.filter((l) => canonicalPmStageName(l.name) !== null || canonicalPmStageName(l.code) !== null).map((l) => l.id)), [master.levelOpts]);
+  // Single 인정 대상 설비 = 동일 공정의 Single~Multi 4 stage rule 설비 전체(확정 정책). Multi = 현재 레벨 설비만(무변경).
+  //  공정 scope·활성 stage rule·활성 equipment·동일 공정 검증·equipment_id distinct. 선택값은 목록 밖(비활성 등)이어도 유지 표시.
   const stageEquip = useMemo(() => {
     const ids: string[] = []; const seen = new Set<string>();
     for (const r of master.stageRules) {
       if (r.is_active === false || r.deleted_at) continue;
-      if (String(r.process_id ?? "") !== processId || String(r.level_id ?? "") !== levelId) continue;
-      const eid = String(r.equipment_id ?? ""); if (!eid || seen.has(eid)) continue; seen.add(eid); ids.push(eid);
+      if (String(r.process_id ?? "") !== processId) continue;
+      const lvl = String(r.level_id ?? "");
+      if (isSingle ? !pmLevelIdSet.has(lvl) : lvl !== levelId) continue;
+      const eid = String(r.equipment_id ?? ""); if (!eid || seen.has(eid)) continue;
+      const e = master.equipById.get(eid);
+      if (!e || e.is_active === false || e.deleted_at || String(e.process_id ?? "") !== processId) continue;
+      seen.add(eid); ids.push(eid);
     }
     for (const id of singleEquip) if (!seen.has(id)) { seen.add(id); ids.push(id); }
     return ids.map((id) => { const e = master.equipById.get(id); return { id, name: (e && (String(e.name ?? "").trim() || String(e.code ?? ""))) || id, code: String(e?.code ?? "").trim() }; });
-  }, [master.stageRules, master.equipById, processId, levelId, singleEquip]);
-  const stageEquipIdSet = useMemo(() => { const s = new Set<string>(); for (const r of master.stageRules) if (r.is_active !== false && !r.deleted_at && String(r.process_id ?? "") === processId && String(r.level_id ?? "") === levelId) s.add(String(r.equipment_id ?? "")); return s; }, [master.stageRules, processId, levelId]);
+  }, [master.stageRules, master.equipById, processId, levelId, isSingle, pmLevelIdSet, singleEquip]);
+  const stageEquipIdSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of master.stageRules) {
+      if (r.is_active === false || r.deleted_at) continue;
+      if (String(r.process_id ?? "") !== processId) continue;
+      const lvl = String(r.level_id ?? "");
+      if (isSingle ? !pmLevelIdSet.has(lvl) : lvl !== levelId) continue;
+      const e = master.equipById.get(String(r.equipment_id ?? ""));
+      if (!e || e.is_active === false || e.deleted_at || String(e.process_id ?? "") !== processId) continue;
+      s.add(String(r.equipment_id ?? ""));
+    }
+    return s;
+  }, [master.stageRules, master.equipById, processId, levelId, isSingle, pmLevelIdSet]);
   const toggleSingle = (id: string) => setSingleEquip((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   // Single 최종 criteria: 전부/1개 → required_equipment_ids(AND) · 2개 이상 아무거나 → operator OR + groups. min_equipment_count 미사용.
   const buildSingleCriteria = useCallback((): Criteria => {
@@ -229,7 +249,7 @@ export default function ProcessCriteriaRuleForm({ darkMode, master, row, onClose
               ))}
             </div>
             <div className="mb-1 flex items-center justify-between">
-              <span className="text-xs text-slate-500">단계 설비(설비별 인증단계) · {singleEquip.length}개 선택</span>
+              <span className="text-xs text-slate-500">Single 인정 대상 설비 (현재 공정 Single~Multi 4) · {singleEquip.length}개 선택</span>
               <span className="flex gap-1.5">
                 <button type="button" className={btn} disabled={!stageEquip.length} onClick={() => setSingleEquip(stageEquip.map((e) => e.id))}>전체 선택</button>
                 <button type="button" className={btn} disabled={!singleEquip.length} onClick={() => setSingleEquip([])}>해제</button>
@@ -237,7 +257,7 @@ export default function ProcessCriteriaRuleForm({ darkMode, master, row, onClose
             </div>
             <div className={`max-h-36 overflow-auto rounded-xl border p-1 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
               {(!processId || !levelId) ? <div className="px-2 py-3 text-center text-xs text-slate-400">공정·인증단계를 먼저 선택하세요.</div>
-                : stageEquip.length === 0 ? <div className="px-2 py-3 text-center text-xs text-slate-400">이 공정·단계의 설비별 인증단계가 없습니다(설비별 인증단계에서 먼저 등록).</div>
+                : stageEquip.length === 0 ? <div className="px-2 py-3 text-center text-xs text-slate-400">이 공정의 Single~Multi 4 설비별 인증단계가 없습니다(설비별 인증단계에서 먼저 등록).</div>
                 : stageEquip.map((e) => (
                   <label key={e.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800">
                     <input type="checkbox" checked={singleEquip.includes(e.id)} onChange={() => toggleSingle(e.id)} />

@@ -7,7 +7,7 @@ import { listProcessCriteriaRules } from "./processCriteriaRuleService";
 import { normalizeCriteria } from "../engines/criteriaEvaluator";
 import { selectPmStageLevels, canonicalPmStageName } from "../utils/certificationLevel";
 import type { AuditEquip, AuditStatus, CriteriaAuditRow, CriteriaAuditResult } from "../types/criteriaAudit";
-import type { Criteria } from "../types/certificationCriteria";
+import type { Criteria, CriteriaGroup } from "../types/certificationCriteria";
 
 const S = (v: unknown) => String(v ?? "");
 const active = (r: ExamRow) => r.is_active !== false && !r.deleted_at;
@@ -60,6 +60,7 @@ export async function runCriteriaAudit(tenantId: string): Promise<CriteriaAuditR
 
   const pmLevels = selectPmStageLevels(levels); // Single~Multi 4, rank_order 오름차순
   if (pmLevels.length === 0) return { rows: [], ok: false, message: "PM 단계(Single~Multi 4) 인증 레벨이 없습니다." };
+  const pmLevelIdSet = new Set(pmLevels.map((l) => S(l.id))); // Single 예상설비(공정 전체 PM 단계) 산정용
 
   // 현재 criteria: (process|level) → 유효(미삭제) 행들.
   const critByKey = new Map<string, ExamRow[]>();
@@ -78,52 +79,54 @@ export async function runCriteriaAudit(tenantId: string): Promise<CriteriaAuditR
       const stageName = canonicalPmStageName(lv.name) ?? canonicalPmStageName(lv.code) ?? nmeOf(lv);
       const isSingle = i === 0; // rank 최저 = Single
 
-      // 단계 설비 집계(설비별 인증단계) — 공정 scope 검증(equipment.process_id === stage.process_id === p).
-      const stageForKey = stageRules.filter((r) => active(r) && S(r.process_id) === pid && S(r.level_id) === lid);
-      const seen = new Set<string>(); const stageEquip: AuditEquip[] = []; let invalidStageCount = 0;
-      for (const r of stageForKey) {
+      // 예상 설비: Single = 동일 공정의 Single~Multi 4 stage rule 설비 전체(확정 정책), Multi = 현재 레벨 설비. 공정 scope·활성 equipment·distinct.
+      const scopeLevels = isSingle ? pmLevelIdSet : new Set([lid]);
+      const seen = new Set<string>(); const expectedEquip: AuditEquip[] = []; let invalidStageCount = 0;
+      for (const r of stageRules) {
+        if (!active(r) || S(r.process_id) !== pid || !scopeLevels.has(S(r.level_id))) continue;
         const eid = S(r.equipment_id); if (!eid || seen.has(eid)) continue;
         const e = equipById.get(eid);
         if (!e || !active(e) || S(e.process_id) !== pid) { invalidStageCount++; continue; } // 부재/비활성/공정 불일치 제외
-        seen.add(eid); stageEquip.push({ id: eid, name: nmeOf(e) });
+        seen.add(eid); expectedEquip.push({ id: eid, name: nmeOf(e) });
       }
-      const expectedEquip = stageEquip;                      // Multi=전체 취득, Single=후보(any 1)
+      const stageEquip = expectedEquip;                      // 표시상 "단계설비" = 인정 대상 설비(Single=공정 전체 PM, Multi=현재 레벨)
       const expectedPrereqLevelIds = i === 0 ? [] : [S(pmLevels[i - 1].id)];
       const expectedPrereqNames = expectedPrereqLevelIds.map((id) => nmeOf(levelById.get(id)));
 
-      // 현재 criteria.
+      // 현재 criteria. Single 은 OR groups 도 인정 → 현재 설비 = top required ∪ groups leaf required(중복 제거).
       const curRows = critByKey.get(`${pid}|${lid}`) ?? [];
       const chosen = chooseCurrent(curRows);
       const c = chosen ? normalizeCriteria(chosen.criteria) : null;
-      const currentReqIds = (c?.required_equipment_ids ?? []).map(S);
+      const groupEquipIds: string[] = [];
+      const collectGroup = (g: CriteriaGroup) => { for (const cond of g.conditions ?? []) for (const id of cond.required_equipment_ids ?? []) groupEquipIds.push(S(id)); for (const sub of g.groups ?? []) collectGroup(sub); };
+      for (const g of c?.groups ?? []) collectGroup(g);
+      const currentReqIds = [...new Set([...(c?.required_equipment_ids ?? []).map(S), ...groupEquipIds])];
       const currentRequired = currentReqIds.map(eq);
       const currentPrereqLevelIds = (c?.prerequisite_level_ids ?? []).map(S);
       const currentPrereqNames = currentPrereqLevelIds.map((id) => nmeOf(levelById.get(id)));
       const currentMinEquipmentCount = typeof c?.min_equipment_count === "number" ? c!.min_equipment_count! : null;
+      // Single "전부(AND)" 명시 저장(groups 없이 required ≥2) — any-1 자동변환 금지 대상.
+      const singleIsAndMulti = isSingle && !(c?.groups?.length) && (c?.required_equipment_ids?.length ?? 0) >= 2;
 
-      // 비교(Single 설비 ≥2 는 OR 정책이라 누락/초과 판정 제외 · 그 외 전부취득 기준).
-      const treatAsAll = !isSingle || stageEquip.length <= 1;
-      const curSet = new Set(currentReqIds); const expSet = new Set(stageEquip.map((e) => e.id));
-      const missing = treatAsAll ? stageEquip.filter((e) => !curSet.has(e.id)) : [];
-      const extra = treatAsAll ? currentReqIds.filter((id) => !expSet.has(id)).map(eq) : [];
+      // 비교: 인정 대상 설비 집합 대비 현재 설비 집합(Single=OR/AND 무관 설비셋 기준, Multi=기존과 동일).
+      const curSet = new Set(currentReqIds); const expSet = new Set(expectedEquip.map((e) => e.id));
+      const missing = expectedEquip.filter((e) => !curSet.has(e.id));
+      const extra = currentReqIds.filter((id) => !expSet.has(id)).map(eq);
       const prereqMatch = sameSet(expectedPrereqLevelIds, currentPrereqLevelIds);
-      const singleNeedsGroups = isSingle && stageEquip.length >= 2;
+      const singleNeedsGroups = isSingle && expectedEquip.length >= 2;
 
       const flags: AuditStatus[] = []; const notes: string[] = [];
       if (stageEquip.length === 0) flags.push("단계 설비 미등록");
       if (!chosen) flags.push("미등록");
       if (curRows.length > 1) { flags.push("criteria 중복"); notes.push(`동일 공정·단계 criteria ${curRows.length}행(대표 1행만 판정에 사용).`); }
-      if (chosen && treatAsAll && missing.length) flags.push("필수설비 누락");
-      if (chosen && treatAsAll && extra.length) flags.push("불필요 설비 포함");
+      if (chosen && missing.length) flags.push("필수설비 누락");
+      if (chosen && extra.length) flags.push("불필요 설비 포함");
       if (chosen && !prereqMatch) flags.push("선행단계 오류");
       if (currentMinEquipmentCount != null) {
         flags.push("min_equipment_count 사용 위험");
-        notes.push(`min_equipment_count=${currentMinEquipmentCount} 사용 중 · 단계 설비수 ${stageEquip.length} — "전부 취득" 정책과 충돌 가능(정책확인필요).`);
+        notes.push(`min_equipment_count=${currentMinEquipmentCount} 사용 중 · 인정 대상 설비수 ${stageEquip.length} — required_equipment_ids/OR groups 방식으로 대체 권장.`);
       }
-      if (singleNeedsGroups) {
-        flags.push("정책확인필요");
-        notes.push(`Single 설비 ${stageEquip.length}개 → "아무 1개(OR)"는 groups 구조 필요. 현재 폼은 OR groups 미지원 → 코드/폼 보완 필요(min_equipment_count 대체 금지).`);
-      }
+      if (isSingle && singleNeedsGroups) notes.push("Single 다중설비: 아무 1개(OR groups) 인정. 폼/선택 적용에서 OR groups 로 관리.");
       if (invalidStageCount) notes.push(`장비 master 부재/비활성/공정 불일치로 제외된 단계 설비 ${invalidStageCount}건.`);
 
       const status = pickStatus(flags);
@@ -134,23 +137,30 @@ export async function runCriteriaAudit(tenantId: string): Promise<CriteriaAuditR
       if (stageEquip.length === 0) blockReason = "단계 설비 미등록 — 설비별 인증단계 먼저 등록";
       else if (invalidStageCount > 0) blockReason = "stage rule↔장비 공정 불일치/비활성 참조 — 수동 확인";
       else if (curRows.length > 1) blockReason = "criteria 중복 — 유지할 행 확정 필요(자동 삭제 금지)";
-      else if (isSingle && stageEquip.length >= 2) blockReason = "Single 다중설비 — any-1/전부 정책 미확정";
+      else if (singleIsAndMulti) blockReason = "Single '전부(AND)' 명시 저장 — any-1 자동변환 금지(수동 확인)";
       else if (complexGroups) blockReason = "복잡한 legacy groups — 수동 확인";
       if (!blockReason && APPLY_STATUSES.has(status)) {
-        // Multi/Single(1개): required_equipment_ids = 단계 설비 전체, prerequisite = 이전 단계. min_equipment_count/groups 제거. 나머지 필드 보존.
+        // 기존 필드(label_ko/effective/priority/version/memo 등) 보존 · 관리 4필드만 재구성.
         const base: Criteria = c ? { ...c } : {};
         delete base.min_equipment_count; delete base.groups; delete base.required_equipment_ids; delete base.prerequisite_level_ids;
-        base.operator = "AND";
         const ids = expectedEquip.map((e) => e.id);
-        if (ids.length) base.required_equipment_ids = ids;
-        if (expectedPrereqLevelIds.length) base.prerequisite_level_ids = expectedPrereqLevelIds;
+        if (isSingle) {
+          // 확정 정책: 아무거나 1개. 1개면 단순 required(AND), 2개 이상이면 OR groups(설비별 단일 leaf). min_equipment_count=1 대체 금지.
+          if (ids.length <= 1) { base.operator = "AND"; if (ids.length) base.required_equipment_ids = ids; }
+          else { base.operator = "OR"; base.groups = ids.map((id) => ({ operator: "AND", conditions: [{ required_equipment_ids: [id] }] })); }
+        } else {
+          base.operator = "AND";
+          if (ids.length) base.required_equipment_ids = ids;
+          if (expectedPrereqLevelIds.length) base.prerequisite_level_ids = expectedPrereqLevelIds;
+        }
         recommendedCriteria = base; applicable = true;
-        if (missing.length) changes.push(`필수설비 추가: ${missing.map((m) => m.name).join(", ")}`);
-        if (extra.length) changes.push(`필수설비 제거: ${extra.map((x) => x.name).join(", ")}`);
+        if (missing.length) changes.push(`설비 추가: ${missing.map((m) => m.name).join(", ")}`);
+        if (extra.length) changes.push(`설비 제거: ${extra.map((x) => x.name).join(", ")}`);
         if (!prereqMatch) changes.push(`선행단계: ${currentPrereqNames.join(", ") || "-"} → ${expectedPrereqNames.join(", ") || "-"}`);
         if (currentMinEquipmentCount != null) changes.push(`min_equipment_count 제거(${currentMinEquipmentCount})`);
         if (!chosen) changes.push("criteria 신규 등록");
-        if (!changes.length) changes.push("구조 정규화(required_equipment_ids AND)");
+        if (isSingle && ids.length >= 2) changes.push("Single 아무거나 1개(OR groups)로 구성");
+        if (!changes.length) changes.push("구조 정규화");
       }
 
       rows.push({
