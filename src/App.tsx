@@ -11856,9 +11856,15 @@ export default function App() {
         uploadFilesToStorage(CLEANING_PHOTO_BUCKET, `${cleanYear}/${newReportId}/before`, cleaningReportForm.beforePhotoDataUrls || []),
         uploadFilesToStorage(CLEANING_PHOTO_BUCKET, `${cleanYear}/${newReportId}/after`, cleaningReportForm.afterPhotoDataUrls || []),
       ]);
+      // [청소 담당자] 하자접수 계정 신규 등록: 표시값(currentUser)과 저장값(cleanerName) 불일치로 공란 저장되던 문제 방지.
+      //   cleanerName 이 비어 있을 때만 로그인 사용자 이름으로 확정(이미 값 있으면/다른 역할 직접 입력이면 유지). managerName·현재 담당자 사용 안 함.
+      const resolvedCleanerName =
+        currentUser?.role === "maintenance_reporter" && !(cleaningReportForm.cleanerName || "").trim()
+          ? (currentUser?.displayName || currentUser?.username || "")
+          : cleaningReportForm.cleanerName;
       addCleaningReportWithAutoFill(
         currentUser,
-        { ...cleaningReportForm, beforePhotoDataUrls: beforeUrls, afterPhotoDataUrls: afterUrls },
+        { ...cleaningReportForm, cleanerName: resolvedCleanerName, beforePhotoDataUrls: beforeUrls, afterPhotoDataUrls: afterUrls },
         newReportId
       );
     }
@@ -25461,7 +25467,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     return <p className="mt-1 text-xs font-semibold text-rose-600">하자접수 계정은 금주차 청소보고서만 등록할 수 있습니다.</p>;
                   })()}
                 </div>
-                <Input label="청소 담당자" value={isMaintenanceReporter ? (currentUser?.displayName || "") : cleaningReportForm.cleanerName} onChange={(v) => setCleaningReportForm((f) => ({ ...f, cleanerName: v }))} readOnly={isMaintenanceReporter} />
+                <Input label="청소 담당자" value={cleaningReportForm.cleanerName || cleaningReportForm.reporterName || ""} onChange={(v) => setCleaningReportForm((f) => ({ ...f, cleanerName: v }))} readOnly={isMaintenanceReporter} />
               </div>
             </div>
 
