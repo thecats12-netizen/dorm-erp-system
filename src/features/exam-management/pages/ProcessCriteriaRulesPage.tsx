@@ -5,6 +5,7 @@ import { listExamRows, examSupabaseReady, type ExamRow } from "../services/examM
 import { loadMyExamPermissions } from "../services/examPermissionService";
 import { normalizeCriteria, describeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { listProcessCriteriaRules, upsertProcessCriteriaRule, softDeleteProcessCriteriaRule, restoreProcessCriteriaRule } from "../services/processCriteriaRuleService";
+import { listEquipmentStageRules } from "../services/equipmentStageRuleService";
 import ProcessCriteriaRuleForm, { type ProcCriteriaMaster } from "../components/ProcessCriteriaRuleForm";
 import CriteriaAuditModal from "../components/CriteriaAuditModal";
 
@@ -14,7 +15,7 @@ type Props = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: st
 
 export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, userId, onToast }: Props) {
   const [rows, setRows] = useState<ExamRow[]>([]);
-  const [m, setM] = useState<{ groups: ExamRow[]; categories: ExamRow[]; processes: ExamRow[]; equipment: ExamRow[]; levels: ExamRow[] }>({ groups: [], categories: [], processes: [], equipment: [], levels: [] });
+  const [m, setM] = useState<{ groups: ExamRow[]; categories: ExamRow[]; processes: ExamRow[]; equipment: ExamRow[]; levels: ExamRow[]; stageRules: ExamRow[] }>({ groups: [], categories: [], processes: [], equipment: [], levels: [], stageRules: [] });
   const [loading, setLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,15 +34,16 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
     setLoading(true); setError(null);
     try {
-      const [r, g, c, p, e, lv] = await Promise.all([
+      const [r, g, c, p, e, lv, sr] = await Promise.all([
         listProcessCriteriaRules(tenantId),
         listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
+        listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setRows(r); setM({ groups: g, categories: c, processes: p, equipment: e, levels: lv });
+      setRows(r); setM({ groups: g, categories: c, processes: p, equipment: e, levels: lv, stageRules: sr });
     } catch (err) { setError((err as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId]);
@@ -84,7 +86,7 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
     if (!extra.length) return levelOpts;
     return [...levelOpts, ...extra].sort((a, b) => a.rank - b.rank);
   }, [editRow, levelOpts, m.levels]);
-  const formMaster: ProcCriteriaMaster = useMemo(() => ({ groups: m.groups, processes: m.processes, equipment: m.equipment, groupById, catById, procById, equipById, levelOpts: formLevelOpts }), [m.groups, m.processes, m.equipment, groupById, catById, procById, equipById, formLevelOpts]);
+  const formMaster: ProcCriteriaMaster = useMemo(() => ({ groups: m.groups, processes: m.processes, equipment: m.equipment, stageRules: m.stageRules, groupById, catById, procById, equipById, levelOpts: formLevelOpts }), [m.groups, m.processes, m.equipment, m.stageRules, groupById, catById, procById, equipById, formLevelOpts]);
 
   // 행 파생: criteria 정규화 + 공정→그룹/제품군.
   const enriched = useMemo(() => rows.map((r) => {
