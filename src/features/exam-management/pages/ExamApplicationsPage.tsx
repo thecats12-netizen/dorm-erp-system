@@ -689,9 +689,10 @@ export default function ExamApplicationsPage({
       if (a.deleted_at) continue;                                                    // 삭제행 제외
       if (!isAcquiredApplication(a)) continue;                                       // 확정 취득만(canonical)
       const idx = levelIdxById.get(String(a.level_id ?? "")); if (idx === undefined) continue; // level_id→PM 단계(없으면 skip · 문자열 추론 금지)
-      const person = (a.personnel_id && personById.get(String(a.personnel_id))) || personByEmpNo.get(String(a.employee_no ?? "").trim());
-      const personId = person ? String(person.id ?? "") : ""; if (!personId) continue;
-      const appProc = String(a.process_id ?? ""), perProc = String(person!.process_id ?? "");
+      const personnelId = String(a.personnel_id ?? "");
+      const person = (personnelId ? personById.get(personnelId) : undefined) ?? personByEmpNo.get(String(a.employee_no ?? "").trim()); // personnel_id 우선 → employee_no fallback
+      const personId = String(person?.id ?? ""); if (!personId) continue;
+      const appProc = String(a.process_id ?? ""), perProc = String(person?.process_id ?? "");
       if (!appProc || appProc !== perProc) continue;                                 // 공정 FK 일치(혼입 금지 · 문자열 비교 없음)
       confirmedStageIdxByPerson.set(personId, Math.max(confirmedStageIdxByPerson.get(personId) ?? -1, idx)); // 최고 확정 rank
     }
