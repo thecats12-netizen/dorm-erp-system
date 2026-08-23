@@ -29,7 +29,9 @@ const SHEET_ALIASES: Record<CfgKey, string[]> = {
 // 통합 등록 미지원 커스텀 시트(→ 처리보류 안내). 현재 08·09 모두 지원 → 비어 있음.
 const HOLD_SHEET_ALIASES: Record<string, string[]> = {};
 
-const norm = (s: string) => String(s ?? "").replace(new RegExp("[​-‍﻿]", "g"), "").replace(/\s+/g, "").trim().toLowerCase();
+// 시트명/헤더 매칭 전용 정규화(데이터 값에는 적용 안 함). 끝의 필수표시 "*"(예 "그룹 *")만 제거 → "그룹"과 동일 인식.
+//  ⚠ 데이터 값 내부 "*"(장비명 등)는 norm 을 거치지 않으므로 영향 없음. 뒤쪽 * 만 제거(글자삭제/fuzzy 아님).
+const norm = (s: string) => String(s ?? "").replace(new RegExp("[​-‍﻿]", "g"), "").replace(/\s+/g, "").trim().toLowerCase().replace(/\*+$/, "");
 const up = (v: unknown) => String(v ?? "").trim().toUpperCase();
 const txt = (v: unknown) => String(v ?? "").trim();
 // 이름 비교용 정규화(공백 "품질"만): NBSP( )→일반 공백, 연속 공백 1칸, trim, lowercase.
