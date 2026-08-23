@@ -5319,9 +5319,16 @@ export default function App() {
     // 2) 담당 기숙사 주차별(월~일) 미제출 감점 — 유효 시작일 이후 ~ 마감 지난 주차만
     const dormId = manager?.dormId;
     if (dormId && startDate) {
+      // [계약기간] 기숙사 계약 전/종료 후 주차는 청소 의무가 없으므로 미제출/감점 대상에서 제외.
+      //   유효 시작일 = MAX(점수 시작일·담당 시작일, 계약 시작일). 계약 종료일이 있으면 종료일이 속한 주차까지만 대상.
+      //   (계약일/종료일 없으면 기존 동작 그대로 → 기존 정상 기숙사 회귀 없음.)
+      const dorm = dorms.find((d) => d.id === dormId) || operationalDorms.find((d) => d.id === dormId);
+      const contractStart = dorm?.contractStart ? parseSafeDate(dorm.contractStart) : null;
+      const contractEnd = dorm?.contractEnd ? parseSafeDate(dorm.contractEnd) : null;
+      const effStart = contractStart && contractStart > startDate ? contractStart : startDate;
       const now = new Date();
       // 유효 시작일이 속한 주의 월요일부터 시작
-      const cursor = new Date(startDate);
+      const cursor = new Date(effStart);
       cursor.setHours(0, 0, 0, 0);
       cursor.setDate(cursor.getDate() - ((cursor.getDay() + 6) % 7)); // 월요일로 정렬
       let guard = 0;
@@ -5331,8 +5338,8 @@ export default function App() {
         const wkEnd = new Date(cursor);
         wkEnd.setDate(wkEnd.getDate() + 6);
         wkEnd.setHours(23, 59, 59, 999); // 일요일 23:59 (제출 마감)
-        // 마감이 지났고(미래/이번주 제외), 유효 시작 이전에 끝난 주가 아니어야 함
-        if (wkEnd < now && wkEnd >= startDate) {
+        // 마감이 지났고(미래/이번주 제외), 유효 시작 이전에 끝난 주가 아니며, 계약 종료 이후 주가 아니어야 함
+        if (wkEnd < now && wkEnd >= effStart && (!contractEnd || wkStart <= contractEnd)) {
           const hasReport = managerReports.some((r) => {
             if (r.dormId !== dormId) return false;
             const d = parseSafeDate(r.reportDate);
