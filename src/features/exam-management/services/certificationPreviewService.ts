@@ -60,3 +60,23 @@ export async function loadPersonnelCertState(tenantId: string, personnelId: stri
   }));
   return { approvedEquipmentIds, pmCerts, needsReeval, ok: true };
 }
+
+// 테넌트 전체의 "확정(approved) 설비 취득"을 직원별로 배치 집계(N+1 없음). key=personnel_id → 취득 설비 id 집합.
+//  · 응시 후보 설비 계산 등에서 재사용. 확정 조건은 loadPersonnelCertState 와 동일(status="approved").
+export async function loadApprovedEquipmentByPerson(tenantId: string): Promise<Map<string, Set<string>>> {
+  const out = new Map<string, Set<string>>();
+  if (!isSupabaseAvailable() || !supabase || !tenantId) return out;
+  const { data, error } = await supabase
+    .from("exam_equipment_certifications")
+    .select("personnel_id,equipment_id,status")
+    .eq("tenant_id", tenantId)
+    .is("deleted_at", null);
+  if (error) { console.warn("[certificationPreview] 설비취득 배치 조회 실패(미적용?):", (error as { code?: unknown }).code); return out; }
+  for (const c of (data as ExamRow[]) || []) {
+    if (String(c.status ?? "") !== "approved") continue;                 // 확정만(반려/미확정/취소 제외)
+    const pid = String(c.personnel_id ?? ""), eq = String(c.equipment_id ?? "");
+    if (!pid || !eq) continue;
+    (out.get(pid) ?? out.set(pid, new Set()).get(pid)!).add(eq);
+  }
+  return out;
+}

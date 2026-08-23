@@ -761,6 +761,10 @@ export type ExamCandidate = {
   employed: boolean; belowTarget: boolean; prereqMet: boolean; notInProgress: boolean;
   retestOk: boolean; retestAvailableDate: string | null; needEquipment: boolean;
   eligible: boolean; blockedReasons: string[];
+  // [C] 다음 추천 단계의 미취득 설비 후보(stage rule − 확정취득). id 는 저장/preselect 용, name 은 표시용(UUID 미노출).
+  equipmentCandidateIds?: string[]; equipmentCandidateNames?: string[];
+  recommendedEquipmentId?: string | null;   // 후보 정확히 1개일 때만 preselect 대상
+  needEquipmentSelection?: boolean;          // 후보 2개 이상 → 사용자가 선택해야 함(자동선택 금지)
 };
 
 // 재직 판정(값 없으면 통과, 있으면 "재직" 포함만).
@@ -802,7 +806,16 @@ export function buildExamCandidates(
   personnel: ExamPersonnelRecord[],
   applications: ExamApplicationRecord[],
   rules?: ExamApplicationRecord[],
-  opts?: { retestGapMonths?: number }
+  // confirmedStageIdxByPerson: 직원 id → 확정 pm_certifications 기준 현재단계 인덱스(PM_STAGES). 없으면 legacy flag 만 사용.
+  // [C] 설비 후보 계산용(선택): stageRules(exam_equipment_stage_rules) · 확정취득(직원 id→설비 id set) · 설비명 · PM 단계 level_id 순서.
+  opts?: {
+    retestGapMonths?: number;
+    confirmedStageIdxByPerson?: Map<string, number>;
+    stageRules?: ExamApplicationRecord[];
+    acquiredEquipByPerson?: Map<string, Set<string>>;
+    equipmentNameById?: Map<string, string>;
+    pmStageLevelIds?: string[];   // selectPmStageLevels 결과의 level_id 순서(Single..M4). index 는 PM_STAGES 와 정렬.
+  }
 ): ExamCandidate[] {
   const today = new Date().toISOString().slice(0, 10);
   const gap = opts?.retestGapMonths ?? extractRetestGapMonths(rules) ?? 3;
@@ -812,9 +825,13 @@ export function buildExamCandidates(
   for (const p of Array.isArray(personnel) ? personnel : []) {
     if (isDeletedRec(p)) continue;
     const employed = candIsEmployed((p as Record<string, unknown>).employment_status ?? p.status);
-    // 현재 단계 = Single 부터 연속 취득한 최상위, 목표 = 다음 단계.
+    // 현재 단계 = Single 부터 연속 취득한 최상위(legacy flag), 목표 = 다음 단계.
     let curIdx = -1;
     for (let i = 0; i < 5; i++) { if (stageAcquired(p, undefined, PM_STAGES[i])) curIdx = i; else break; }
+    // [B: 확정 인증 우선] pm_certifications 확정 단계(공정 scope·rank_order 기준, 호출부 집계)를 반영.
+    //  · flag 판정을 하회시키지 않음(Math.max) → 기존 동작 회귀 없이 확정 이력 누락만 보정.
+    const pmIdx = opts?.confirmedStageIdxByPerson?.get(asText(p.id)) ?? -1;
+    if (pmIdx > curIdx) curIdx = pmIdx;
     const targetIdx = curIdx + 1;
     if (targetIdx >= PM_STAGES.length) continue;               // Master 이상 → 후보 아님(목표 미달 아님)
     const current_level = curIdx < 0 ? "미취득" : PM_STAGES[curIdx];
@@ -844,11 +861,39 @@ export function buildExamCandidates(
     if (!retestOk) blockedReasons.push(`재시험 제한(${retestAvailableDate} 이후)`);
 
     const eligible = employed && !!process && prereqMet && notInProgress && retestOk;
+
+    // [C] 다음 추천 단계의 미취득 설비 후보 = (target 단계 stage rule 설비) − (확정 취득 설비).
+    //  · Single(targetIdx 0) = 동일 공정 Single~M4 전체 인정범위(any-1 정책) · Multi = 해당 레벨만.
+    //  · 이름 문자열 판정 금지: process_id + level_id(FK)로만 scope. 다른 공정 혼입 없음.
+    let equipmentCandidateIds: string[] | undefined;
+    let equipmentCandidateNames: string[] | undefined;
+    let recommendedEquipmentId: string | null | undefined;
+    let needEquipmentSelection: boolean | undefined;
+    const procId = asText(p.process_id);
+    const stageRules = opts?.stageRules, pmLevelIds = opts?.pmStageLevelIds;
+    if (stageRules && pmLevelIds && procId && targetIdx < pmLevelIds.length) {
+      const scopeLevelIds = targetIdx === 0 ? new Set(pmLevelIds) : new Set([pmLevelIds[targetIdx]]); // Single=전체 인정범위, Multi=해당 레벨
+      const targetEquip = new Set<string>();
+      for (const s of stageRules) {
+        if (isDeletedRec(s) || (s as { is_active?: unknown }).is_active === false) continue;
+        if (asText(s.process_id) !== procId) continue;                 // 공정 FK 일치만(혼입 금지)
+        if (!scopeLevelIds.has(asText(s.level_id))) continue;
+        const eq = asText(s.equipment_id); if (eq) targetEquip.add(eq);
+      }
+      const acquired = opts?.acquiredEquipByPerson?.get(asText(p.id)) ?? new Set<string>();
+      const remaining = [...targetEquip].filter((id) => !acquired.has(id)); // 이미 취득 설비 제외
+      equipmentCandidateIds = remaining;
+      equipmentCandidateNames = remaining.map((id) => opts?.equipmentNameById?.get(id) || "").filter(Boolean);
+      recommendedEquipmentId = remaining.length === 1 ? remaining[0] : null; // 1개일 때만 preselect
+      needEquipmentSelection = remaining.length > 1;                          // 2개+ → 사용자 선택
+    }
+
     out.push({
       employee_no: empNo, name: asText(p.name), group_name: asText(p.group_name),
       product: asText(p.product_group) || asText(p.product), process,
       current_level, target_level, employed, belowTarget: true, prereqMet, notInProgress,
       retestOk, retestAvailableDate, needEquipment, eligible, blockedReasons,
+      equipmentCandidateIds, equipmentCandidateNames, recommendedEquipmentId, needEquipmentSelection,
     });
   }
   return out;

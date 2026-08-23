@@ -8,6 +8,8 @@ import {
   type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, deriveAchievementTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, isInProgressStatus, applicationMatchesTarget, type ExamCandidate, type AchievementTiming } from "../services/examAutomationService";
+import { selectPmStageLevels } from "../utils/certificationLevel";
+import { loadApprovedEquipmentByPerson } from "../services/certificationPreviewService";
 import { normalizeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { loadMyExamPermissions, type MyExamPermissions } from "../services/examPermissionService";
 // [4단계] 공통 사원선택 + 라이선스 요약(조회 전용, 추가 UI). 기존 사번 select/필드/저장은 그대로 유지.
@@ -644,7 +646,41 @@ export default function ExamApplicationsPage({
   // [공용] 응시 후보 목록 계산 + 공정 권한 필터(최신 exam_applications 반영). openCandidates·등록 후 갱신에서 재사용.
   const computeCandidateList = useCallback(async (): Promise<ExamCandidate[]> => {
     const freshApps = await listExamRows("exam_applications", tenantId).catch(() => rows);
-    const list = buildExamCandidates(personnel as Record<string, unknown>[], freshApps as Record<string, unknown>[], rules as Record<string, unknown>[]);
+    // [B: 현재단계 정합] 확정 pm_certifications(공정 scope·rank_order)를 배치 로드해 현재단계 판정에 반영(N+1 없음).
+    const [pmCerts, levelRows] = await Promise.all([
+      listExamRows("pm_certifications", tenantId).catch(() => [] as ExamRow[]),
+      listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
+    ]);
+    const pmStages = selectPmStageLevels(levelRows);                         // Single~M4 rank_order 순(코드 하드코딩 없음)
+    // [C: 설비 후보] stage rule · 설비명 · 확정 취득을 배치 로드(N+1 없음).
+    const [stageRules, equipRows, acquiredEquipByPerson] = await Promise.all([
+      listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[]),
+      listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]),
+      loadApprovedEquipmentByPerson(tenantId).catch(() => new Map<string, Set<string>>()),
+    ]);
+    const equipmentNameById = new Map<string, string>(equipRows.map((e) => [String(e.id), String(e.name ?? e.code ?? "")]));
+    const pmStageLevelIds = pmStages.map((s) => String(s.id));               // Single..M4 level_id 순서(PM_STAGES 정렬)
+    const today = new Date().toISOString().slice(0, 10);
+    const setByPersonProc = new Map<string, Set<string>>();                  // `${personId}|${processId}` → 확정 level_id 집합
+    for (const c of pmCerts) {
+      if (String(c.approval_status ?? "") !== "승인" || c.is_active === false || c.deleted_at) continue; // 확정·활성만(취소/반려/미확정 제외)
+      const exp = c.expiry_date ? String(c.expiry_date).slice(0, 10) : "";
+      if (exp && exp < today) continue;                                      // 만료분 제외
+      const pid = String(c.personnel_id ?? ""), proc = String(c.process_id ?? ""), lid = String(c.level_id ?? "");
+      if (!pid || !lid) continue;
+      const k = `${pid}|${proc}`;
+      (setByPersonProc.get(k) ?? setByPersonProc.set(k, new Set()).get(k)!).add(lid);
+    }
+    const confirmedStageIdxByPerson = new Map<string, number>();            // 직원 id → 현재단계 인덱스(PM_STAGES)
+    for (const p of personnel) {
+      const pid = String((p as Record<string, unknown>).id ?? ""), proc = String((p as Record<string, unknown>).process_id ?? "");
+      const set = setByPersonProc.get(`${pid}|${proc}`); if (!pid || !set) continue; // 공정 일치분만(다른 공정 혼입 금지)
+      let idx = -1;
+      for (let i = 0; i < pmStages.length; i++) if (set.has(String(pmStages[i].id))) idx = i; // 확정된 최고 rank 단계
+      if (idx >= 0) confirmedStageIdxByPerson.set(pid, idx);
+    }
+    const list = buildExamCandidates(personnel as Record<string, unknown>[], freshApps as Record<string, unknown>[], rules as Record<string, unknown>[],
+      { confirmedStageIdxByPerson, stageRules: stageRules as Record<string, unknown>[], acquiredEquipByPerson, equipmentNameById, pmStageLevelIds });
     try {
       const perms: MyExamPermissions = await loadMyExamPermissions(tenantId);
       if (!perms.isAdmin && !perms.isViewerAll) {
@@ -698,12 +734,17 @@ export default function ExamApplicationsPage({
         if (existing.some((a) => !a.deleted_at && String(a.category_code ?? "") === String(c.target_level ?? ""))) {
           failures.push({ ref, reason: `동일 구분코드(${c.target_level})의 응시 이력이 이미 있어 신규 등록할 수 없습니다.` }); continue;
         }
+        // [연번 자동 발급] 수동 등록과 동일 RPC 재사용(tenant·연도별 동시성 안전). 실패(RPC 미적용)면 null → 기존처럼 미지정 저장.
+        const seqNo = await getNextExamSequence(tenantId, new Date().getFullYear());
         const payload: ExamRow = {
           employee_no: c.employee_no, name: c.name, group_name: c.group_name,
           product: c.product, process: c.process, pm_level: c.current_level, status: "승인대기",
           category_code: c.target_level,                                        // 목표 단계 식별(후보 재계산 중복 인식)
           level_id: levelId, process_id: processId,                             // FK 식별(정확 중복 판정)
           personnel_id: person?.id ? String(person.id) : null,
+          ...(seqNo != null ? { seq_no: seqNo } : {}),                          // 발급 성공 시에만 설정(수동 등록과 동일 결과)
+          // [C] 설비 후보가 정확히 1개일 때만 preselect(자동 저장). 2개+ 는 임의 선택 금지 → null 유지(수정 화면에서 선택).
+          ...(c.recommendedEquipmentId ? { equipment_id: c.recommendedEquipmentId } : {}),
           // [라인 스냅샷] 이미 로드된 personnel 에서 사번→line_id(행별 재조회 없음). process 로 추정하지 않음.
           line_id: personnelLineByEmp.get(String(c.employee_no ?? "").trim()) ?? null,
         };
@@ -976,7 +1017,13 @@ export default function ExamApplicationsPage({
                           <td className="px-2 py-1.5"><input type="checkbox" disabled={!c.eligible || !canEdit} checked={candSel.has(candKey(c))} onChange={() => setCandSel((p) => { const n = new Set(p); const k = candKey(c); if (n.has(k)) n.delete(k); else n.add(k); return n; })} /></td>
                           <td className="px-2 py-1.5">{c.employee_no}</td><td className="px-2 py-1.5">{c.name}</td><td className="px-2 py-1.5">{c.process || "-"}</td>
                           <td className="px-2 py-1.5">{c.current_level} → <b>{c.target_level}</b></td>
-                          <td className="px-2 py-1.5">{c.needEquipment ? "필요" : "-"}</td>
+                          <td className="px-2 py-1.5">{(() => {
+                            const names = c.equipmentCandidateNames ?? [];
+                            if (c.recommendedEquipmentId && names.length === 1) return names[0];        // 후보 1개 → 설비명
+                            if (c.needEquipmentSelection && names.length > 1) return <span title={names.join(", ")}>후보 {names.length}종 <span className="text-amber-600">(선택 필요)</span></span>; // N개 → 선택 필요
+                            if (c.equipmentCandidateIds && c.equipmentCandidateIds.length === 0) return <span className="text-slate-400">미취득 없음</span>;
+                            return c.needEquipment ? "필요" : "-";                                        // 기준 미로딩/해당없음
+                          })()}</td>
                           <td className="px-2 py-1.5">{c.retestAvailableDate || "-"}</td>
                           <td className="px-2 py-1.5">{c.eligible ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">응시 가능</span> : <span className="text-rose-600">{c.blockedReasons.join(", ")}</span>}</td>
                         </tr>
