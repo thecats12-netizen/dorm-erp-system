@@ -6,8 +6,13 @@ import * as XLSX from "xlsx";
 import { EXAM_ENTITY_CONFIGS, type ExamEntityConfig, type ExamColumn } from "../examMasterConfigs";
 import { listExamRows, buildProcessRefIndex, resolveEquipmentHierarchy, type ExamMasterTable, type ExamProcessRef, type ExamRow } from "./examMasterService";
 import { listEquipmentStageRules } from "./equipmentStageRuleService";
-import { listProcessCriteriaRules } from "./processCriteriaRuleService";
+import { listProcessCriteriaRules, isAchieveType } from "./processCriteriaRuleService";
 import { criteriaToFormState } from "../utils/criteriaFormMapper";
+
+// "인증 규칙"(06_인증규칙/배지) 범위 = 달성기준이 아닌 exam_rules(취득/유효/목표). 그 외 테이블은 전건.
+//  · 달성기준(rule_type='달성기준')은 08_공정별달성기준에서만 관리 → 여기선 제외.
+const isRulesEntity = (cfg: ExamEntityConfig) => cfg.key === "rules" || cfg.table === "exam_rules";
+const inRulesScope = (cfg: ExamEntityConfig, r: ExamRow) => !isRulesEntity(cfg) || !isAchieveType(r.rule_type);
 
 // [단일 source of truth] 라인/제품파트(hidden)는 통합 Excel 3기능 모두에서 제외 → 표시 config 만 사용.
 const VISIBLE_CONFIGS = EXAM_ENTITY_CONFIGS.filter((c) => !c.hidden);
@@ -159,7 +164,7 @@ export async function downloadExamMasterCurrent(tenantId: string, includeInactiv
   for (let i = 0; i < VISIBLE_CONFIGS.length; i++) {
     const cfg = VISIBLE_CONFIGS[i];
     const rows = (await listExamRows(cfg.table, tenantId).catch(() => [] as ExamRow[]))
-      .filter((r) => includeInactive || r.is_active !== false);
+      .filter((r) => (includeInactive || r.is_active !== false) && inRulesScope(cfg, r));
     counts[cfg.key] = rows.length;
     const json = rows.map((r) => {
       const o: Record<string, string> = {};
@@ -191,7 +196,7 @@ export async function loadExamMasterCounts(tenantId: string, includeInactive = f
   const out: Record<string, number> = {};
   await Promise.all(VISIBLE_CONFIGS.map(async (cfg) => {
     const rows = await listExamRows(cfg.table, tenantId).catch(() => [] as ExamRow[]);
-    out[cfg.key] = rows.filter((r) => includeInactive || r.is_active !== false).length;
+    out[cfg.key] = rows.filter((r) => (includeInactive || r.is_active !== false) && inRulesScope(cfg, r)).length;
   }));
   return out;
 }

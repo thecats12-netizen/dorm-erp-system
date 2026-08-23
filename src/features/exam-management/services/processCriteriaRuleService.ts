@@ -9,7 +9,8 @@ import type { Criteria } from "../types/certificationCriteria";
 const TABLE = "exam_rules";
 // 신규 저장 rule_type(기존 인증 규칙 CRUD select 값과 동일). 조회는 공백 무시로 "달성기준"도 포함.
 export const ACHIEVE_RULE_TYPE = "달성 기준";
-const isAchieveType = (rt: unknown) => String(rt ?? "").replace(/\s/g, "") === "달성기준";
+// canonical 판별자: "달성기준"(공백무시) 여부. 인증 규칙 범위는 !isAchieveType 로 정의(취득/유효/목표).
+export const isAchieveType = (rt: unknown) => String(rt ?? "").replace(/\s/g, "") === "달성기준";
 const nowIso = () => new Date().toISOString();
 
 function toUserError(err: { code?: string; message?: string } | null): string {

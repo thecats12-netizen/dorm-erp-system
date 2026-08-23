@@ -8,6 +8,7 @@ import {
   writeExamAudit, listExamAudit, examSupabaseReady, translateExamWriteError, isExamTableMissing, findScopedExistingId,
   examRefLabel, resolveEquipmentHierarchy, type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
+import { isAchieveType } from "../services/processCriteriaRuleService";
 
 // 참조 옵션은 라벨뿐 아니라 상위 FK(category_id/group_id/part_id/process_id)와 활성여부를 함께 싣는다(종속 선택용).
 type RefOpt = { id: string; label: string; code?: string | null; name?: string | null; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null; process_id?: string | null };
@@ -309,6 +310,8 @@ export default function ExamMasterGrid({
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = rows.filter((r) => {
+      // 인증 규칙 탭은 "달성기준이 아닌 exam_rules"(취득/유효/목표)만 표시. 달성기준은 공정별 달성기준 탭 전용(행은 DB에 그대로 유지).
+      if (isRules && isAchieveType(r.rule_type)) return false;
       if (activeFilter === "사용" && r.is_active === false) return false;
       if (activeFilter === "미사용" && r.is_active !== false) return false;
       // 계단식 필터(조회 전용): process_id → 공정 → group_id/category_id 를 refMap 으로 판정(행별 DB 호출 없음).
