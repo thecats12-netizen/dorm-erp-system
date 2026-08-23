@@ -10,6 +10,7 @@ import {
 import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, deriveAchievementTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, isInProgressStatus, applicationMatchesTarget, type ExamCandidate, type AchievementTiming } from "../services/examAutomationService";
 import { selectPmStageLevels } from "../utils/certificationLevel";
 import { loadApprovedEquipmentByPerson } from "../services/certificationPreviewService";
+import { isAcquiredApplication } from "../services/employeeAutofillService";
 import { normalizeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { loadMyExamPermissions, type MyExamPermissions } from "../services/examPermissionService";
 // [4단계] 공통 사원선택 + 라이선스 요약(조회 전용, 추가 UI). 기존 사번 select/필드/저장은 그대로 유지.
@@ -678,6 +679,21 @@ export default function ExamApplicationsPage({
       let idx = -1;
       for (let i = 0; i < pmStages.length; i++) if (set.has(String(pmStages[i].id))) idx = i; // 확정된 최고 rank 단계
       if (idx >= 0) confirmedStageIdxByPerson.set(pid, idx);
+    }
+    // [B fix] 확정 exam_applications 취득이력도 현재단계 SoT 로 병합(max). PM 인증 승인과 별개로 "시험 취득"을 인정.
+    //  · canonical isAcquiredApplication 재사용(불합격/취소/미취득/진행중/삭제 제외) · 공정 FK 일치만(혼입 금지) · level_id→pmStages index.
+    const levelIdxById = new Map<string, number>(pmStageLevelIds.map((id, i) => [id, i]));
+    const personById = new Map(personnel.map((p) => [String((p as Record<string, unknown>).id ?? ""), p as Record<string, unknown>]));
+    const personByEmpNo = new Map(personnel.map((p) => [String((p as Record<string, unknown>).employee_no ?? "").trim(), p as Record<string, unknown>]));
+    for (const a of freshApps as Record<string, unknown>[]) {
+      if (a.deleted_at) continue;                                                    // 삭제행 제외
+      if (!isAcquiredApplication(a)) continue;                                       // 확정 취득만(canonical)
+      const idx = levelIdxById.get(String(a.level_id ?? "")); if (idx === undefined) continue; // level_id→PM 단계(없으면 skip · 문자열 추론 금지)
+      const person = (a.personnel_id && personById.get(String(a.personnel_id))) || personByEmpNo.get(String(a.employee_no ?? "").trim());
+      const personId = person ? String(person.id ?? "") : ""; if (!personId) continue;
+      const appProc = String(a.process_id ?? ""), perProc = String(person!.process_id ?? "");
+      if (!appProc || appProc !== perProc) continue;                                 // 공정 FK 일치(혼입 금지 · 문자열 비교 없음)
+      confirmedStageIdxByPerson.set(personId, Math.max(confirmedStageIdxByPerson.get(personId) ?? -1, idx)); // 최고 확정 rank
     }
     const list = buildExamCandidates(personnel as Record<string, unknown>[], freshApps as Record<string, unknown>[], rules as Record<string, unknown>[],
       { confirmedStageIdxByPerson, stageRules: stageRules as Record<string, unknown>[], acquiredEquipByPerson, equipmentNameById, pmStageLevelIds });

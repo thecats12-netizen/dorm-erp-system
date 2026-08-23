@@ -14,6 +14,11 @@ const asText = (v: unknown): string => (v == null ? "" : String(v).trim());
 const ymd = (v: unknown): string | null => { const s = asText(v); return s ? s.slice(0, 10) : null; };
 const num = (v: unknown): number | null => { const n = Number(v); return Number.isFinite(n) ? n : null; };
 
+// [canonical] exam_applications 한 건이 "확정 취득"인지 — 현재단계 판정의 단일 기준(computeLicenseSummary·응시 후보 공용).
+//  인정: 인증취득일 존재 / cert_status="취득" / status 가 인증취득·실기합격. 불합격·취소·미취득·응시예정·진행중은 미인정.
+export const isAcquiredApplication = (a: Row): boolean =>
+  !!ymd(a.cert_acquired_date) || asText(a.cert_status) === "취득" || /인증\s*취득|실기\s*합격/.test(asText(a.status));
+
 type LicenseSummary = EmployeeAutofill["licenseSummary"];
 
 // 공통 라이선스 요약 계산(순수 함수 · 단건/배치 공용 — 계산 로직 중복 방지).
@@ -39,7 +44,7 @@ export function computeLicenseSummary(inp: {
   const rankOf = (code: unknown): number => levelByCode.get(asText(code))?.rank ?? -1;
   const warnings: string[] = [];
 
-  const isAcquiredApp = (a: Row) => !!ymd(a.cert_acquired_date) || asText(a.cert_status) === "취득" || /인증\s*취득|실기\s*합격/.test(asText(a.status));
+  const isAcquiredApp = isAcquiredApplication; // canonical(단일 정의) 재사용
   const acquiredApps = apps.filter(isAcquiredApp)
     .sort((a, b) => asText(ymd(b.cert_acquired_date) || ymd(b.practical_pass_date)).localeCompare(asText(ymd(a.cert_acquired_date) || ymd(a.practical_pass_date))));
   const completedLevelCodes = plans.filter((p) => p.status === "completed").map((p) => asText(p.license_level)).filter(Boolean);
