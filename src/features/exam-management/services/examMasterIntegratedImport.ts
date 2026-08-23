@@ -32,6 +32,9 @@ const HOLD_SHEET_ALIASES: Record<string, string[]> = {};
 const norm = (s: string) => String(s ?? "").replace(new RegExp("[​-‍﻿]", "g"), "").replace(/\s+/g, "").trim().toLowerCase();
 const up = (v: unknown) => String(v ?? "").trim().toUpperCase();
 const txt = (v: unknown) => String(v ?? "").trim();
+// 이름 비교용 정규화(공백 "품질"만): NBSP( )→일반 공백, 연속 공백 1칸, trim, lowercase.
+//  ⚠ 글자 삭제/fuzzy 금지 — "기술 2그룹" ≠ "기술2그룹", "기술 21그룹" ≠ "기술 2그룹"(내부 단일 공백 보존).
+const normName = (v: unknown) => String(v ?? "").replace(/ /g, " ").replace(/\s+/g, " ").trim().toLowerCase();
 // "코드 · 이름 · 경로…" → 코드/이름(앞 두 세그먼트).
 const parseRef = (v: unknown) => { const p = String(v ?? "").replace(/\s+/g, " ").trim().split("·").map((s) => s.trim()); return { code: p[0] || "", name: p[1] || p[0] || "" }; };
 
@@ -53,11 +56,22 @@ function matchSheet(sheetNames: string[], key: CfgKey): string | null {
 function resolveRef(pool: ExamRow[], raw: string, scope: (r: ExamRow) => boolean): { id: string | null; err?: "none" | "many" } {
   if (!raw) return { id: null };
   const { code, name } = parseRef(raw);
-  const m = pool.filter((r) => scope(r) && r.deleted_at == null && (code && name ? (up(r.code) === up(code) && txt(r.name).toLowerCase() === name.toLowerCase()) : (up(r.code) === up(code || name) || txt(r.name).toLowerCase() === (code || name).toLowerCase())));
+  // 이름 비교는 공백 품질만 정규화(normName). 코드는 기존대로 trim+대문자. (fuzzy/글자삭제 없음)
+  const m = pool.filter((r) => scope(r) && r.deleted_at == null && (code && name ? (up(r.code) === up(code) && normName(r.name) === normName(name)) : (up(r.code) === up(code || name) || normName(r.name) === normName(code || name))));
   const ids = Array.from(new Set(m.map((r) => String(r.id))));
   if (ids.length === 0) return { id: null, err: "none" };
   if (ids.length > 1) return { id: null, err: "many" };
   return { id: ids[0] };
+}
+
+// [통합 importer 전용] 그룹 기존 매칭 = code + name(전역 MASTER_SCOPED_KEYS·개별 CRUD 불변).
+//  exam_groups 는 지역 코드(평택/천안)를 공유할 수 있어 code 단일키로는 서로 다른 그룹을 구분 못 함 → 통합 등록에서만 code+name 사용.
+//  staged 임시행(__staged_)은 제외(실제 DB row 만 update 대상).
+function findGroupExistingByCodeName(existing: ExamRow[], row: ExamRow): string | null {
+  const c = up(row.code); const n = normName(row.name);
+  if (!c && !n) return null;
+  const hit = existing.find((r) => !r.deleted_at && !String(r.id ?? "").startsWith("__staged_") && String(r.id ?? "") !== String(row.id ?? "") && up(r.code) === c && normName(r.name) === n);
+  return hit ? String(hit.id) : null;
 }
 
 // 통합 분석(미리보기). pool = 기존 DB + 이 파일에서 앞 시트가 만들 신규 행(스코프 해석용). 저장은 하지 않음.
@@ -139,12 +153,13 @@ export async function analyzeIntegratedWorkbook(wb: XLSX.WorkBook, tenantId: str
       let action: RowAction; let reason: string | undefined;
       if (err) { action = "error"; reason = err; }
       else {
-        // 파일 내부 스코프 중복
-        const scopeKey = `${key}|${gId}|${cId}|${pId}|${up(rowOut.code)}`;
-        if (seen.has(scopeKey)) { action = "dup"; reason = "파일 내 동일 스코프 코드 중복"; }
+        // 파일 내부 스코프 중복. 그룹은 지역 코드 공유 가능 → code+name 으로 구분(그 외 엔티티는 기존 code 기준 유지).
+        const scopeKey = `${key}|${gId}|${cId}|${pId}|${up(rowOut.code)}${key === "groups" ? `|${normName(rowOut.name)}` : ""}`;
+        if (seen.has(scopeKey)) { action = "dup"; reason = key === "groups" ? "파일 내 동일 코드+이름 그룹 중복" : "파일 내 동일 스코프 코드 중복"; }
         else {
           seen.add(scopeKey);
-          const existId = findScopedExistingId(pool[key], String(cfg.table), rowOut);
+          // 그룹만 통합 전용 code+name 매칭(전역 키/개별 CRUD 불변). 그 외는 기존 findScopedExistingId.
+          const existId = key === "groups" ? findGroupExistingByCodeName(pool.groups, rowOut) : findScopedExistingId(pool[key], String(cfg.table), rowOut);
           if (existId) { action = "update"; rowOut.id = existId; }
           else { action = "new"; }
           // 다음 시트 해석을 위해 풀에 반영(신규는 임시 id 부여).
