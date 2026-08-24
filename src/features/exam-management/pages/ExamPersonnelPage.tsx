@@ -12,6 +12,7 @@ import { normalizeCertificationLevel, acquiredLevelIds } from "../utils/certific
 import { generatePlanForEmployeeAuto } from "../services/licensePlanService";
 // [3단계] 인력현황 등록 UX: 공통 사원선택 + 자동입력(조회 전용 기반). 다른 화면 미변경.
 import EmployeeSelector from "../components/EmployeeSelector";
+import PersonnelEquipmentProgressSection from "./PersonnelEquipmentProgressSection";
 import { loadEmployeeAutofill } from "../services/employeeAutofillService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
 import type { EmployeeLite, EmployeeAutofill } from "../types/employeeLookup";
@@ -87,6 +88,7 @@ export default function ExamPersonnelPage({
   const [levelsRaw, setLevelsRaw] = useState<ExamRow[]>([]); // exam_levels master(raw · code/name/rank)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<"info" | "equipment">("info"); // 기본: 기존 인력 정보
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [sortKey, setSortKey] = useState<string | null>(null);
@@ -568,6 +570,17 @@ export default function ExamPersonnelPage({
         <p className="text-sm text-slate-500">시험관리 · 직원 인증 현황(연명부)을 관리합니다.</p>
       </div>
 
+      {/* 뷰 전환: 인력 정보(기존 · 기본) / 설비 인증현황(신규 · 단계별 취득/대상) */}
+      <div className="mb-3 flex flex-wrap gap-1.5">
+        <button onClick={() => setView("info")} className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${view === "info" ? "bg-slate-900 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>인력 정보</button>
+        <button onClick={() => setView("equipment")} className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${view === "equipment" ? "bg-slate-900 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>설비 인증현황</button>
+      </div>
+
+      {view === "equipment" && (
+        <PersonnelEquipmentProgressSection darkMode={darkMode} tenantId={tenantId} personnel={rows} levels={levelsRaw} applications={apps} />
+      )}
+
+      {view === "info" && (<>
       {/* 필터/툴바 */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="검색(사번/이름 등)" className={`${inputCls} min-w-[170px]`} />
@@ -648,6 +661,7 @@ export default function ExamPersonnelPage({
           <button className={btn} disabled={curPage >= pageCount} onClick={() => setPage(curPage + 1)}>다음</button>
         </span>
       </div>
+      </>)}
 
       {/* 등록/수정 모달 */}
       {editRow && (

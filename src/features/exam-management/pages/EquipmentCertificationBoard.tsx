@@ -9,6 +9,8 @@ import {
   listEquipmentCertifications, setEquipmentCertificationStatus, createManualEquipmentCertification,
   eqCertStatusKo, type EqCertStatus,
 } from "../services/equipmentCertificationService";
+import { listEquipmentStageRules } from "../services/equipmentStageRuleService";
+import EquipmentStageProgressPanel from "./EquipmentStageProgressPanel";
 
 const PAGE_SIZE = 20;
 // 상태 탭(전체 + 실제 상태 + 재평가 필요는 metadata.needs_reeval 플래그). 코드값은 내부 전용.
@@ -30,7 +32,8 @@ type Props = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: st
 
 export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantId, userId, onToast }: Props) {
   const [rows, setRows] = useState<ExamRow[]>([]);
-  const [master, setMaster] = useState<{ groups: ExamRow[]; categories: ExamRow[]; processes: ExamRow[]; equipment: ExamRow[]; levels: ExamRow[]; personnel: ExamRow[] }>({ groups: [], categories: [], processes: [], equipment: [], levels: [], personnel: [] });
+  const [master, setMaster] = useState<{ groups: ExamRow[]; categories: ExamRow[]; processes: ExamRow[]; equipment: ExamRow[]; levels: ExamRow[]; personnel: ExamRow[]; stageRules: ExamRow[]; applications: ExamRow[]; pmCertifications: ExamRow[] }>({ groups: [], categories: [], processes: [], equipment: [], levels: [], personnel: [], stageRules: [], applications: [], pmCertifications: [] });
+  const [view, setView] = useState<"approve" | "progress">("approve"); // 기본: 기존 승인 관리
   const [loading, setLoading] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [tab, setTab] = useState("all");
@@ -49,7 +52,7 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
     setLoading(true); setError(null);
     try {
-      const [certs, g, c, p, e, lv, pe] = await Promise.all([
+      const [certs, g, c, p, e, lv, pe, sr, ap, pm] = await Promise.all([
         listEquipmentCertifications(tenantId),   // 미적용/오류 시 [] (서비스가 안전 처리)
         listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
@@ -57,8 +60,11 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
         listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
+        listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[]), // 단계별 현황 대상설비(분모) · 실패 시 [] 안전
+        listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),   // 현재 Level canonical(확정 취득)
+        listExamRows("pm_certifications", tenantId).catch(() => [] as ExamRow[]),   // 현재 Level canonical(승인 인증)
       ]);
-      setRows(certs); setMaster({ groups: g, categories: c, processes: p, equipment: e, levels: lv, personnel: pe });
+      setRows(certs); setMaster({ groups: g, categories: c, processes: p, equipment: e, levels: lv, personnel: pe, stageRules: sr, applications: ap, pmCertifications: pm });
     } catch (err) { setError((err as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId]);
@@ -125,9 +131,20 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
           <h2 className="text-lg font-semibold">설비 인증현황</h2>
           <p className="text-sm text-slate-500">응시 합격으로 생성된 설비 취득 후보를 검토·승인합니다.</p>
         </div>
-        {isAdmin && <button className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800" onClick={() => setManualOpen(true)}>수동 취득 등록</button>}
+        {view === "approve" && isAdmin && <button className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800" onClick={() => setManualOpen(true)}>수동 취득 등록</button>}
       </div>
 
+      {/* 뷰 전환: 승인 관리(기존 · 기본) / 단계별 현황(신규) */}
+      <div className="mb-3 flex flex-wrap gap-1.5">
+        <button onClick={() => setView("approve")} className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${view === "approve" ? "bg-slate-900 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>승인 관리</button>
+        <button onClick={() => setView("progress")} className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${view === "progress" ? "bg-slate-900 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>단계별 현황</button>
+      </div>
+
+      {view === "progress" && (
+        <EquipmentStageProgressPanel darkMode={darkMode} personnel={master.personnel} levels={master.levels} processes={master.processes} equipment={master.equipment} stageRules={master.stageRules} certs={rows} applications={master.applications} pmCertifications={master.pmCertifications} />
+      )}
+
+      {view === "approve" && (<>
       {/* 상태 탭 */}
       <div className="mb-3 flex flex-wrap gap-1.5">
         {STATUS_TABS.map((t) => (
@@ -190,6 +207,7 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
         <span>총 {filtered.length}건</span>
         <span className="flex items-center gap-2"><button className={btn} disabled={curPage <= 1} onClick={() => setPage(curPage - 1)}>이전</button><span>{curPage} / {pageCount}</span><button className={btn} disabled={curPage >= pageCount} onClick={() => setPage(curPage + 1)}>다음</button></span>
       </div>
+      </>)}
 
       {/* 사유 모달(반려/취소) */}
       {reasonModal && (
