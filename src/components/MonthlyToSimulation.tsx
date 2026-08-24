@@ -53,6 +53,9 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
   const [region, setRegion] = useState<RegionSel>("전체");
   const [gender, setGender] = useState<GenderSel>("전체");
   const [vacancyCost, setVacancyCost] = useState<number>(defaultVacancyCost);
+  // [예상 기숙사(채)] 시뮬레이션 기숙사 채수 증감(가정값 · 양수/음수/0). 빈값·NaN → 0. local state(원본 불변 · DB 저장 없음).
+  const [expectedDormRaw, setExpectedDormRaw] = useState("");
+  const expectedDorm = useMemo(() => { const n = parseInt(expectedDormRaw, 10); return Number.isFinite(n) ? n : 0; }, [expectedDormRaw]);
   const [scenarios, setScenarios] = useState<Adjustment[]>([]);
   const [modal, setModal] = useState(false);
   const [draft, setDraft] = useState<Partial<Adjustment>>({ month: now.getMonth() + 1, region: "전체", gender: "전체", type: "직접 인원 증감", quantity: 0 });
@@ -82,10 +85,11 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
       // 예상 TO = 계획 TO(해지 예정분 가산된 물리적 현재) − 누적 임차 해지예정 TO + 시나리오 TO 델타.
       const to = Math.max(0, c.planTo - c.terminationCumulative + sc.to);
       const finalResidents = Math.max(0, c.baseResidents + sc.res);
-      const dormCount = Math.max(0, c.dormBase + sc.dorm);
+      // 예상 기숙사(채) = 기준 채수 + 시나리오 채수 + 예상 기숙사 증감(과거월 미적용 · 1회만 가산). 채수는 TO/거주자에 영향 없음.
+      const dormCount = Math.max(0, c.dormBase + sc.dorm + (c.sourceType === "history" ? 0 : expectedDorm));
       return { ...c, to, scenarioRes: sc.res, finalResidents, dormCount, ...calcMonthly(to, finalResidents, vacancyCost) };
     });
-  }, [baseCells, region, gender, vacancyCost]);
+  }, [baseCells, region, gender, vacancyCost, expectedDorm]);
   const kpiOf = (cells: ReturnType<typeof buildCells>) => ({
     endRes: cells[11].finalResidents, minRemain: Math.min(...cells.map((r) => r.remain)),
     maxShortage: Math.max(...cells.map((r) => r.shortage)), occAvg: Math.round((cells.reduce((a, r) => a + r.occ, 0) / 12) * 10) / 10,
@@ -173,6 +177,7 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
     { label: "임차 만기(채)", get: (r) => r.leaseExpiry ? String(r.leaseExpiry) : "-", muted: true },
     { label: "추가임차(채)", get: (r) => r.leaseAdd ? String(r.leaseAdd) : "-", muted: true },
     { label: "기준 예상 거주자", get: (r) => String(r.baseResidents), tone: (r) => r.isEstimatePast ? "text-slate-400 italic" : "" },
+    { label: "예상 기숙사(채)", get: (r) => r.sourceType === "history" ? "-" : dash(expectedDorm, true), muted: true, tone: (r) => (r.sourceType !== "history" && expectedDorm) ? "text-blue-600" : "" },
     { label: "시나리오 증감", get: (r) => dash(r.scenarioRes, true), tone: (r) => r.scenarioRes ? "text-blue-600" : "" },
     { label: "최종 예상 거주자", get: (r) => String(r.finalResidents) },
     { label: "예상 TO", get: (r) => String(r.to) },
@@ -249,12 +254,13 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
         <select value={region} onChange={(e) => setRegion(e.target.value)} className={inputCls}><option value="전체">지역: 전체</option>{sites.map((s) => <option key={s} value={s}>{s}</option>)}</select>
         <select value={gender} onChange={(e) => setGender(e.target.value as GenderSel)} className={inputCls}><option value="전체">성별: 전체</option><option value="남">남</option><option value="여">여</option></select>
         <label className="flex items-center gap-1 text-xs text-slate-500">공실 1실 월비용<input type="text" inputMode="numeric" value={String(vacancyCost)} onChange={(e) => setVacancyCost(Number(e.target.value.replace(/[^0-9]/g, "")) || 0)} className={`${inputCls} w-28`} /></label>
+        <label className="flex items-center gap-1 text-xs text-slate-500">예상 기숙사(채)<input type="text" inputMode="numeric" value={expectedDormRaw} onChange={(e) => setExpectedDormRaw(e.target.value.replace(/[^0-9-]/g, ""))} placeholder="0" className={`${inputCls} w-20`} title="시뮬레이션 기숙사 채수 증감(양수/음수)" /></label>
         <span className="ml-auto flex gap-1.5">
           <button className={btn} onClick={() => exportSimulationExcel(buildExportModel())}>Excel</button>
           <button className={btn} onClick={() => printSimulation(buildExportModel())}>PDF</button>
           <button className={btn} onClick={() => printSimulation(buildExportModel())}>인쇄</button>
           <button className="rounded-xl bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800" onClick={() => setModal(true)}>시나리오 추가</button>
-          <button className={btn} onClick={() => setScenarios([])}>초기화</button>
+          <button className={btn} onClick={() => { setScenarios([]); setExpectedDormRaw(""); }}>초기화</button>
         </span>
       </div>
 
