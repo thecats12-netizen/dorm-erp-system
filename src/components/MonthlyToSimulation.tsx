@@ -176,8 +176,9 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
     { label: "기타 확정 증감", get: (r) => dash(r.otherDelta, true) },
     { label: "임차 만기(채)", get: (r) => r.leaseExpiry ? String(r.leaseExpiry) : "-", muted: true },
     { label: "추가임차(채)", get: (r) => r.leaseAdd ? String(r.leaseAdd) : "-", muted: true },
+    // 예상 기숙사(채) = 최종 예상 채수(기준 + 시나리오 기숙사 추가/해지 + 수동 예상 기숙사 증감). r.dormCount 는 이미 3자 합산(중복 없음).
+    { label: "예상 기숙사(채)", get: (r) => String(r.dormCount), muted: true, tone: (r) => r.dormCount !== r.dormBase ? "text-blue-600" : "" },
     { label: "기준 예상 거주자", get: (r) => String(r.baseResidents), tone: (r) => r.isEstimatePast ? "text-slate-400 italic" : "" },
-    { label: "예상 기숙사(채)", get: (r) => r.sourceType === "history" ? "-" : dash(expectedDorm, true), muted: true, tone: (r) => (r.sourceType !== "history" && expectedDorm) ? "text-blue-600" : "" },
     { label: "시나리오 증감", get: (r) => dash(r.scenarioRes, true), tone: (r) => r.scenarioRes ? "text-blue-600" : "" },
     { label: "최종 예상 거주자", get: (r) => String(r.finalResidents) },
     { label: "예상 TO", get: (r) => String(r.to) },
