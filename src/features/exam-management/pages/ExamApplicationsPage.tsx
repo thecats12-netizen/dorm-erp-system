@@ -977,13 +977,15 @@ export default function ExamApplicationsPage({
                           );
                         })()
                           : c.key === "timing_status" ? (() => {
-                            // 저장된 조기/지연 값은 그대로 두고, 공정별 달성기준 기반 자동판정을 배지+툴팁(근거)으로 보조 표시.
+                            // [F 표시 정합] primary = 현재 자동판정 결과. 판정 불가면 "판정 보류"(저장 legacy 값을 primary 로 쓰지 않음 · DB 불변).
                             const t = computeAppTiming(r);
-                            const tip = t.insufficient ? `자동 판정 보류: ${t.insufficientReason}` : `자동판정 근거: ${t.reasons.join(", ") || "-"}`;
+                            const tip = t.insufficient ? `판정 보류: ${t.insufficientReason}` : `자동판정 근거: ${t.reasons.join(", ") || "-"}`;
+                            const legacy = cellText(c, r);
                             return (
                               <span className="inline-flex items-center gap-1">
-                                <span>{cellText(c, r)}</span>
-                                <span title={tip} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동:{t.value || "선택"}</span>
+                                <span>{t.insufficient ? "판정 보류" : (t.value || "판정 보류")}</span>
+                                <span title={tip} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>{t.insufficient ? "기준 없음" : "자동"}</span>
+                                {t.insufficient && legacy && <span title={`저장값: ${legacy}`} className="text-[0.6rem] text-slate-400">(저장값 {legacy})</span>}
                               </span>
                             );
                           })()
@@ -1130,13 +1132,14 @@ export default function ExamApplicationsPage({
                 <div key={c.key}>
                   <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{c.label}{c.required && <span className="text-rose-500"> *</span>}{AUTO_READONLY.has(c.key) && <span className="ml-1 text-[0.6rem] font-normal text-slate-400">(사번 자동)</span>}{(c.key === "status" || c.key === "timing_status") && <span className="ml-1 rounded bg-slate-200 px-1 py-0.5 text-[0.55rem] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">자동</span>}</label>
                   {c.key === "timing_status" ? (
-                    // [자동] 조기/지연취득: 공정별 달성기준(FK 매칭)+인증취득일로 자동 판정. 판정 불가 시 기존 "선택" 유지(새 상태값 안 만듦 · 임의 정상 금지).
+                    // [F 표시 정합] primary = 현재 자동판정 결과(timingAuto · 목록과 동일 helper). 판정 불가면 "판정 보류"(저장 legacy 값을 primary 로 쓰지 않음 · DB 불변).
                     <>
                       <div className={`${inputCls} w-full flex items-center justify-between gap-2 ${darkMode ? "bg-slate-800/60 text-slate-300" : "bg-slate-100 text-slate-600"}`} title="조기/지연취득은 공정별 달성기준과 인증취득일로 자동 판정됩니다">
-                        <span>{(autoPreview && String(autoPreview.timing_status ?? "").trim()) || "선택"}</span>
+                        <span>{timingAuto?.insufficient ? "판정 보류" : (timingAuto?.value || "판정 보류")}</span>
+                        {timingAuto?.insufficient && <span className="rounded bg-slate-200 px-1 py-0.5 text-[0.55rem] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">기준 없음</span>}
                       </div>
-                      {(!(autoPreview && String(autoPreview.timing_status ?? "").trim()) && timingAuto?.insufficient) && (
-                        <p className="mt-1 text-[0.65rem] text-amber-600">자동 판정에 필요한 기준정보가 부족합니다.</p>
+                      {timingAuto?.insufficient && (
+                        <p className="mt-1 text-[0.65rem] text-amber-600">자동 판정에 필요한 기준정보가 부족합니다{timingAuto.insufficientReason ? ` (${timingAuto.insufficientReason})` : ""}.{(() => { const legacy = String(editRow.timing_status ?? "").trim(); return legacy ? ` 저장값: ${legacy}` : ""; })()}</p>
                       )}
                     </>
                   ) : c.key === "status" ? (() => {
