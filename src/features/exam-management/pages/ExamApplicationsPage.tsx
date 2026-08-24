@@ -99,6 +99,18 @@ const AUTO_STATUS_MAP: Record<string, string> = {
   "응시예정": "예정", "미등록": "예정", "취소": "취소", "재응시": "재응시",
 };
 
+// [G/H 표시 정합] 응시상태 표시 단일 기준(목록·수정 공용). 저장 정책(computeDerivedFields ③: 빈값/"예정" 은 자동)과 동일한 자동/수동 판정.
+//  자동모드면 계산값을 표시하고, 수동 상태(취소/불합격/연기 등)는 저장값 그대로 보존. 저장/DB 는 변경하지 않음(표시 전용).
+type ExamStatusDisplay = { value: string; mode: "auto" | "manual"; calculatedValue: string; storedValue: string };
+const resolveExamStatusDisplay = (row: ExamRow): ExamStatusDisplay => {
+  const storedValue = String(row.status ?? "").trim();
+  const calculatedValue = AUTO_STATUS_MAP[calculateExamStatus(row).value] ?? "예정";
+  const autoMode = storedValue === "" || storedValue === "예정"; // computeDerivedFields ③ 과 동일 기준
+  return autoMode
+    ? { value: calculatedValue, mode: "auto", calculatedValue, storedValue }
+    : { value: storedValue, mode: "manual", calculatedValue, storedValue };
+};
+
 // 인증취득여부: 수동 확정값 우선, 아니면 실기 합격일 존재 시 "취득"(자동계산).
 const certOf = (r: ExamRow): "취득" | "미취득" => {
   if (r.cert_status_manual && (r.cert_status === "취득" || r.cert_status === "미취득")) return r.cert_status as "취득" | "미취득";
@@ -456,11 +468,8 @@ export default function ExamApplicationsPage({
     return next;
   };
 
-  // [자동값 미리보기] 저장 시 적용될 자동계산 결과(응시상태/조기·지연취득 등)를 모달에 그대로 표시 → 표시값과 저장값 불일치 방지(display == save).
-  //  computeDerivedFields 와 동일 함수 사용(계산식 중복 금지). rules/personnel 변경 시 갱신.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const autoPreview = useMemo(() => (editRow ? computeDerivedFields(editRow) : null), [editRow, rules, personnel]);
-  // 조기/지연 자동판정 상세(판정 불가 사유 안내용). 표시값 자체는 autoPreview.timing_status 를 사용.
+  // 응시상태/조기·지연취득 표시는 목록과 동일한 helper(resolveExamStatusDisplay·computeAppTiming)를 직접 사용한다(표시==저장 계산식 공유).
+  // 조기/지연 자동판정 상세(판정 불가 사유 안내용).
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const timingAuto = useMemo(() => (editRow ? computeAppTiming(editRow) : null), [editRow, rules, personnel, equipmentRows, rows]);
 
@@ -967,12 +976,13 @@ export default function ExamApplicationsPage({
                     <td key={c.key} className={`whitespace-nowrap px-2.5 py-2 ${pinFirst && c.key === "employee_no" ? "sticky left-9 " + (darkMode ? "bg-slate-900" : "bg-white") : ""}`}>
                       {c.type === "cert" ? <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${certOf(r) === "취득" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-500"}`}>{certOf(r)}{r.cert_status_manual ? " ✓" : ""}</span>
                         : c.key === "status" ? (() => {
-                          // 저장된 status(수동/저장값)는 그대로 표시하고, 자동계산 상태를 작은 배지+툴팁(근거)으로 보조 표시.
-                          const auto = calculateExamStatus(r);
+                          // [G/H 표시 정합] primary = 표시 helper 결과(자동모드=계산값, 수동=저장값). 목록·수정 동일. 저장값 불변.
+                          const d = resolveExamStatusDisplay(r);
+                          const tip = d.mode === "auto" ? `자동계산 근거: ${calculateExamStatus(r).reasons.join(", ")}` : `수동 지정 상태(저장값). 자동계산값: ${d.calculatedValue}`;
                           return (
                             <span className="inline-flex items-center gap-1">
-                              <span>{cellText(c, r)}</span>
-                              <span title={`자동계산 근거: ${auto.reasons.join(", ")}`} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`}>자동:{auto.value}</span>
+                              <span>{d.value || "-"}</span>
+                              <span title={tip} className={`rounded px-1 py-0.5 text-[0.6rem] font-medium ${d.mode === "manual" ? (darkMode ? "bg-amber-900/40 text-amber-300" : "bg-amber-100 text-amber-700") : (darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600")}`}>{d.mode === "auto" ? "자동" : "수동"}</span>
                             </span>
                           );
                         })()
@@ -1143,14 +1153,13 @@ export default function ExamApplicationsPage({
                       )}
                     </>
                   ) : c.key === "status" ? (() => {
-                    // [자동] 응시상태: 자동모드(빈값/"예정")에서는 진행 날짜로 계산된 상태(autoPreview 단일 source)를 선택값처럼 즉시 표시.
-                    //  저장값에는 계산값(예: "필기 합격")만 들어가고 "자동(…)" 문자열은 저장하지 않음. 수동 상태(취소/재응시/연기/불합격 등)는 그대로 보존.
-                    const autoMode = !String(editRow.status ?? "").trim() || String(editRow.status) === "예정";
-                    const autoVal = (autoPreview && String(autoPreview.status ?? "").trim()) || "예정";
+                    // [G/H 표시 정합] 목록과 동일한 표시 helper 사용 → 자동모드면 "자동(계산값)" 을 즉시 표시, 수동 상태는 그대로 선택.
+                    //  저장 정책 무변경: "__auto__" 선택 시 status=null(computeDerivedFields 가 계산), 수동 상태(취소/불합격/재응시/연기)는 그대로 보존.
+                    const d = resolveExamStatusDisplay(editRow);
                     return (
-                      <select className={`${inputCls} w-full`} value={autoMode ? "__auto__" : String(editRow.status)}
+                      <select className={`${inputCls} w-full`} value={d.mode === "auto" ? "__auto__" : d.storedValue}
                         onChange={(e) => { const v = e.target.value; setEditRow((f) => ({ ...(f || {}), status: v === "__auto__" ? null : v })); }}>
-                        <option value="__auto__">자동({autoVal})</option>
+                        <option value="__auto__">자동({d.calculatedValue})</option>
                         {STATUS_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
                       </select>
                     );
