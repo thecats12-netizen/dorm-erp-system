@@ -85,9 +85,14 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
       // 예상 TO = 계획 TO(해지 예정분 가산된 물리적 현재) − 누적 임차 해지예정 TO + 시나리오 TO 델타.
       const to = Math.max(0, c.planTo - c.terminationCumulative + sc.to);
       const finalResidents = Math.max(0, c.baseResidents + sc.res);
-      // 예상 기숙사(채) = 기준 채수 + 시나리오 채수 + 예상 기숙사 증감(과거월 미적용 · 1회만 가산). 채수는 TO/거주자에 영향 없음.
+      // 예상 기숙사(채) = 기준 채수 + 시나리오 채수(누적) + 예상 기숙사 증감(과거월 미적용 · 1회만 가산). 채수는 TO/거주자에 영향 없음.
       const dormCount = Math.max(0, c.dormBase + sc.dorm + (c.sourceType === "history" ? 0 : expectedDorm));
-      return { ...c, to, scenarioRes: sc.res, finalResidents, dormCount, ...calcMonthly(to, finalResidents, vacancyCost) };
+      // [표시 전용] 해당 월에 적용된 시나리오 기숙사 증감(비누적). 반복은 각 월마다 dd, 단발은 시작월에만. 과거월 0. (dormCount 계산 무관)
+      const scenarioDormMonthly = c.sourceType === "history" ? 0 : sadj.reduce((s, a) => {
+        const dd = a.dormDeltaEach ?? 0; const rep = a.repeatUntil != null && a.repeatUntil >= a.month;
+        return s + (rep ? (c.month >= a.month && c.month <= (a.repeatUntil as number) ? dd : 0) : (c.month === a.month ? dd : 0));
+      }, 0);
+      return { ...c, to, scenarioRes: sc.res, scenarioDormMonthly, finalResidents, dormCount, ...calcMonthly(to, finalResidents, vacancyCost) };
     });
   }, [baseCells, region, gender, vacancyCost, expectedDorm]);
   const kpiOf = (cells: ReturnType<typeof buildCells>) => ({
@@ -176,8 +181,8 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
     { label: "기타 확정 증감", get: (r) => dash(r.otherDelta, true) },
     { label: "임차 만기(채)", get: (r) => r.leaseExpiry ? String(r.leaseExpiry) : "-", muted: true },
     { label: "추가임차(채)", get: (r) => r.leaseAdd ? String(r.leaseAdd) : "-", muted: true },
-    // 예상 기숙사(채) = 최종 예상 채수(기준 + 시나리오 기숙사 추가/해지 + 수동 예상 기숙사 증감). r.dormCount 는 이미 3자 합산(중복 없음).
-    { label: "예상 기숙사(채)", get: (r) => String(r.dormCount), muted: true, tone: (r) => r.dormCount !== r.dormBase ? "text-blue-600" : "" },
+    // 예상 기숙사(채) = 해당 월 시나리오 기숙사 증감(비누적 · 추가+/해지-). 수동 예상 기숙사 입력값은 미표시(dormCount 계산에만 반영).
+    { label: "예상 기숙사(채)", get: (r) => dash(r.scenarioDormMonthly, true), muted: true, tone: (r) => r.scenarioDormMonthly ? "text-blue-600" : "" },
     { label: "기준 예상 거주자", get: (r) => String(r.baseResidents), tone: (r) => r.isEstimatePast ? "text-slate-400 italic" : "" },
     { label: "시나리오 증감", get: (r) => dash(r.scenarioRes, true), tone: (r) => r.scenarioRes ? "text-blue-600" : "" },
     { label: "최종 예상 거주자", get: (r) => String(r.finalResidents) },
