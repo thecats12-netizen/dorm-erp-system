@@ -10,7 +10,7 @@ import {
 import { calculateExamStatus, calculateCertificationStatus, isCertificationApproved, deriveAchievementTiming, resolvePmLevel, resolveDmLevel, extractTimingMonths, PM_STAGES, buildExamCandidates, isInProgressStatus, applicationMatchesTarget, type ExamCandidate, type AchievementTiming } from "../services/examAutomationService";
 import { selectPmStageLevels } from "../utils/certificationLevel";
 import { loadApprovedEquipmentByPerson } from "../services/certificationPreviewService";
-import { isAcquiredApplication } from "../services/employeeAutofillService";
+import { computeCurrentLevelByPersonnel } from "../services/currentCertificationLevelService";
 import { normalizeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { loadMyExamPermissions, type MyExamPermissions } from "../services/examPermissionService";
 // [4단계] 공통 사원선택 + 라이선스 요약(조회 전용, 추가 UI). 기존 사번 select/필드/저장은 그대로 유지.
@@ -661,7 +661,6 @@ export default function ExamApplicationsPage({
       listExamRows("pm_certifications", tenantId).catch(() => [] as ExamRow[]),
       listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
     ]);
-    const pmStages = selectPmStageLevels(levelRows);                         // Single~M4 rank_order 순(코드 하드코딩 없음)
     // [C: 설비 후보] stage rule · 설비명 · 확정 취득을 배치 로드(N+1 없음).
     const [stageRules, equipRows, acquiredEquipByPerson] = await Promise.all([
       listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[]),
@@ -669,42 +668,12 @@ export default function ExamApplicationsPage({
       loadApprovedEquipmentByPerson(tenantId).catch(() => new Map<string, Set<string>>()),
     ]);
     const equipmentNameById = new Map<string, string>(equipRows.map((e) => [String(e.id), String(e.name ?? e.code ?? "")]));
-    const pmStageLevelIds = pmStages.map((s) => String(s.id));               // Single..M4 level_id 순서(PM_STAGES 정렬)
-    const today = new Date().toISOString().slice(0, 10);
-    const setByPersonProc = new Map<string, Set<string>>();                  // `${personId}|${processId}` → 확정 level_id 집합
-    for (const c of pmCerts) {
-      if (String(c.approval_status ?? "") !== "승인" || c.is_active === false || c.deleted_at) continue; // 확정·활성만(취소/반려/미확정 제외)
-      const exp = c.expiry_date ? String(c.expiry_date).slice(0, 10) : "";
-      if (exp && exp < today) continue;                                      // 만료분 제외
-      const pid = String(c.personnel_id ?? ""), proc = String(c.process_id ?? ""), lid = String(c.level_id ?? "");
-      if (!pid || !lid) continue;
-      const k = `${pid}|${proc}`;
-      (setByPersonProc.get(k) ?? setByPersonProc.set(k, new Set()).get(k)!).add(lid);
-    }
-    const confirmedStageIdxByPerson = new Map<string, number>();            // 직원 id → 현재단계 인덱스(PM_STAGES)
-    for (const p of personnel) {
-      const pid = String((p as Record<string, unknown>).id ?? ""), proc = String((p as Record<string, unknown>).process_id ?? "");
-      const set = setByPersonProc.get(`${pid}|${proc}`); if (!pid || !set) continue; // 공정 일치분만(다른 공정 혼입 금지)
-      let idx = -1;
-      for (let i = 0; i < pmStages.length; i++) if (set.has(String(pmStages[i].id))) idx = i; // 확정된 최고 rank 단계
-      if (idx >= 0) confirmedStageIdxByPerson.set(pid, idx);
-    }
-    // [B fix] 확정 exam_applications 취득이력도 현재단계 SoT 로 병합(max). PM 인증 승인과 별개로 "시험 취득"을 인정.
-    //  · canonical isAcquiredApplication 재사용(불합격/취소/미취득/진행중/삭제 제외) · 공정 FK 일치만(혼입 금지) · level_id→pmStages index.
-    const levelIdxById = new Map<string, number>(pmStageLevelIds.map((id, i) => [id, i]));
-    const personById = new Map(personnel.map((p) => [String((p as Record<string, unknown>).id ?? ""), p as Record<string, unknown>]));
-    const personByEmpNo = new Map(personnel.map((p) => [String((p as Record<string, unknown>).employee_no ?? "").trim(), p as Record<string, unknown>]));
-    for (const a of freshApps as Record<string, unknown>[]) {
-      if (a.deleted_at) continue;                                                    // 삭제행 제외
-      if (!isAcquiredApplication(a)) continue;                                       // 확정 취득만(canonical)
-      const idx = levelIdxById.get(String(a.level_id ?? "")); if (idx === undefined) continue; // level_id→PM 단계(없으면 skip · 문자열 추론 금지)
-      const personnelId = String(a.personnel_id ?? "");
-      const person = (personnelId ? personById.get(personnelId) : undefined) ?? personByEmpNo.get(String(a.employee_no ?? "").trim()); // personnel_id 우선 → employee_no fallback
-      const personId = String(person?.id ?? ""); if (!personId) continue;
-      const appProc = String(a.process_id ?? ""), perProc = String(person?.process_id ?? "");
-      if (!appProc || appProc !== perProc) continue;                                 // 공정 FK 일치(혼입 금지 · 문자열 비교 없음)
-      confirmedStageIdxByPerson.set(personId, Math.max(confirmedStageIdxByPerson.get(personId) ?? -1, idx)); // 최고 확정 rank
-    }
+    const pmStageLevelIds = selectPmStageLevels(levelRows).map((s) => String(s.id)); // Single..M4 level_id 순서(설비 후보 scope · PM_STAGES 정렬)
+    // [P1-1: 현재단계 SoT 통일] 공용 currentCertificationLevelService 재사용(= max(확정 exam_applications, 유효 pm_certifications, personnel flag) · 공정 scope · rank_order).
+    //  인라인 중복 계산 제거 — 값 동일. buildExamCandidates 는 기존대로 flag 를 max 로 다시 반영(공용 결과에 flag 포함 → 값 불변).
+    const currentLevelByPerson = computeCurrentLevelByPersonnel({ personnel: personnel as unknown as ExamRow[], levels: levelRows, applications: freshApps as ExamRow[], pmCertifications: pmCerts });
+    const confirmedStageIdxByPerson = new Map<string, number>();            // 직원 id → 현재단계 인덱스(공용 서비스 결과)
+    for (const [pid, r] of currentLevelByPerson) if (r.currentLevelIndex >= 0) confirmedStageIdxByPerson.set(pid, r.currentLevelIndex);
     const list = buildExamCandidates(personnel as Record<string, unknown>[], freshApps as Record<string, unknown>[], rules as Record<string, unknown>[],
       { confirmedStageIdxByPerson, stageRules: stageRules as Record<string, unknown>[], acquiredEquipByPerson, equipmentNameById, pmStageLevelIds });
     try {
