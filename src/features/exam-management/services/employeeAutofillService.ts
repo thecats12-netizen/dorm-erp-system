@@ -6,7 +6,7 @@
 //  - 인증 컬럼은 프로젝트별 편차가 있어 select("*") + 방어적 접근(존재하지 않는 컬럼 추측/에러 방지).
 import { supabase, isSupabaseAvailable } from "../../../services/supabaseService";
 import { loadPlansForEmployee, remainingMonths, isOverdue, todayYmd, addMonths, toYmd, resolveEmployeeScope, buildLadderForScope, type EmployeeLicensePlan } from "./licensePlanService";
-import { calculatePmLevel, calculateDmLevel } from "./examAutomationService";
+import { calculatePmLevel, calculateDmLevel, extractRetestGapMonths } from "./examAutomationService";
 import type { EmployeeAutofill } from "../types/employeeLookup";
 
 type Row = Record<string, unknown>;
@@ -29,11 +29,13 @@ export function computeLicenseSummary(inp: {
 }): LicenseSummary {
   const { person, plans, apps, levels, rules, processes, parts, groups, today } = inp;
 
-  // 재시험 가능일: 최근 불합격/취소 응시 발생일 + 재시험 대기(기본 3개월). 없으면 null.
+  // 재시험 가능일: 최근 불합격/취소 응시 발생일 + 재시험 간격. [SoT 통일] 간격 = 인증규칙 retest_gap_months(없으면 3개월)
+  //  — 후보 계산(buildExamCandidates)과 동일한 extractRetestGapMonths 재사용(하드코딩 제거). 기준일 정책 무변경.
+  const retestGapMonths = extractRetestGapMonths(rules) ?? 3;
   const failDates = apps.filter((a) => /불합격|취소/.test(asText(a.status)))
     .map((a) => ymd(a.practical_pass_date) || ymd(a.written_pass_date) || ymd(a.updated_at))
     .filter((d): d is string => !!d).sort();
-  const retestAvailableDate = failDates.length ? (addMonths(failDates[failDates.length - 1], 3) || null) : null;
+  const retestAvailableDate = failDates.length ? (addMonths(failDates[failDates.length - 1], retestGapMonths) || null) : null;
 
   // 레벨 마스터: code→{name, rank}(code 우선, 없으면 name).
   const levelByCode = new Map<string, { name: string; rank: number }>();

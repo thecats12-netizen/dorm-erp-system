@@ -786,8 +786,8 @@ export function applicationMatchesTarget(app: ExamApplicationRecord, target: { p
   if (lid) return asText(app.level_id) === lid;
   return target.targetLevel ? candMatchesLevel(app, target.targetLevel) : false;
 }
-// exam_rules 에서 재시험 제한기간(개월) 추출. 없으면 null.
-function extractRetestGapMonths(rules?: ExamApplicationRecord[]): number | null {
+// exam_rules 에서 재시험 제한기간(개월) 추출. 없으면 null. [재시험 gap SoT] 후보/요약 공용(하드코딩 금지).
+export function extractRetestGapMonths(rules?: ExamApplicationRecord[]): number | null {
   if (!Array.isArray(rules)) return null;
   for (const r of rules) {
     const bag = JSON.stringify({ ...(r as Record<string, unknown>), ...((r?.criteria as Record<string, unknown>) || {}) });
