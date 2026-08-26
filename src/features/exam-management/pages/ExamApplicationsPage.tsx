@@ -105,7 +105,7 @@ type ExamStatusDisplay = { value: string; mode: "auto" | "manual"; calculatedVal
 const resolveExamStatusDisplay = (row: ExamRow): ExamStatusDisplay => {
   const storedValue = String(row.status ?? "").trim();
   const calculatedValue = AUTO_STATUS_MAP[calculateExamStatus(row).value] ?? "예정";
-  const autoMode = storedValue === "" || storedValue === "예정"; // computeDerivedFields ③ 과 동일 기준
+  const autoMode = row.exam_status_manual !== true; // [B-2] 명시 플래그 기준. 구 휴리스틱("빈값/예정"=자동) 제거 → 자동계산 저장값을 manual 로 오판정하지 않는다.
   return autoMode
     ? { value: calculatedValue, mode: "auto", calculatedValue, storedValue }
     : { value: storedValue, mode: "manual", calculatedValue, storedValue };
@@ -442,11 +442,15 @@ export default function ExamApplicationsPage({
       if (req.length) next.cert_acquired_date = req.sort().slice(-1)[0]; // 가장 늦은 날짜
     }
 
-    // ③ 응시상태: 비어 있거나 기본값("예정")일 때만 자동(날짜 기반). 사용자가 명시 선택한 상태(취소/재응시/불합격 등)는 보존.
-    const curStatus = String(next.status ?? "").trim();
-    if (curStatus === "" || curStatus === "예정") {
-      const autoStatus = AUTO_STATUS_MAP[calculateExamStatus(next).value] ?? "";
-      if (autoStatus) next.status = autoStatus;
+    // ③ 응시상태: [B-2] 명시 플래그(exam_status_manual) 기준.
+    //  · AUTO(false/미설정): 계산값을 status 에 저장(raw status 소비자 호환 유지 — 대시보드/리포트/Excel/중복방지/취득판정 불변).
+    //  · MANUAL(true): 사용자가 선택한 status 를 자동계산으로 덮어쓰지 않고 보존(빈값이면 자동 보완만).
+    const autoStatus = AUTO_STATUS_MAP[calculateExamStatus(next).value] ?? "";
+    if (next.exam_status_manual === true) {
+      if (!String(next.status ?? "").trim() && autoStatus) next.status = autoStatus; // 빈 status 저장 방지
+    } else {
+      next.exam_status_manual = false;                 // AUTO 기본값 명시
+      if (autoStatus) next.status = autoStatus;         // 최신 날짜 기준 계산값으로 갱신
     }
 
     // ④ 조기/지연취득: 비어 있을 때만 자동(수동 선택 보존). 공정별 달성기준(FK 매칭)+실제 취득일로 판정.
@@ -1123,11 +1127,14 @@ export default function ExamApplicationsPage({
                     </>
                   ) : c.key === "status" ? (() => {
                     // [G/H 표시 정합] 목록과 동일한 표시 helper 사용 → 자동모드면 "자동(계산값)" 을 즉시 표시, 수동 상태는 그대로 선택.
-                    //  저장 정책 무변경: "__auto__" 선택 시 status=null(computeDerivedFields 가 계산), 수동 상태(취소/불합격/재응시/연기)는 그대로 보존.
+                    //  [B-2] "__auto__" 선택 → exam_status_manual=false(재오픈해도 AUTO, status 는 저장 시 계산값으로 채워짐).
+                    //        수동 상태(취소/불합격/재응시/연기 등) 선택 → exam_status_manual=true + status=선택값(보존).
                     const d = resolveExamStatusDisplay(editRow);
                     return (
                       <select className={`${inputCls} w-full`} value={d.mode === "auto" ? "__auto__" : d.storedValue}
-                        onChange={(e) => { const v = e.target.value; setEditRow((f) => ({ ...(f || {}), status: v === "__auto__" ? null : v })); }}>
+                        onChange={(e) => { const v = e.target.value; setEditRow((f) => v === "__auto__"
+                          ? { ...(f || {}), exam_status_manual: false, status: null }
+                          : { ...(f || {}), exam_status_manual: true, status: v }); }}>
                         <option value="__auto__">자동({d.calculatedValue})</option>
                         {STATUS_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
                       </select>
