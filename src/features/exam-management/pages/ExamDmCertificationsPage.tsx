@@ -308,6 +308,7 @@ export default function ExamDmCertificationsPage({
     const msg = `${e?.message ?? ""} ${e?.details ?? ""} ${e?.hint ?? ""}`.toLowerCase();
     if (code === "23502" && /level_id/.test(msg)) return "D.M 인증 레벨 기준정보가 연결되지 않았습니다.";
     if (code === "23503" && /level_id/.test(msg)) return "D.M 인증 레벨 기준정보가 연결되지 않았습니다.";
+    if (code === "23502" && /acquired_date/.test(msg)) return "D.M 인증 데이터를 저장할 수 없습니다. 취득일 컬럼 설정(NULL 허용)이 필요합니다. 관리자에게 문의해 주세요.";
     if (status === 403 || code === "42501" || /row-level security|permission denied|not authorized/.test(msg)) {
       return "D.M 인증 데이터를 저장할 권한이 없습니다.";
     }

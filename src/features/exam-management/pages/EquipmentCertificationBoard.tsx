@@ -79,7 +79,11 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
   const equipMap = useMemo(() => nameMap(master.equipment), [master.equipment]);
   const levelMap = useMemo(() => nameMap(master.levels), [master.levels]);
   const empByPid = useMemo(() => new Map(master.personnel.map((r) => [String(r.id), r])), [master.personnel]);
+  const procById = useMemo(() => new Map(master.processes.map((r) => [String(r.id), r])), [master.processes]); // 공정→group_id/category_id 역추적용
   const nm = (m: Map<string, string>, id: unknown) => { const s = String(id ?? "").trim(); if (!s) return "-"; return m.get(s) || "-"; };
+  // 그룹/제품군: cert row 값 우선 → 없으면 공정(process)의 group_id/category_id → 인력(personnel) 순 fallback(이름 표시, UUID 미노출).
+  const scopeGroupId = (r: ExamRow, pe: ExamRow | undefined) => { const p = procById.get(String(r.process_id ?? "")); return r.group_id ?? p?.group_id ?? pe?.group_id ?? null; };
+  const scopeCategoryId = (r: ExamRow, pe: ExamRow | undefined) => { const p = procById.get(String(r.process_id ?? "")); return r.category_id ?? p?.category_id ?? pe?.category_id ?? null; };
 
   const procOpts = useMemo(() => master.processes.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.processes]);
   const equipOpts = useMemo(() => master.equipment.filter((r) => r.is_active !== false && (!fProcess || String(r.process_id ?? "") === fProcess)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.equipment, fProcess]);
@@ -179,8 +183,8 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
                 <tr key={String(r.id)} className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
                   <td className="whitespace-nowrap px-2.5 py-2">{String(pe?.employee_no ?? "-")}</td>
                   <td className="whitespace-nowrap px-2.5 py-2">{String(pe?.name ?? "-")}</td>
-                  <td className="whitespace-nowrap px-2.5 py-2">{nm(groupMap, r.group_id)}</td>
-                  <td className="whitespace-nowrap px-2.5 py-2">{nm(catMap, r.category_id)}</td>
+                  <td className="whitespace-nowrap px-2.5 py-2">{nm(groupMap, scopeGroupId(r, pe))}</td>
+                  <td className="whitespace-nowrap px-2.5 py-2">{nm(catMap, scopeCategoryId(r, pe))}</td>
                   <td className="whitespace-nowrap px-2.5 py-2">{nm(procMap, r.process_id)}</td>
                   <td className="whitespace-nowrap px-2.5 py-2">{nm(equipMap, r.equipment_id)}</td>
                   <td className="whitespace-nowrap px-2.5 py-2">{nm(levelMap, r.level_id)}</td>

@@ -9,6 +9,7 @@ import {
   type ExamRow,
 } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
+import { listEquipmentCertifications } from "../services/equipmentCertificationService";
 // [자동 라이선스] PM 승인 시 해당 단계 완료 + 다음 단계 자동 활성화(추가 전용·비차단).
 import { completeStageByLevelId } from "../services/licensePlanService";
 // [인증 이력] 승인 완료 후 append-only 이력 1건 기록(비차단 · 승인 로직 불변).
@@ -138,6 +139,7 @@ export default function ExamPmCertificationsPage({
   const [rules, setRules] = useState<ExamRow[]>([]);
   const [levelOpts, setLevelOpts] = useState<RefOpt[]>([]);
   const [equipOpts, setEquipOpts] = useState<RefOpt[]>([]);
+  const [equipCerts, setEquipCerts] = useState<ExamRow[]>([]); // [인증 설비] 승인된 설비 인증(설비 인증현황과 동일 canonical source)
   const [autoInfo, setAutoInfo] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -167,6 +169,17 @@ export default function ExamPmCertificationsPage({
 
   const personByEmp = useMemo(() => { const m = new Map<string, ExamRow>(); personnel.forEach((p) => m.set(String(p.employee_no ?? ""), p)); return m; }, [personnel]);
   const appById = useMemo(() => { const m = new Map<string, ExamRow>(); apps.forEach((a) => m.set(String(a.id ?? ""), a)); return m; }, [apps]);
+  // [인증 설비] 승인된 설비 인증(status="approved" · 미삭제)을 personnel_id 기준 distinct equipment_id 로 집계(설비 인증현황과 동일 canonical).
+  const approvedEquipByPid = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const c of equipCerts) {
+      if (String(c.status ?? "") !== "approved" || c.deleted_at) continue;
+      const pid = String(c.personnel_id ?? ""); const eid = String(c.equipment_id ?? "");
+      if (!pid || !eid) continue;
+      const arr = m.get(pid) ?? []; if (!arr.includes(eid)) arr.push(eid); m.set(pid, arr);
+    }
+    return m;
+  }, [equipCerts]);
   const levelLabel = useCallback((id: unknown) => (!id ? "" : (levelOpts.find((o) => o.id === String(id))?.label || "")), [levelOpts]);
   const equipLabel = useCallback((id: unknown) => (!id ? "" : (equipOpts.find((o) => o.id === String(id))?.label || "")), [equipOpts]);
 
@@ -181,26 +194,32 @@ export default function ExamPmCertificationsPage({
       part_name: p?.part_name ?? app?.process ?? "",
       process: app?.process ?? p?.part_name ?? "",
       level_label: levelLabel(r.level_id ?? app?.level_id),
-      equipment_label: equipLabel(r.equipment_id ?? app?.equipment_id),
+      equipment_label: (() => {
+        // 승인된 설비 인증(canonical)을 우선 표시(distinct 여러 개 · 이름). 없으면 기존 pm_cert/app equipment_id 폴백.
+        const names = (p ? (approvedEquipByPid.get(String(p.id)) ?? []) : []).map((id) => equipLabel(id)).filter(Boolean);
+        const uniq = Array.from(new Set(names));
+        return uniq.length ? uniq.join(", ") : equipLabel(r.equipment_id ?? app?.equipment_id);
+      })(),
       current_pm_level: p?.current_pm_level ?? "",
       cert_state: certState(r),
       approval_label: approvalLabel(r),
     };
-  }, [appById, personByEmp, levelLabel, equipLabel]);
+  }, [appById, personByEmp, levelLabel, equipLabel, approvedEquipByPid]);
 
   const reload = useCallback(async () => {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
-      const [certs, appRows, people, rule, lv, eq] = await Promise.all([
+      const [certs, appRows, people, rule, lv, eq, eqCerts] = await Promise.all([
         listExamRows("pm_certifications", tenantId),
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
         listExamRefOptions("exam_levels", tenantId).catch(() => [] as RefOpt[]),
         listExamRefOptions("exam_equipment", tenantId).catch(() => [] as RefOpt[]),
+        listEquipmentCertifications(tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setApps(appRows); setPersonnel(people); setRules(rule); setLevelOpts(lv); setEquipOpts(eq);
+      setApps(appRows); setPersonnel(people); setRules(rule); setLevelOpts(lv); setEquipOpts(eq); setEquipCerts(eqCerts);
 
       let finalCerts = certs;
       if (canEdit) {
