@@ -153,10 +153,12 @@ export default function ExamDmCertificationsPage({
   // dm_stage/dm_level → exam_levels.id 해석. 공용 resolver(FK>code>name>alias exact) 사용.
   //  화면 표기명(Single Job/M1~M4 등)이 현재 master(Y072/Single, Y073/Multi 1 …)와 코드/이름이 달라도 alias 로 정확 연결.
   //  0건이면 null(호출부에서 저장 차단). fuzzy/첫 번째 level 사용 금지.
-  const resolveLevelId = (row: ExamRow): string | null => {
+  //  ⚠ levels 는 인자로 받는다: reload 내부 자동 생성 시점엔 state(levels)가 아직 갱신 전(초기 [])이므로,
+  //     그 순간 갓 조회한 최신 목록을 넘겨야 "Single Job" 등 alias 가 정상 해석된다(빈 목록 → 전건 skip 방지).
+  const resolveLevelId = (row: ExamRow, lvls: ExamRow[] = levels): string | null => {
     const existing = String(row.level_id ?? "").trim();
     if (existing) return existing; // 이미 FK 로 연결됨 → 유지.
-    return normalizeCertificationLevel(row.dm_level, levels) || normalizeCertificationLevel(row.dm_stage, levels);
+    return normalizeCertificationLevel(row.dm_level, lvls) || normalizeCertificationLevel(row.dm_stage, lvls);
   };
 
   const reload = useCallback(async () => {
@@ -205,7 +207,7 @@ export default function ExamDmCertificationsPage({
               notes: c.master_candidate ? "Master 후보(관리자 승인 필요)" : null,
             };
             // level_id(NOT NULL) 미해석 후보는 자동 생성 건너뜀(null 요청 금지). "첫 번째 level 사용" 같은 임의 fallback 금지.
-            const levelId = resolveLevelId(draft);
+            const levelId = resolveLevelId(draft, lvl);
             if (!levelId) { skipped++; const bad = String(c.dm_level ?? "").trim() || String(c.dm_stage ?? "").trim(); if (bad) skippedInputs.add(bad); continue; }
             await upsertExamRow("dm_certifications", sanitizeDmCertificationPayload({ ...draft, level_id: levelId }), tenantId, userId);
             created++;

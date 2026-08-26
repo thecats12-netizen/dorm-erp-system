@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
+import { acquiredLevelIds, normalizeCertificationLevel } from "../utils/certificationLevel";
 import { TrendChart, BarDistribution, Donut, Collapsible } from "../components/ExamReportCharts";
 import { RC } from "../components/examReportColors";
 
@@ -56,6 +57,7 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
   const [targets, setTargets] = useState<ExamRow[]>([]);
   const [monthly, setMonthly] = useState<ExamRow[]>([]);
   const [levels, setLevels] = useState<Array<{ id: string; label: string }>>([]);
+  const [levelsRaw, setLevelsRaw] = useState<ExamRow[]>([]); // [단계 정합화] code/name/rank_order 포함 원본(공용 resolver 용)
   // [장비] 기준정보(id→이름 매핑 · 필터 옵션용). 저장 구조/통계 무관. [라인 UI 제외]
   const [equipRows, setEquipRows] = useState<ExamRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -71,7 +73,7 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
     setLoading(true); setError(null);
     try {
-      const [p, a, c, t, m, lv, eq] = await Promise.all([
+      const [p, a, c, t, m, lv, eq, lvRaw] = await Promise.all([
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
@@ -79,8 +81,9 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
         listExamRows("exam_monthly_results", tenantId).catch(() => [] as ExamRow[]),
         listExamRefOptions("exam_levels", tenantId).catch(() => []),
         listExamRows("exam_equipment", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setMonthly(m); setLevels(lv); setEquipRows(eq);
+      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setMonthly(m); setLevels(lv); setEquipRows(eq); setLevelsRaw(lvRaw);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId, refreshKey]);
@@ -108,11 +111,38 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
     .sort((x, y) => x.name.localeCompare(y.name, "ko")), [equipRows]);
   const equipMap = useMemo(() => new Map(equipOpts.map((o) => [o.id, o.name])), [equipOpts]);
 
+  // [단계 정합화] 전체/그룹/파트/공정 인증 현황이 personnel flag(single_job 등) 대신 실제 취득 응시이력으로 단계를 반영하도록 보강.
+  //  ExamPersonnelPage 와 동일 공용 로직(acquiredLevelIds + normalizeCertificationLevel). process_id 있는 인력만 재계산(동일 공정 취득만 인정),
+  //  legacy(process_id 없음) 인력은 기존 flag 그대로 유지(무회귀). 표시/집계 전용 — 저장/원본 미변경.
+  const personnelComputed = useMemo(() => {
+    const sid = {
+      single_job: normalizeCertificationLevel("Single", levelsRaw),
+      m1: normalizeCertificationLevel("M1", levelsRaw), m2: normalizeCertificationLevel("M2", levelsRaw),
+      m3: normalizeCertificationLevel("M3", levelsRaw), m4: normalizeCertificationLevel("M4", levelsRaw),
+    };
+    const rankById = new Map(levelsRaw.map((l) => [String(l.id), Number(l.rank_order ?? 0)]));
+    const nameById = new Map(levelsRaw.map((l) => [String(l.id), String(l.name ?? l.code ?? "")]));
+    return personnel.map((r) => {
+      const emp = str(r.employee_no), pid = str(r.process_id);
+      if (!emp || !pid) return r; // legacy(공정 미연결) → 기존 flag 보존(무회귀)
+      const acq = acquiredLevelIds(apps, emp, levelsRaw, { processId: pid });
+      let bestId = "", bestRank = -Infinity;
+      for (const id of acq) { const rk = rankById.get(id) ?? 0; if (rk > bestRank) { bestRank = rk; bestId = id; } }
+      return {
+        ...r,
+        single_job: sid.single_job && acq.has(sid.single_job) ? "○" : "",
+        m1: sid.m1 && acq.has(sid.m1) ? "○" : "", m2: sid.m2 && acq.has(sid.m2) ? "○" : "",
+        m3: sid.m3 && acq.has(sid.m3) ? "○" : "", m4: sid.m4 && acq.has(sid.m4) ? "○" : "",
+        cert_level: bestId ? (nameById.get(bestId) || "") : "",
+      };
+    });
+  }, [personnel, apps, levelsRaw]);
+
   // 데이터셋별 필터. [라인 UI 제외] 라인 필터 없음 → 전체 집계 기본(line_id 유무로 데이터 누락 없음).
-  const fPersonnel = useMemo(() => personnel.filter((r) =>
+  const fPersonnel = useMemo(() => personnelComputed.filter((r) =>
     (f.group === "전체" || str(r.group_name) === f.group) && (f.product === "전체" || str(r.product_group) === f.product) &&
     (f.part === "전체" || str(r.part_name) === f.part) && (f.level === "전체" || str(r.cert_level) === f.level)
-  ), [personnel, f]);
+  ), [personnelComputed, f]);
   const fApps = useMemo(() => apps.filter((r) => {
     const ym = appMonth(r);
     return (f.equipment === "전체" || str(r.equipment_id) === f.equipment) &&

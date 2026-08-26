@@ -283,16 +283,16 @@ export default function ExamMasterGrid({
     });
   };
 
-  // [인증 규칙 전용] 기준 구분 → 적용 라인 → 제품군 → 그룹 → 공정 순으로만 선택 가능하게 게이팅(제품/파트 단계 제거).
-  //  적용 제품군은 filterBy 로 표현할 수 없는 선행조건(기준 구분)이 있어 별도 처리. 적용 라인은 선택(게이팅 없음). 다른 탭 동작은 불변.
+  // [인증 규칙 전용] 기준 구분 → 적용 그룹 → 적용 제품군 → 적용 공정 순으로만 선택 가능하게 게이팅.
+  //  계층 정본: category.group_id(제품군이 그룹에 소속) · process.category_id(공정이 제품군에 소속). 필드 표시 순서(그룹→제품군→공정)와 일치.
   const isRules = config.table === "exam_rules";
   const rulesGate = (colKey: string): { disabled: boolean; reason: string } => {
     if (!isRules) return { disabled: false, reason: "" };
     const has = (k: string) => !!String(editRow?.[k] ?? "").trim();
     switch (colKey) {
-      case "category_id": return { disabled: !has("rule_type"), reason: "기준 구분을 먼저 선택해 주세요." };
-      case "group_id": return { disabled: !has("category_id"), reason: "적용 제품군을 먼저 선택해 주세요." };
-      case "process_id": return { disabled: !has("group_id"), reason: "적용 그룹을 먼저 선택해 주세요." };
+      case "group_id": return { disabled: !has("rule_type"), reason: "기준 구분을 먼저 선택해 주세요." };
+      case "category_id": return { disabled: !has("group_id"), reason: "적용 그룹을 먼저 선택해 주세요." };
+      case "process_id": return { disabled: !has("category_id"), reason: "적용 제품군을 먼저 선택해 주세요." };
       default: return { disabled: false, reason: "" };
     }
   };

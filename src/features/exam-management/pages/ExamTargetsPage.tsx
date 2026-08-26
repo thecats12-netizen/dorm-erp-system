@@ -24,21 +24,24 @@ const pct = (actual: unknown, target: unknown): number => {
 };
 const MONTHS = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11", "m12"];
 const sumMonths = (r: ExamRow) => MONTHS.reduce((a, k) => a + num(r[k]), 0);
-const IDENTITY = ["year", "group_name", "product_group", "part_name", "level_id"];
+// [정본] 그룹→제품군 1:N 이므로 식별은 FK(group_id + category_id) 기준. 텍스트(product_group)는 표시 snapshot 일 뿐 식별 아님.
+const IDENTITY = ["year", "group_id", "category_id", "part_name", "level_id"];
 const PAGE_SIZE = 20;
 
 // [이중계상 방지] 목표 스코프 유형/충돌 판정 — 수동 저장과 Excel Import 가 "동일 규칙"을 쓰도록 공통 추출.
 //  파트 목표 = part_id 또는 trim(part_name) 존재 / 그룹 목표 = 둘 다 없음.
 const isPartScopedTarget = (r: ExamRow): boolean =>
   !!String(r.part_id ?? "").trim() || !!String(r.part_name ?? "").trim();
-//  충돌 키: tenant_id + year + group_id + level_id. 셋 중 하나라도 없으면 null(검사 생략 → 기존 입력 검증 유지).
+//  충돌 키: tenant_id + year + group_id + category_id + level_id. 그룹 1개에 제품군 N개(1:N)이므로 제품군 축 포함(누락 시 DRAM/FLASH 오충돌).
+//  year/group_id/level_id 중 하나라도 없으면 null(검사 생략). category_id 는 그룹 단위 legacy 행 대비 빈값 허용.
 //  JSON.stringify 로 배열을 직렬화해 필드 경계가 값과 섞이지 않도록 안전 구성(단순 문자열 연결 충돌 방지).
 const scopeConflictKey = (tenant: string, r: ExamRow): string | null => {
   const gid = String(r.group_id ?? "").trim();
+  const cid = String(r.category_id ?? "").trim();
   const yr = String(r.year ?? "").trim();
   const lv = String(r.level_id ?? "").trim();
   if (!gid || !yr || !lv) return null;
-  return JSON.stringify([String(tenant ?? "").trim(), yr, gid, lv]);
+  return JSON.stringify([String(tenant ?? "").trim(), yr, gid, cid, lv]);
 };
 //  candidate 와 "동일 스코프 · 반대 유형"인 기존 행 반환(자기 자신 id 는 제외 → 업데이트 Import 오탐 방지).
 //  tenant_id 는 양쪽 실제 값 기준 비교(candidate 는 tenant 인자, 기존 행은 r.tenant_id).
@@ -231,10 +234,11 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   // ── [기준정보 연동] 제품군 → 그룹 선택([Line 전환] 제품/파트 단계 제거 · group_id 저장) ────────
   const mName = (r: ExamRow | undefined) => String(r?.name ?? "").trim();
   const activeOnly = (list: ExamRow[], keepId: string) => list.filter((r) => r.is_active !== false || String(r.id) === keepId);
-  const catOpts = useMemo(() => activeOnly(master.categories, scopeSel.categoryId), [master.categories, scopeSel.categoryId]);
-  const groupOpts = useMemo(
-    () => activeOnly(master.groups, scopeSel.groupId).filter((g) => !scopeSel.categoryId || String(g.category_id ?? "") === scopeSel.categoryId),
-    [master.groups, scopeSel.categoryId, scopeSel.groupId]
+  // [정본] 그룹 먼저 → 제품군은 선택 그룹 소속(category.group_id === groupId)만. 그룹은 제품군과 무관하게 전체 활성.
+  const groupOpts = useMemo(() => activeOnly(master.groups, scopeSel.groupId), [master.groups, scopeSel.groupId]);
+  const catOpts = useMemo(
+    () => activeOnly(master.categories, scopeSel.categoryId).filter((c) => !scopeSel.groupId || String(c.group_id ?? "") === scopeSel.groupId),
+    [master.categories, scopeSel.groupId, scopeSel.categoryId]
   );
   // [5] 동일 명칭이 여러 범위에 있을 때만 상위 경로를 덧붙인다. 저장값은 항상 row.id 기준으로 파생.
   const optLabel = (r: ExamRow, siblings: ExamRow[]): string => {
@@ -246,46 +250,30 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
     const path = [mName(c), mName(g)].filter(Boolean).join(" > ");
     return `${name}${path ? ` · ${path}` : ""}${r.is_active === false ? " (비활성)" : ""}`;
   };
-  // [4] 수정 진입 초기값 복원 순서: ① group_id 직접 → ② part_id → exam_parts.group_id 역추적 →
-  //  ③ group_name/product_group 텍스트 유일 매칭 → ④ 매칭 불가 시 빈값('미지정', 앱 오류 없음).
-  //  기존 part_id/part_name 은 여기서 변경하지 않고 그대로 둔다(보존).
+  // [정본 복원] 그룹→제품군(category.group_id). 순서: ① group_id 직접 · ② category_id 직접 →
+  //  ③ 하위호환: group_id + product_group 이름으로 exam_categories(c.group_id===group_id) 유일 매칭 →
+  //  ④ group_id 없으면 category.group_id 역추적 / group_name 텍스트 유일 매칭 → 실패 시 빈값(앱 오류 없음).
+  //  기존 group_name/product_group 표시 컬럼은 보존(삭제하지 않음).
   const resolveScopeFromRow = useCallback((r: ExamRow) => {
-    // ① group_id 직접
     let grp = master.groups.find((x) => String(x.id) === String(r.group_id ?? ""));
-    let part: ExamRow | undefined;
-    // ② group_id 없으면 part_id(또는 파트명 유일 매칭) → part.group_id 역추적
-    if (!grp) {
-      part = master.parts.find((p) => String(p.id) === String(r.part_id ?? ""));
-      if (!part) {
-        const pn = String(r.part_name ?? "").trim(), gn = String(r.group_name ?? "").trim(), cn = String(r.product_group ?? "").trim();
-        if (pn) {
-          const cands = master.parts.filter((p) => {
-            if (mName(p) !== pn) return false;
-            const g = master.groups.find((x) => String(x.id) === String(p.group_id ?? ""));
-            if (gn && mName(g) !== gn) return false;
-            const c = master.categories.find((x) => String(x.id) === String(g?.category_id ?? p.category_id ?? ""));
-            if (cn && mName(c) !== cn) return false;
-            return true;
-          });
-          if (cands.length === 1) part = cands[0]; // 유일할 때만 연결
-        }
-      }
-      grp = master.groups.find((x) => String(x.id) === String(part?.group_id ?? ""));
-    }
-    // ③ 그래도 없으면 group_name(+product_group) 텍스트 유일 매칭
-    if (!grp) {
-      const gn = String(r.group_name ?? "").trim(), cn = String(r.product_group ?? "").trim();
-      if (gn) {
-        const gcands = master.groups.filter((g) => {
-          if (mName(g) !== gn) return false;
-          if (cn) { const c = master.categories.find((x) => String(x.id) === String(g.category_id ?? "")); if (mName(c) !== cn) return false; }
-          return true;
-        });
-        if (gcands.length === 1) grp = gcands[0];
+    // 제품군: ② category_id 직접
+    let cat = master.categories.find((x) => String(x.id) === String(r.category_id ?? ""));
+    // ③ category_id 없으면 group scope + product_group 이름 유일 매칭
+    if (!cat) {
+      const cn = String(r.product_group ?? "").trim();
+      if (cn) {
+        const gid = String(grp?.id ?? r.group_id ?? "");
+        const cands = master.categories.filter((c) => mName(c) === cn && (!gid || String(c.group_id ?? "") === gid));
+        if (cands.length === 1) cat = cands[0];
       }
     }
-    const cat = master.categories.find((x) => String(x.id) === String(grp?.category_id ?? part?.category_id ?? ""));
-    return { categoryId: String(cat?.id ?? ""), groupId: String(grp?.id ?? ""), partId: String(part?.id ?? "") };
+    // ④ group_id 없으면 category.group_id 역추적 → group_name 텍스트 유일 매칭
+    if (!grp && cat) grp = master.groups.find((x) => String(x.id) === String(cat!.group_id ?? ""));
+    if (!grp) {
+      const gn = String(r.group_name ?? "").trim();
+      if (gn) { const gc = master.groups.filter((g) => mName(g) === gn); if (gc.length === 1) grp = gc[0]; }
+    }
+    return { categoryId: String(cat?.id ?? ""), groupId: String(grp?.id ?? ""), partId: String(r.part_id ?? "") };
   }, [master]);
   // [6] Excel 업로드용: 제품군+그룹+파트 "이름"으로 tenant 내 파트를 찾되, 상위 계층까지 모두 일치하는
   //  유일 1건일 때만 연결한다(0건·2건 이상은 오류). 이름 단독/첫 항목 매칭 금지 — 화면 드롭다운과 동일 원칙.
@@ -313,17 +301,20 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   //  (식별자는 isColEditable 상 신규만 편집) 여기서 part 를 비워도 기존 행에는 영향 없음.
   //  [Line 전환] 그룹까지만 선택 → group_id(정규화 축) 저장. 텍스트 identity(product_group/group_name)는 유지.
   const applyScope = (next: { categoryId: string; groupId: string; partId: string }) => {
+    const groupChanged = next.groupId !== scopeSel.groupId; // 그룹 변경 시 인증레벨 reset(집계 scope 변경)
     setScopeSel(next);
     const cat = master.categories.find((x) => String(x.id) === next.categoryId);
     const grp = master.groups.find((x) => String(x.id) === next.groupId);
     const part = next.partId ? master.parts.find((x) => String(x.id) === next.partId) : undefined;
     setEditRow((f) => ({
       ...(f || {}),
-      product_group: mName(cat) || null,
+      product_group: mName(cat) || null,       // 표시 snapshot(식별 아님)
       group_name: mName(grp) || null,
-      group_id: next.groupId || null,          // 신규 정규화 축(FK)
+      group_id: next.groupId || null,          // 정규화 축(FK)
+      category_id: next.categoryId || null,    // [정본] 제품군 FK(그룹→제품군 1:N 식별)
       part_id: next.partId || null,            // 그룹 단위 신규 목표 → 파트 없음(신규라 보존 대상 없음)
       part_name: part ? mName(part) : null,
+      ...(groupChanged ? { level_id: null } : {}),
     }));
   };
 
@@ -332,11 +323,12 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
     for (const c of formCols) if (c.required && !String(editRow[c.key] ?? "").trim()) { setError(`${c.label}은(는) 필수입니다.`); return; }
     // [Line 전환] 계층 무결성 검증(신규 등록만). 그룹까지만 필수 — 제품/파트 필수 검증 제거.
     if (!editRow.id) {
-      if (!scopeSel.categoryId) { setError("제품군을 선택해 주세요."); return; }
       if (!scopeSel.groupId) { setError("그룹을 선택해 주세요."); return; }
+      if (!scopeSel.categoryId) { setError("제품군을 선택해 주세요."); return; }
       const grp = master.groups.find((x) => String(x.id) === scopeSel.groupId);
-      if (grp && String(grp.category_id ?? "") !== scopeSel.categoryId) { setError("선택한 그룹이 현재 제품군에 속하지 않습니다."); return; }
-      if (grp?.is_active === false) { setError("비활성 기준정보는 새로 선택할 수 없습니다."); return; }
+      const cat = master.categories.find((x) => String(x.id) === scopeSel.categoryId);
+      if (cat && String(cat.group_id ?? "") !== scopeSel.groupId) { setError("선택한 제품군이 현재 그룹에 속하지 않습니다."); return; }
+      if (grp?.is_active === false || cat?.is_active === false) { setError("비활성 기준정보는 새로 선택할 수 없습니다."); return; }
       // [이중계상 방지 · fail-closed] 화면 rows(부분 로딩 가능) 대신 DB 를 스코프 한정 조회해 반대 유형 공존 확인.
       //  scopeConflictKey 산출 가능(year/group_id/level_id 존재) 시에만 검사. 조회 실패 시 저장 중단(폴백 금지).
       //  Excel Import 와 동일 규칙(findOppositeScopeConflict) 사용. 데이터/통계/DB/identity 무변경.
@@ -584,16 +576,17 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
                     <div className={`${inputCls} w-full ${darkMode ? "bg-slate-800/60 text-slate-400" : "bg-slate-100 text-slate-500"}`} title={autoActual ? "승인 완료 인증에서 자동 집계됩니다(수정 불가)" : "등록 후 변경할 수 없습니다"}>
                       {c.type === "ref" ? (levels.find((o) => o.id === String(editRow[c.key] ?? ""))?.label || "-") : (String(editRow[c.key] ?? "") || "-")}
                     </div>
-                  ) : c.key === "product_group" ? (
-                    // [Line 전환] 제품군 → 그룹 까지만 선택(제품/파트 단계 제거). 상위 변경 시 하위 자동 초기화 · group_id 저장.
-                    <select className={`${inputCls} w-full`} value={scopeSel.categoryId} onChange={(e) => applyScope({ categoryId: e.target.value, groupId: "", partId: "" })}>
-                      <option value="">선택</option>
-                      {catOpts.map((o) => <option key={String(o.id)} value={String(o.id)}>{optLabel(o, catOpts)}</option>)}
-                    </select>
                   ) : c.key === "group_name" ? (
-                    <select className={`${inputCls} w-full`} value={scopeSel.groupId} disabled={!scopeSel.categoryId} onChange={(e) => applyScope({ ...scopeSel, groupId: e.target.value, partId: "" })}>
-                      <option value="">{scopeSel.categoryId ? "선택" : "제품군을 먼저 선택"}</option>
+                    // [정본] 그룹 먼저 선택(제품군과 무관). 그룹 변경 시 제품군·인증레벨 자동 초기화 · group_id 저장.
+                    <select className={`${inputCls} w-full`} value={scopeSel.groupId} onChange={(e) => applyScope({ groupId: e.target.value, categoryId: "", partId: "" })}>
+                      <option value="">선택</option>
                       {groupOpts.map((o) => <option key={String(o.id)} value={String(o.id)}>{optLabel(o, groupOpts)}</option>)}
+                    </select>
+                  ) : c.key === "product_group" ? (
+                    // [정본] 제품군은 선택 그룹 소속(category.group_id)만. 그룹 미선택 시 비활성. 라벨은 제품군명만(그룹 scope 내 유일).
+                    <select className={`${inputCls} w-full`} value={scopeSel.categoryId} disabled={!scopeSel.groupId} onChange={(e) => applyScope({ ...scopeSel, categoryId: e.target.value, partId: "" })}>
+                      <option value="">{scopeSel.groupId ? "선택" : "그룹을 먼저 선택해 주세요."}</option>
+                      {catOpts.map((o) => <option key={String(o.id)} value={String(o.id)}>{optLabel(o, catOpts)}</option>)}
                     </select>
                   ) : c.type === "ref" ? (
                     <select className={`${inputCls} w-full`} value={String(editRow[c.key] ?? "")} onChange={(e) => setEditRow((f) => ({ ...(f || {}), [c.key]: e.target.value || null }))}><option value="">선택</option>{levels.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
