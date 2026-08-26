@@ -24,8 +24,11 @@ const pct = (actual: unknown, target: unknown): number => {
 };
 const MONTHS = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11", "m12"];
 const sumMonths = (r: ExamRow) => MONTHS.reduce((a, k) => a + num(r[k]), 0);
-// [정본] 그룹→제품군 1:N 이므로 식별은 FK(group_id + category_id) 기준. 텍스트(product_group)는 표시 snapshot 일 뿐 식별 아님.
+// [정본] 그룹→제품군 1:N 이므로 "식별/중복판정"은 FK(group_id + category_id) 기준. 텍스트(product_group)는 표시 snapshot 일 뿐 식별 아님.
 const IDENTITY = ["year", "group_id", "category_id", "part_name", "level_id"];
+// [폼 편집 대상] 신규 등록 시 편집 가능한 "식별 성격 폼 컬럼" 키(실제 렌더되는 컬럼 = 연도/그룹/제품군/파트/레벨).
+//  ⚠ IDENTITY(FK)와 분리: 그룹/제품군 select 는 group_name/product_group 컬럼으로 렌더되므로 이 키가 편집 판정 대상.
+const IDENTITY_FORM_KEYS = ["year", "group_name", "product_group", "part_name", "level_id"];
 const PAGE_SIZE = 20;
 
 // [이중계상 방지] 목표 스코프 유형/충돌 판정 — 수동 저장과 Excel Import 가 "동일 규칙"을 쓰도록 공통 추출.
@@ -120,7 +123,7 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   const isColEditable = useCallback((key: string, isNew: boolean) => {
     if (AUTO_ACTUAL_KEYS.has(key)) return false;                 // 자동 실적값: 편집 불가
     if (MANUAL_KEYS.has(key)) return true;                        // 목표/비고: 항상
-    return isNew && IDENTITY.includes(key);                       // 식별자: 신규 등록 시만
+    return isNew && IDENTITY_FORM_KEYS.includes(key);             // 식별자(폼 컬럼): 신규 등록 시만
   }, [AUTO_ACTUAL_KEYS, MANUAL_KEYS]);
   const hasLevel = useMemo(() => cfg.cols.some((c) => c.type === "ref"), [cfg.cols]);
 
