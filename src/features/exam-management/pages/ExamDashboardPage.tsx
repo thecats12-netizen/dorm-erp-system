@@ -4,7 +4,7 @@ import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } fro
 import { computeCertifiedFlagsByPerson } from "../utils/personnelCertSnapshot";
 import { computeExamKpiSummary, type GroupRate } from "../services/examAnalyticsKpi";
 import { computeCurrentLevelByPersonnel } from "../services/currentCertificationLevelService";
-import { selectPmStageLevels } from "../utils/certificationLevel";
+import { selectPmStageLevels, isApplicationAcquired } from "../utils/certificationLevel";
 import { listEquipmentCertifications } from "../services/equipmentCertificationService";
 import { listEquipmentStageRules } from "../services/equipmentStageRuleService";
 import { listProcessCriteriaRules } from "../services/processCriteriaRuleService";
@@ -31,7 +31,8 @@ const ymd = (v: unknown) => { if (v == null || v === "") return ""; if (v instan
 
 const isFail = (a: ExamRow) => /불합격/.test(str(a.status));
 const isTaken = (a: ExamRow) => !["예정", "취소", ""].includes(str(a.status));
-const isAcquired = (a: ExamRow) => !!a.practical_pass_date || str(a.status) === "인증 취득";
+// [P1 취득 SoT 통일] 최종 인증 취득 = 공용 canonical(isApplicationAcquired: cert_acquired_date/cert_status_manual 취득 포함). 실기 합격(practical_pass_date)과 라벨/개념은 별개.
+const isAcquired = (a: ExamRow) => isApplicationAcquired(a);
 const isPass = (a: ExamRow) => !isFail(a) && (isAcquired(a) || /합격/.test(str(a.status)));
 const passMonth = (a: ExamRow) => ymd(a.practical_pass_date || a.written_pass_date).slice(0, 7);
 const expiryState = (r: ExamRow) => { const s = ymd(r.expiry_date); if (!s) return "-"; const d = Math.floor((new Date(s).getTime() - Date.now()) / 86400000); return d < 0 ? "만료" : d <= 30 ? "만료예정" : "유효"; };

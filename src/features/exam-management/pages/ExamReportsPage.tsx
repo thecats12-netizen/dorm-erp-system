@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
 import { computeCertifiedFlagsByPerson } from "../utils/personnelCertSnapshot";
+import { isApplicationAcquired } from "../utils/certificationLevel";
 import { TrendChart, BarDistribution, Donut, Collapsible } from "../components/ExamReportCharts";
 import { RC } from "../components/examReportColors";
 
@@ -12,7 +13,8 @@ const pct = (a: unknown, t: unknown): number => { const tt = num(t); if (!(tt > 
 const ymd = (v: unknown) => { if (v == null || v === "") return ""; if (v instanceof Date && !isNaN(v.getTime())) return v.toISOString().slice(0, 10); const s = String(v).trim(); const m = s.match(/^(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})/); return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : s.slice(0, 10); };
 const isFail = (a: ExamRow) => /불합격/.test(str(a.status));
 const isTaken = (a: ExamRow) => !["예정", "취소", ""].includes(str(a.status));
-const isAcquired = (a: ExamRow) => !!a.practical_pass_date || str(a.status) === "인증 취득";
+// [P1 취득 SoT 통일] 최종 인증 취득 = 공용 canonical(isApplicationAcquired). 실기 합격(practical_pass_date)과는 별개 개념.
+const isAcquired = (a: ExamRow) => isApplicationAcquired(a);
 const isPass = (a: ExamRow) => !isFail(a) && (isAcquired(a) || /합격/.test(str(a.status)));
 const expiryState = (r: ExamRow) => { const s = ymd(r.expiry_date); if (!s) return "-"; const d = Math.floor((new Date(s).getTime() - Date.now()) / 86400000); return d < 0 ? "만료" : d <= 30 ? "만료예정" : "유효"; };
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
