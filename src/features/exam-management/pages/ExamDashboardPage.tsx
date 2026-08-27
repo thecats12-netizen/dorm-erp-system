@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
 import { computeCertifiedFlagsByPerson } from "../utils/personnelCertSnapshot";
+import { computeExamKpiSummary } from "../services/examAnalyticsKpi";
+import { computeCurrentLevelByPersonnel } from "../services/currentCertificationLevelService";
+import { selectPmStageLevels } from "../utils/certificationLevel";
 import { buildRetestCandidates, summarizeCertExpiry, buildExamNotifications, runRecalculation, type ExamNotification, type RecalcResult, type RecalcScope } from "../services/examAutomationService";
 import { listRetestCandidates, generateRetestCandidates, setRetestCandidateStatus, type RetestCandidateRow, type RetestStatus } from "../services/examRetestService";
 import { writeAutomationLog, listAutomationLogs, type AutomationLogRow } from "../services/examAutomationLogService";
@@ -76,6 +79,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   const [targets, setTargets] = useState<ExamRow[]>([]);
   const [levels, setLevels] = useState<RefOpt[]>([]);
   const [levelsRaw, setLevelsRaw] = useState<ExamRow[]>([]); // [P2 SoT] code/name/rank_order 포함 원본(공용 인증 스냅샷용)
+  const [pmCerts, setPmCerts] = useState<ExamRow[]>([]); // [KPI] 현재 Level 분포(computeCurrentLevelByPersonnel)용 PM 인증
   const [rules, setRules] = useState<ExamRow[]>([]);
   const [retest, setRetest] = useState<RetestCandidateRow[]>([]);
   const [retestOpen, setRetestOpen] = useState(false);
@@ -100,7 +104,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
     setLoading(true); setError(null);
     try {
-      const [p, a, c, t, lv, ru, rc, lvRaw] = await Promise.all([
+      const [p, a, c, t, lv, ru, rc, lvRaw, pmc] = await Promise.all([
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
@@ -109,8 +113,9 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
         listRetestCandidates(tenantId).catch(() => [] as RetestCandidateRow[]),
         listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("pm_certifications", tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv); setRules(ru); setRetest(rc); setLevelsRaw(lvRaw);
+      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv); setRules(ru); setRetest(rc); setLevelsRaw(lvRaw); setPmCerts(pmc);
       // [9단계] 라이선스 계획 통계/자동화 오류(공통 정본). 계획 테이블 미적용 환경에서도 안전(빈 결과).
       try { setLicAnalytics(await loadLicenseAnalytics(tenantId, p)); } catch { /* 무시 */ }
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
@@ -294,6 +299,22 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   const acquiredApps = useMemo(() => fApps.filter(isAcquired), [fApps]);
   const byProduct = useMemo(() => groupBy(fPersonnel.filter((r) => truthy(r.cert_level) || truthy(r.dm) || truthy(r.single_job)), (r) => str(r.product_group), "personnel"), [fPersonnel]);
   const byPart = useMemo(() => groupBy(fPersonnel.filter((r) => truthy(r.cert_level) || truthy(r.dm) || truthy(r.single_job)), (r) => str(r.part_name), "personnel"), [fPersonnel]);
+
+  // [KPI 1차] 공용 순수 집계(examAnalyticsKpi) — 현재 필터 인원 기준 canonical 지표. 페이지 내 계산식 중복 없음.
+  const kpiSummary = useMemo(() => computeExamKpiSummary({
+    personnel: fPersonnel, applications: apps, levels: levelsRaw,
+    pmCertifications: pmCerts, dmCertifications: certs, retestCandidates: retest,
+  }), [fPersonnel, apps, levelsRaw, pmCerts, certs, retest]);
+  // 현재 Level 배타 분포 drill-down 용(rows). 카운트는 위 kpiSummary 와 동일 정의.
+  const levelByPerson = useMemo(() => computeCurrentLevelByPersonnel({
+    personnel: fPersonnel, levels: levelsRaw, applications: apps, pmCertifications: pmCerts,
+  }), [fPersonnel, levelsRaw, apps, pmCerts]);
+  const levelSegments = useMemo((): Segment[] => {
+    const stageNames = selectPmStageLevels(levelsRaw).map((l) => str(l.name) || str(l.code));
+    const buckets: Array<{ label: string; rows: ExamRow[] }> = [{ label: "미취득", rows: [] }, ...stageNames.map((n) => ({ label: n, rows: [] as ExamRow[] }))];
+    for (const p of fPersonnel) { const r = levelByPerson.get(str(p.id)); const idx = r ? r.currentLevelIndex : -1; const bi = idx < 0 ? 0 : Math.min(idx + 1, buckets.length - 1); buckets[bi].rows.push(p); }
+    return buckets.map((b) => ({ label: b.label, value: b.rows.length, rows: b.rows, kind: "personnel" as Kind }));
+  }, [fPersonnel, levelByPerson, levelsRaw]);
   const byProcess = useMemo(() => groupBy(acquiredApps, (r) => str(r.process), "application"), [acquiredApps]);
   const byLevel = useMemo(() => groupBy(acquiredApps, (r) => levelLabel(r.level_id), "application"), [acquiredApps, levelLabel]);
   const monthly = useMemo(() => {
@@ -423,7 +444,8 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
         <KpiCard darkMode={darkMode} label="연간 목표 달성률" value={`${kpi.annualRate}%`} color="purple" onClick={() => openDetail("연간 목표", { rows: fTargets, kind: "target" })} />
       </div>
 
-      {/* KPI — 레벨 분포 */}
+      {/* 단계별 인증 보유 현황(중복 집계 · 한 사람이 여러 단계 보유 가능) — 현재 Level 배타 분포와 구분 */}
+      <div className="mb-1 text-[0.62rem] font-semibold uppercase tracking-wide text-slate-400">단계별 인증 보유 현황 (중복 집계)</div>
       <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-8">
         {([["Single", "single_job", "blue"], ["M1", "m1", "cyan"], ["M2", "m2", "cyan"], ["M3", "m3", "cyan"], ["M4", "m4", "cyan"], ["D.M", "dm", "amber"], ["Dual Multi", "dual_multi", "purple"], ["Master", "cert_level", "emerald"]] as Array<[string, string, string]>).map(([label, key, color]) => {
           const map: Record<string, number> = { Single: kpi.single, M1: kpi.m1, M2: kpi.m2, M3: kpi.m3, M4: kpi.m4, "D.M": kpi.dm, "Dual Multi": kpi.dual, Master: kpi.master };
@@ -431,6 +453,39 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
           return <KpiCard key={label} darkMode={darkMode} label={label} value={String(map[label])} color={color} onClick={() => openDetail(`${label} 보유자`, { rows: rowsFor(), kind: "personnel" })} />;
         })}
       </div>
+
+      {/* [KPI 1차] 인증 취득 요약 — 현재 필터 인원 기준 canonical(실제 취득 · 승인 D.M) */}
+      <section className={sectionCls}>
+        <div className="mb-3"><h3 className="text-base font-semibold">인증 취득 요약</h3><p className="text-sm text-slate-500">현재 필터 인원 기준 · 실제 취득(exam_applications) / 승인 D.M(dm_certifications).</p></div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <KpiCard darkMode={darkMode} label="전체 인원" value={`${kpiSummary.headcount}명`} color="slate" onClick={() => openDetail("전체 인원", { rows: fPersonnel, kind: "personnel" })} />
+          <KpiCard darkMode={darkMode} label="응시 인원" value={`${kpiSummary.appliedCount}명 · ${kpiSummary.appliedRate}%`} color="indigo" />
+          <KpiCard darkMode={darkMode} label="인증 취득" value={`${kpiSummary.acquiredCount}명 · ${kpiSummary.acquiredRate}%`} color="emerald" />
+          <KpiCard darkMode={darkMode} label="재시험 대상" value={`${kpiSummary.retestCount}명`} color="amber" onClick={() => setRetestOpen(true)} />
+          <KpiCard darkMode={darkMode} label="D.M 인증" value={`${kpiSummary.dmCount}명`} color="purple" />
+          <KpiCard darkMode={darkMode} label="Dual" value={`${kpiSummary.dualCount}명`} color="purple" />
+        </div>
+        <div className="mt-5 grid gap-6 lg:grid-cols-2">
+          <div>
+            <h4 className="mb-2 text-sm font-semibold">현재 Level 분포 <span className="font-normal text-slate-400">(배타 · 인원당 1단계)</span></h4>
+            <BarList darkMode={darkMode} data={levelSegments} onPick={(s) => openDetail(`현재 Level · ${s.label}`, s)} empty="인원 데이터가 없습니다." />
+          </div>
+          <div>
+            <h4 className="mb-2 text-sm font-semibold">그룹별 인증률</h4>
+            {kpiSummary.groupRates.length === 0 ? <p className="text-xs text-slate-400">데이터가 없습니다.</p> : (
+              <ul className="space-y-1.5">
+                {kpiSummary.groupRates.map((g) => (
+                  <li key={g.key} className="flex items-center gap-2 text-sm">
+                    <span className="w-24 shrink-0 truncate sm:w-28" title={g.label}>{g.label}</span>
+                    <span className="relative h-2 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700"><span className="absolute inset-y-0 left-0 rounded-full bg-emerald-500" style={{ width: `${Math.min(100, g.rate)}%` }} /></span>
+                    <span className="w-20 shrink-0 text-right text-xs text-slate-500 sm:w-24">{g.acquired}/{g.headcount} · {g.rate}%</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* [9단계] 라이선스 자동화 현황 — employee_license_plan 기준(대시보드·보고서 공통 정본) */}
       {licAnalytics && (
