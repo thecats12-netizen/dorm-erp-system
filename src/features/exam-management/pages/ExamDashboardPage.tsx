@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
+import { computeCertifiedFlagsByPerson } from "../utils/personnelCertSnapshot";
 import { buildRetestCandidates, summarizeCertExpiry, buildExamNotifications, runRecalculation, type ExamNotification, type RecalcResult, type RecalcScope } from "../services/examAutomationService";
 import { listRetestCandidates, generateRetestCandidates, setRetestCandidateStatus, type RetestCandidateRow, type RetestStatus } from "../services/examRetestService";
 import { writeAutomationLog, listAutomationLogs, type AutomationLogRow } from "../services/examAutomationLogService";
@@ -74,6 +75,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   const [certs, setCerts] = useState<ExamRow[]>([]);
   const [targets, setTargets] = useState<ExamRow[]>([]);
   const [levels, setLevels] = useState<RefOpt[]>([]);
+  const [levelsRaw, setLevelsRaw] = useState<ExamRow[]>([]); // [P2 SoT] code/name/rank_order 포함 원본(공용 인증 스냅샷용)
   const [rules, setRules] = useState<ExamRow[]>([]);
   const [retest, setRetest] = useState<RetestCandidateRow[]>([]);
   const [retestOpen, setRetestOpen] = useState(false);
@@ -98,7 +100,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
     setLoading(true); setError(null);
     try {
-      const [p, a, c, t, lv, ru, rc] = await Promise.all([
+      const [p, a, c, t, lv, ru, rc, lvRaw] = await Promise.all([
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
@@ -106,8 +108,9 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
         listExamRefOptions("exam_levels", tenantId).catch(() => [] as RefOpt[]),
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
         listRetestCandidates(tenantId).catch(() => [] as RetestCandidateRow[]),
+        listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv); setRules(ru); setRetest(rc);
+      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv); setRules(ru); setRetest(rc); setLevelsRaw(lvRaw);
       // [9단계] 라이선스 계획 통계/자동화 오류(공통 정본). 계획 테이블 미적용 환경에서도 안전(빈 결과).
       try { setLicAnalytics(await loadLicenseAnalytics(tenantId, p)); } catch { /* 무시 */ }
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
@@ -229,12 +232,17 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   }, [personnel, apps, targets, levels]);
 
   // 데이터셋별 필터 적용(해당 필드가 있는 항목만).
-  const fPersonnel = useMemo(() => personnel.filter((r) =>
+  // [P2 SoT] Single~M4/인증Level/D.M/Dual 을 보고서와 동일 공용 계산으로 통일(실제 취득 · 승인 dm_certifications). 표시/집계 전용.
+  const personnelComputed = useMemo(
+    () => computeCertifiedFlagsByPerson({ personnel, applications: apps, levels: levelsRaw, dmCertifications: certs }),
+    [personnel, apps, levelsRaw, certs],
+  );
+  const fPersonnel = useMemo(() => personnelComputed.filter((r) =>
     (f.group === "전체" || str(r.group_name) === f.group) &&
     (f.product === "전체" || str(r.product_group) === f.product) &&
     (f.part === "전체" || str(r.part_name) === f.part) &&
     (f.level === "전체" || str(r.cert_level) === f.level)
-  ), [personnel, f]);
+  ), [personnelComputed, f]);
   const fApps = useMemo(() => apps.filter((r) => {
     const ym = passMonth(r) || ymd(r.written_exam_date).slice(0, 7);
     return (f.year === "전체" || ym.slice(0, 4) === f.year) &&

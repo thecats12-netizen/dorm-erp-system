@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
-import { acquiredLevelIds, normalizeCertificationLevel } from "../utils/certificationLevel";
+import { computeCertifiedFlagsByPerson } from "../utils/personnelCertSnapshot";
 import { TrendChart, BarDistribution, Donut, Collapsible } from "../components/ExamReportCharts";
 import { RC } from "../components/examReportColors";
 
@@ -114,41 +114,10 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
   // [단계 정합화] 전체/그룹/파트/공정 인증 현황이 personnel flag(single_job 등) 대신 실제 취득 응시이력으로 단계를 반영하도록 보강.
   //  ExamPersonnelPage 와 동일 공용 로직(acquiredLevelIds + normalizeCertificationLevel). process_id 있는 인력만 재계산(동일 공정 취득만 인정),
   //  legacy(process_id 없음) 인력은 기존 flag 그대로 유지(무회귀). 표시/집계 전용 — 저장/원본 미변경.
-  const personnelComputed = useMemo(() => {
-    const sid = {
-      single_job: normalizeCertificationLevel("Single", levelsRaw),
-      m1: normalizeCertificationLevel("M1", levelsRaw), m2: normalizeCertificationLevel("M2", levelsRaw),
-      m3: normalizeCertificationLevel("M3", levelsRaw), m4: normalizeCertificationLevel("M4", levelsRaw),
-    };
-    const rankById = new Map(levelsRaw.map((l) => [String(l.id), Number(l.rank_order ?? 0)]));
-    const nameById = new Map(levelsRaw.map((l) => [String(l.id), String(l.name ?? l.code ?? "")]));
-    // [D.M/Dual canonical] 유효 승인 D.M 인증(dm_certifications: 미삭제 · approval_status="승인" · is_active!==false)을
-    //  employee_no 기준으로 집계. dm=1건 이상 승인, dual=승인 중 dual_multi truthy 존재. flag 아닌 실데이터가 canonical.
-    const dmByEmp = new Map<string, { dm: boolean; dual: boolean }>();
-    for (const c of certs) {
-      if (c.deleted_at || String(c.approval_status ?? "") !== "승인" || c.is_active === false) continue;
-      const e = str(c.employee_no); if (!e) continue;
-      const prev = dmByEmp.get(e) ?? { dm: false, dual: false };
-      dmByEmp.set(e, { dm: true, dual: prev.dual || truthy(c.dual_multi) });
-    }
-    return personnel.map((r): ExamRow => {
-      const emp = str(r.employee_no), pid = str(r.process_id);
-      const dmInfo = emp ? dmByEmp.get(emp) : undefined;
-      const dmOverlay = { dm: dmInfo?.dm ? "○" : "", dual_multi: !!dmInfo?.dual }; // canonical 우선(legacy flag 미혼합)
-      if (!emp || !pid) return { ...r, ...dmOverlay }; // legacy(공정 미연결) → single~m4 flag 보존, dm/dual 만 실데이터 정합
-      const acq = acquiredLevelIds(apps, emp, levelsRaw, { processId: pid });
-      let bestId = "", bestRank = -Infinity;
-      for (const id of acq) { const rk = rankById.get(id) ?? 0; if (rk > bestRank) { bestRank = rk; bestId = id; } }
-      return {
-        ...r,
-        single_job: sid.single_job && acq.has(sid.single_job) ? "○" : "",
-        m1: sid.m1 && acq.has(sid.m1) ? "○" : "", m2: sid.m2 && acq.has(sid.m2) ? "○" : "",
-        m3: sid.m3 && acq.has(sid.m3) ? "○" : "", m4: sid.m4 && acq.has(sid.m4) ? "○" : "",
-        cert_level: bestId ? (nameById.get(bestId) || "") : "",
-        ...dmOverlay,
-      };
-    });
-  }, [personnel, apps, levelsRaw, certs]);
+  const personnelComputed = useMemo(
+    () => computeCertifiedFlagsByPerson({ personnel, applications: apps, levels: levelsRaw, dmCertifications: certs }),
+    [personnel, apps, levelsRaw, certs],
+  );
 
   // 데이터셋별 필터. [라인 UI 제외] 라인 필터 없음 → 전체 집계 기본(line_id 유무로 데이터 누락 없음).
   const fPersonnel = useMemo(() => personnelComputed.filter((r) =>
