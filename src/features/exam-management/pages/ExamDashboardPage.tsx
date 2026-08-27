@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
-import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
+import { listExamRows, examSupabaseReady, examRefLabel, type ExamRow } from "../services/examMasterService";
 import { computeCertifiedFlagsByPerson } from "../utils/personnelCertSnapshot";
 import { computeExamKpiSummary, type GroupRate } from "../services/examAnalyticsKpi";
 import { computeCurrentLevelByPersonnel } from "../services/currentCertificationLevelService";
@@ -82,8 +82,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   const [apps, setApps] = useState<ExamRow[]>([]);
   const [certs, setCerts] = useState<ExamRow[]>([]);
   const [targets, setTargets] = useState<ExamRow[]>([]);
-  const [levels, setLevels] = useState<RefOpt[]>([]);
-  const [levelsRaw, setLevelsRaw] = useState<ExamRow[]>([]); // [P2 SoT] code/name/rank_order 포함 원본(공용 인증 스냅샷용)
+  const [levelsRaw, setLevelsRaw] = useState<ExamRow[]>([]); // [P2 SoT] code/name/rank_order 포함 원본(공용 인증 스냅샷 + RefOpt derive)
   const [pmCerts, setPmCerts] = useState<ExamRow[]>([]); // [KPI] 현재 Level 분포(computeCurrentLevelByPersonnel)용 PM 인증
   const [eqCerts, setEqCerts] = useState<ExamRow[]>([]); // [KPI 2차-B] 설비 인증(approved)
   const [eqStageRules, setEqStageRules] = useState<ExamRow[]>([]); // [KPI 2차-B] 설비별 인증단계 규칙(대상 설비)
@@ -98,6 +97,8 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
     { year: "전체", month: "전체", group: "전체", product: "전체", part: "전체", process: "전체", level: "전체" }
   );
   const [detail, setDetail] = useState<{ title: string; kind: Kind; rows: ExamRow[] } | null>(null);
+  // [P2 성능] exam_levels 는 raw 1회 로드 → RefOpt(id·label) 를 여기서 derive(중복 DB query 제거). 라벨 형식은 listExamRefOptions 와 동일(examRefLabel).
+  const levels = useMemo<RefOpt[]>(() => levelsRaw.filter((l) => l.is_active !== false).map((l) => ({ id: String(l.id), label: examRefLabel(l) })), [levelsRaw]);
   const [detailSearch, setDetailSearch] = useState("");
   const [notiOpen, setNotiOpen] = useState(false);
   const [licAnalytics, setLicAnalytics] = useState<LicenseAnalytics | null>(null); // [9단계] 라이선스 계획 통계/자동화 오류
@@ -112,12 +113,11 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
     setLoading(true); setError(null);
     try {
-      const [p, a, c, t, lv, ru, rc, lvRaw, pmc, eqc, esr, acr] = await Promise.all([
+      const [p, a, c, t, ru, rc, lvRaw, pmc, eqc, esr, acr] = await Promise.all([
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_annual_targets", tenantId).catch(() => [] as ExamRow[]),
-        listExamRefOptions("exam_levels", tenantId).catch(() => [] as RefOpt[]),
         listExamRows("exam_rules", tenantId).catch(() => [] as ExamRow[]),
         listRetestCandidates(tenantId).catch(() => [] as RetestCandidateRow[]),
         listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
@@ -126,7 +126,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
         listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[]),
         listProcessCriteriaRules(tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv); setRules(ru); setRetest(rc); setLevelsRaw(lvRaw); setPmCerts(pmc);
+      setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setRules(ru); setRetest(rc); setLevelsRaw(lvRaw); setPmCerts(pmc);
       setEqCerts(eqc); setEqStageRules(esr); setAchieveRules(acr);
       // [9단계] 라이선스 계획 통계/자동화 오류(공통 정본). 계획 테이블 미적용 환경에서도 안전(빈 결과).
       try { setLicAnalytics(await loadLicenseAnalytics(tenantId, p)); } catch { /* 무시 */ }
@@ -312,21 +312,22 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   const byProduct = useMemo(() => groupBy(fPersonnel.filter((r) => truthy(r.cert_level) || truthy(r.dm) || truthy(r.single_job)), (r) => str(r.product_group), "personnel"), [fPersonnel]);
   const byPart = useMemo(() => groupBy(fPersonnel.filter((r) => truthy(r.cert_level) || truthy(r.dm) || truthy(r.single_job)), (r) => str(r.part_name), "personnel"), [fPersonnel]);
 
+  // [P2 성능] 현재 Level 은 1회만 계산 → kpiSummary(내부 재계산 방지) 와 levelSegments(drill-down) 가 공유.
+  const levelByPerson = useMemo(() => computeCurrentLevelByPersonnel({
+    personnel: fPersonnel, levels: levelsRaw, applications: apps, pmCertifications: pmCerts,
+  }), [fPersonnel, levelsRaw, apps, pmCerts]);
   // [KPI 1차] 공용 순수 집계(examAnalyticsKpi) — 현재 필터 인원 기준 canonical 지표. 페이지 내 계산식 중복 없음.
   const kpiSummary = useMemo(() => computeExamKpiSummary({
     personnel: fPersonnel, applications: apps, levels: levelsRaw,
     pmCertifications: pmCerts, dmCertifications: certs, retestCandidates: retest,
     monthlyApplications: fApps, // 월별 추세: 기간+scope 필터 적용된 응시
     equipmentCertifications: eqCerts, equipmentStageRules: eqStageRules, criteriaRules: achieveRules,
-  }), [fPersonnel, apps, levelsRaw, pmCerts, certs, retest, fApps, eqCerts, eqStageRules, achieveRules]);
+    currentLevelByPerson: levelByPerson, // 중복 계산 방지(페이지에서 이미 계산)
+  }), [fPersonnel, apps, levelsRaw, pmCerts, certs, retest, fApps, eqCerts, eqStageRules, achieveRules, levelByPerson]);
   // 월별 추세(응시/합격/취득 · 건수) — 기존 Columns 재사용(3개 미니 차트).
   const monthlyApplied = useMemo(() => kpiSummary.monthlyTrend.map((m) => ({ label: m.label, value: m.applied, rows: [] as ExamRow[], kind: "application" as Kind })), [kpiSummary]);
   const monthlyPassed = useMemo(() => kpiSummary.monthlyTrend.map((m) => ({ label: m.label, value: m.passed, rows: [] as ExamRow[], kind: "application" as Kind })), [kpiSummary]);
   const monthlyAcquired = useMemo(() => kpiSummary.monthlyTrend.map((m) => ({ label: m.label, value: m.acquired, rows: [] as ExamRow[], kind: "application" as Kind })), [kpiSummary]);
-  // 현재 Level 배타 분포 drill-down 용(rows). 카운트는 위 kpiSummary 와 동일 정의.
-  const levelByPerson = useMemo(() => computeCurrentLevelByPersonnel({
-    personnel: fPersonnel, levels: levelsRaw, applications: apps, pmCertifications: pmCerts,
-  }), [fPersonnel, levelsRaw, apps, pmCerts]);
   const levelSegments = useMemo((): Segment[] => {
     const stageNames = selectPmStageLevels(levelsRaw).map((l) => str(l.name) || str(l.code));
     const buckets: Array<{ label: string; rows: ExamRow[] }> = [{ label: "미취득", rows: [] }, ...stageNames.map((n) => ({ label: n, rows: [] as ExamRow[] }))];

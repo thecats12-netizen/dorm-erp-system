@@ -3,7 +3,7 @@
 //  · 새 인증 판정 엔진 만들지 않음. 페이지 컴포넌트에 KPI 계산식 중복 금지.
 //  · 정책 데이터(required_months/valid_months) 의존 지표(목표취득/만료/갱신)는 여기서 계산하지 않는다.
 import type { ExamRow } from "./examMasterService";
-import { computeCurrentLevelByPersonnel } from "./currentCertificationLevelService";
+import { computeCurrentLevelByPersonnel, type CurrentLevelResult } from "./currentCertificationLevelService";
 import { computeEquipmentProgressByPersonnel } from "./equipmentProgressService";
 import { deriveAchievementTiming } from "./examAutomationService";
 import { monthsBetween } from "./licensePlanService";
@@ -58,6 +58,7 @@ export function computeExamKpiSummary(input: {
   equipmentCertifications?: ExamRow[]; // 설비 인증(approved 판정용)
   equipmentStageRules?: ExamRow[];     // 설비별 인증단계 규칙(대상 설비)
   criteriaRules?: ExamRow[];           // 공정별 달성기준(조기/정상/지연 criteria)
+  currentLevelByPerson?: Map<string, CurrentLevelResult>; // 페이지 precompute 재사용(중복 계산 방지)
 }): ExamKpiSummary {
   const { personnel, applications, levels, pmCertifications, dmCertifications, retestCandidates } = input;
   const monthlyApps = input.monthlyApplications ?? applications;
@@ -80,8 +81,9 @@ export function computeExamKpiSummary(input: {
     // 필기: 응시=필기시험일/필기합격일 존재, 합격=필기합격일 존재.
     if (S(a.written_exam_date) || S(a.written_pass_date)) wTaken.add(e);
     if (S(a.written_pass_date)) wPass.add(e);
-    // 실기: 응시=실기합격일 존재 또는 status 가 실기 계열, 합격=실기합격일 존재.
-    if (S(a.practical_pass_date) || /실기/.test(S(a.status))) pTaken.add(e);
+    // 실기: 응시=실기합격일/실기취득(진행)일 존재 또는 status 실기 계열, 합격=실기합격일 존재.
+    //  practical_acquire_date 는 calculateExamStatus 에서 "실기진행"(실기 응시 발생) 신호로 쓰이므로 분모에 포함.
+    if (S(a.practical_pass_date) || S(a.practical_acquire_date) || /실기/.test(S(a.status))) pTaken.add(e);
     if (S(a.practical_pass_date)) pPass.add(e);
     // 공정별(process_id canonical · 라벨=공정명 텍스트). 분모=응시(scope) 사번, 분자=취득 사번.
     const pid = S(a.process_id); if (pid) {
@@ -96,7 +98,8 @@ export function computeExamKpiSummary(input: {
 
   // 현재 Level 배타 분포(canonical). index: -1=미취득, 0=Single … 4=M4.
   const stageNames = selectPmStageLevels(levels).map((l) => S(l.name) || S(l.code)); // ["Single","M1"…]
-  const levelByPerson = computeCurrentLevelByPersonnel({ personnel, levels, applications, pmCertifications });
+  // 중복 계산 방지: 페이지가 이미 계산한 결과를 넘기면 재사용(같은 입력이면 동일 결과).
+  const levelByPerson = input.currentLevelByPerson ?? computeCurrentLevelByPersonnel({ personnel, levels, applications, pmCertifications });
   const buckets: LevelBucket[] = [{ key: "none", label: "미취득", count: 0 }, ...stageNames.map((n, i) => ({ key: `stage${i}`, label: n, count: 0 }))];
   for (const p of personnel) {
     const r = levelByPerson.get(S(p.id));
