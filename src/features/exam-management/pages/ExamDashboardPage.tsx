@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { listExamRows, listExamRefOptions, examSupabaseReady, type ExamRow } from "../services/examMasterService";
 import { computeCertifiedFlagsByPerson } from "../utils/personnelCertSnapshot";
-import { computeExamKpiSummary } from "../services/examAnalyticsKpi";
+import { computeExamKpiSummary, type GroupRate } from "../services/examAnalyticsKpi";
 import { computeCurrentLevelByPersonnel } from "../services/currentCertificationLevelService";
 import { selectPmStageLevels } from "../utils/certificationLevel";
 import { buildRetestCandidates, summarizeCertExpiry, buildExamNotifications, runRecalculation, type ExamNotification, type RecalcResult, type RecalcScope } from "../services/examAutomationService";
@@ -304,7 +304,12 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   const kpiSummary = useMemo(() => computeExamKpiSummary({
     personnel: fPersonnel, applications: apps, levels: levelsRaw,
     pmCertifications: pmCerts, dmCertifications: certs, retestCandidates: retest,
-  }), [fPersonnel, apps, levelsRaw, pmCerts, certs, retest]);
+    monthlyApplications: fApps, // 월별 추세: 기간+scope 필터 적용된 응시
+  }), [fPersonnel, apps, levelsRaw, pmCerts, certs, retest, fApps]);
+  // 월별 추세(응시/합격/취득 · 건수) — 기존 Columns 재사용(3개 미니 차트).
+  const monthlyApplied = useMemo(() => kpiSummary.monthlyTrend.map((m) => ({ label: m.label, value: m.applied, rows: [] as ExamRow[], kind: "application" as Kind })), [kpiSummary]);
+  const monthlyPassed = useMemo(() => kpiSummary.monthlyTrend.map((m) => ({ label: m.label, value: m.passed, rows: [] as ExamRow[], kind: "application" as Kind })), [kpiSummary]);
+  const monthlyAcquired = useMemo(() => kpiSummary.monthlyTrend.map((m) => ({ label: m.label, value: m.acquired, rows: [] as ExamRow[], kind: "application" as Kind })), [kpiSummary]);
   // 현재 Level 배타 분포 drill-down 용(rows). 카운트는 위 kpiSummary 와 동일 정의.
   const levelByPerson = useMemo(() => computeCurrentLevelByPersonnel({
     personnel: fPersonnel, levels: levelsRaw, applications: apps, pmCertifications: pmCerts,
@@ -334,6 +339,14 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
 
   // ── UI helpers ──
   const sectionCls = `rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`;
+  const rateList = (rows: GroupRate[]) => rows.length === 0
+    ? <p className="text-xs text-slate-400">데이터가 없습니다.</p>
+    : (<ul className="space-y-1.5">{rows.map((g) => (
+        <li key={g.key} className="flex items-center gap-2 text-sm">
+          <span className="w-24 shrink-0 truncate sm:w-28" title={g.label}>{g.label}</span>
+          <span className="relative h-2 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700"><span className="absolute inset-y-0 left-0 rounded-full bg-emerald-500" style={{ width: `${Math.min(100, g.rate)}%` }} /></span>
+          <span className="w-20 shrink-0 text-right text-xs text-slate-500 sm:w-24">{g.acquired}/{g.headcount} · {g.rate}%</span>
+        </li>))}</ul>);
   const selCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
 
   const openDetail = (title: string, s: { rows: ExamRow[]; kind: Kind }) => { setDetailSearch(""); setDetail({ title, kind: s.kind, rows: s.rows }); };
@@ -484,6 +497,37 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
               </ul>
             )}
           </div>
+        </div>
+      </section>
+
+      {/* [KPI 2차-A] 시험 성과 — 필기/실기 합격률(현재 필터 인원 기준 · 사번 distinct) */}
+      <section className={sectionCls}>
+        <div className="mb-3"><h3 className="text-base font-semibold">시험 성과</h3><p className="text-sm text-slate-500">필기/실기 합격률 · 응시(분모) 대비 합격(분자) · 사번 distinct.</p></div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <KpiCard darkMode={darkMode} label="필기 합격" value={`${kpiSummary.writtenPassCount}명 · ${kpiSummary.writtenPassRate}%`} color="cyan" />
+          <KpiCard darkMode={darkMode} label="실기 합격" value={`${kpiSummary.practicalPassCount}명 · ${kpiSummary.practicalPassRate}%`} color="blue" />
+        </div>
+      </section>
+
+      {/* [KPI 2차-A] 조직별 인증 현황 — 공정별(process_id)/제품군별(category_id) 인증률 */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className={sectionCls}>
+          <h3 className="mb-3 text-base font-semibold">공정별 인증률</h3>
+          {rateList(kpiSummary.processRates)}
+        </section>
+        <section className={sectionCls}>
+          <h3 className="mb-3 text-base font-semibold">제품군별 인증률</h3>
+          {rateList(kpiSummary.categoryRates)}
+        </section>
+      </div>
+
+      {/* [KPI 2차-A] 시험 추세 — 월별 응시/합격/취득(건수 · 기간+scope 필터) */}
+      <section className={sectionCls}>
+        <div className="mb-3"><h3 className="text-base font-semibold">시험 추세 (월별 · 건수)</h3><p className="text-sm text-slate-500">응시(필기시험일) / 합격(합격일) / 취득(취득일) · 이벤트 건수 기준.</p></div>
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          <div className="overflow-x-auto"><h4 className="mb-2 text-sm font-semibold text-indigo-500">응시</h4><Columns data={monthlyApplied} onPick={() => {}} /></div>
+          <div className="overflow-x-auto"><h4 className="mb-2 text-sm font-semibold text-emerald-500">합격</h4><Columns data={monthlyPassed} onPick={() => {}} /></div>
+          <div className="overflow-x-auto"><h4 className="mb-2 text-sm font-semibold text-amber-500">취득</h4><Columns data={monthlyAcquired} onPick={() => {}} /></div>
         </div>
       </section>
 
