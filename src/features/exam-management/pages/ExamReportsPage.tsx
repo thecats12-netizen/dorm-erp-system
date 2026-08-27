@@ -18,6 +18,44 @@ const isAcquired = (a: ExamRow) => isApplicationAcquired(a);
 const isPass = (a: ExamRow) => !isFail(a) && (isAcquired(a) || /합격/.test(str(a.status)));
 const expiryState = (r: ExamRow) => { const s = ymd(r.expiry_date); if (!s) return "-"; const d = Math.floor((new Date(s).getTime() - Date.now()) / 86400000); return d < 0 ? "만료" : d <= 30 ? "만료예정" : "유효"; };
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// ── [출력 그래프] print-safe inline SVG 문자열 빌더 (외부 라이브러리 없음 · document.write 창 동작 · 확대 선명 · 흑백 대응 위해 값/라벨 병기) ──
+const CHART_W = 680;
+// 2계열 line chart(월별 계획/실적). 값은 호출부에서 계산된 것 그대로.
+const svgLine = (series: Array<{ name: string; color: string; data: number[] }>, xLabels: string[]): string => {
+  const w = CHART_W, h = 220, pl = 42, pr = 16, pt = 24, pb = 26;
+  const n = xLabels.length; const max = Math.max(1, ...series.flatMap((s) => s.data));
+  const X = (i: number) => pl + (n <= 1 ? 0 : (i * (w - pl - pr)) / (n - 1));
+  const Y = (v: number) => pt + (h - pt - pb) * (1 - v / max);
+  const grid = [0, 0.5, 1].map((t) => { const gy = pt + (h - pt - pb) * (1 - t); return `<line x1="${pl}" y1="${gy}" x2="${w - pr}" y2="${gy}" stroke="#e2e8f0"/><text x="${pl - 5}" y="${gy + 3}" text-anchor="end" font-size="9" fill="#64748b">${Math.round(max * t)}</text>`; }).join("");
+  const xlab = xLabels.map((l, i) => `<text x="${X(i)}" y="${h - 8}" text-anchor="middle" font-size="9" fill="#64748b">${esc(l)}</text>`).join("");
+  const lines = series.map((s) => { const pts = s.data.map((v, i) => `${X(i)},${Y(v)}`).join(" "); const dots = s.data.map((v, i) => `<circle cx="${X(i)}" cy="${Y(v)}" r="2.2" fill="${s.color}"/>`).join(""); return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2"/>${dots}`; }).join("");
+  const legend = series.map((s, i) => `<rect x="${pl + i * 96}" y="4" width="10" height="10" fill="${s.color}"/><text x="${pl + i * 96 + 14}" y="13" font-size="10" fill="#334155">${esc(s.name)}</text>`).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="max-width:${w}px;height:auto">${grid}${xlab}${lines}${legend}</svg>`;
+};
+// 가로 막대(그룹/제품군/공정/응시상태). 상위 12개 · 값 라벨 병기.
+const svgHBar = (items: Array<{ label: string; value: number }>, color: string): string => {
+  const top = items.slice(0, 12); const w = CHART_W, rowH = 22, pl = 128, pr = 46; const h = Math.max(rowH, top.length * rowH) + 6;
+  const max = Math.max(1, ...top.map((i) => i.value));
+  const rows = top.map((it, i) => { const bw = Math.max(0, (it.value / max) * (w - pl - pr)); const yy = i * rowH + 4; return `<text x="${pl - 6}" y="${yy + 13}" text-anchor="end" font-size="10" fill="#334155">${esc(it.label.length > 18 ? it.label.slice(0, 17) + "…" : it.label)}</text><rect x="${pl}" y="${yy + 3}" width="${bw}" height="13" fill="${color}" rx="2"/><text x="${pl + bw + 5}" y="${yy + 13}" font-size="10" fill="#334155">${it.value}</text>`; }).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="max-width:${w}px;height:auto">${rows}</svg>`;
+};
+// 도넛(조기/정상/지연). total>0 전제(호출부에서 hasData 판정). 범례에 인원+% 병기.
+const svgDonut = (items: Array<{ label: string; value: number; color: string }>): string => {
+  const total = items.reduce((s, i) => s + Math.max(0, i.value), 0); if (total <= 0) return "";
+  const size = 168, r = 60, cx = size / 2, cy = size / 2, sw = 26; let acc = 0;
+  const segs = items.map((it) => { const frac = Math.max(0, it.value) / total; if (frac <= 0) return ""; const a0 = acc * 2 * Math.PI - Math.PI / 2; acc += frac; const a1 = acc * 2 * Math.PI - Math.PI / 2; const large = frac > 0.5 ? 1 : 0; const x0 = cx + r * Math.cos(a0), y0 = cy + r * Math.sin(a0), x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1); return `<path d="M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}" fill="none" stroke="${it.color}" stroke-width="${sw}"/>`; }).join("");
+  const legend = items.map((it, i) => `<rect x="${size + 12}" y="${i * 22 + 10}" width="10" height="10" fill="${it.color}"/><text x="${size + 26}" y="${i * 22 + 19}" font-size="10" fill="#334155">${esc(it.label)} ${it.value}명 (${Math.round((it.value / total) * 100)}%)</text>`).join("");
+  const H = Math.max(size, items.length * 22 + 18);
+  return `<svg viewBox="0 0 ${size + 210} ${H}" width="100%" style="max-width:${size + 210}px;height:auto">${segs}${legend}</svg>`;
+};
+// 목표 대비 실적(2 막대 비교 · 달성률 병기).
+const svgCompare = (target: number, actual: number, ratePct: number): string => {
+  const w = CHART_W, pl = 84, pr = 60, rowH = 28; const h = rowH * 2 + 8; const max = Math.max(1, target, actual);
+  const bar = (label: string, val: number, color: string, i: number) => { const bw = Math.max(0, (val / max) * (w - pl - pr)); const yy = i * rowH + 4; return `<text x="${pl - 6}" y="${yy + 16}" text-anchor="end" font-size="10" fill="#334155">${label}</text><rect x="${pl}" y="${yy + 5}" width="${bw}" height="14" fill="${color}" rx="2"/><text x="${pl + bw + 6}" y="${yy + 16}" font-size="10" fill="#334155">${val}</text>`; };
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="max-width:${w}px;height:auto">${bar("목표(연간)", target, "#1e3a8a", 0)}${bar(`실적(누계) ${ratePct}%`, actual, "#ea580c", 1)}</svg>`;
+};
+
 // 분포(인증 인원 = 취득 사원 distinct) 집계 · 상위 12개.
 const distinctAcquiredBy = (rows: ExamRow[], keyFn: (r: ExamRow) => string) => {
   const m = new Map<string, Set<string>>();
@@ -414,38 +452,44 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
           : levelIsStage(levelLabel(a.level_id), s as Stage));
     const tgtMatch = (t: ExamRow) => lv.some((s) => s !== "육성 재보수" && levelIsStage(levelLabel(t.level_id), (s === "Dual Multi" ? "Dual Multi" : s) as Stage));
     const exApps = fApps.filter(appMatch), exTargets = fTargets.filter(tgtMatch), exMonthly = fMonthly.filter(tgtMatch);
-    const tbl = (title: string, heads: string[], rowsHtml: string, hasData: boolean) =>
-      `<section class="rep"><h3>${esc(title)}</h3>${hasData ? `<table><thead><tr>${heads.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table>` : `<p class="empty">해당 조건의 데이터가 없습니다.</p>`}</section>`;
-    const dist = (items: Array<{ label: string; value: number }>, title: string, keyLabel: string) =>
-      tbl(title, [keyLabel, "인증 인원"], items.map((it) => `<tr><td>${esc(it.label)}</td><td>${it.value}</td></tr>`).join(""), items.length > 0);
+    // 그래프(SVG) + 수치표(§10) 결합. hasData 아니면 한글 빈 상태.
+    const tbl = (title: string, heads: string[], rowsHtml: string, hasData: boolean, svg = "") =>
+      `<section class="rep"><h3>${esc(title)}</h3>${hasData ? `<div class="chart">${svg}</div><table><thead><tr>${heads.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table>` : `<p class="empty">해당 조건의 데이터가 없습니다.</p>`}</section>`;
+    const dist = (items: Array<{ label: string; value: number }>, title: string, keyLabel: string, color: string) =>
+      tbl(title, [keyLabel, "인증 인원"], items.map((it) => `<tr><td>${esc(it.label)}</td><td>${it.value}</td></tr>`).join(""), items.length > 0, svgHBar(items, color));
     const sectionHtml = (id: ReportSectionId): string => {
       if (id === "monthly_plan_actual") {
         const actual = MONTHS.map((k) => exMonthly.reduce((s, t) => s + num(t[k]), 0));
         const planAnnual = exTargets.reduce((s, t) => s + num(t.target_count), 0);
         const plan = MONTHS.map(() => Math.round((planAnnual / 12) * 10) / 10);
         const rows = MONTHS.map((_, i) => `<tr><td>${i + 1}월</td><td>${plan[i]}</td><td>${actual[i]}</td></tr>`).join("");
-        return tbl("월별 계획/실적 (계획=연간목표 12개월 균등 분배 근사)", ["월", "계획", "실적"], rows, planAnnual > 0 || actual.some((v) => v > 0));
+        const svg = svgLine([{ name: "계획", color: "#2563eb", data: plan }, { name: "실적", color: "#ea580c", data: actual }], MONTHS.map((_, i) => `${i + 1}월`));
+        return tbl("월별 계획/실적 (계획=연간목표 12개월 균등 분배 근사)", ["월", "계획", "실적"], rows, planAnnual > 0 || actual.some((v) => v > 0), svg);
       }
-      if (id === "group_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.group_name)), "그룹별 인증 인원", "그룹");
-      if (id === "category_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.product)), "제품군별 인증 인원", "제품군");
-      if (id === "process_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.process)), "공정별 인증 인원", "공정");
+      if (id === "group_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.group_name)), "그룹별 인증 인원", "그룹", "#2563eb");
+      if (id === "category_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.product)), "제품군별 인증 인원", "제품군", "#1e3a8a");
+      if (id === "process_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.process)), "공정별 인증 인원", "공정", "#3b82f6");
       if (id === "achievement_timing") {
         const early = exApps.filter((a) => /조기/.test(str(a.timing_status))).length;
         const normal = exApps.filter((a) => /정상/.test(str(a.timing_status))).length;
         const late = exApps.filter((a) => /지연/.test(str(a.timing_status))).length;
-        const rows = [["조기취득", early], ["정상취득", normal], ["지연취득", late]].map(([l, v]) => `<tr><td>${l}</td><td>${v}</td></tr>`).join("");
-        return tbl("조기/정상/지연 비율", ["구분", "인원"], rows, early + normal + late > 0);
+        const total = early + normal + late;
+        const pctOf = (v: number) => (total > 0 ? Math.round((v / total) * 100) : 0);
+        const rows = [["조기취득", early], ["정상취득", normal], ["지연취득", late]].map(([l, v]) => `<tr><td>${l}</td><td>${v}</td><td>${pctOf(Number(v))}%</td></tr>`).join("");
+        const svg = svgDonut([{ label: "조기취득", value: early, color: "#3b82f6" }, { label: "정상취득", value: normal, color: "#1e3a8a" }, { label: "지연취득", value: late, color: "#94a3b8" }]);
+        return tbl("조기/정상/지연 비율", ["구분", "인원", "비율"], rows, total > 0, svg);
       }
       if (id === "exam_status_distribution") {
         const m = new Map<string, number>();
         exApps.forEach((r) => { const k = str(r.status) || "(미지정)"; m.set(k, (m.get(k) ?? 0) + 1); });
-        const items = Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
-        return tbl("응시상태 분포", ["상태", "건수"], items.map(([l, v]) => `<tr><td>${esc(l)}</td><td>${v}</td></tr>`).join(""), items.length > 0);
+        const items = Array.from(m.entries()).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+        return tbl("응시상태 분포", ["상태", "건수"], items.map((it) => `<tr><td>${esc(it.label)}</td><td>${it.value}</td></tr>`).join(""), items.length > 0, svgHBar(items, "#64748b"));
       }
       // target_performance
       const planTotal = exTargets.reduce((s, t) => s + num(t.target_count), 0);
       const actualTotal = exMonthly.reduce((s, t) => s + MONTHS.reduce((x, k) => x + num(t[k]), 0), 0);
-      return tbl("목표 대비 실적", ["구분", "값"], `<tr><td>목표(연간)</td><td>${planTotal}</td></tr><tr><td>실적(누계)</td><td>${actualTotal}</td></tr>`, planTotal > 0 || actualTotal > 0);
+      const ratePct = pct(actualTotal, planTotal);
+      return tbl("목표 대비 실적", ["구분", "값"], `<tr><td>목표(연간)</td><td>${planTotal}</td></tr><tr><td>실적(누계)</td><td>${actualTotal}</td></tr><tr><td>달성률</td><td>${ratePct}%</td></tr>`, planTotal > 0 || actualTotal > 0, svgCompare(planTotal, actualTotal, ratePct));
     };
     const bodySections = EXPORT_SECTIONS.filter((s) => exportSections.has(s.id)).map((s) => sectionHtml(s.id)).join("");
     const selLabels = (EXPORT_LEVELS as readonly string[]).filter((l) => exportLevels.has(l as ExportLevel)).join(", ");
@@ -457,6 +501,7 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
       .meta b{font-size:16px}.meta span{color:#475569;font-size:10.5px}
       .rep{page-break-inside:avoid;break-inside:avoid;margin-bottom:14px}
       .rep h3{font-size:13px;margin:0 0 6px;border-left:4px solid #2563eb;padding-left:8px}
+      .chart{margin:4px 0 8px}.chart svg{max-width:100%;height:auto;display:block}
       table{border-collapse:collapse;width:100%}th,td{border:1px solid #cbd5e1;padding:3px 6px;text-align:center;word-break:break-all}
       thead{display:table-header-group}th{background:#f1f5f9;font-weight:600}
       .empty{color:#94a3b8;font-size:10.5px;padding:8px 0}
