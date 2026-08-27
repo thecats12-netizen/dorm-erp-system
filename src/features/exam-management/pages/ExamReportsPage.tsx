@@ -32,6 +32,21 @@ const MONTHS = Array.from({ length: 12 }, (_, i) => `m${i + 1}`);
 // [단계 대시보드] 인증단계 선택형 보고. 기존 표 보고서는 유지하고 상단에 단계별 KPI·월별추이·상세를 추가(읽기/집계 전용).
 const STAGES = ["전체", "Single", "M1", "M2", "M3", "M4", "Dual Multi", "육성 재보수"] as const;
 type Stage = typeof STAGES[number];
+
+// [출력 설정] 보고서 섹션 단일 정의(고정 출력 순서). ID 는 내부용 · 화면엔 label 만 노출.
+type ReportSectionId = "monthly_plan_actual" | "group_certification" | "category_certification" | "process_certification" | "achievement_timing" | "exam_status_distribution" | "target_performance";
+const EXPORT_SECTIONS: Array<{ id: ReportSectionId; label: string }> = [
+  { id: "monthly_plan_actual", label: "월별 계획/실적" },
+  { id: "group_certification", label: "그룹별 인증 인원" },
+  { id: "category_certification", label: "제품군별 인증 인원" },
+  { id: "process_certification", label: "공정별 인증 인원" },
+  { id: "achievement_timing", label: "조기/정상/지연 비율" },
+  { id: "exam_status_distribution", label: "응시상태 분포" },
+  { id: "target_performance", label: "목표 대비 실적" },
+];
+// 출력 인증단계(전체=제외한 실제 단계). 화면 필터와 별개의 출력 전용 선택.
+const EXPORT_LEVELS = ["Single", "M1", "M2", "M3", "M4", "Dual Multi", "육성 재보수"] as const;
+type ExportLevel = typeof EXPORT_LEVELS[number];
 // 2차: 꺾은선/세로 막대/가로 막대/누적 막대/영역/도넛/혼합(동일 data source, 표현만 변경). 렌더는 ExamReportCharts.
 const CHART_TYPES = ["꺾은선", "세로 막대", "가로 막대", "누적 막대", "영역", "도넛", "혼합"] as const;
 type ChartType = typeof CHART_TYPES[number];
@@ -68,6 +83,10 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
   const [search, setSearch] = useState("");
   const [stage, setStage] = useState<Stage>("전체");           // [단계 대시보드] 선택 인증단계
   const [chartType, setChartType] = useState<ChartType>("꺾은선"); // 월별추이 차트 유형
+  // [출력 설정] 화면 필터와 별개의 "출력 전용" 선택(섹션·인증단계). 기본 전체선택.
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportSections, setExportSections] = useState<Set<ReportSectionId>>(() => new Set(EXPORT_SECTIONS.map((s) => s.id)));
+  const [exportLevels, setExportLevels] = useState<Set<ExportLevel>>(() => new Set(EXPORT_LEVELS));
   // equipment 는 id 로 저장(표시는 이름 매핑). 기본 "전체" → 기존 집계/합계 불변. [라인 UI 제외]
   const [f, setF] = useState({ year: "전체", month: "전체", group: "전체", product: "전체", part: "전체", process: "전체", equipment: "전체", level: "전체" });
 
@@ -381,6 +400,72 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
     w.document.close();
   };
 
+  // ── [출력 설정] 선택 섹션/인증단계만 PDF·인쇄 (기존 memo/함수 재사용 · 추가 DB 조회 없음) ──
+  //  1차 화면필터(fApps/fCerts/fTargets/fMonthly) → 2차 출력 인증단계(exportLevels) → 3차 선택 섹션(exportSections).
+  const openExportPrint = () => {
+    if (exportSections.size === 0) { window.alert("출력할 보고서 항목을 1개 이상 선택해 주세요."); return; }
+    if (exportLevels.size === 0) { window.alert("출력할 인증단계를 1개 이상 선택해 주세요."); return; }
+    const w = window.open("", "_blank", "width=1100,height=800"); if (!w) return;
+    const lv = Array.from(exportLevels);
+    // 응시행이 선택 인증단계에 해당하는지(기존 stageApps 판정 재사용: levelIsStage / 육성 재보수 합집합 / Dual Multi).
+    const appMatch = (a: ExamRow) => lv.some((s) =>
+      s === "육성 재보수" ? (/재응시|재시험/.test(str(a.status)) || maintenanceEmpNos.has(str(a.employee_no)))
+        : s === "Dual Multi" ? (a.dual_multi === true || truthy(a.dual_multi) || levelIsStage(levelLabel(a.level_id), "Dual Multi"))
+          : levelIsStage(levelLabel(a.level_id), s as Stage));
+    const tgtMatch = (t: ExamRow) => lv.some((s) => s !== "육성 재보수" && levelIsStage(levelLabel(t.level_id), (s === "Dual Multi" ? "Dual Multi" : s) as Stage));
+    const exApps = fApps.filter(appMatch), exTargets = fTargets.filter(tgtMatch), exMonthly = fMonthly.filter(tgtMatch);
+    const tbl = (title: string, heads: string[], rowsHtml: string, hasData: boolean) =>
+      `<section class="rep"><h3>${esc(title)}</h3>${hasData ? `<table><thead><tr>${heads.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table>` : `<p class="empty">해당 조건의 데이터가 없습니다.</p>`}</section>`;
+    const dist = (items: Array<{ label: string; value: number }>, title: string, keyLabel: string) =>
+      tbl(title, [keyLabel, "인증 인원"], items.map((it) => `<tr><td>${esc(it.label)}</td><td>${it.value}</td></tr>`).join(""), items.length > 0);
+    const sectionHtml = (id: ReportSectionId): string => {
+      if (id === "monthly_plan_actual") {
+        const actual = MONTHS.map((k) => exMonthly.reduce((s, t) => s + num(t[k]), 0));
+        const planAnnual = exTargets.reduce((s, t) => s + num(t.target_count), 0);
+        const plan = MONTHS.map(() => Math.round((planAnnual / 12) * 10) / 10);
+        const rows = MONTHS.map((_, i) => `<tr><td>${i + 1}월</td><td>${plan[i]}</td><td>${actual[i]}</td></tr>`).join("");
+        return tbl("월별 계획/실적 (계획=연간목표 12개월 균등 분배 근사)", ["월", "계획", "실적"], rows, planAnnual > 0 || actual.some((v) => v > 0));
+      }
+      if (id === "group_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.group_name)), "그룹별 인증 인원", "그룹");
+      if (id === "category_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.product)), "제품군별 인증 인원", "제품군");
+      if (id === "process_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.process)), "공정별 인증 인원", "공정");
+      if (id === "achievement_timing") {
+        const early = exApps.filter((a) => /조기/.test(str(a.timing_status))).length;
+        const normal = exApps.filter((a) => /정상/.test(str(a.timing_status))).length;
+        const late = exApps.filter((a) => /지연/.test(str(a.timing_status))).length;
+        const rows = [["조기취득", early], ["정상취득", normal], ["지연취득", late]].map(([l, v]) => `<tr><td>${l}</td><td>${v}</td></tr>`).join("");
+        return tbl("조기/정상/지연 비율", ["구분", "인원"], rows, early + normal + late > 0);
+      }
+      if (id === "exam_status_distribution") {
+        const m = new Map<string, number>();
+        exApps.forEach((r) => { const k = str(r.status) || "(미지정)"; m.set(k, (m.get(k) ?? 0) + 1); });
+        const items = Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+        return tbl("응시상태 분포", ["상태", "건수"], items.map(([l, v]) => `<tr><td>${esc(l)}</td><td>${v}</td></tr>`).join(""), items.length > 0);
+      }
+      // target_performance
+      const planTotal = exTargets.reduce((s, t) => s + num(t.target_count), 0);
+      const actualTotal = exMonthly.reduce((s, t) => s + MONTHS.reduce((x, k) => x + num(t[k]), 0), 0);
+      return tbl("목표 대비 실적", ["구분", "값"], `<tr><td>목표(연간)</td><td>${planTotal}</td></tr><tr><td>실적(누계)</td><td>${actualTotal}</td></tr>`, planTotal > 0 || actualTotal > 0);
+    };
+    const bodySections = EXPORT_SECTIONS.filter((s) => exportSections.has(s.id)).map((s) => sectionHtml(s.id)).join("");
+    const selLabels = (EXPORT_LEVELS as readonly string[]).filter((l) => exportLevels.has(l as ExportLevel)).join(", ");
+    const metaHtml = `<div class="meta"><b>시험관리 보고서</b><span>출력일 ${today} · 작성자 ${esc(authorName)}</span><span>필터: ${activeFilters.length ? esc(activeFilters.join(", ")) : "전체"}</span><span>선택 인증단계: ${esc(selLabels)}</span></div>`;
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>시험관리 보고서</title><style>
+      @page{size:A4 portrait;margin:12mm}
+      *{box-sizing:border-box}body{font-family:'Malgun Gothic',sans-serif;font-size:11px;color:#0f172a;margin:0}
+      .meta{display:flex;flex-direction:column;gap:2px;margin-bottom:12px;border-bottom:2px solid #334155;padding-bottom:6px}
+      .meta b{font-size:16px}.meta span{color:#475569;font-size:10.5px}
+      .rep{page-break-inside:avoid;break-inside:avoid;margin-bottom:14px}
+      .rep h3{font-size:13px;margin:0 0 6px;border-left:4px solid #2563eb;padding-left:8px}
+      table{border-collapse:collapse;width:100%}th,td{border:1px solid #cbd5e1;padding:3px 6px;text-align:center;word-break:break-all}
+      thead{display:table-header-group}th{background:#f1f5f9;font-weight:600}
+      .empty{color:#94a3b8;font-size:10.5px;padding:8px 0}
+      @media print{body{padding:0}}
+    </style></head><body>${metaHtml}${bodySections}<scr`+`ipt>window.onload=function(){window.focus();window.print();}</scr`+`ipt></body></html>`);
+    w.document.close();
+  };
+  const toggleSet = <T,>(setFn: React.Dispatch<React.SetStateAction<Set<T>>>, key: T) => setFn((prev) => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n; });
+
   const section = `rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`;
   const selCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
   const btn = darkMode ? "inline-flex items-center justify-center rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800" : "inline-flex items-center justify-center rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100";
@@ -436,6 +521,7 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
           <button className={btn} onClick={exportCsv}>CSV</button>
           <button className={btn} onClick={openPrint}>PDF</button>
           <button className={btn} onClick={openPrint}>인쇄</button>
+          <button className={`${btn} border-blue-400 text-blue-600 dark:border-blue-500 dark:text-blue-300`} onClick={() => setExportOpen(true)}>보고서 출력 설정</button>
           <span className="ml-auto text-xs text-slate-500">출력일 {today} · 작성자 {authorName} · 총 {rows.length}건</span>
         </div>
       </section>
@@ -557,6 +643,50 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
         </div>
         <div className="mt-2 text-xs text-slate-500">총 {rows.length}건 · PDF/인쇄 시 A4 {built.wide ? "가로" : "세로"} 자동 분할</div>
       </section>
+
+      {/* [출력 설정] 선택 섹션 + 인증단계만 PDF/인쇄. 화면 필터와 별개 · 기존 계산 결과 재사용 */}
+      {exportOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setExportOpen(false)}>
+          <div className={`max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl p-5 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-base font-semibold">보고서 출력 설정</h3>
+              <span className="text-xs text-slate-500">보고서 {exportSections.size}개 · 인증단계 {exportLevels.size}개 선택</span>
+            </div>
+            <div className="grid gap-5 sm:grid-cols-2">
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-sm font-semibold">보고서 항목</span>
+                  <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={exportSections.size === EXPORT_SECTIONS.length} onChange={(e) => setExportSections(e.target.checked ? new Set(EXPORT_SECTIONS.map((s) => s.id)) : new Set())} />전체 선택</label>
+                </div>
+                <div className="space-y-1.5">
+                  {EXPORT_SECTIONS.map((s) => (
+                    <label key={s.id} className="flex min-h-[36px] items-center gap-2 text-sm"><input type="checkbox" checked={exportSections.has(s.id)} onChange={() => toggleSet(setExportSections, s.id)} />{s.label}</label>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-sm font-semibold">인증단계</span>
+                  <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={exportLevels.size === EXPORT_LEVELS.length} onChange={(e) => setExportLevels(e.target.checked ? new Set(EXPORT_LEVELS) : new Set())} />전체 선택</label>
+                </div>
+                <div className="space-y-1.5">
+                  {EXPORT_LEVELS.map((l) => (
+                    <label key={l} className="flex min-h-[36px] items-center gap-2 text-sm"><input type="checkbox" checked={exportLevels.has(l)} onChange={() => toggleSet(setExportLevels, l)} />{l}</label>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {(exportSections.size === 0 || exportLevels.size === 0) && (
+              <p className="mt-3 text-xs text-rose-500">{exportSections.size === 0 ? "출력할 보고서 항목을 1개 이상 선택해 주세요." : "출력할 인증단계를 1개 이상 선택해 주세요."}</p>
+            )}
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button className={btn} onClick={() => setExportOpen(false)}>취소</button>
+              <button className={`${btn} ${exportSections.size === 0 || exportLevels.size === 0 ? "opacity-50" : ""}`} disabled={exportSections.size === 0 || exportLevels.size === 0} onClick={openExportPrint}>인쇄</button>
+              <button className={`rounded-xl bg-blue-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 ${exportSections.size === 0 || exportLevels.size === 0 ? "opacity-50" : ""}`} disabled={exportSections.size === 0 || exportLevels.size === 0} onClick={openExportPrint}>PDF 생성</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
