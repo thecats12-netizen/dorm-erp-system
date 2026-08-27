@@ -424,10 +424,11 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
           if (m.count > 1) { err.push({ row: i + 2, reason: `동일한 파트가 여러 건 존재하여 자동 연결할 수 없습니다(${partName}). 제품군·그룹을 함께 입력해 주세요.` }); continue; }
           const part = m.part!;
           const grp = master.groups.find((x) => String(x.id) === String(part.group_id ?? ""));
-          const cat = master.categories.find((x) => String(x.id) === String(grp?.category_id ?? part.category_id ?? ""));
+          const cat = master.categories.find((x) => String(x.id) === String(part.category_id ?? "")); // [정본] 파트 자신의 제품군 FK(legacy group.category_id 미사용)
           row.part_id = String(part.id);
           row.part_name = mName(part); row.group_name = mName(grp) || row.group_name; row.product_group = mName(cat) || row.product_group; // FK 와 이름 일치
           if (grp) row.group_id = String(grp.id); // [Line 전환] 파트로 그룹 확정 시 group_id 정규화
+          if (cat) row.category_id = String(cat.id); // [정본 FK] 제품군 식별 축
         }
         // [Line 전환] group_id 정규화: 파트 미매칭이어도 제품군+그룹 이름이 유일하게 매칭되면 group_id 저장.
         //  실패해도 오류 아님(group_id 는 null 로 두고 기존 텍스트 identity 로 저장 · 신규/레거시 파일 모두 호환).
@@ -437,11 +438,24 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
             const gcands = master.groups.filter((g) => {
               if (g.is_active === false) return false;
               if (mName(g) !== gn) return false;
-              if (cn) { const c = master.categories.find((x) => String(x.id) === String(g.category_id ?? "")); if (mName(c) !== cn) return false; }
+              // [정본] 그룹이 해당 제품군을 "소속"으로 갖는지 category.group_id 로 확인(legacy group.category_id 미사용).
+              if (cn && !master.categories.some((c) => c.is_active !== false && String(c.group_id ?? "") === String(g.id) && mName(c) === cn)) return false;
               return true;
             });
             const gids = Array.from(new Set(gcands.map((g) => String(g.id))));
             if (gids.length === 1) row.group_id = gids[0];
+          }
+        }
+        // [정본 FK] 제품군(category_id) 확정: group 확정 + product_group 이름으로 category.group_id 기준 유일 매칭.
+        //  category_id 없으면 같은 그룹의 DRAM/FLASH 가 identity 충돌 → 반드시 세팅. 파트 경로에서 이미 세팅됐으면 생략.
+        if (!row.category_id && row.group_id) {
+          const cn = String(row.product_group ?? "").trim();
+          if (cn) {
+            const ccands = master.categories.filter((c) => c.is_active !== false && String(c.group_id ?? "") === String(row.group_id) && mName(c) === cn);
+            const cids = Array.from(new Set(ccands.map((c) => String(c.id))));
+            if (cids.length === 1) { row.category_id = cids[0]; row.product_group = mName(ccands.find((c) => String(c.id) === cids[0])); }
+            else if (cids.length === 0) { err.push({ row: i + 2, reason: `선택한 그룹에서 제품군 ‘${cn}’을(를) 찾을 수 없습니다.` }); continue; }
+            else { err.push({ row: i + 2, reason: `제품군 ‘${cn}’이(가) 여러 건 존재하여 자동 연결할 수 없습니다. 그룹을 확인해 주세요.` }); continue; }
           }
         }
         // [이중계상 방지] 기존 DB 목표 + 같은 파일 내 확정 행과 "동일 스코프 · 반대 유형" 충돌 시 저장 제외(경고).
