@@ -5,6 +5,10 @@ import { computeCertifiedFlagsByPerson } from "../utils/personnelCertSnapshot";
 import { computeExamKpiSummary, type GroupRate } from "../services/examAnalyticsKpi";
 import { computeCurrentLevelByPersonnel } from "../services/currentCertificationLevelService";
 import { selectPmStageLevels } from "../utils/certificationLevel";
+import { listEquipmentCertifications } from "../services/equipmentCertificationService";
+import { listEquipmentStageRules } from "../services/equipmentStageRuleService";
+import { listProcessCriteriaRules } from "../services/processCriteriaRuleService";
+import { Donut } from "../components/ExamReportCharts";
 import { buildRetestCandidates, summarizeCertExpiry, buildExamNotifications, runRecalculation, type ExamNotification, type RecalcResult, type RecalcScope } from "../services/examAutomationService";
 import { listRetestCandidates, generateRetestCandidates, setRetestCandidateStatus, type RetestCandidateRow, type RetestStatus } from "../services/examRetestService";
 import { writeAutomationLog, listAutomationLogs, type AutomationLogRow } from "../services/examAutomationLogService";
@@ -80,6 +84,9 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
   const [levels, setLevels] = useState<RefOpt[]>([]);
   const [levelsRaw, setLevelsRaw] = useState<ExamRow[]>([]); // [P2 SoT] code/name/rank_order 포함 원본(공용 인증 스냅샷용)
   const [pmCerts, setPmCerts] = useState<ExamRow[]>([]); // [KPI] 현재 Level 분포(computeCurrentLevelByPersonnel)용 PM 인증
+  const [eqCerts, setEqCerts] = useState<ExamRow[]>([]); // [KPI 2차-B] 설비 인증(approved)
+  const [eqStageRules, setEqStageRules] = useState<ExamRow[]>([]); // [KPI 2차-B] 설비별 인증단계 규칙(대상 설비)
+  const [achieveRules, setAchieveRules] = useState<ExamRow[]>([]); // [KPI 2차-B] 공정별 달성기준(조기/정상/지연 criteria)
   const [rules, setRules] = useState<ExamRow[]>([]);
   const [retest, setRetest] = useState<RetestCandidateRow[]>([]);
   const [retestOpen, setRetestOpen] = useState(false);
@@ -104,7 +111,7 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); return; }
     setLoading(true); setError(null);
     try {
-      const [p, a, c, t, lv, ru, rc, lvRaw, pmc] = await Promise.all([
+      const [p, a, c, t, lv, ru, rc, lvRaw, pmc, eqc, esr, acr] = await Promise.all([
         listExamRows("exam_personnel", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
@@ -114,8 +121,12 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
         listRetestCandidates(tenantId).catch(() => [] as RetestCandidateRow[]),
         listExamRows("exam_levels", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("pm_certifications", tenantId).catch(() => [] as ExamRow[]),
+        listEquipmentCertifications(tenantId).catch(() => [] as ExamRow[]),
+        listEquipmentStageRules(tenantId).catch(() => [] as ExamRow[]),
+        listProcessCriteriaRules(tenantId).catch(() => [] as ExamRow[]),
       ]);
       setPersonnel(p); setApps(a); setCerts(c); setTargets(t); setLevels(lv); setRules(ru); setRetest(rc); setLevelsRaw(lvRaw); setPmCerts(pmc);
+      setEqCerts(eqc); setEqStageRules(esr); setAchieveRules(acr);
       // [9단계] 라이선스 계획 통계/자동화 오류(공통 정본). 계획 테이블 미적용 환경에서도 안전(빈 결과).
       try { setLicAnalytics(await loadLicenseAnalytics(tenantId, p)); } catch { /* 무시 */ }
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
@@ -305,7 +316,8 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
     personnel: fPersonnel, applications: apps, levels: levelsRaw,
     pmCertifications: pmCerts, dmCertifications: certs, retestCandidates: retest,
     monthlyApplications: fApps, // 월별 추세: 기간+scope 필터 적용된 응시
-  }), [fPersonnel, apps, levelsRaw, pmCerts, certs, retest, fApps]);
+    equipmentCertifications: eqCerts, equipmentStageRules: eqStageRules, criteriaRules: achieveRules,
+  }), [fPersonnel, apps, levelsRaw, pmCerts, certs, retest, fApps, eqCerts, eqStageRules, achieveRules]);
   // 월별 추세(응시/합격/취득 · 건수) — 기존 Columns 재사용(3개 미니 차트).
   const monthlyApplied = useMemo(() => kpiSummary.monthlyTrend.map((m) => ({ label: m.label, value: m.applied, rows: [] as ExamRow[], kind: "application" as Kind })), [kpiSummary]);
   const monthlyPassed = useMemo(() => kpiSummary.monthlyTrend.map((m) => ({ label: m.label, value: m.passed, rows: [] as ExamRow[], kind: "application" as Kind })), [kpiSummary]);
@@ -530,6 +542,40 @@ export default function ExamDashboardPage({ darkMode, canEdit, tenantId, userId,
           <div className="overflow-x-auto"><h4 className="mb-2 text-sm font-semibold text-amber-500">취득</h4><Columns data={monthlyAcquired} onPick={() => {}} /></div>
         </div>
       </section>
+
+      {/* [KPI 2차-B] 설비 인증 / 취득 속도 */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className={sectionCls}>
+          <div className="mb-3"><h3 className="text-base font-semibold">설비 인증 현황</h3><p className="text-sm text-slate-500">대상 설비 보유 인원 기준 · distinct 설비(직원별) 취득률.</p></div>
+          <div className="flex flex-wrap items-center gap-6">
+            <Donut darkMode={darkMode} items={[
+              { label: "취득", value: kpiSummary.equipmentSummary.acquiredEquipmentCount, color: "#10b981" },
+              { label: "미취득", value: Math.max(0, kpiSummary.equipmentSummary.targetEquipmentCount - kpiSummary.equipmentSummary.acquiredEquipmentCount), color: "#e2e8f0" },
+            ]} />
+            <div className="space-y-1 text-sm">
+              <div><span className="text-slate-500">설비 인증률 </span><span className="text-lg font-semibold">{kpiSummary.equipmentSummary.rate == null ? "-" : `${kpiSummary.equipmentSummary.rate}%`}</span></div>
+              <div className="text-slate-500">설비 미취득 <span className="font-semibold text-rose-500">{kpiSummary.equipmentSummary.missingPersons}명</span> / 대상 {kpiSummary.equipmentSummary.targetPersons}명</div>
+              <div className="text-xs text-slate-400">취득 {kpiSummary.equipmentSummary.acquiredEquipmentCount} / 대상 {kpiSummary.equipmentSummary.targetEquipmentCount} 설비</div>
+            </div>
+          </div>
+        </section>
+        <section className={sectionCls}>
+          <div className="mb-3"><h3 className="text-base font-semibold">취득 속도 분석</h3><p className="text-sm text-slate-500">공정별 달성기준 기준 조기/정상/지연 · 판정불가 제외한 평균 취득기간.</p></div>
+          <div className="flex flex-wrap items-center gap-6">
+            <Donut darkMode={darkMode} items={[
+              { label: "조기", value: kpiSummary.timingDistribution.early, color: "#38bdf8" },
+              { label: "정상", value: kpiSummary.timingDistribution.onTime, color: "#10b981" },
+              { label: "지연", value: kpiSummary.timingDistribution.late, color: "#f59e0b" },
+              { label: "판정불가", value: kpiSummary.timingDistribution.undetermined, color: "#e2e8f0" },
+            ]} />
+            <div className="space-y-1 text-sm">
+              <div><span className="text-slate-500">평균 취득기간 </span><span className="text-lg font-semibold">{kpiSummary.avgAcquireMonths == null ? "-" : `${kpiSummary.avgAcquireMonths}개월`}</span></div>
+              <div className="text-slate-500">조기 {kpiSummary.timingDistribution.early} · 정상 {kpiSummary.timingDistribution.onTime} · 지연 {kpiSummary.timingDistribution.late}</div>
+              <div className="text-xs text-slate-400">판정불가 {kpiSummary.timingDistribution.undetermined}(정상/지연에 미포함)</div>
+            </div>
+          </div>
+        </section>
+      </div>
 
       {/* [9단계] 라이선스 자동화 현황 — employee_license_plan 기준(대시보드·보고서 공통 정본) */}
       {licAnalytics && (

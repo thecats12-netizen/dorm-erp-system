@@ -4,6 +4,11 @@
 //  · 정책 데이터(required_months/valid_months) 의존 지표(목표취득/만료/갱신)는 여기서 계산하지 않는다.
 import type { ExamRow } from "./examMasterService";
 import { computeCurrentLevelByPersonnel } from "./currentCertificationLevelService";
+import { computeEquipmentProgressByPersonnel } from "./equipmentProgressService";
+import { deriveAchievementTiming } from "./examAutomationService";
+import { monthsBetween } from "./licensePlanService";
+import { isAchieveType } from "./processCriteriaRuleService";
+import { normalizeCriteria, isCriteriaEffective } from "../engines/criteriaEvaluator";
 import { isApplicationAcquired, selectPmStageLevels } from "../utils/certificationLevel";
 
 const S = (v: unknown) => (v == null ? "" : String(v));
@@ -18,6 +23,8 @@ const rate = (num: number, den: number) => (den > 0 ? Math.round((num / den) * 1
 export type LevelBucket = { key: string; label: string; count: number };
 export type GroupRate = { key: string; label: string; acquired: number; headcount: number; rate: number };
 export type MonthlyPoint = { month: number; label: string; applied: number; passed: number; acquired: number };
+export type EquipmentSummary = { targetPersons: number; missingPersons: number; targetEquipmentCount: number; acquiredEquipmentCount: number; rate: number | null };
+export type TimingDistribution = { early: number; onTime: number; late: number; undetermined: number };
 export type ExamKpiSummary = {
   headcount: number;
   appliedCount: number; appliedRate: number;
@@ -32,6 +39,10 @@ export type ExamKpiSummary = {
   processRates: GroupRate[];   // key=process_id(canonical), label=공정명. 분모/분자=사번 distinct(apps 기준)
   categoryRates: GroupRate[];  // key=category_id(canonical), label=제품군명(동명 다그룹 시 그룹명 보조)
   monthlyTrend: MonthlyPoint[]; // 12개월 · 건수(응시/합격/취득 이벤트 count)
+  // [KPI 2차-B]
+  equipmentSummary: EquipmentSummary; // 설비: 대상/미취득 인원 + distinct 설비 취득률(personId+equipId)
+  timingDistribution: TimingDistribution; // 조기/정상/지연/판정불가(deriveAchievementTiming)
+  avgAcquireMonths: number | null;     // 평균 취득기간(개월): Single=입사일→취득, M1~M4=직전취득→취득
 };
 
 // personnel 은 "현재 필터가 적용된" 인력 배열을 넘긴다(headcount = personnel.length).
@@ -44,9 +55,15 @@ export function computeExamKpiSummary(input: {
   dmCertifications: ExamRow[];
   retestCandidates: Array<{ employee_no?: unknown; status?: unknown }>;
   monthlyApplications?: ExamRow[]; // 월별 추세용(기간+scope 필터 적용된 apps). 미지정 시 applications 사용.
+  equipmentCertifications?: ExamRow[]; // 설비 인증(approved 판정용)
+  equipmentStageRules?: ExamRow[];     // 설비별 인증단계 규칙(대상 설비)
+  criteriaRules?: ExamRow[];           // 공정별 달성기준(조기/정상/지연 criteria)
 }): ExamKpiSummary {
   const { personnel, applications, levels, pmCertifications, dmCertifications, retestCandidates } = input;
   const monthlyApps = input.monthlyApplications ?? applications;
+  const equipmentCertifications = input.equipmentCertifications ?? [];
+  const equipmentStageRules = input.equipmentStageRules ?? [];
+  const criteriaRules = input.criteriaRules ?? [];
   const empScope = new Set(personnel.map((p) => S(p.employee_no)).filter(Boolean));
   const inScope = (a: ExamRow) => empScope.has(S(a.employee_no));
 
@@ -136,6 +153,75 @@ export function computeExamKpiSummary(input: {
   const retestEmp = new Set<string>();
   for (const r of retestCandidates) { if (["후보", "승인"].includes(S(r.status))) { const e = S(r.employee_no); if (e) retestEmp.add(e); } }
 
+  // ── [설비] 대상/미취득 인원 + distinct 설비 취득률 (computeEquipmentProgressByPersonnel 재사용) ──
+  const approvedByPerson = new Map<string, Set<string>>();
+  for (const c of equipmentCertifications) {
+    if (c.deleted_at || S(c.status) !== "approved") continue;
+    const pid = S(c.personnel_id), eid = S(c.equipment_id); if (!pid || !eid) continue;
+    const set = approvedByPerson.get(pid) ?? new Set<string>(); set.add(eid); approvedByPerson.set(pid, set);
+  }
+  const progress = computeEquipmentProgressByPersonnel({ personnel, levels, stageRules: equipmentStageRules, approvedByPerson });
+  let eqTargetPersons = 0, eqMissingPersons = 0, eqTargetCount = 0, eqAcquiredCount = 0;
+  for (const pr of progress.values()) {
+    const tset = new Set<string>(), aset = new Set<string>();
+    for (const s of pr.stages) { s.targetEquipmentIds.forEach((id) => tset.add(id)); s.acquiredEquipmentIds.forEach((id) => aset.add(id)); }
+    if (tset.size === 0) continue; // target=0 → 대상/미취득 모두 제외
+    eqTargetPersons += 1; eqTargetCount += tset.size; eqAcquiredCount += aset.size; // person 단위 union → personId+equipId distinct
+    if (aset.size < tset.size) eqMissingPersons += 1;
+  }
+  const equipmentSummary: EquipmentSummary = {
+    targetPersons: eqTargetPersons, missingPersons: eqMissingPersons,
+    targetEquipmentCount: eqTargetCount, acquiredEquipmentCount: eqAcquiredCount,
+    rate: eqTargetCount > 0 ? rate(eqAcquiredCount, eqTargetCount) : null,
+  };
+
+  // ── [조기/정상/지연] + [평균 취득기간] (deriveAchievementTiming 재사용) ──
+  // 취득(person+level) canonical 1건: 동일 사번+level 은 가장 이른 취득일 1건만.
+  const hireByEmp = new Map<string, unknown>();
+  for (const p of personnel) { const e = S(p.employee_no); if (e && !hireByEmp.has(e)) hireByEmp.set(e, p.hire_date); }
+  const empScopeSet = new Set(personnel.map((p) => S(p.employee_no)).filter(Boolean));
+  const acqByEmpLevel = new Map<string, Map<string, { date: string; processId: string }>>();
+  for (const a of applications) {
+    if (a.deleted_at || !isApplicationAcquired(a)) continue;
+    const e = S(a.employee_no); if (!e || !empScopeSet.has(e)) continue;
+    const lvl = S(a.level_id); if (!lvl) continue;
+    const d = (S(a.cert_acquired_date) || S(a.practical_pass_date)).slice(0, 10); if (!d) continue;
+    const m = acqByEmpLevel.get(e) ?? new Map(); const prev = m.get(lvl);
+    if (!prev || d < prev.date) m.set(lvl, { date: d, processId: S(a.process_id) }); // 가장 이른 취득일
+    acqByEmpLevel.set(e, m);
+  }
+  // 공정+단계별 유효 달성기준 criteria 선택(effective 우선 · 없으면 첫 행). normalizeCriteria 로 정규화.
+  const achieveRules = criteriaRules.filter((r) => !r.deleted_at && isAchieveType(r.rule_type));
+  const criteriaFor = (processId: string, levelId: string, at: string): Record<string, unknown> | null => {
+    const cands = achieveRules.filter((r) => S(r.process_id) === processId && S(r.level_id) === levelId);
+    if (cands.length === 0) return null;
+    const atDate = at ? new Date(at) : new Date();
+    const eff = cands.find((r) => isCriteriaEffective(normalizeCriteria(r.criteria), atDate)) ?? cands[0];
+    return normalizeCriteria(eff.criteria) as unknown as Record<string, unknown>;
+  };
+  const timingDistribution: TimingDistribution = { early: 0, onTime: 0, late: 0, undetermined: 0 };
+  let avgSum = 0, avgN = 0;
+  for (const [emp, byLevel] of acqByEmpLevel) {
+    for (const [lvl, ent] of byLevel) {
+      const criteria = criteriaFor(ent.processId, lvl, ent.date);
+      const prereqIds: string[] = criteria && Array.isArray(criteria.prerequisite_level_ids) ? (criteria.prerequisite_level_ids as unknown[]).map(String) : [];
+      // 선행단계 취득일(최신). 없으면 undefined → Single 등은 입사일 기준.
+      let prereqAcq = "";
+      for (const pid of prereqIds) { const d = byLevel.get(pid)?.date; if (d && d > prereqAcq) prereqAcq = d; }
+      const hireDate = hireByEmp.get(emp);
+      const t = deriveAchievementTiming({ criteria, hireDate, prereqAcquiredDate: prereqAcq || undefined, certAcquiredDate: ent.date });
+      if (!criteria || t.insufficient) timingDistribution.undetermined += 1;
+      else if (t.value === "조기취득") timingDistribution.early += 1;
+      else if (t.value === "지연취득") timingDistribution.late += 1;
+      else if (t.value === "정상취득") timingDistribution.onTime += 1;
+      else timingDistribution.undetermined += 1;
+      // 평균 취득기간: base = 선행단계 취득일(있으면) 또는 입사일. 둘 다 없으면 제외.
+      const base = prereqAcq || (hireDate ? String(hireDate).slice(0, 10) : "");
+      if (base) { const mm = monthsBetween(base, ent.date); if (mm != null && mm >= 0) { avgSum += mm; avgN += 1; } }
+    }
+  }
+  const avgAcquireMonths = avgN > 0 ? Math.round((avgSum / avgN) * 10) / 10 : null;
+
   const headcount = personnel.length;
   return {
     headcount,
@@ -146,5 +232,6 @@ export function computeExamKpiSummary(input: {
     writtenTakenCount: wTaken.size, writtenPassCount: wPass.size, writtenPassRate: rate(wPass.size, wTaken.size),
     practicalTakenCount: pTaken.size, practicalPassCount: pPass.size, practicalPassRate: rate(pPass.size, pTaken.size),
     processRates, categoryRates, monthlyTrend: trend,
+    equipmentSummary, timingDistribution, avgAcquireMonths,
   };
 }
