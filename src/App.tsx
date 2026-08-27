@@ -228,6 +228,9 @@ function mapProfileToLoginUser(profile: Profile, authUserEmail?: string): LoginU
     genderAccess: profile.gender_access || "전체",
     createdAt: profile.created_at || new Date().toISOString(),
     dormId: profile.dorm_id || undefined,
+    // [청소 보고주기] 개인별 보고 의무 주기(1~12주, 미설정/미적용 컬럼 → undefined → 점수계산에서 1주로 동작) + 우수자.
+    cleaningReportIntervalWeeks: (profile as { cleaning_report_interval_weeks?: number | null }).cleaning_report_interval_weeks ?? undefined,
+    isCleaningExcellent: (profile as { is_cleaning_excellent?: boolean | null }).is_cleaning_excellent ?? undefined,
     // 숨김(삭제) 판정: is_deleted 우선, 없으면 deleted_at 존재 여부로 판단
     isDeleted: profile.is_deleted === true || !!profile.deleted_at,
     deletedAt: profile.deleted_at || undefined,
@@ -5327,6 +5330,9 @@ export default function App() {
       const contractEnd = dorm?.contractEnd ? parseSafeDate(dorm.contractEnd) : null;
       const effStart = contractStart && contractStart > startDate ? contractStart : startDate;
       const now = new Date();
+      // [개인별 보고주기] 보고 의무 주기(주). 미설정=1(기존 주 단위 동작). 1~12로 클램프.
+      //  감점은 "완료된 미보고 cycle" 1개당 1회(주기 종료 시점). cycleWeeks=1 이면 기존 주 단위 계산과 완전 동일.
+      const cycleWeeks = Math.min(12, Math.max(1, Math.round(Number(manager?.cleaningReportIntervalWeeks ?? 1)) || 1));
       // 유효 시작일이 속한 주의 월요일부터 시작
       const cursor = new Date(effStart);
       cursor.setHours(0, 0, 0, 0);
@@ -5334,20 +5340,20 @@ export default function App() {
       let guard = 0;
       while (cursor <= now && guard < 600) {
         guard++;
-        const wkStart = new Date(cursor); // 월요일 00:00
-        const wkEnd = new Date(cursor);
-        wkEnd.setDate(wkEnd.getDate() + 6);
-        wkEnd.setHours(23, 59, 59, 999); // 일요일 23:59 (제출 마감)
-        // 마감이 지났고(미래/이번주 제외), 유효 시작 이전에 끝난 주가 아니며, 계약 종료 이후 주가 아니어야 함
-        if (wkEnd < now && wkEnd >= effStart && (!contractEnd || wkStart <= contractEnd)) {
+        const cyStart = new Date(cursor); // cycle 시작 월요일 00:00
+        const cyEnd = new Date(cursor);
+        cyEnd.setDate(cyEnd.getDate() + 7 * cycleWeeks - 1); // cycle 마지막 주 일요일
+        cyEnd.setHours(23, 59, 59, 999); // 일요일 23:59 (제출 마감)
+        // cycle 마감이 지났고(미래/진행중 cycle 제외), 유효 시작 이전에 끝난 cycle 이 아니며, 계약 종료 이후 cycle 이 아니어야 함
+        if (cyEnd < now && cyEnd >= effStart && (!contractEnd || cyStart <= contractEnd)) {
           const hasReport = managerReports.some((r) => {
             if (r.dormId !== dormId) return false;
             const d = parseSafeDate(r.reportDate);
-            return !!d && d >= wkStart && d <= wkEnd;
+            return !!d && d >= cyStart && d <= cyEnd; // cycle 범위 안 1건 이상이면 완료
           });
-          if (!hasReport) score += cleaningSettings.missingReportPenalty;
+          if (!hasReport) score += cleaningSettings.missingReportPenalty; // 미보고 cycle 1회 감점
         }
-        cursor.setDate(cursor.getDate() + 7);
+        cursor.setDate(cursor.getDate() + 7 * cycleWeeks); // 다음 cycle 로 이동
       }
     }
 
@@ -5358,6 +5364,20 @@ export default function App() {
     // 기본 점수 100점에서 감점
     const penalty = calculateCleaningScoreByManager(managerUserId);
     return 100 + penalty; // 100 + (-5) = 95점 등
+  };
+
+  // [청소 보고주기] 담당자별 보고 의무 주기/우수자 저장. optimistic 로컬 반영 + profiles 업데이트(컬럼 미적용 시 로컬만 유지).
+  const saveCleaningInterval = async (uid: string, patch: { cleaning_report_interval_weeks?: number; is_cleaning_excellent?: boolean }) => {
+    if (!uid) return;
+    setUsers((prev) => prev.map((u) => u.id === uid ? {
+      ...u,
+      ...(patch.cleaning_report_interval_weeks !== undefined ? { cleaningReportIntervalWeeks: patch.cleaning_report_interval_weeks } : {}),
+      ...(patch.is_cleaning_excellent !== undefined ? { isCleaningExcellent: patch.is_cleaning_excellent } : {}),
+    } : u));
+    try {
+      const res = await updateProfileOnly(uid, patch);
+      if (res.error && !isMissingColumnError(res.error)) console.error("[cleaning] 보고주기 저장 실패:", res.error);
+    } catch (e) { console.error("[cleaning] 보고주기 저장 예외:", e); }
   };
 
   const getManagerCleaningStats = (managerUserId: string) => {
@@ -22654,6 +22674,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       <th className="px-3 py-2 whitespace-nowrap">사진누락</th>
                       <th className="px-3 py-2 whitespace-nowrap">감점</th>
                       <th className="px-3 py-2 whitespace-nowrap">점수</th>
+                      <th className="px-3 py-2 whitespace-nowrap">보고 주기</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -22676,6 +22697,23 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                           <td className="px-3 py-2 whitespace-nowrap text-amber-600">{photoMissing}</td>
                           <td className="px-3 py-2 whitespace-nowrap text-rose-600">{penalty}</td>
                           <td className="px-3 py-2 whitespace-nowrap font-bold">{score}</td>
+                          <td className="px-3 py-2 whitespace-nowrap">
+                            {canManageUsers(currentUser) && uid ? (
+                              <div className="flex items-center gap-2">
+                                <label className="flex items-center gap-1 text-xs" title="우수자: 보고주기를 길게 설정 가능한 관리 속성(감점 면제 아님)">
+                                  <input type="checkbox" checked={!!manager?.isCleaningExcellent}
+                                    onChange={(e) => saveCleaningInterval(uid, { is_cleaning_excellent: e.target.checked, ...(e.target.checked && Number(manager?.cleaningReportIntervalWeeks ?? 1) === 1 ? { cleaning_report_interval_weeks: 2 } : {}) })} />우수자
+                                </label>
+                                <select aria-label="보고 주기" className={`rounded-lg border px-1.5 py-1 text-xs ${theme.darkMode ? "border-slate-600 bg-slate-950 text-slate-200" : "border-slate-300 bg-white text-slate-700"}`}
+                                  value={String(Math.min(12, Math.max(1, Number(manager?.cleaningReportIntervalWeeks ?? 1) || 1)))}
+                                  onChange={(e) => saveCleaningInterval(uid, { cleaning_report_interval_weeks: Number(e.target.value) })}>
+                                  {Array.from({ length: 12 }, (_, i) => i + 1).map((w) => <option key={w} value={w}>{w}주마다</option>)}
+                                </select>
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-500">{manager?.isCleaningExcellent ? "우수자 · " : ""}{Math.min(12, Math.max(1, Number(manager?.cleaningReportIntervalWeeks ?? 1) || 1))}주마다</span>
+                            )}
+                          </td>
                         </tr>
                       );
                     })}

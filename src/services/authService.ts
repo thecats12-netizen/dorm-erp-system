@@ -49,6 +49,8 @@ export interface Profile {
   role?: UserRole;
   is_active?: boolean;
   dorm_id?: string | null;
+  cleaning_report_interval_weeks?: number | null; // 청소 보고 의무 주기(주 · 1~12)
+  is_cleaning_excellent?: boolean | null;         // 청소 우수자 여부
   site_access?: Site | "전체";
   gender_access?: "남" | "여" | "전체";
   is_deleted?: boolean | null;
@@ -363,6 +365,8 @@ export const updateProfileOnly = async (
     if (profile.role !== undefined) patch.role = profile.role;
     if (profile.is_active !== undefined) patch.is_active = profile.is_active;
     if (profile.dorm_id !== undefined) patch.dorm_id = profile.dorm_id;
+    if (profile.cleaning_report_interval_weeks !== undefined) patch.cleaning_report_interval_weeks = profile.cleaning_report_interval_weeks;
+    if (profile.is_cleaning_excellent !== undefined) patch.is_cleaning_excellent = profile.is_cleaning_excellent;
     if (profile.site_access !== undefined) patch.site_access = profile.site_access;
     if (profile.gender_access !== undefined) patch.gender_access = profile.gender_access;
     if (profile.is_deleted !== undefined) patch.is_deleted = profile.is_deleted;

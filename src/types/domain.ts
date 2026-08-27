@@ -20,6 +20,9 @@ export type LoginUser = {
   세대현관?: string;
   manualActiveOverride?: boolean;
   dormId?: string;
+  // [청소 보고주기] 개인별 청소 보고 의무 주기(주 · 1~12, 미설정=1) + 우수자 여부(관리 속성). 미설정 시 기존 1주 동작.
+  cleaningReportIntervalWeeks?: number;
+  isCleaningExcellent?: boolean;
   isDeleted?: boolean;
   deletedAt?: string;
   isPermanentDeleted?: boolean;
