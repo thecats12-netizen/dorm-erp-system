@@ -9,6 +9,8 @@ import {
   resolveCalculation,
 } from "../utils/examCalculations";
 import { createRuleEngine, type RuleContext, type RuleEngine } from "./certificationRuleEngine";
+import { isApplicationAcquired } from "../utils/certificationLevel";
+import type { ExamRow } from "./examMasterService";
 
 // 시험 응시 레코드(exam_applications 1행) — 계산에 필요한 필드만 느슨하게 참조.
 export type ExamApplicationRecord = Record<string, unknown>;
@@ -602,9 +604,10 @@ export type MonthlyPerfFilters = { group?: string; product?: string; part?: stri
 // 삭제/취소/확정 판정.
 const isDeletedRec = (r: ExamApplicationRecord): boolean => !!r.deleted_at || r.is_active === false || r.isDeleted === true;
 const isCanceledRec = (r: ExamApplicationRecord): boolean => /취소/.test(asText(r.status));
-// 최종 확정: 수동 확정 취득(exam_applications) 또는 승인 완료(dm_certifications). 자동계산 후보만 있는 건 제외.
+// 최종 확정: 공용 canonical 취득 판정(isApplicationAcquired — status "인증 취득"/실기·인증 취득일/수동 확정 취득)
+//  또는 승인 완료 D.M(dm_certifications: approval_status="승인"). 대시보드·응시관리와 동일 SoT(별도 판정식 신설 아님).
 const isConfirmedRec = (r: ExamApplicationRecord): boolean =>
-  (r.cert_status_manual === true && asText(r.cert_status) === "취득") || asText(r.approval_status) === "승인";
+  isApplicationAcquired(r as ExamRow) || asText(r.approval_status) === "승인";
 // 인증 확정일(취득일).
 const confirmDate = (r: ExamApplicationRecord): string => toYmd(r.cert_acquired_date ?? r.acquired_date ?? r.practical_pass_date);
 // 중복 인증 식별 키(사원 + 단계/구분 + 확정일). 동일 인증은 1건으로.

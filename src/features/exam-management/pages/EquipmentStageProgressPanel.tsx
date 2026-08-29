@@ -21,12 +21,14 @@ type Props = {
 };
 
 const S = (v: unknown) => String(v ?? "").trim();
+const PAGE_SIZE = 50; // 751명 전체 DOM 렌더 방지(표시 전용 · 계산/필터 결과는 전체 대상 유지).
 
 export default function EquipmentStageProgressPanel({ darkMode, personnel, levels, processes, equipment, stageRules, certs, applications, pmCertifications }: Props) {
   const [search, setSearch] = useState("");
   const [fProcess, setFProcess] = useState("");
   const [fLevel, setFLevel] = useState("");
   const [quick, setQuick] = useState<"all" | "incomplete" | "complete">("all");
+  const [page, setPage] = useState(1); // 표시 페이지(필터 변경 시 1로 리셋).
   const [expanded, setExpanded] = useState<{ personnelId: string; stageIndex: number } | null>(null); // 펼친 셀(직원+단계) 1개만
 
   const inputCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
@@ -125,6 +127,11 @@ export default function EquipmentStageProgressPanel({ darkMode, personnel, level
 
   const levelFilterOpts = useMemo(() => Array.from(new Set(personnel.map(currentLevelOf).filter((v) => v && v !== "-"))).sort(), [personnel, currentLevelOf]);
 
+  // 현재 페이지 행만 렌더(계산·집계는 전체 rows 기준 유지 · DOM 부하만 축소).
+  const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const curPage = Math.min(page, pageCount);
+  const paged = useMemo(() => rows.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE), [rows, curPage]);
+
   // 펼친 셀(직원+단계)의 설비 상세 rows — 대상/취득/미취득은 progress 서비스 결과만 사용(재계산 없음).
   const detail = useMemo(() => {
     if (!expanded) return null;
@@ -167,16 +174,17 @@ export default function EquipmentStageProgressPanel({ darkMode, personnel, level
   };
 
   const qBtn = (k: typeof quick, label: string) => (
-    <button onClick={() => setQuick(k)} className={`rounded-xl px-3 py-1.5 text-xs font-medium transition ${quick === k ? "bg-blue-600 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{label}</button>
+    <button onClick={() => { setQuick(k); setPage(1); }} className={`rounded-xl px-3 py-1.5 text-xs font-medium transition ${quick === k ? "bg-blue-600 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{label}</button>
   );
+  const pageBtn = darkMode ? "inline-flex items-center justify-center rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800 disabled:opacity-50" : "inline-flex items-center justify-center rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100 disabled:opacity-50";
 
   return (
     <div>
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         {qBtn("all", "전체")}{qBtn("incomplete", "미완료")}{qBtn("complete", "완료")}
-        <select value={fProcess} onChange={(e) => setFProcess(e.target.value)} className={inputCls}><option value="">공정: 전체</option>{procOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
-        <select value={fLevel} onChange={(e) => setFLevel(e.target.value)} className={inputCls}><option value="">현재 Level: 전체</option>{levelFilterOpts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="검색(사번/이름)" className={`${inputCls} min-w-[160px]`} />
+        <select value={fProcess} onChange={(e) => { setFProcess(e.target.value); setPage(1); }} className={inputCls}><option value="">공정: 전체</option>{procOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
+        <select value={fLevel} onChange={(e) => { setFLevel(e.target.value); setPage(1); }} className={inputCls}><option value="">현재 Level: 전체</option>{levelFilterOpts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="검색(사번/이름)" className={`${inputCls} min-w-[160px]`} />
       </div>
 
       {/* 가로 스크롤 컨테이너(모바일에서 5단계 테이블이 깨지지 않도록) */}
@@ -186,7 +194,7 @@ export default function EquipmentStageProgressPanel({ darkMode, personnel, level
             <tr>{["사번", "이름", "공정", "현재 Level", ...stageLabels, "전체"].map((h, i) => <th key={`${h}-${i}`} className="whitespace-nowrap px-2.5 py-2">{h}</th>)}</tr>
           </thead>
           <tbody>
-            {rows.map((p) => {
+            {paged.map((p) => {
               const pid = S(p.id);
               const prog = progressByPerson.get(pid);
               const total = totals.get(pid);
@@ -225,6 +233,13 @@ export default function EquipmentStageProgressPanel({ darkMode, personnel, level
           </tbody>
         </table>
       </div>
+      {pageCount > 1 && (
+        <div className="mt-2 flex items-center justify-end gap-2 text-xs text-slate-500">
+          <button className={pageBtn} disabled={curPage <= 1} onClick={() => setPage(curPage - 1)}>이전</button>
+          <span>{curPage} / {pageCount}</span>
+          <button className={pageBtn} disabled={curPage >= pageCount} onClick={() => setPage(curPage + 1)}>다음</button>
+        </div>
+      )}
       <div className="mt-2 text-xs text-slate-500">총 {rows.length}명 · 대상 설비/취득 설비는 설비별 인증단계(stage rule)와 승인된 설비취득 기준입니다.</div>
     </div>
   );

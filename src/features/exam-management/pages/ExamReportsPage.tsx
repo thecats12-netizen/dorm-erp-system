@@ -21,17 +21,45 @@ const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 
 // ── [출력 그래프] print-safe inline SVG 문자열 빌더 (외부 라이브러리 없음 · document.write 창 동작 · 확대 선명 · 흑백 대응 위해 값/라벨 병기) ──
 const CHART_W = 680;
-// 2계열 line chart(월별 계획/실적). 값은 호출부에서 계산된 것 그대로.
-const svgLine = (series: Array<{ name: string; color: string; data: number[] }>, xLabels: string[]): string => {
-  const w = CHART_W, h = 220, pl = 42, pr = 16, pt = 24, pb = 26;
-  const n = xLabels.length; const max = Math.max(1, ...series.flatMap((s) => s.data));
-  const X = (i: number) => pl + (n <= 1 ? 0 : (i * (w - pl - pr)) / (n - 1));
-  const Y = (v: number) => pt + (h - pt - pb) * (1 - v / max);
-  const grid = [0, 0.5, 1].map((t) => { const gy = pt + (h - pt - pb) * (1 - t); return `<line x1="${pl}" y1="${gy}" x2="${w - pr}" y2="${gy}" stroke="#e2e8f0"/><text x="${pl - 5}" y="${gy + 3}" text-anchor="end" font-size="9" fill="#64748b">${Math.round(max * t)}</text>`; }).join("");
-  const xlab = xLabels.map((l, i) => `<text x="${X(i)}" y="${h - 8}" text-anchor="middle" font-size="9" fill="#64748b">${esc(l)}</text>`).join("");
-  const lines = series.map((s) => { const pts = s.data.map((v, i) => `${X(i)},${Y(v)}`).join(" "); const dots = s.data.map((v, i) => `<circle cx="${X(i)}" cy="${Y(v)}" r="2.2" fill="${s.color}"/>`).join(""); return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2"/>${dots}`; }).join("");
-  const legend = series.map((s, i) => `<rect x="${pl + i * 96}" y="4" width="10" height="10" fill="${s.color}"/><text x="${pl + i * 96 + 14}" y="13" font-size="10" fill="#334155">${esc(s.name)}</text>`).join("");
-  return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="max-width:${w}px;height:auto">${grid}${xlab}${lines}${legend}</svg>`;
+// 월별 계획/실적 추이(2계열, 12개월) — 화면 TrendChart 와 동일 표현을 인쇄용 inline SVG 로 매핑(print-safe).
+//  화면 선택 chartType(꺾은선/세로 막대/가로 막대/누적 막대/영역/도넛/혼합)을 그대로 반영. 데이터 source 동일 · 표현만 변경.
+const svgTrend = (type: string, plan: number[], actual: number[], xLabels: string[]): string => {
+  const W = CHART_W, H = 240, padL = 34, padR = 14, padT = 16, padB = 26, n = xLabels.length || 12;
+  const planC = RC.plan, actualC = RC.actual, gridC = "#e2e8f0", axisC = "#94a3b8";
+  const planT = plan.reduce((s, v) => s + v, 0), actualT = actual.reduce((s, v) => s + v, 0);
+  // 도넛: 계획 총합 vs 실적 총합(달성 비교) — 기존 svgDonut 재사용.
+  if (type === "도넛") return svgDonut([{ label: "계획", value: Math.round(planT), color: planC }, { label: "실적", value: Math.round(actualT), color: actualC }]);
+  // 가로 막대: 월별 계획/실적을 가로 그룹 막대.
+  if (type === "가로 막대") {
+    const max = Math.max(1, ...plan, ...actual), rowH = 16, bl = 30, bw = W - bl - 34;
+    const rows = xLabels.map((l, i) => { const yy = i * rowH + 4; const pw = plan[i] ? Math.max(2, (plan[i] / max) * bw) : 0; const aw = actual[i] ? Math.max(2, (actual[i] / max) * bw) : 0; return `<text x="${bl - 4}" y="${yy + 8}" text-anchor="end" font-size="8" fill="${axisC}">${esc(l)}</text><rect x="${bl}" y="${yy}" width="${pw}" height="5" fill="${planC}" rx="1"/><rect x="${bl}" y="${yy + 6}" width="${aw}" height="5" fill="${actualC}" rx="1"/><text x="${bl + Math.max(pw, aw) + 4}" y="${yy + 9}" font-size="8" fill="#334155">${plan[i]}/${actual[i]}</text>`; }).join("");
+    const HH = n * rowH + 8;
+    return `<svg viewBox="0 0 ${W} ${HH}" width="100%" style="max-width:${W}px;height:auto"><rect x="${bl}" y="-1" width="9" height="9" fill="${planC}"/><rect x="${bl + 40}" y="-1" width="9" height="9" fill="${actualC}"/>${rows}</svg>`;
+  }
+  const stacked = type === "누적 막대";
+  const max = Math.max(1, ...(stacked ? plan.map((v, i) => v + actual[i]) : [...plan, ...actual]));
+  const gx = (i: number) => padL + (i * (W - padL - padR)) / (n - 1);
+  const gy = (v: number) => H - padB - (v / max) * (H - padT - padB);
+  const bw = (W - padL - padR) / n / 2.6;
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map((t) => { const y = padT + t * (H - padT - padB); return `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${gridC}"/>`; }).join("");
+  const xlab = xLabels.map((l, i) => `<text x="${gx(i)}" y="${H - 8}" font-size="10" fill="${axisC}" text-anchor="middle">${esc(l)}</text>`).join("");
+  const ymax = `<text x="${padL}" y="${padT + 2}" font-size="10" fill="${axisC}" text-anchor="end">${Math.round(max)}</text>`;
+  const legend = `<rect x="${padL}" y="1" width="9" height="9" fill="${planC}"/><text x="${padL + 12}" y="9" font-size="9" fill="#334155">계획</text><rect x="${padL + 52}" y="1" width="9" height="9" fill="${actualC}"/><text x="${padL + 64}" y="9" font-size="9" fill="#334155">실적</text>`;
+  const poly = (arr: number[], color: string, fill: boolean) => { const pts = arr.map((v, i) => `${gx(i)},${gy(v)}`).join(" "); return fill ? `<polygon points="${gx(0)},${gy(0)} ${pts} ${gx(n - 1)},${gy(0)}" fill="${color}" fill-opacity="0.18" stroke="${color}" stroke-width="2"/>` : `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2"/>`; };
+  const dots = (arr: number[], color: string) => arr.map((v, i) => `<circle cx="${gx(i)}" cy="${gy(v)}" r="2.5" fill="${color}"/>`).join("");
+  let bodySvg = "";
+  if (type === "세로 막대") {
+    bodySvg = xLabels.map((_, i) => `<rect x="${gx(i) - bw - 1}" y="${gy(plan[i])}" width="${bw}" height="${Math.max(0, H - padB - gy(plan[i]))}" fill="${planC}" rx="1"/><rect x="${gx(i) + 1}" y="${gy(actual[i])}" width="${bw}" height="${Math.max(0, H - padB - gy(actual[i]))}" fill="${actualC}" rx="1"/>`).join("");
+  } else if (stacked) {
+    bodySvg = xLabels.map((_, i) => { const yA = gy(actual[i]), yP = gy(actual[i] + plan[i]); return `<rect x="${gx(i) - bw}" y="${yA}" width="${bw * 2}" height="${Math.max(0, H - padB - yA)}" fill="${actualC}" rx="1"/><rect x="${gx(i) - bw}" y="${yP}" width="${bw * 2}" height="${Math.max(0, yA - yP)}" fill="${planC}" rx="1"/>`; }).join("");
+  } else if (type === "영역") {
+    bodySvg = poly(plan, planC, true) + poly(actual, actualC, true);
+  } else if (type === "혼합") {
+    bodySvg = xLabels.map((_, i) => `<rect x="${gx(i) - bw}" y="${gy(actual[i])}" width="${bw * 2}" height="${Math.max(0, H - padB - gy(actual[i]))}" fill="${actualC}" rx="1"/>`).join("") + poly(plan, planC, false) + dots(plan, planC);
+  } else { // 꺾은선(기본)
+    bodySvg = poly(plan, planC, false) + poly(actual, actualC, false) + dots(plan, planC) + dots(actual, actualC);
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;height:auto">${gridLines}${xlab}${ymax}${legend}${bodySvg}</svg>`;
 };
 // 가로 막대(그룹/제품군/공정/응시상태). 상위 12개 · 값 라벨 병기.
 const svgHBar = (items: Array<{ label: string; value: number }>, color: string): string => {
@@ -426,7 +454,8 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
     }
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(report)}</title><style>
       @page{size:A4 ${wide ? "landscape" : "portrait"};margin:12mm}
-      *{box-sizing:border-box}body{font-family:'Malgun Gothic',sans-serif;font-size:11px;color:#0f172a;margin:0}
+      *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      body{font-family:'Malgun Gothic',sans-serif;font-size:11px;color:#0f172a;margin:0}
       .page{page-break-after:always}.page:last-child{page-break-after:auto}
       .meta{display:flex;flex-direction:column;gap:2px;margin-bottom:8px;border-bottom:2px solid #334155;padding-bottom:6px}
       .meta b{font-size:15px}.meta span{color:#475569;font-size:10.5px}
@@ -463,8 +492,9 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
         const planAnnual = exTargets.reduce((s, t) => s + num(t.target_count), 0);
         const plan = MONTHS.map(() => Math.round((planAnnual / 12) * 10) / 10);
         const rows = MONTHS.map((_, i) => `<tr><td>${i + 1}월</td><td>${plan[i]}</td><td>${actual[i]}</td></tr>`).join("");
-        const svg = svgLine([{ name: "계획", color: "#2563eb", data: plan }, { name: "실적", color: "#ea580c", data: actual }], MONTHS.map((_, i) => `${i + 1}월`));
-        return tbl("월별 계획/실적 (계획=연간목표 12개월 균등 분배 근사)", ["월", "계획", "실적"], rows, planAnnual > 0 || actual.some((v) => v > 0), svg);
+        // 화면에서 선택한 차트 유형(chartType)을 인쇄에도 동일 반영(print-safe SVG).
+        const svg = svgTrend(chartType, plan, actual, MONTHS.map((_, i) => `${i + 1}월`));
+        return tbl(`월별 계획/실적 (${chartType} · 계획=연간목표 12개월 균등 분배 근사)`, ["월", "계획", "실적"], rows, planAnnual > 0 || actual.some((v) => v > 0), svg);
       }
       if (id === "group_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.group_name)), "그룹별 인증 인원", "그룹", "#2563eb");
       if (id === "category_certification") return dist(distinctAcquiredBy(exApps, (r) => str(r.product)), "제품군별 인증 인원", "제품군", "#1e3a8a");
@@ -496,7 +526,8 @@ export default function ExamReportsPage({ darkMode, tenantId, author, refreshKey
     const metaHtml = `<div class="meta"><b>시험관리 보고서</b><span>출력일 ${today} · 작성자 ${esc(authorName)}</span><span>필터: ${activeFilters.length ? esc(activeFilters.join(", ")) : "전체"}</span><span>선택 인증단계: ${esc(selLabels)}</span></div>`;
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>시험관리 보고서</title><style>
       @page{size:A4 portrait;margin:12mm}
-      *{box-sizing:border-box}body{font-family:'Malgun Gothic',sans-serif;font-size:11px;color:#0f172a;margin:0}
+      *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      body{font-family:'Malgun Gothic',sans-serif;font-size:11px;color:#0f172a;margin:0}
       .meta{display:flex;flex-direction:column;gap:2px;margin-bottom:12px;border-bottom:2px solid #334155;padding-bottom:6px}
       .meta b{font-size:16px}.meta span{color:#475569;font-size:10.5px}
       .rep{page-break-inside:avoid;break-inside:avoid;margin-bottom:14px}

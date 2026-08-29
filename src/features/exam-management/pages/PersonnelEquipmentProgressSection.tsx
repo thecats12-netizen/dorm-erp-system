@@ -10,6 +10,7 @@ import { computeCurrentLevelByPersonnel } from "../services/currentCertification
 import { computeEquipmentProgressByPersonnel, type PersonnelEquipmentProgress } from "../services/equipmentProgressService";
 
 const S = (v: unknown) => String(v ?? "").trim();
+const PAGE_SIZE = 50; // 751명 전체 DOM 렌더 방지(표시 전용 · 계산/필터 결과는 전체 대상 유지).
 
 type Props = { darkMode: boolean; tenantId: string; personnel: ExamRow[]; levels: ExamRow[]; applications: ExamRow[] };
 
@@ -22,6 +23,7 @@ export default function PersonnelEquipmentProgressSection({ darkMode, tenantId, 
   const [search, setSearch] = useState("");
   const [fLevel, setFLevel] = useState("");
   const [quick, setQuick] = useState<"all" | "incomplete" | "complete">("all");
+  const [page, setPage] = useState(1); // 표시 페이지(필터 변경 시 1로 리셋).
 
   const load = useCallback(async () => {
     if (!examSupabaseReady()) return;
@@ -87,6 +89,11 @@ export default function PersonnelEquipmentProgressSection({ darkMode, tenantId, 
 
   const levelFilterOpts = useMemo(() => Array.from(new Set(personnel.map(currentLevelOf).filter((v) => v && v !== "-"))).sort(), [personnel, currentLevelOf]);
 
+  // 현재 페이지 행만 렌더(계산·집계는 전체 rows 기준 유지 · DOM 부하만 축소).
+  const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const curPage = Math.min(page, pageCount);
+  const paged = useMemo(() => rows.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE), [rows, curPage]);
+
   const cell = (s: PersonnelEquipmentProgress["stages"][number] | undefined) => {
     if (!s || s.targetCount === 0) return <span className="text-slate-400">- / -</span>;
     const pct = s.progressPercent ?? 0;
@@ -100,15 +107,16 @@ export default function PersonnelEquipmentProgressSection({ darkMode, tenantId, 
     );
   };
   const qBtn = (k: typeof quick, label: string) => (
-    <button onClick={() => setQuick(k)} className={`rounded-xl px-3 py-1.5 text-xs font-medium transition ${quick === k ? "bg-blue-600 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{label}</button>
+    <button onClick={() => { setQuick(k); setPage(1); }} className={`rounded-xl px-3 py-1.5 text-xs font-medium transition ${quick === k ? "bg-blue-600 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{label}</button>
   );
+  const pageBtn = darkMode ? "inline-flex items-center justify-center rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800 disabled:opacity-50" : "inline-flex items-center justify-center rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100 disabled:opacity-50";
 
   return (
     <div>
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         {qBtn("all", "전체")}{qBtn("incomplete", "설비 미완료")}{qBtn("complete", "설비 완료")}
-        <select value={fLevel} onChange={(e) => setFLevel(e.target.value)} className={inputCls}><option value="">현재 Level: 전체</option>{levelFilterOpts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="검색(사번/이름)" className={`${inputCls} min-w-[160px]`} />
+        <select value={fLevel} onChange={(e) => { setFLevel(e.target.value); setPage(1); }} className={inputCls}><option value="">현재 Level: 전체</option>{levelFilterOpts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="검색(사번/이름)" className={`${inputCls} min-w-[160px]`} />
         {loading && <span className="text-xs text-slate-400">불러오는 중…</span>}
       </div>
 
@@ -119,7 +127,7 @@ export default function PersonnelEquipmentProgressSection({ darkMode, tenantId, 
             <tr>{["사번", "이름", "그룹", "제품군", "공정", "현재 Level", ...stageLabels, "설비 전체", "사용여부"].map((h, i) => <th key={`${h}-${i}`} className="whitespace-nowrap px-2.5 py-2">{h}</th>)}</tr>
           </thead>
           <tbody>
-            {rows.map((p) => {
+            {paged.map((p) => {
               const pid = S(p.id);
               const prog = progressByPerson.get(pid);
               const total = totals.get(pid);
@@ -144,7 +152,7 @@ export default function PersonnelEquipmentProgressSection({ darkMode, tenantId, 
 
       {/* 모바일: 직원 카드 */}
       <div className="space-y-2 sm:hidden">
-        {rows.map((p) => {
+        {paged.map((p) => {
           const pid = S(p.id);
           const prog = progressByPerson.get(pid);
           return (
@@ -168,6 +176,13 @@ export default function PersonnelEquipmentProgressSection({ darkMode, tenantId, 
         {rows.length === 0 && <div className="px-3 py-8 text-center text-xs text-slate-500">표시할 직원이 없습니다.</div>}
       </div>
 
+      {pageCount > 1 && (
+        <div className="mt-2 flex items-center justify-end gap-2 text-xs text-slate-500">
+          <button className={pageBtn} disabled={curPage <= 1} onClick={() => setPage(curPage - 1)}>이전</button>
+          <span>{curPage} / {pageCount}</span>
+          <button className={pageBtn} disabled={curPage >= pageCount} onClick={() => setPage(curPage + 1)}>다음</button>
+        </div>
+      )}
       <div className="mt-2 text-xs text-slate-500">총 {rows.length}명 · 대상/취득 설비는 설비별 인증단계와 승인 설비취득 기준 · 설비 상세는 <span className="font-medium">PM 인증관리 &gt; 설비 인증현황</span>에서 확인.</div>
     </div>
   );
