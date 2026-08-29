@@ -27,7 +27,7 @@ const COLS: Col[] = [
   { key: "name", label: "이름", type: "text", required: true },
   { key: "group_name", label: "그룹", type: "text", filter: true },
   { key: "product_group", label: "제품군", type: "text", filter: true },
-  { key: "part_name", label: "파트", type: "text" }, // [Line 전환] 파트 필터 제거(검색/필터는 라인·제품군·그룹·공정). 컬럼값은 Excel·상세·저장에 보존.
+  { key: "part_name", label: "공정", type: "text" }, // 공정(canonical 헤더). Excel import 는 "파트"/"공정" 둘 다 허용(하위호환). 컬럼값(part_name)은 상세·저장에 보존.
   { key: "position", label: "직책", type: "text" },
   { key: "hire_date", label: "입사일", type: "date" },
   { key: "employment_status", label: "재직여부", type: "select", options: ["재직", "휴직", "퇴직"], filter: true },

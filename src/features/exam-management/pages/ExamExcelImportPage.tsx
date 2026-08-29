@@ -72,7 +72,8 @@ const SHEET_CONFIGS: SheetConfig[] = [
       { key: "group_name", label: "그룹", aliases: ["그룹"], type: "text" },
       { key: "product_group", label: "제품군", aliases: ["제품군", "제품"], type: "text" },
       // 파트는 원본 텍스트(part_name)로 보존하고, 저장 시 공정(process_id)으로 매핑한다.
-      { key: "part_name", label: "파트", aliases: ["파트", "part"], type: "text" },
+      // 공정(신규 export 헤더) · 파트(구버전 호환)를 동일 텍스트로 받는다. 저장 시 group→제품군→공정 스코프로 process_id 확정([:applyPersonnel]).
+      { key: "part_name", label: "공정", aliases: ["공정", "파트", "part", "process", "process_name"], type: "text" },
       { key: "position", label: "직책", aliases: ["직책", "직급"], type: "text" },
       { key: "hire_date", label: "입사일", aliases: ["입사일", "입사일자"], type: "date" },
       { key: "employment_status", label: "재직여부", aliases: ["재직여부", "재직", "재직상태"], type: "text" },
@@ -203,6 +204,8 @@ export default function ExamExcelImportPage({ darkMode, canEdit, tenantId, userI
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<SheetResult[]>([]);
+  // [공정 스코프 매핑] group→제품군→공정 스코프로 process_id 확정 실패한 행(저장 제외 · 사용자 안내용).
+  const [processFailures, setProcessFailures] = useState<Array<{ employee_no: string; name: string; group_name: string; product_group: string; part_name: string; reason: string }>>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [noRequiredSheet, setNoRequiredSheet] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -363,27 +366,60 @@ export default function ExamExcelImportPage({ darkMode, canEdit, tenantId, userI
   // 관리자 승인 후 인력현황만 동기화(사번 기준 신규/수정/변경없음, 부분 실패 허용).
   const applyPersonnel = async () => {
     if (syncing || !personnelResult || personnelResult.okRows.length === 0) return;
-    setSyncing(true); setError(null);
+    setSyncing(true); setError(null); setProcessFailures([]);
     try {
-      await loadRefs(["exam_processes"]); // 공정 매핑용
       const perms: MyExamPermissions = await loadMyExamPermissions(tenantId);
       const canWrite = (pid: string | null | undefined, action: "create" | "update") => perms.can(pid ?? null, action);
 
-      const prepared: ExamRow[] = personnelResult.okRows.map((row) => {
+      // [공정 스코프 인덱스] 그룹/제품군/공정 raw 1회 로드(FK 보유) → 메모리 매칭(행별 조회 없음).
+      const [groupsRaw, catsRaw, procsRaw] = await Promise.all([
+        listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
+      ]);
+      const norm = (s: unknown) => String(s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+      // 그룹명 alias: "천안 · 2Part" 같은 접두는 "·" 마지막 세그먼트("2Part") 우선 매칭, 실패 시 원본으로도 시도. 하드코딩 확장 없음.
+      const normGroupTail = (s: unknown) => { const p = String(s ?? "").split("·").map((x) => x.trim()).filter(Boolean); return norm(p.length ? p[p.length - 1] : s); };
+      // 공정 확정: 그룹 → 제품군(category.group_id) → 공정(process.category_id) 스코프. 이름 전역 매칭 금지. 정확히 1건만 성공.
+      const resolveProcessId = (groupName: unknown, productGroup: unknown, partName: unknown): { id: string | null; reason: string } => {
+        const pn = norm(partName);
+        if (!pn) return { id: null, reason: "" }; // 공정 빈값 → NULL 허용(비시험대상)
+        const gs0 = groupsRaw.filter((g) => !g.deleted_at && norm(g.name) === normGroupTail(groupName));
+        const gs = gs0.length ? gs0 : groupsRaw.filter((g) => !g.deleted_at && norm(g.name) === norm(groupName));
+        if (gs.length === 0) return { id: null, reason: "그룹을 기준정보에서 찾을 수 없습니다" };
+        const gids = new Set(gs.map((g) => String(g.id)));
+        const cs = catsRaw.filter((c) => !c.deleted_at && gids.has(String(c.group_id ?? "")) && norm(c.name) === norm(productGroup));
+        if (cs.length === 0) return { id: null, reason: "선택한 그룹에 해당 제품군이 없습니다" };
+        const cids = new Set(cs.map((c) => String(c.id)));
+        const ps = Array.from(new Set(procsRaw.filter((p) => !p.deleted_at && cids.has(String(p.category_id ?? "")) && norm(p.name) === pn).map((p) => String(p.id))));
+        if (ps.length === 1) return { id: ps[0], reason: "" };
+        if (ps.length === 0) return { id: null, reason: "선택한 그룹/제품군에 해당 공정이 존재하지 않습니다" };
+        return { id: null, reason: "동일 기준의 공정이 2건 이상이라 자동 연결할 수 없습니다" };
+      };
+
+      const prepared: ExamRow[] = [];
+      const failures: Array<{ employee_no: string; name: string; group_name: string; product_group: string; part_name: string; reason: string }> = [];
+      personnelResult.okRows.forEach((row) => {
         const r: ExamRow = { ...row };
         delete (r as { _status?: unknown })._status;
-        // 공정 자동 매핑: 파트(텍스트) → exam_processes id (미매칭 시 null)
-        r.process_id = r.part_name ? mapRefTo("exam_processes", r.part_name) : null;
+        // 공정 확정: 그룹→제품군→공정 스코프. 실패(공정값 있으나 미확정)는 저장 제외 + 안내.
+        const rp = resolveProcessId(r.group_name, r.product_group, r.part_name);
+        if (rp.reason) {
+          failures.push({ employee_no: String(r.employee_no ?? ""), name: String(r.name ?? ""), group_name: String(r.group_name ?? ""), product_group: String(r.product_group ?? ""), part_name: String(r.part_name ?? ""), reason: rp.reason });
+          return; // 잘못된/모호한 공정은 임의 저장하지 않는다
+        }
+        r.process_id = rp.id; // 매칭 1건 id 또는 null(빈 공정=비시험대상)
         // PM Level(엑셀 우선, 없으면 자동), 인증 Level 자동 계산(없으면)
         const { pm, cert } = computeLadder(r);
         if (String(r.current_pm_level ?? "").trim() === "" && pm) r.current_pm_level = pm;
         if (String(r.cert_level ?? "").trim() === "" && cert) r.cert_level = cert;
-        return r;
+        prepared.push(r);
       });
+      setProcessFailures(failures);
 
-      const res = await syncExamPersonnel(prepared, tenantId, userId, canWrite);
+      const res = prepared.length ? await syncExamPersonnel(prepared, tenantId, userId, canWrite) : { total: 0, newCount: 0, updateCount: 0, unchangedCount: 0, errors: [] as Array<{ row: number; reason: string }> };
       setPersonnelApplied(true);
-      onToast?.(`총 ${res.total}건 중 신규 ${res.newCount}건, 수정 ${res.updateCount}건, 변경 없음 ${res.unchangedCount}건, 오류 ${res.errors.length}건입니다.`);
+      onToast?.(`총 ${personnelResult.okRows.length}건 중 신규 ${res.newCount}건 · 수정 ${res.updateCount}건 · 변경 없음 ${res.unchangedCount}건 · 공정 연결 실패(제외) ${failures.length}건입니다.`);
       onDataChanged?.(); // 인력현황만 최소 재조회 신호
     } catch (e) {
       setError((e as { message?: string })?.message || "인력현황 동기화에 실패했습니다.");
@@ -538,6 +574,23 @@ export default function ExamExcelImportPage({ darkMode, canEdit, tenantId, userI
                   {personnelApplied ? "반영 완료" : syncing ? "동기화 중…" : `관리자 승인 후 인력현황 반영 (${personnelResult.okRows.length}건)`}
                 </button>
               ) : <span className="text-xs text-slate-400">인력현황 반영 권한이 없습니다(조회 전용).</span>}
+              {processFailures.length > 0 && (
+                <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 dark:border-amber-700/60 dark:bg-amber-950/30">
+                  <div className="mb-1 text-xs font-semibold text-amber-700 dark:text-amber-300">공정 연결 실패 {processFailures.length}건 — 아래 행은 공정이 연결되지 않아 저장에서 제외되었습니다. 기준정보(그룹/제품군/공정)를 확인해 주세요.</div>
+                  <div className="max-h-52 overflow-auto">
+                    <table className="w-full text-left text-[0.7rem]">
+                      <thead className="text-slate-500"><tr><th className="px-2 py-1">사번</th><th className="px-2 py-1">이름</th><th className="px-2 py-1">그룹</th><th className="px-2 py-1">제품군</th><th className="px-2 py-1">공정</th><th className="px-2 py-1">사유</th></tr></thead>
+                      <tbody>
+                        {processFailures.map((f, i) => (
+                          <tr key={`${f.employee_no}-${i}`} className="border-t border-amber-200/60 dark:border-amber-800/40">
+                            <td className="px-2 py-1">{f.employee_no || "-"}</td><td className="px-2 py-1">{f.name || "-"}</td><td className="px-2 py-1">{f.group_name || "-"}</td><td className="px-2 py-1">{f.product_group || "-"}</td><td className="px-2 py-1">{f.part_name || "-"}</td><td className="px-2 py-1 text-amber-700 dark:text-amber-300">{f.reason}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
