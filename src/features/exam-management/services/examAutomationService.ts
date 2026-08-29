@@ -603,6 +603,9 @@ export type MonthlyPerfFilters = { group?: string; product?: string; part?: stri
 
 // 삭제/취소/확정 판정.
 const isDeletedRec = (r: ExamApplicationRecord): boolean => !!r.deleted_at || r.is_active === false || r.isDeleted === true;
+// [취득 실적 집계 전용] historical 인증행의 is_active=false 는 "삭제"가 아니다(취득은 과거 사실 · 응시관리도 deleted_at 만으로 표시).
+//  실제 삭제만 제외: deleted_at 존재 또는 명시적 isDeleted. 전역 isDeletedRec(is_active 포함) 의미는 그대로 두고 실적 집계에서만 사용.
+const isPerfDeleted = (r: ExamApplicationRecord): boolean => !!r.deleted_at || r.isDeleted === true;
 const isCanceledRec = (r: ExamApplicationRecord): boolean => /취소/.test(asText(r.status));
 // 최종 확정: 공용 canonical 취득 판정(isApplicationAcquired — status "인증 취득"/실기·인증 취득일/수동 확정 취득)
 //  또는 승인 완료 D.M(dm_certifications: approval_status="승인"). 대시보드·응시관리와 동일 SoT(별도 판정식 신설 아님).
@@ -628,7 +631,7 @@ export function calculateMonthlyPerformance(
   let count = 0;
   let excludedDup = 0;
   for (const r of Array.isArray(records) ? records : []) {
-    if (isDeletedRec(r)) continue;      // 삭제 제외
+    if (isPerfDeleted(r)) continue;     // 삭제만 제외(is_active=false 는 취득 실적에서 제외하지 않음)
     if (isCanceledRec(r)) continue;     // 취소 제외
     if (!isConfirmedRec(r)) continue;   // 수동 확정/승인만(자동 후보 제외)
     const d = confirmDate(r);

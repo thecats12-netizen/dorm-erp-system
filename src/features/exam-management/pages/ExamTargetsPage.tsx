@@ -814,7 +814,7 @@ function AnnualAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode
         </select>
         <select value={f.group} onChange={(e) => setF((p) => ({ ...p, group: e.target.value }))} className={selCls}><option value="전체">그룹: 전체</option>{opts.groups.map((o) => <option key={o} value={o}>{o}</option>)}</select>
         <select value={f.product} onChange={(e) => setF((p) => ({ ...p, product: e.target.value }))} className={selCls}><option value="전체">제품: 전체</option>{opts.products.map((o) => <option key={o} value={o}>{o}</option>)}</select>
-        <select value={f.part} onChange={(e) => setF((p) => ({ ...p, part: e.target.value }))} className={selCls}><option value="전체">파트: 전체</option>{opts.parts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        {/* [파트 필터 제거] 연간목표·월간실적 필터는 연도·그룹·제품군·공정·인증단계만. part 는 항상 "전체"(no-op) 로 유지 · 데이터/컬럼/기타 메뉴 무변경. */}
         <select value={f.process} onChange={(e) => setF((p) => ({ ...p, process: e.target.value }))} className={selCls}><option value="전체">공정: 전체</option>{opts.processes.map((o) => <option key={o} value={o}>{o}</option>)}</select>
         <select value={f.level} onChange={(e) => setF((p) => ({ ...p, level: e.target.value }))} className={selCls}><option value="전체">인증단계: 전체</option>{opts.levels.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
       </div>
@@ -849,9 +849,6 @@ export function ExamMonthlyResultsPage(props: PageProps) {
 
 // 월간실적 자동집계 패널(읽기 전용) — exam_applications/dm_certifications 의 최종 인증 확정 건수를 월별 집계.
 //  저장/승인 발생 시 새로고침으로 해당 연도만 다시 계산. 화면 진입마다 DB 재저장하지 않음(조회 전용).
-// [임시 진단] URL ?examDebug=1 일 때만 개발용 console 계측 허용(일반 사용자 화면/콘솔 비노출). 최종 수정 시 제거 예정.
-const isExamDebug = (): boolean => { try { return new URLSearchParams(window.location.search).get("examDebug") === "1"; } catch { return false; } };
-
 function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode: boolean; tenantId: string; refreshKey?: number }) {
   // 단계 인증(exam_applications 취득 + pm/dm 승인)과 설비 인증(exam_equipment_certifications approved)을 분리 집계.
   const [stageRecords, setStageRecords] = useState<ExamRow[]>([]); // 단계 인증 source(중복 제거된 apps+pm+dm)
@@ -880,20 +877,7 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
       // 단계 인증 중복 방지: PM 자동생성분(source_application_id)이 이미 포함된 취득 응시를 가리키면 제외(이중계상 차단).
       const acquiredAppIds = new Set(apps.filter((a) => isApplicationAcquired(a)).map((a) => String(a.id)));
       const pmDedup = pm.filter((p) => { const sa = String(p.source_application_id ?? ""); return !(sa && acquiredAppIds.has(sa)); });
-      const stageArr = [...apps, ...pmDedup, ...dm];
-      setStageRecords(stageArr);
-      // [임시 계측 · ?examDebug=1 에서만 · 최종수정 시 제거] apps→stageRecords 로드 단계 값 확인(UI 비노출).
-      if (isExamDebug()) {
-        const s = apps.find((a) => String(a.employee_no) === "S2411002");
-        console.groupCollapsed("[examDebug] 월간 load");
-        console.debug("[A] tenantId =", tenantId);
-        console.debug("[B] apps.length =", apps.length, "· S2411002 존재 =", !!s);
-        if (s) console.debug("[B] S2411002 raw =", { employee_no: s.employee_no, name: s.name, status: s.status, cert_status: s.cert_status, cert_status_manual: s.cert_status_manual, practical_pass_date: s.practical_pass_date, cert_acquired_date: s.cert_acquired_date, level_id: s.level_id, process_id: s.process_id, tenant_id: s.tenant_id, deleted_at: s.deleted_at, isAcquired: isApplicationAcquired(s) });
-        console.debug("[C] pm.length =", pm.length, "· pmDedup.length =", pmDedup.length);
-        console.debug("[D] dm.length =", dm.length);
-        console.debug("[E] stageRecords.length =", stageArr.length, "· S2411002 존재 =", stageArr.some((r) => String(r.employee_no) === "S2411002"));
-        console.groupEnd();
-      }
+      setStageRecords([...apps, ...pmDedup, ...dm]);
       // 설비 scope 이름 해석: process_id → 공정/제품군(category)/그룹 이름(canonical hierarchy). 설비행에 이름 부여해 필터 재사용.
       const procById = new Map(proc.map((p) => [String(p.id), p]));
       const catById = new Map(cat.map((c) => [String(c.id), c]));
@@ -945,20 +929,6 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
   const totalMonths = useMemo(() => stageAgg.months.map((v, i) => v + equipAgg.months[i]), [stageAgg, equipAgg]);
   const totalSum = stageAgg.total + equipAgg.total;
 
-  // [임시 계측 · ?examDebug=1 에서만] render 시점 filters/service 결과 확인([F][G][H]). service 격리(force 2025) vs 실제 선택연도 비교.
-  useEffect(() => {
-    if (!isExamDebug()) return;
-    const found = stageRecords.find((r) => String(r.employee_no) === "S2411002");
-    const cd = found ? String(found.cert_acquired_date ?? found.acquired_date ?? found.practical_pass_date ?? "") : "";
-    const force2025 = calculateMonthlyPerformanceYear(stageRecords, "2025", {});
-    console.groupCollapsed("[examDebug] 월간 render");
-    console.debug("[F] filters =", { year, ...filters });
-    console.debug("[G] S2411002 in stageRecords =", !!found, found ? { isAcquired: isApplicationAcquired(found), confirmDate: cd, confirmYear: cd.slice(0, 4), confirmMonth: cd.slice(5, 7) } : null);
-    console.debug("[H] force 2025 (filters 없음) months =", force2025.months, "total =", force2025.total);
-    console.debug("[H] 실제 선택연도(", year, ") stageAgg months =", stageAgg.months, "total =", stageAgg.total);
-    console.groupEnd();
-  }, [stageRecords, year, filters, stageAgg]);
-
   const section = `rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`;
   const selCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
   const btn = darkMode ? "inline-flex items-center justify-center rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800" : "inline-flex items-center justify-center rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100";
@@ -979,7 +949,7 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
         </select>
         <select value={f.group} onChange={(e) => setF((p) => ({ ...p, group: e.target.value }))} className={selCls}><option value="전체">그룹: 전체</option>{opts.groups.map((o) => <option key={o} value={o}>{o}</option>)}</select>
         <select value={f.product} onChange={(e) => setF((p) => ({ ...p, product: e.target.value }))} className={selCls}><option value="전체">제품: 전체</option>{opts.products.map((o) => <option key={o} value={o}>{o}</option>)}</select>
-        <select value={f.part} onChange={(e) => setF((p) => ({ ...p, part: e.target.value }))} className={selCls}><option value="전체">파트: 전체</option>{opts.parts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
+        {/* [파트 필터 제거] 연간목표·월간실적 필터는 연도·그룹·제품군·공정·인증단계만. part 는 항상 "전체"(no-op) 로 유지 · 데이터/컬럼/기타 메뉴 무변경. */}
         <select value={f.process} onChange={(e) => setF((p) => ({ ...p, process: e.target.value }))} className={selCls}><option value="전체">공정: 전체</option>{opts.processes.map((o) => <option key={o} value={o}>{o}</option>)}</select>
         <select value={f.level} onChange={(e) => setF((p) => ({ ...p, level: e.target.value }))} className={selCls}><option value="전체">인증단계: 전체</option>{opts.levels.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
       </div>
