@@ -689,6 +689,59 @@ export function calculateAnnualPerformance(
 }
 
 // ─────────────────────────────────────────────────────────────
+// 설비 인증 실적 자동집계(단계 인증과 분리 · exam_equipment_certifications)
+//  · 단계 인증(exam_applications/pm/dm)과 절대 합산하지 않는다(별도 canonical 지표).
+//  · 확정: status="approved" · 미삭제. 취득일 canonical: acquired_date → approved_at(승인시각) → created_at(구데이터 호환 fallback).
+//  · 중복 방지: personnel_id + equipment_id + 취득일 = 1건(legacy 중복 승인 흡수).
+//  · 인증단계(level) 특정 선택 시 설비를 해당 단계에 억지 배정하지 않는다 → 0(설비는 단계 필터와 별도).
+// ─────────────────────────────────────────────────────────────
+const isEquipApproved = (r: ExamApplicationRecord): boolean => !r.deleted_at && asText(r.status) === "approved";
+const equipConfirmDate = (r: ExamApplicationRecord): string => toYmd(r.acquired_date ?? r.approved_at ?? r.created_at);
+const equipDedupKey = (r: ExamApplicationRecord): string =>
+  [asText(r.personnel_id), asText(r.equipment_id), equipConfirmDate(r)].join("|");
+
+export function calculateEquipmentMonthlyPerformance(
+  records: ExamApplicationRecord[],
+  year: number | string,
+  month: number | string,
+  filters?: MonthlyPerfFilters,
+): CalculationResult<number> {
+  // 인증단계 특정 선택 시 설비는 별도(억지 배정 금지) → 0.
+  if (filters?.level && filters.level !== "전체") return autoResult<number>(0, ["설비 인증은 인증단계 필터와 별도 집계"], []);
+  const y = String(year);
+  const mm = String(month).padStart(2, "0");
+  const seen = new Set<string>();
+  let count = 0;
+  let excludedDup = 0;
+  for (const r of Array.isArray(records) ? records : []) {
+    if (!isEquipApproved(r)) continue;                                  // 승인·미삭제만
+    const d = equipConfirmDate(r);
+    if (!d || d.slice(0, 4) !== y || d.slice(5, 7) !== mm) continue;    // 해당 월 승인/취득만
+    if (!matchFilter(r.group_name, filters?.group)) continue;          // group→제품군→공정 canonical(호출부에서 이름 해석)
+    if (!matchFilter(r.product ?? r.product_group, filters?.product)) continue;
+    if (!matchFilter(r.part_name ?? r.part, filters?.part)) continue;
+    if (!matchFilter(r.process ?? r.dm_process, filters?.process)) continue;
+    const k = equipDedupKey(r);
+    if (seen.has(k)) { excludedDup += 1; continue; }
+    seen.add(k);
+    count += 1;
+  }
+  const reasons = [`${y}년 ${Number(mm)}월 승인 설비 인증 ${count}건`];
+  const warnings = excludedDup > 0 ? [`중복 설비 인증 ${excludedDup}건 제외`] : [];
+  return autoResult<number>(count, reasons, warnings);
+}
+
+export function calculateEquipmentMonthlyPerformanceYear(
+  records: ExamApplicationRecord[],
+  year: number | string,
+  filters?: MonthlyPerfFilters,
+): { months: number[]; total: number; results: CalculationResult<number>[] } {
+  const results = Array.from({ length: 12 }, (_, i) => calculateEquipmentMonthlyPerformance(records, year, i + 1, filters));
+  const months = results.map((r) => r.value);
+  return { months, total: months.reduce((a, b) => a + b, 0), results };
+}
+
+// ─────────────────────────────────────────────────────────────
 // 재시험 후보 자동생성(후보 도출 — 실제 시험회차 등록 아님)
 // ─────────────────────────────────────────────────────────────
 

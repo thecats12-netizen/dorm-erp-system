@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overlayA11y";
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
-import { calculateMonthlyPerformanceYear, calculateAnnualPerformance } from "../services/examAutomationService";
+import { calculateMonthlyPerformanceYear, calculateAnnualPerformance, calculateEquipmentMonthlyPerformanceYear } from "../services/examAutomationService";
+import { isApplicationAcquired } from "../utils/certificationLevel";
+import { listEquipmentCertifications } from "../services/equipmentCertificationService";
 import {
   listExamRows, listExamRefOptions, listTargetScopeRows, upsertExamRow, softDeleteExamRow,
   writeExamAudit, examSupabaseReady, makeExcelRowReader, type ExamRow, type ExamMasterTable,
@@ -848,7 +850,9 @@ export function ExamMonthlyResultsPage(props: PageProps) {
 // 월간실적 자동집계 패널(읽기 전용) — exam_applications/dm_certifications 의 최종 인증 확정 건수를 월별 집계.
 //  저장/승인 발생 시 새로고침으로 해당 연도만 다시 계산. 화면 진입마다 DB 재저장하지 않음(조회 전용).
 function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode: boolean; tenantId: string; refreshKey?: number }) {
-  const [records, setRecords] = useState<ExamRow[]>([]);
+  // 단계 인증(exam_applications 취득 + pm/dm 승인)과 설비 인증(exam_equipment_certifications approved)을 분리 집계.
+  const [stageRecords, setStageRecords] = useState<ExamRow[]>([]); // 단계 인증 source(중복 제거된 apps+pm+dm)
+  const [equipRecords, setEquipRecords] = useState<ExamRow[]>([]); // 설비 인증 source(group/제품군/공정 이름 해석 포함)
   const [levels, setLevels] = useState<RefOpt[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -856,15 +860,36 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
   const [f, setF] = useState({ group: "전체", product: "전체", part: "전체", process: "전체", level: "전체" });
 
   const load = useCallback(async () => {
-    if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRecords([]); return; }
+    if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setStageRecords([]); setEquipRecords([]); return; }
     setLoading(true); setError(null);
     try {
-      const [apps, dm, lv] = await Promise.all([
+      // batch 1회 로드(직원별 조회 없음 · N+1 0). 설비 scope 이름 해석용 공정/제품군/그룹 기준정보 포함.
+      const [apps, pm, dm, equip, proc, cat, grp, lv] = await Promise.all([
         listExamRows("exam_applications", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("pm_certifications", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("dm_certifications", tenantId).catch(() => [] as ExamRow[]),
+        listEquipmentCertifications(tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
         listExamRefOptions("exam_levels", tenantId).catch(() => [] as RefOpt[]),
       ]);
-      setRecords([...apps, ...dm]); setLevels(lv);
+      // 단계 인증 중복 방지: PM 자동생성분(source_application_id)이 이미 포함된 취득 응시를 가리키면 제외(이중계상 차단).
+      const acquiredAppIds = new Set(apps.filter((a) => isApplicationAcquired(a)).map((a) => String(a.id)));
+      const pmDedup = pm.filter((p) => { const sa = String(p.source_application_id ?? ""); return !(sa && acquiredAppIds.has(sa)); });
+      setStageRecords([...apps, ...pmDedup, ...dm]);
+      // 설비 scope 이름 해석: process_id → 공정/제품군(category)/그룹 이름(canonical hierarchy). 설비행에 이름 부여해 필터 재사용.
+      const procById = new Map(proc.map((p) => [String(p.id), p]));
+      const catById = new Map(cat.map((c) => [String(c.id), c]));
+      const grpById = new Map(grp.map((g) => [String(g.id), g]));
+      const nm = (v: unknown) => (v === null || v === undefined ? "" : String(v));
+      setEquipRecords(equip.map((e) => {
+        const p = procById.get(String(e.process_id ?? ""));
+        const c = p ? catById.get(String(p.category_id ?? "")) : undefined;
+        const g = c ? grpById.get(String(c.group_id ?? "")) : undefined;
+        return { ...e, process: nm(p?.name ?? p?.code), product_group: nm(c?.name), group_name: nm(g?.name) };
+      }));
+      setLevels(lv);
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [tenantId, refreshKey]);
@@ -873,30 +898,36 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
 
   const str = (v: unknown) => (v === null || v === undefined ? "" : String(v));
   const levelLabel = (id: string) => levels.find((o) => o.id === id)?.label || id;
-  const recYear = (r: ExamRow) => { const s = str(r.cert_acquired_date ?? r.acquired_date ?? r.practical_pass_date); const m = s.match(/(\d{4})/); return m ? m[1] : ""; };
+  const stageYear = (r: ExamRow) => { const s = str(r.cert_acquired_date ?? r.acquired_date ?? r.practical_pass_date); const m = s.match(/(\d{4})/); return m ? m[1] : ""; };
+  const equipYear = (r: ExamRow) => { const s = str(r.acquired_date ?? r.approved_at ?? r.created_at); const m = s.match(/(\d{4})/); return m ? m[1] : ""; };
 
   const opts = useMemo(() => {
     const uniq = (arr: string[]) => Array.from(new Set(arr.filter(Boolean))).sort();
+    const scoped = [...stageRecords, ...equipRecords];
     const levelPairs = new Map<string, string>();
-    records.forEach((r) => { const lid = str(r.level_id); if (lid) levelPairs.set(lid, levelLabel(lid)); const st = str(r.dm_stage); if (st) levelPairs.set(st, st); });
+    stageRecords.forEach((r) => { const lid = str(r.level_id); if (lid) levelPairs.set(lid, levelLabel(lid)); const st = str(r.dm_stage); if (st) levelPairs.set(st, st); });
     return {
-      years: uniq(records.map(recYear)).reverse(),
-      groups: uniq(records.map((r) => str(r.group_name))),
-      products: uniq(records.map((r) => str(r.product ?? r.product_group))),
-      parts: uniq(records.map((r) => str(r.part_name ?? r.part))),
-      processes: uniq(records.map((r) => str(r.process ?? r.dm_process))),
+      years: uniq([...stageRecords.map(stageYear), ...equipRecords.map(equipYear)]).reverse(),
+      groups: uniq(scoped.map((r) => str(r.group_name))),
+      products: uniq(scoped.map((r) => str(r.product ?? r.product_group))),
+      parts: uniq(scoped.map((r) => str(r.part_name ?? r.part))),
+      processes: uniq(scoped.map((r) => str(r.process ?? r.dm_process))),
       levels: Array.from(levelPairs.entries()),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [records, levels]);
+  }, [stageRecords, equipRecords, levels]);
 
-  const agg = useMemo(() => calculateMonthlyPerformanceYear(records, year, {
+  const filters = useMemo(() => ({
     group: f.group === "전체" ? undefined : f.group,
     product: f.product === "전체" ? undefined : f.product,
     part: f.part === "전체" ? undefined : f.part,
     process: f.process === "전체" ? undefined : f.process,
     level: f.level === "전체" ? undefined : f.level,
-  }), [records, year, f]);
+  }), [f]);
+  const stageAgg = useMemo(() => calculateMonthlyPerformanceYear(stageRecords, year, filters), [stageRecords, year, filters]);
+  const equipAgg = useMemo(() => calculateEquipmentMonthlyPerformanceYear(equipRecords, year, filters), [equipRecords, year, filters]);
+  const totalMonths = useMemo(() => stageAgg.months.map((v, i) => v + equipAgg.months[i]), [stageAgg, equipAgg]);
+  const totalSum = stageAgg.total + equipAgg.total;
 
   const section = `rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`;
   const selCls = darkMode ? "rounded-lg border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm outline-none" : "rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm outline-none";
@@ -907,7 +938,7 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-lg font-semibold">월간실적 자동집계 <span className="text-xs font-normal text-slate-400">(실제 인증 확정 건수 · 읽기 전용)</span></h2>
-          <p className="text-sm text-slate-500">해당 월에 최종 확정(수동 확정/승인 완료)된 인증만 집계 — 취소·삭제·중복·자동 후보 제외.</p>
+          <p className="text-sm text-slate-500">단계 인증(응시 취득·PM/DM 승인)과 설비 인증(승인 완료)을 분리 집계 — 취소·삭제·중복·자동 후보 제외.</p>
         </div>
         <button className={btn} onClick={() => void load()}>새로고침</button>
       </div>
@@ -926,20 +957,44 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
       {error && <div className="mb-2 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</div>}
       {loading && <div className="mb-2 text-xs text-slate-500">불러오는 중…</div>}
 
+      {/* 요약: 단계 인증 / 설비 인증 / 전체 인증 활동(참고) — 기존 지표를 하나로 덮어쓰지 않고 분리 표시. */}
+      <div className="mb-3 grid grid-cols-3 gap-2">
+        <div className={`rounded-xl px-3 py-2 ${darkMode ? "bg-blue-950/40 ring-1 ring-blue-800/50" : "bg-blue-50 ring-1 ring-blue-100"}`}>
+          <div className="text-[0.7rem] text-slate-500">단계 인증 누계</div><div className="text-lg font-semibold text-blue-600">{stageAgg.total}<span className="ml-1 text-xs font-normal text-slate-400">건</span></div>
+        </div>
+        <div className={`rounded-xl px-3 py-2 ${darkMode ? "bg-emerald-950/40 ring-1 ring-emerald-800/50" : "bg-emerald-50 ring-1 ring-emerald-100"}`}>
+          <div className="text-[0.7rem] text-slate-500">설비 인증 누계</div><div className="text-lg font-semibold text-emerald-600">{equipAgg.total}<span className="ml-1 text-xs font-normal text-slate-400">건</span></div>
+        </div>
+        <div className={`rounded-xl px-3 py-2 ${darkMode ? "bg-slate-800 ring-1 ring-slate-700" : "bg-slate-100 ring-1 ring-slate-200"}`}>
+          <div className="text-[0.7rem] text-slate-500">전체 인증 활동</div><div className="text-lg font-semibold text-slate-700 dark:text-slate-200">{totalSum}<span className="ml-1 text-xs font-normal text-slate-400">건</span></div>
+        </div>
+      </div>
+
       <div className="overflow-auto rounded-xl border border-slate-200 dark:border-slate-700">
         <table className="w-full text-center text-xs">
           <thead className={darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-700"}>
-            <tr>{Array.from({ length: 12 }, (_, i) => <th key={i} className="whitespace-nowrap px-2.5 py-2">{i + 1}월</th>)}<th className="whitespace-nowrap px-2.5 py-2 font-semibold">누계</th></tr>
+            <tr><th className="whitespace-nowrap px-2.5 py-2 text-left">구분</th>{Array.from({ length: 12 }, (_, i) => <th key={i} className="whitespace-nowrap px-2.5 py-2">{i + 1}월</th>)}<th className="whitespace-nowrap px-2.5 py-2 font-semibold">누계</th></tr>
           </thead>
           <tbody>
             <tr className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
-              {agg.months.map((v, i) => <td key={i} className="px-2.5 py-2">{v}</td>)}
-              <td className="px-2.5 py-2 font-semibold text-blue-600">{agg.total}</td>
+              <td className="whitespace-nowrap px-2.5 py-2 text-left font-medium text-blue-600">단계 인증</td>
+              {stageAgg.months.map((v, i) => <td key={i} className="px-2.5 py-2">{v}</td>)}
+              <td className="px-2.5 py-2 font-semibold text-blue-600">{stageAgg.total}</td>
+            </tr>
+            <tr className={`border-t ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+              <td className="whitespace-nowrap px-2.5 py-2 text-left font-medium text-emerald-600">설비 인증</td>
+              {equipAgg.months.map((v, i) => <td key={i} className="px-2.5 py-2">{v}</td>)}
+              <td className="px-2.5 py-2 font-semibold text-emerald-600">{equipAgg.total}</td>
+            </tr>
+            <tr className={`border-t ${darkMode ? "border-slate-600 bg-slate-800/40" : "border-slate-200 bg-slate-50"}`}>
+              <td className="whitespace-nowrap px-2.5 py-2 text-left font-semibold">전체</td>
+              {totalMonths.map((v, i) => <td key={i} className="px-2.5 py-2 font-medium">{v}</td>)}
+              <td className="px-2.5 py-2 font-semibold text-slate-700 dark:text-slate-200">{totalSum}</td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p className="mt-2 text-[0.7rem] text-slate-400">※ 자동집계는 조회 전용입니다(DB 재저장 없음). 저장/승인 후 “새로고침”으로 다시 계산됩니다. 아래 표는 수기 입력/목표 관리용입니다.</p>
+      <p className="mt-2 text-[0.7rem] text-slate-400">※ 자동집계는 조회 전용입니다(DB 재저장 없음). 저장/승인 후 “새로고침”으로 다시 계산됩니다. 설비 인증은 인증단계 필터와 별도로 집계됩니다. 아래 표는 수기 입력/목표 관리용입니다.</p>
     </section>
   );
 }
