@@ -766,16 +766,19 @@ function AnnualAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [records, targets, levels]);
 
+  // [연도 정합] 표시 연도 = 계산 연도 보장(기본 new Date().getFullYear() 가 옵션에 없으면 최신 연도로 정규화).
+  const selectedYear = useMemo(() => (opts.years.includes(year) ? year : (opts.years[0] ?? year)), [opts.years, year]);
+
   // 목표 합계(exam_annual_targets) — 연도 + 그룹/제품/파트/인증단계 필터 매칭.
   const targetTotal = useMemo(() => targets.filter((t) =>
-    str(t.year) === year &&
+    str(t.year) === selectedYear &&
     (f.group === "전체" || str(t.group_name) === f.group) &&
     (f.product === "전체" || str(t.product_group) === f.product) &&
     (f.part === "전체" || str(t.part_name) === f.part) &&
     (f.level === "전체" || str(t.level_id) === f.level)
-  ).reduce((s, t) => s + (Number(t.target_count) || 0), 0), [targets, year, f]);
+  ).reduce((s, t) => s + (Number(t.target_count) || 0), 0), [targets, selectedYear, f]);
 
-  const perf = useMemo(() => calculateAnnualPerformance(records, year, {
+  const perf = useMemo(() => calculateAnnualPerformance(records, selectedYear, {
     target: targetTotal,
     filters: {
       group: f.group === "전체" ? undefined : f.group,
@@ -784,7 +787,7 @@ function AnnualAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode
       process: f.process === "전체" ? undefined : f.process,
       level: f.level === "전체" ? undefined : f.level,
     },
-  }), [records, year, f, targetTotal]);
+  }), [records, selectedYear, f, targetTotal]);
 
   const { actual, target, rate, months } = perf.value;
   const section = `rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`;
@@ -809,7 +812,7 @@ function AnnualAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
-        <select value={year} onChange={(e) => setYear(e.target.value)} className={selCls}>
+        <select value={selectedYear} onChange={(e) => setYear(e.target.value)} className={selCls}>
           {(opts.years.length ? opts.years : [String(new Date().getFullYear())]).map((y) => <option key={y} value={y}>{y}년</option>)}
         </select>
         <select value={f.group} onChange={(e) => setF((p) => ({ ...p, group: e.target.value }))} className={selCls}><option value="전체">그룹: 전체</option>{opts.groups.map((o) => <option key={o} value={o}>{o}</option>)}</select>
@@ -849,14 +852,9 @@ export function ExamMonthlyResultsPage(props: PageProps) {
 
 // 월간실적 자동집계 패널(읽기 전용) — exam_applications/dm_certifications 의 최종 인증 확정 건수를 월별 집계.
 //  저장/승인 발생 시 새로고침으로 해당 연도만 다시 계산. 화면 진입마다 DB 재저장하지 않음(조회 전용).
-// [임시 진단] URL ?examDebug=1 일 때만 진단 패널/로그 노출(일반 사용자 화면 비노출). 원인 확정 후 제거.
-const isExamDebug = (): boolean => { try { return new URLSearchParams(window.location.search).get("examDebug") === "1"; } catch { return false; } };
-type MonthlyDbg = { tenantId: string; appsLen: number; found: ExamRow | null; pmLen: number; pmDedupLen: number; dmLen: number; stageLen: number; stageHas: boolean };
-
 function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMode: boolean; tenantId: string; refreshKey?: number }) {
   // 단계 인증(exam_applications 취득 + pm/dm 승인)과 설비 인증(exam_equipment_certifications approved)을 분리 집계.
   const [stageRecords, setStageRecords] = useState<ExamRow[]>([]); // 단계 인증 source(중복 제거된 apps+pm+dm)
-  const [dbg, setDbg] = useState<MonthlyDbg | null>(null); // [임시 진단] ?examDebug=1 에서만 채움
   const [equipRecords, setEquipRecords] = useState<ExamRow[]>([]); // 설비 인증 source(group/제품군/공정 이름 해석 포함)
   const [levels, setLevels] = useState<RefOpt[]>([]);
   const [loading, setLoading] = useState(false);
@@ -882,13 +880,7 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
       // 단계 인증 중복 방지: PM 자동생성분(source_application_id)이 이미 포함된 취득 응시를 가리키면 제외(이중계상 차단).
       const acquiredAppIds = new Set(apps.filter((a) => isApplicationAcquired(a)).map((a) => String(a.id)));
       const pmDedup = pm.filter((p) => { const sa = String(p.source_application_id ?? ""); return !(sa && acquiredAppIds.has(sa)); });
-      const stageArr = [...apps, ...pmDedup, ...dm];
-      setStageRecords(stageArr);
-      // [임시 진단] ?examDebug=1 에서만 로드 스냅샷 저장(원인 추적용). 일반 URL 은 null 유지.
-      if (isExamDebug()) {
-        const found = apps.find((a) => String(a.employee_no) === "S2411002") ?? null;
-        setDbg({ tenantId, appsLen: apps.length, found, pmLen: pm.length, pmDedupLen: pmDedup.length, dmLen: dm.length, stageLen: stageArr.length, stageHas: stageArr.some((r) => String(r.employee_no) === "S2411002") });
-      } else setDbg(null);
+      setStageRecords([...apps, ...pmDedup, ...dm]);
       // 설비 scope 이름 해석: process_id → 공정/제품군(category)/그룹 이름(canonical hierarchy). 설비행에 이름 부여해 필터 재사용.
       const procById = new Map(proc.map((p) => [String(p.id), p]));
       const catById = new Map(cat.map((c) => [String(c.id), c]));
@@ -935,8 +927,12 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
     process: f.process === "전체" ? undefined : f.process,
     level: f.level === "전체" ? undefined : f.level,
   }), [f]);
-  const stageAgg = useMemo(() => calculateMonthlyPerformanceYear(stageRecords, year, filters), [stageRecords, year, filters]);
-  const equipAgg = useMemo(() => calculateEquipmentMonthlyPerformanceYear(equipRecords, year, filters), [equipRecords, year, filters]);
+  // [연도 정합] 실제 집계 연도는 반드시 옵션에 존재하는 값으로 정규화. 기본값 new Date().getFullYear() 가 데이터에 없으면
+  //  controlled select 는 첫 옵션을 "표시"하지만 state 는 존재하지 않는 연도로 남아 화면(예 2025)과 계산(예 2026)이 어긋난다.
+  //  → select value 와 집계에 동일한 selectedYear 를 사용해 표시 연도 = 계산 연도를 보장.
+  const selectedYear = useMemo(() => (opts.years.includes(year) ? year : (opts.years[0] ?? year)), [opts.years, year]);
+  const stageAgg = useMemo(() => calculateMonthlyPerformanceYear(stageRecords, selectedYear, filters), [stageRecords, selectedYear, filters]);
+  const equipAgg = useMemo(() => calculateEquipmentMonthlyPerformanceYear(equipRecords, selectedYear, filters), [equipRecords, selectedYear, filters]);
   const totalMonths = useMemo(() => stageAgg.months.map((v, i) => v + equipAgg.months[i]), [stageAgg, equipAgg]);
   const totalSum = stageAgg.total + equipAgg.total;
 
@@ -955,7 +951,7 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
-        <select value={year} onChange={(e) => setYear(e.target.value)} className={selCls}>
+        <select value={selectedYear} onChange={(e) => setYear(e.target.value)} className={selCls}>
           {(opts.years.length ? opts.years : [String(new Date().getFullYear())]).map((y) => <option key={y} value={y}>{y}년</option>)}
         </select>
         <select value={f.group} onChange={(e) => setF((p) => ({ ...p, group: e.target.value }))} className={selCls}><option value="전체">그룹: 전체</option>{opts.groups.map((o) => <option key={o} value={o}>{o}</option>)}</select>
@@ -1006,40 +1002,6 @@ function MonthlyAutoAggregatePanel({ darkMode, tenantId, refreshKey }: { darkMod
         </table>
       </div>
       <p className="mt-2 text-[0.7rem] text-slate-400">※ 자동집계는 조회 전용입니다(DB 재저장 없음). 저장/승인 후 “새로고침”으로 다시 계산됩니다. 설비 인증은 인증단계 필터와 별도로 집계됩니다. 아래 표는 수기 입력/목표 관리용입니다.</p>
-
-      {/* [임시 진단 · ?examDebug=1 에서만] 월간실적 0건 원인 추적. 일반 URL 미노출. 원인 확정 후 제거. */}
-      {isExamDebug() && dbg && (() => {
-        const S = (v: unknown) => (v === null || v === undefined ? "" : String(v));
-        const toYmd = (v: unknown) => { const s = S(v).trim(); const m = s.match(/^(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})/); return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : s.slice(0, 10); };
-        const r = dbg.found;
-        const cd = r ? toYmd(r.cert_acquired_date ?? r.acquired_date ?? r.practical_pass_date) : "";
-        const perfDeleted = r ? (!!r.deleted_at || r.isDeleted === true) : null;
-        const acquired = r ? isApplicationAcquired(r) : null;
-        const force = calculateMonthlyPerformanceYear(stageRecords, "2025", {});
-        const withFilters = calculateMonthlyPerformanceYear(stageRecords, "2025", filters);
-        const row = (k: string, v: unknown) => <div className="flex gap-2"><span className="w-40 shrink-0 text-slate-400">{k}</span><span className="break-all font-mono text-slate-700 dark:text-slate-200">{S(v) || "-"}</span></div>;
-        return (
-          <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-[0.7rem] dark:border-amber-700/50 dark:bg-amber-950/30">
-            <div className="mb-1 font-semibold text-amber-700 dark:text-amber-300">[진단 · examDebug] 월간실적 0건 추적 (개발용 · 일반 URL 비노출)</div>
-            {row("A. tenantId", dbg.tenantId)}
-            {row("B. apps.length", `${dbg.appsLen}${dbg.appsLen >= 1000 ? " ⚠(1000 상한 의심)" : ""}`)}
-            {row("C. S2411002 apps 포함", dbg.found ? "예" : "아니오")}
-            {r && row("D. status/cert_status", `${S(r.status)} / ${S(r.cert_status)}`)}
-            {r && row("D. cert_status_manual/is_active", `${S(r.cert_status_manual)} / ${S(r.is_active)}`)}
-            {r && row("D. cert_acq/practical", `${S(r.cert_acquired_date)} / ${S(r.practical_pass_date)}`)}
-            {r && row("D. deleted_at/level_id", `${S(r.deleted_at)} / ${S(r.level_id)}`)}
-            {r && row("E. isPerfDeleted(탈락)", String(perfDeleted))}
-            {r && row("E. isApplicationAcquired", String(acquired))}
-            {r && row("E. confirmDate/Y/M", `${cd} / ${cd.slice(0, 4)} / ${cd.slice(5, 7)}`)}
-            {row("C. pm/pmDedup/dm", `${dbg.pmLen} / ${dbg.pmDedupLen} / ${dbg.dmLen}`)}
-            {row("F. stageRecords.length · 포함", `${dbg.stageLen} · ${dbg.stageHas ? "예" : "아니오"}`)}
-            {row("G. filters(year/필터)", `${year} / ${JSON.stringify(filters)}`)}
-            {row("J. force 2025(필터 없음)", `months=${JSON.stringify(force.months)} total=${force.total}`)}
-            {row("J. 2025+현재필터", `months=${JSON.stringify(withFilters.months)} total=${withFilters.total}`)}
-            {row("K. stageAgg(선택연도)", `months=${JSON.stringify(stageAgg.months)} total=${stageAgg.total}`)}
-          </div>
-        );
-      })()}
     </section>
   );
 }
