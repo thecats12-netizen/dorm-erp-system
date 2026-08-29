@@ -1,6 +1,7 @@
 // 설비 인증현황 승인 보드 — 설비취득 후보/승인/반려/취소/수동취득.
 //  서비스(equipmentCertificationService)·엔진 재사용. UI 는 한글만(코드값/UUID 비노출). DB 미적용/RLS 오류 안전 가드.
 import { useCallback, useEffect, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 import { listExamRows, examSupabaseReady, type ExamRow } from "../services/examMasterService";
 import { loadMyExamPermissions } from "../services/examPermissionService";
 import EmployeeSelector from "../components/EmployeeSelector";
@@ -111,6 +112,26 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
   const curPage = Math.min(page, pageCount);
   const paged = filtered.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
 
+  // Excel 내보내기: 현재 필터가 적용된 "전체 filtered rows"(페이지네이션 이전) · 상태는 한글 라벨(eqCertStatusKo) · UUID/코드값 미노출. 재조회 없음.
+  const exportExcel = () => {
+    const data = filtered.map((r) => {
+      const pe = empByPid.get(String(r.personnel_id ?? ""));
+      return {
+        "사번": String(pe?.employee_no ?? "-"), "이름": String(pe?.name ?? "-"),
+        "그룹": nm(groupMap, scopeGroupId(r, pe)), "제품군": nm(catMap, scopeCategoryId(r, pe)),
+        "공정": nm(procMap, r.process_id), "설비": nm(equipMap, r.equipment_id), "기준단계": nm(levelMap, r.level_id),
+        "원천": SOURCE_KO(r.source), "취득 예정일": ymd(r.acquired_date), "상태": eqCertStatusKo(String(r.status ?? "") as EqCertStatus),
+        "신청일": ymd(r.requested_at), "승인일": ymd(r.approved_at),
+      };
+    });
+    const ws = XLSX.utils.json_to_sheet(data.length ? data : [{ "사번": "" }]);
+    ws["!autofilter"] = { ref: ws["!ref"] || "A1" };
+    ws["!freeze"] = { xSplit: 0, ySplit: 1 };
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "PM 승인관리");
+    XLSX.writeFile(wb, `시험관리_PM승인관리_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const doStatus = async (id: string, next: EqCertStatus, reason?: string) => {
     setBusyId(id); setError(null);
     try { await setEquipmentCertificationStatus(id, next, tenantId, userId, reason ? { reason } : undefined); onToast?.(`설비 취득: ${eqCertStatusKo(next)} 처리했습니다.`); await reload(); }
@@ -164,6 +185,7 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
         <span className="text-xs text-slate-400">~</span>
         <input type="date" value={fTo} onChange={(e) => { setFTo(e.target.value); setPage(1); }} className={inputCls} title="취득 예정일 종료" />
         <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="검색(사번/이름/설비/공정)" className={`${inputCls} min-w-[180px]`} />
+        <button className={`${btn} ml-auto`} onClick={exportExcel}>Excel 내보내기</button>
       </div>
 
       {error && <div className="mb-2 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">{error}</div>}

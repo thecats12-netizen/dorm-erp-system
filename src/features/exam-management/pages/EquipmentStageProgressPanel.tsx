@@ -3,6 +3,7 @@
 //  · 취득(분자)은 이미 로드된 설비취득 레코드(certs, status="approved")에서 파생 → 추가 DB 조회 없음.
 //  · 현재 Level 은 공용 currentCertificationLevelService(canonical · max(확정 취득 응시, 승인 pm 인증, personnel flag)) 결과 사용.
 import { Fragment, useCallback, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 import type { ExamRow } from "../services/examMasterService";
 import { computeEquipmentProgressByPersonnel, type PersonnelEquipmentProgress } from "../services/equipmentProgressService";
 import { computeCurrentLevelByPersonnel } from "../services/currentCertificationLevelService";
@@ -177,6 +178,31 @@ export default function EquipmentStageProgressPanel({ darkMode, personnel, level
     <button onClick={() => { setQuick(k); setPage(1); }} className={`rounded-xl px-3 py-1.5 text-xs font-medium transition ${quick === k ? "bg-blue-600 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{label}</button>
   );
   const pageBtn = darkMode ? "inline-flex items-center justify-center rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800 disabled:opacity-50" : "inline-flex items-center justify-center rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100 disabled:opacity-50";
+  const btn = darkMode ? "inline-flex items-center justify-center rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800" : "inline-flex items-center justify-center rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100";
+
+  // Excel 내보내기: 현재 필터가 적용된 "전체 rows"(페이지네이션 이전) · 단계 값은 공용 stageLabels(canonical). 재조회 없음.
+  const exportExcel = () => {
+    const data = rows.map((p) => {
+      const pid = S(p.id);
+      const prog = progressByPerson.get(pid);
+      const total = totals.get(pid);
+      const o: Record<string, string> = {
+        "사번": S(p.employee_no) || "-", "이름": S(p.name) || "-", "그룹": S(p.group_name) || "-",
+        "제품군": S(p.product_group) || "-", "공정": procName.get(S(p.process_id)) || "-", "현재 Level": currentLevelOf(p),
+      };
+      stageLabels.forEach((lab, i) => { const s = prog?.stages[i]; o[lab] = s && s.targetCount > 0 ? `${s.acquiredCount}/${s.targetCount}` : "-"; });
+      const tgt = total?.tgt ?? 0, acq = total?.acq ?? 0;
+      o["설비 전체"] = tgt > 0 ? `${acq}/${tgt}` : "-";
+      o["진행률"] = tgt > 0 ? `${Math.round((acq / tgt) * 100)}%` : "-";
+      return o;
+    });
+    const ws = XLSX.utils.json_to_sheet(data.length ? data : [{ "사번": "" }]);
+    ws["!autofilter"] = { ref: ws["!ref"] || "A1" };
+    ws["!freeze"] = { xSplit: 0, ySplit: 1 };
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "단계별 현황");
+    XLSX.writeFile(wb, `시험관리_PM단계별현황_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
 
   return (
     <div>
@@ -185,6 +211,7 @@ export default function EquipmentStageProgressPanel({ darkMode, personnel, level
         <select value={fProcess} onChange={(e) => { setFProcess(e.target.value); setPage(1); }} className={inputCls}><option value="">공정: 전체</option>{procOpts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
         <select value={fLevel} onChange={(e) => { setFLevel(e.target.value); setPage(1); }} className={inputCls}><option value="">현재 Level: 전체</option>{levelFilterOpts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
         <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="검색(사번/이름)" className={`${inputCls} min-w-[160px]`} />
+        <button className={`${btn} ml-auto`} onClick={exportExcel}>Excel 내보내기</button>
       </div>
 
       {/* 가로 스크롤 컨테이너(모바일에서 5단계 테이블이 깨지지 않도록) */}

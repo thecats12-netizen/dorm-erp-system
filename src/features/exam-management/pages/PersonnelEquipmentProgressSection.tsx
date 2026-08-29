@@ -3,6 +3,7 @@
 //  · 계산 로직 페이지 내 중복 없음. 상세 펼침은 PM 인증관리 > 설비 인증현황에서(여기선 요약만).
 //  · 데이터는 batch 1회 로드(N+1 없음). personnel/levels/applications 는 인력현황에서 이미 로드한 값을 props 로 재사용.
 import { useCallback, useEffect, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 import { listExamRows, examSupabaseReady, type ExamRow } from "../services/examMasterService";
 import { listEquipmentStageRules } from "../services/equipmentStageRuleService";
 import { loadApprovedEquipmentByPerson } from "../services/certificationPreviewService";
@@ -110,6 +111,34 @@ export default function PersonnelEquipmentProgressSection({ darkMode, tenantId, 
     <button onClick={() => { setQuick(k); setPage(1); }} className={`rounded-xl px-3 py-1.5 text-xs font-medium transition ${quick === k ? "bg-blue-600 text-white" : (darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{label}</button>
   );
   const pageBtn = darkMode ? "inline-flex items-center justify-center rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800 disabled:opacity-50" : "inline-flex items-center justify-center rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100 disabled:opacity-50";
+  const btn = darkMode ? "inline-flex items-center justify-center rounded-xl border border-slate-600 px-3 py-1.5 text-xs font-medium hover:bg-slate-800" : "inline-flex items-center justify-center rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-100";
+
+  // Excel 내보내기: 현재 필터가 적용된 "전체 rows"(페이지네이션 이전) 사용 · 화면과 동일 canonical 값. 재조회 없음(N+1 0).
+  const exportExcel = () => {
+    const data = rows.map((p) => {
+      const pid = S(p.id);
+      const prog = progressByPerson.get(pid);
+      const total = totals.get(pid);
+      const o: Record<string, string> = {
+        "사번": S(p.employee_no) || "-", "이름": S(p.name) || "-", "그룹": S(p.group_name) || "-",
+        "제품군": S(p.product_group) || "-", "공정": procName.get(S(p.process_id)) || "-", "현재 Level": currentLevelOf(p),
+      };
+      stageLabels.forEach((lab, i) => { const s = prog?.stages[i]; o[lab] = s && s.targetCount > 0 ? `${s.acquiredCount}/${s.targetCount}` : "-"; });
+      const tgt = total?.tgt ?? 0, acq = total?.acq ?? 0;
+      o["대상 설비 수"] = tgt > 0 ? String(tgt) : "-";
+      o["승인 설비 수"] = tgt > 0 ? String(acq) : "-";
+      o["미취득 설비 수"] = tgt > 0 ? String(Math.max(0, tgt - acq)) : "-";
+      o["진행률"] = tgt > 0 ? `${Math.round((acq / tgt) * 100)}%` : "-";
+      o["사용여부"] = p.is_active === false ? "미사용" : "사용";
+      return o;
+    });
+    const ws = XLSX.utils.json_to_sheet(data.length ? data : [{ "사번": "" }]);
+    ws["!autofilter"] = { ref: ws["!ref"] || "A1" };
+    ws["!freeze"] = { xSplit: 0, ySplit: 1 };
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "설비 인증현황");
+    XLSX.writeFile(wb, `시험관리_설비인증현황_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
 
   return (
     <div>
@@ -117,6 +146,7 @@ export default function PersonnelEquipmentProgressSection({ darkMode, tenantId, 
         {qBtn("all", "전체")}{qBtn("incomplete", "설비 미완료")}{qBtn("complete", "설비 완료")}
         <select value={fLevel} onChange={(e) => { setFLevel(e.target.value); setPage(1); }} className={inputCls}><option value="">현재 Level: 전체</option>{levelFilterOpts.map((o) => <option key={o} value={o}>{o}</option>)}</select>
         <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="검색(사번/이름)" className={`${inputCls} min-w-[160px]`} />
+        <button className={`${btn} ml-auto`} onClick={exportExcel}>Excel 내보내기</button>
         {loading && <span className="text-xs text-slate-400">불러오는 중…</span>}
       </div>
 
