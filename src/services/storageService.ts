@@ -119,6 +119,22 @@ export const removeJson = (key: string, tenantId = "default") => {
   adapter.removeItem(getStorageKey(key, tenantId));
 };
 
+// [군대관리 2E] 개인정보(PII) 포함 군대 데이터 — 브라우저 persistent storage 금지 대상.
+//  personnel/training/notices/reports 는 PII(연락처/생년월일/군번/계좌 등)를 담을 수 있어 localStorage 에 저장/복원하지 않는다.
+//  settings/rules/codeValues/autocreate 는 PII 가 없어 cache 유지(아래 목록에서 제외).
+export const MILITARY_SENSITIVE_KEYS = [
+  MILITARY_PERSONNEL_KEY, MILITARY_TRAINING_KEY, MILITARY_NOTICES_KEY, MILITARY_REPORTS_KEY,
+] as const;
+
+// legacy(v1) 민감 키 — 과거 버전이 남겼을 수 있는 평문 PII 잔재까지 청소.
+const MILITARY_SENSITIVE_LEGACY_KEYS = ["military-personnel-v1", "military-training-v1", "military-notices-v1", "military-reports-v1"] as const;
+
+// 민감 군대 캐시만 정확히 제거(현재 v4 + legacy v1 · logout/계정전환/legacy purge). localStorage.clear 사용 금지 — 타 모듈/설정 보존.
+export const purgeMilitarySensitiveCache = (tenantId = "default") => {
+  if (!isBrowser) return;
+  [...MILITARY_SENSITIVE_KEYS, ...MILITARY_SENSITIVE_LEGACY_KEYS].forEach((k) => adapter.removeItem(getStorageKey(k, tenantId)));
+};
+
 export const migrateLocalStorageKeys = (migrations: Array<{ oldKey: string; newKey: string }>, tenantId = "default") => {
   if (!isBrowser) return;
 

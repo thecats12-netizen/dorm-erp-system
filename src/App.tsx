@@ -34,11 +34,7 @@ import {
   DORM_CONTRACTS_KEY,
   INVENTORY_KEY,
   LEASES_KEY,
-  MILITARY_NOTICES_KEY,
-  MILITARY_PERSONNEL_KEY,
-  MILITARY_REPORTS_KEY,
   MILITARY_SETTINGS_KEY,
-  MILITARY_TRAINING_KEY,
   MILITARY_TRAINING_RULES_KEY,
   MILITARY_CODE_VALUES_KEY,
   MILITARY_TRAINING_AUTOCREATE_KEY,
@@ -54,6 +50,7 @@ import {
   migrateLocalStorageKeys,
   removeJson,
   saveJson,
+  purgeMilitarySensitiveCache,
 } from "./services/storageService";
 import {
   supabase,
@@ -1089,11 +1086,9 @@ function loadSystemSettings(raw?: string | null, tenantId = "default"): SystemSe
 }
 
 function runLegacyLocalStorageMigration(tenantId = "default"): void {
+  // [군대관리 2E] 민감(personnel/training/notices/reports) legacy v1 은 v4 로 승격하지 않는다(평문 PII 재생성 방지).
+  //  비민감(settings) 및 시스템 설정만 migration 유지.
   migrateLocalStorageKeys([
-    { oldKey: "military-personnel-v1", newKey: MILITARY_PERSONNEL_KEY },
-    { oldKey: "military-training-v1", newKey: MILITARY_TRAINING_KEY },
-    { oldKey: "military-notices-v1", newKey: MILITARY_NOTICES_KEY },
-    { oldKey: "military-reports-v1", newKey: MILITARY_REPORTS_KEY },
     { oldKey: "military-settings-v1", newKey: MILITARY_SETTINGS_KEY },
     { oldKey: "dorm-system-settings-v1", newKey: SYSTEM_SETTINGS_KEY },
   ], tenantId);
@@ -3749,10 +3744,12 @@ export default function App() {
         // localStorage 로드는 "폴백"이다. Supabase 로드가 먼저 실제 데이터를 채운 경우,
         // 비어 있을 수 있는 localStorage 값으로 덮어쓰지 않는다(로드 경합으로 인사/훈련/공지 0건 표시 방지).
         const keepLocalIfEmpty = (arr: any[]) => (prev: any[]) => (prev.length > 0 ? prev : arr);
-        setMilitaryPersonnel(keepLocalIfEmpty(loadJson<any[]>(MILITARY_PERSONNEL_KEY, [], tenantId)));
-        setMilitaryTrainingRecords(keepLocalIfEmpty(loadJson<any[]>(MILITARY_TRAINING_KEY, [], tenantId)));
-        setMilitaryNotices(keepLocalIfEmpty(loadJson<any[]>(MILITARY_NOTICES_KEY, [], tenantId)));
-        setMilitaryReports(keepLocalIfEmpty(loadJson<any[]>(MILITARY_REPORTS_KEY, [], tenantId)));
+        // [군대관리 2E] 민감(personnel/training/notices/reports)은 localStorage 폴백 로드 금지(stale PII 노출 방지).
+        //  Supabase 로드값(있으면)만 유지, 없으면 빈 상태(fail-closed). 비민감(settings/rules/codeValues)만 로컬 캐시 폴백.
+        setMilitaryPersonnel(keepLocalIfEmpty([]));
+        setMilitaryTrainingRecords(keepLocalIfEmpty([]));
+        setMilitaryNotices(keepLocalIfEmpty([]));
+        setMilitaryReports(keepLocalIfEmpty([]));
         setMilitarySettings(loadJson<any>(MILITARY_SETTINGS_KEY, {}, tenantId));
         const loadedRules = loadJson<MilitaryTrainingRule[]>(MILITARY_TRAINING_RULES_KEY, [], tenantId);
         setMilitaryTrainingRules(loadedRules.length ? loadedRules : defaultMilitaryTrainingRules);
@@ -4032,13 +4029,18 @@ export default function App() {
     }
   };
 
+  // [군대관리 2E] 앱 시작 시 legacy 평문 PII 잔재(military-personnel/training/notices/reports v1·v4) 1회 청소. 비민감 설정 cache 는 보존.
   useEffect(() => {
-    if (isSupabaseAvailable()) {
-      loadSupabaseMilitaryModule();
-    } else {
-      setSupabaseSyncStatus("Supabase 환경변수 미설정");
-    }
+    purgeMilitarySensitiveCache(tenantId);
   }, [tenantId]);
+
+  useEffect(() => {
+    if (!isSupabaseAvailable()) { setSupabaseSyncStatus("Supabase 환경변수 미설정"); return; }
+    // [군대관리 2E] 인증 세션 확정(currentUser) 전에는 민감 군대 데이터를 로드하지 않는다(미로그인 PII 노출 방지).
+    if (!currentUser?.id) return;
+    loadSupabaseMilitaryModule();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, currentUser?.id]);
 
   // [5] Realtime 실패/끊김 대비 fallback: 군대 메뉴에 있을 때 진입 시 1회 + 45초 간격으로 조용히 재조회.
   //     (다른 기기 저장분을 realtime 이 놓쳐도 최대 45초 내 자동 반영. 상태 텍스트/로딩 표시 없음 → 화면 깜빡임 없음)
@@ -4153,10 +4155,11 @@ export default function App() {
       setJsonWithTenant(CLEANING_SETTINGS_KEY, payload.cleaningSettings, setCleaningSettings);
       setJsonWithTenant(SYSTEM_SETTINGS_KEY, payload.systemSettings, setSystemSettings);
       setJsonWithTenant(AUDIT_LOGS_KEY, payload.auditLogs, setAuditLogs);
-      setJsonWithTenant(MILITARY_PERSONNEL_KEY, payload.militaryPersonnel, setMilitaryPersonnel);
-      setJsonWithTenant(MILITARY_TRAINING_KEY, payload.militaryTrainingRecords, setMilitaryTrainingRecords);
-      setJsonWithTenant(MILITARY_NOTICES_KEY, payload.militaryNotices, setMilitaryNotices);
-      setJsonWithTenant(MILITARY_REPORTS_KEY, payload.militaryReports, setMilitaryReports);
+      // [군대관리 2E] 민감(personnel/training/notices/reports)은 복원 시 state 만 설정(localStorage 미저장). 이후 Supabase 자동저장이 단일 출처.
+      if (payload.militaryPersonnel !== undefined) setMilitaryPersonnel(payload.militaryPersonnel);
+      if (payload.militaryTrainingRecords !== undefined) setMilitaryTrainingRecords(payload.militaryTrainingRecords);
+      if (payload.militaryNotices !== undefined) setMilitaryNotices(payload.militaryNotices);
+      if (payload.militaryReports !== undefined) setMilitaryReports(payload.militaryReports);
       setJsonWithTenant(MILITARY_SETTINGS_KEY, payload.militarySettings, setMilitarySettings);
       setJsonWithTenant(MILITARY_TRAINING_RULES_KEY, payload.militaryTrainingRules, setMilitaryTrainingRules);
       setJsonWithTenant(MILITARY_CODE_VALUES_KEY, payload.militaryCodeValues, setMilitaryCodeValues);
@@ -6662,24 +6665,9 @@ export default function App() {
     if (isLoading) return;
     if (!isSupabaseAvailable()) saveJson(AUDIT_LOGS_KEY, auditLogs.slice(0, MAX_AUDIT_LOGS), tenantId);
   }, [auditLogs, tenantId, isLoading]);
-  // 군대 모듈 localStorage 저장은 오프라인(Supabase 미설정) 시에만 — Supabase 모드에선 자동저장이 단일 출처.
-  // (이전: 무조건 저장 → 기기별 localStorage 사본이 생겨 기기 간 데이터가 달라질 수 있었음)
-  useEffect(() => {
-    if (isLoading || isSupabaseAvailable()) return;
-    saveJson(MILITARY_PERSONNEL_KEY, militaryPersonnel, tenantId);
-  }, [militaryPersonnel, tenantId, isLoading]);
-  useEffect(() => {
-    if (isLoading || isSupabaseAvailable()) return;
-    saveJson(MILITARY_TRAINING_KEY, militaryTrainingRecords, tenantId);
-  }, [militaryTrainingRecords, tenantId, isLoading]);
-  useEffect(() => {
-    if (isLoading || isSupabaseAvailable()) return;
-    saveJson(MILITARY_NOTICES_KEY, militaryNotices, tenantId);
-  }, [militaryNotices, tenantId, isLoading]);
-  useEffect(() => {
-    if (isLoading || isSupabaseAvailable()) return;
-    saveJson(MILITARY_REPORTS_KEY, militaryReports, tenantId);
-  }, [militaryReports, tenantId, isLoading]);
+  // 군대 모듈 localStorage 저장:
+  //  [군대관리 2E] 민감(personnel/training/notices/reports)은 PII 포함 → 브라우저 persistent 저장 금지(오프라인 포함).
+  //    Supabase 가 단일 출처. 비민감(settings/rules/codeValues/autocreate)만 오프라인 cache 유지.
   useEffect(() => {
     if (isLoading || isSupabaseAvailable()) return;
     saveJson(MILITARY_SETTINGS_KEY, militarySettings, tenantId);
@@ -9963,6 +9951,17 @@ export default function App() {
 
   const pdfBusyRef = useRef(false); // PDF 생성 중복 클릭 방지(생성 중 재진입 차단)
   const manualSignOutRef = useRef(false);
+  // [군대관리 2E] 민감 군대 데이터 client 정리(localStorage 민감키 purge + React state 초기화). 로그아웃/세션만료/계정전환 공용.
+  const clearMilitarySensitiveClientState = () => {
+    // in-flight loadSupabaseMilitaryModule 응답 무효화(로그아웃 후 늦은 응답이 민감 state 를 재오염하는 race 방지).
+    militaryLoadSeqRef.current += 1;
+    purgeMilitarySensitiveCache(tenantId);
+    setMilitaryPersonnel([]);
+    setMilitaryTrainingRecords([]);
+    setMilitaryNotices([]);
+    setMilitaryReports([]);
+  };
+
   const logout = async () => {
     // 군대 모듈 저장 필요 상태면 로그아웃 전 경고(앱 내부 동작이라 beforeunload 미발생)
     if (militaryDirty && !await appConfirm("확인", "군대관리에 저장되지 않은 변경사항이 있습니다.\n저장하지 않고 로그아웃하시겠습니까?")) {
@@ -9972,6 +9971,7 @@ export default function App() {
     if (isSupabaseAvailable()) {
       await supabaseSignOut();
     }
+    clearMilitarySensitiveClientState(); // 민감 PII localStorage/state 즉시 제거
     setCurrentUser(null);
   };
 
@@ -9987,6 +9987,7 @@ export default function App() {
         // 자동 로그아웃(세션 만료/refresh 실패) → 손상 토큰만 정리 + 안내 + 로그인 화면 이동
         console.warn("[Auth] 세션 만료 감지 — 재로그인 필요");
         clearSupabaseAuthStorage(); // 다음 로딩에서 만료 토큰 refresh 재시도로 지연되지 않도록 인증 토큰만 제거
+        clearMilitarySensitiveClientState(); // [군대관리 2E] 세션만료 시 민감 PII localStorage/state 제거
         setCurrentUser(null);
         setLoginError("로그인 세션이 만료되었습니다. 다시 로그인해주세요.");
       }
