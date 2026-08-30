@@ -167,6 +167,7 @@ import {
   base64ToArrayBuffer,
 } from "./utils/excelUtils";
 import { mapRowToTemplateHeaders, parseExcelDate, getTemplateHeaders } from "./services/excelService";
+import { GENERAL_BACKUP_SCHEMA_VERSION, GENERAL_BACKUP_TYPE, MAX_BACKUP_BYTES, isPlainObject, hasDangerousKeys, pickGeneralBackupData, type GeneralBackupDataKey } from "./utils/backupSecurity";
 import MilitaryActionItemsPanel from "./features/military/MilitaryActionItemsPanel";
 import MilitaryCalendarPanel from "./features/military/MilitaryCalendarPanel";
 import MilitaryPersonnelDetailDrawer from "./features/military/MilitaryPersonnelDetailDrawer";
@@ -4092,95 +4093,75 @@ export default function App() {
   };
 
   const exportLocalStorageBackup = () => {
+    // [2F 보안] 관리자만. 일반 백업 = 비민감 데이터만(계정/인증/개인정보/민감 군대 데이터 제외). 서버 권한 대체 아님(프론트 방어).
+    if (!canManageUsers(currentUser)) { void appAlert("백업 및 복원", "관리자만 백업 기능을 사용할 수 있습니다."); return; }
     const payload = {
-      users,
-      dorms,
-      occupants,
-      inventory,
-      leases,
-      dormContracts,
-      newHires,
-      sales,
-      defects,
-      cleaningReports,
-      customTemplates,
-      systemSettings,
-      auditLogs,
-      militaryPersonnel,
-      militaryTrainingRecords,
-      militaryNotices,
-      militaryReports,
-      militarySettings,
-      militaryTrainingRules,
-      militaryCodeValues,
-      militaryTrainingAutoConfig,
-      theme,
-      auth: currentUser,
+      schemaVersion: GENERAL_BACKUP_SCHEMA_VERSION,
+      backupType: GENERAL_BACKUP_TYPE,
+      createdAt: new Date().toISOString(),
+      // allowlist(설정/기준정보 · 비PII)만. 운영 collection(dorms/inventory/leases/sales/defects/cleaningReports)은 담당자명/전화/주소 PII 포함이라 제외.
+      data: pickGeneralBackupData({
+        systemSettings, theme, customTemplates, cleaningSettings,
+        militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig,
+      }),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `dorm-erp-backup-${backupTimestamp()}.json`;
+    a.download = `dorm-erp-general-backup-${backupTimestamp()}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    void appAlert("백업 및 복원", "로컬 백업 파일을 내려받았습니다.");
+    void appAlert("백업 및 복원", "일반 백업 파일을 내려받았습니다.\n(로그인 정보·개인정보·군인 인사정보는 포함되지 않습니다.)");
   };
 
   const importLocalStorageBackup = async (files: FileList | null) => {
     if (!files?.length) return;
+    // [2F 보안] 관리자만. 로그인 정보/개인정보/민감 군대 데이터는 복원하지 않는다(비민감 allowlist 만).
+    if (!canManageUsers(currentUser)) { setBackupImportError("관리자만 복원 기능을 사용할 수 있습니다."); return; }
     const file = files[0];
     try {
+      if (file.size > MAX_BACKUP_BYTES) throw new Error("백업 파일 크기가 허용 범위를 초과했습니다.");
+      if (!/\.json$/i.test(file.name)) throw new Error("JSON 백업 파일만 복원할 수 있습니다.");
       const text = await file.text();
-      const payload = JSON.parse(text);
-      if (!payload || typeof payload !== "object") throw new Error("유효하지 않은 백업 파일입니다.");
+      const raw = JSON.parse(text);
+      if (!isPlainObject(raw)) throw new Error("유효하지 않은 백업 파일입니다.");
+      if (hasDangerousKeys(raw)) throw new Error("허용되지 않는 키가 포함된 백업 파일입니다.");
+      // 신규(v2 general) / legacy(schemaVersion 없음) 구분. 미래 미지원 버전은 거부.
+      const isV2 = raw.schemaVersion === GENERAL_BACKUP_SCHEMA_VERSION && raw.backupType === GENERAL_BACKUP_TYPE;
+      if (raw.schemaVersion !== undefined && !isV2) throw new Error("지원하지 않는 백업 형식입니다.");
+      const src = isV2 && isPlainObject(raw.data) ? (raw.data as Record<string, unknown>) : (raw as Record<string, unknown>);
+      const data = pickGeneralBackupData(src); // 비민감 allowlist + 타입검증만
+      const keys = Object.keys(data);
+      if (keys.length === 0) throw new Error("복원할 수 있는 일반 데이터가 없습니다.");
 
-      const setJsonWithTenant = (key: string, value: any, setter: (value: any) => void) => {
-        if (value !== undefined) {
-          saveJson(key, value, tenantId);
-          setter(value);
-        }
-      };
+      const createdAt = typeof raw.createdAt === "string" ? raw.createdAt : "-";
+      const ok = await appConfirm(
+        "일반 백업 복원",
+        `백업 생성일: ${createdAt}\n복원 대상: 비민감 설정/운영 데이터 ${keys.length}개 영역\n\n※ 로그인 정보·사용자 계정·입주자/군인 개인정보는 보안상 복원되지 않습니다.`,
+        { confirmText: "복원" },
+      );
+      if (!ok) return;
 
-      setJsonWithTenant(USERS_KEY, payload.users, setUsers);
-      setJsonWithTenant(DORMS_KEY, payload.dorms, setDorms);
-      setJsonWithTenant(OCCUPANTS_KEY, payload.occupants, setOccupants);
-      setJsonWithTenant(INVENTORY_KEY, payload.inventory, setInventory);
-      setJsonWithTenant(LEASES_KEY, payload.leases, setLeases);
-      setJsonWithTenant(DORM_CONTRACTS_KEY, payload.dormContracts, setDormContracts);
-      setJsonWithTenant(NEW_HIRES_KEY, payload.newHires, setNewHires);
-      setJsonWithTenant(SALES_KEY, payload.sales, setSales);
-      setJsonWithTenant(DEFECTS_KEY, payload.defects, setDefects);
-      setJsonWithTenant(CLEANING_REPORTS_KEY, payload.cleaningReports, setCleaningReports);
-      setJsonWithTenant(CLEANING_SETTINGS_KEY, payload.cleaningSettings, setCleaningSettings);
-      setJsonWithTenant(SYSTEM_SETTINGS_KEY, payload.systemSettings, setSystemSettings);
-      setJsonWithTenant(AUDIT_LOGS_KEY, payload.auditLogs, setAuditLogs);
-      // [군대관리 2E] 민감(personnel/training/notices/reports)은 복원 시 state 만 설정(localStorage 미저장). 이후 Supabase 자동저장이 단일 출처.
-      if (payload.militaryPersonnel !== undefined) setMilitaryPersonnel(payload.militaryPersonnel);
-      if (payload.militaryTrainingRecords !== undefined) setMilitaryTrainingRecords(payload.militaryTrainingRecords);
-      if (payload.militaryNotices !== undefined) setMilitaryNotices(payload.militaryNotices);
-      if (payload.militaryReports !== undefined) setMilitaryReports(payload.militaryReports);
-      setJsonWithTenant(MILITARY_SETTINGS_KEY, payload.militarySettings, setMilitarySettings);
-      setJsonWithTenant(MILITARY_TRAINING_RULES_KEY, payload.militaryTrainingRules, setMilitaryTrainingRules);
-      setJsonWithTenant(MILITARY_CODE_VALUES_KEY, payload.militaryCodeValues, setMilitaryCodeValues);
-      setJsonWithTenant(MILITARY_TRAINING_AUTOCREATE_KEY, payload.militaryTrainingAutoConfig, setMilitaryTrainingAutoConfig);
-      if (payload.customTemplates) {
-        saveJson(CUSTOM_TEMPLATES_KEY, payload.customTemplates, tenantId);
-        setCustomTemplates(payload.customTemplates);
-      }
-      if (payload.theme) {
-        saveJson(THEME_KEY, payload.theme, tenantId);
-        setTheme(payload.theme);
-      }
-      if (payload.auth) {
-        saveJson(AUTH_KEY, payload.auth, tenantId);
-        setCurrentUser(payload.auth);
-      }
+      const restore: Array<[string, GeneralBackupDataKey, (v: any) => void]> = [
+        [SYSTEM_SETTINGS_KEY, "systemSettings", setSystemSettings], [THEME_KEY, "theme", setTheme],
+        [CUSTOM_TEMPLATES_KEY, "customTemplates", setCustomTemplates], [CLEANING_SETTINGS_KEY, "cleaningSettings", setCleaningSettings],
+        [MILITARY_SETTINGS_KEY, "militarySettings", setMilitarySettings], [MILITARY_TRAINING_RULES_KEY, "militaryTrainingRules", setMilitaryTrainingRules],
+        [MILITARY_CODE_VALUES_KEY, "militaryCodeValues", setMilitaryCodeValues], [MILITARY_TRAINING_AUTOCREATE_KEY, "militaryTrainingAutoConfig", setMilitaryTrainingAutoConfig],
+      ];
+      restore.forEach(([storageKey, dataKey, setter]) => {
+        const v = data[dataKey];
+        if (v === undefined) return;
+        saveJson(storageKey, v, tenantId);
+        setter(v);
+      });
+      // ★ auth/users/occupants/newHires/dormContracts/auditLogs/군대 인사·훈련·공지·보고서는 복원하지 않음(계정/세션/PII 주입 차단).
 
       setBackupImportError(null);
       setSettingsSavedAt(new Date().toLocaleString());
+      void appAlert("백업 및 복원", `일반 데이터 ${keys.length}개 영역을 복원했습니다.`);
     } catch (error) {
-      setBackupImportError(String(error));
+      setBackupImportError((error as { message?: string })?.message || String(error));
     }
   };
 
@@ -23240,15 +23221,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </button>
                 <button
                   onClick={exportLocalStorageBackup}
+                  title="설정과 비민감 운영 데이터를 백업합니다. 로그인 정보·개인정보는 포함되지 않습니다."
                   className={`${theme.darkMode ? "w-full sm:w-auto rounded-2xl border border-slate-600 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100" : "w-full sm:w-auto rounded-2xl border border-slate-300 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100"}`}
                 >
-                  로컬백업 다운로드
+                  일반 백업 다운로드
                 </button>
                 <button
                   onClick={() => backupInputRef.current?.click()}
+                  title="일반 백업(비민감)만 복원합니다. 로그인 정보·개인정보는 복원되지 않습니다."
                   className={`${theme.darkMode ? "w-full sm:w-auto rounded-2xl border border-slate-600 bg-slate-950 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-900" : "w-full sm:w-auto rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"}`}
                 >
-                  백업 파일 복원
+                  일반 백업 복원
                 </button>
                 <button
                   onClick={resetAllData}
