@@ -12,8 +12,11 @@ type Props = {
   deptOf: (p: MilitaryPersonnel) => string;
   formatDate?: (v: string) => string;
   onOpenPerson?: (personId: string) => void;
+  onNavigateType?: (type: MilitaryActionType) => void; // 유형별 보조 이동(미이수/임박→훈련, 미발송→공지)
   onExport?: (info: { rowCount: number; filterSummary: string }) => void;
 };
+
+const NAV_LABEL: Partial<Record<MilitaryActionType, string>> = { "미이수": "훈련기록", "임박7": "훈련기록", "임박30": "훈련기록", "미발송": "공지사항" };
 
 const TYPE_ORDER: Array<MilitaryActionType | "전체"> = ["전체", "미이수", "미발송", "임박7", "임박30", "정보누락"];
 const TYPE_CHIP: Record<MilitaryActionType, string> = {
@@ -24,7 +27,7 @@ const TYPE_CHIP: Record<MilitaryActionType, string> = {
   "정보누락": "text-slate-700 bg-slate-100 dark:bg-slate-800",
 };
 
-export default function MilitaryActionItemsPanel({ darkMode, personnel, training, notices, deptOf, formatDate, onOpenPerson, onExport }: Props) {
+export default function MilitaryActionItemsPanel({ darkMode, personnel, training, notices, deptOf, formatDate, onOpenPerson, onNavigateType, onExport }: Props) {
   const [typeF, setTypeF] = useState<MilitaryActionType | "전체">("전체");
   const [deptF, setDeptF] = useState("전체");
   const [search, setSearch] = useState("");
@@ -98,7 +101,11 @@ export default function MilitaryActionItemsPanel({ darkMode, personnel, training
                 <td className="whitespace-nowrap px-3 py-2">{r.dueDate ? fmt(r.dueDate) : "-"}</td>
                 <td className="whitespace-nowrap px-3 py-2">{r.status}</td>
                 <td className="px-3 py-2">{r.relInfo}</td>
-                <td className="whitespace-nowrap px-3 py-2">{r.personId ? <button className="text-blue-600 hover:underline" onClick={() => onOpenPerson?.(r.personId)}>상세보기</button> : <span className="text-slate-400">-</span>}</td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {r.personId && <button className="text-blue-600 hover:underline" onClick={() => onOpenPerson?.(r.personId)}>상세보기</button>}
+                  {onNavigateType && NAV_LABEL[r.type] && <>{r.personId && <span className="mx-1 text-slate-300">·</span>}<button className="text-slate-500 hover:underline" onClick={() => onNavigateType(r.type)}>{NAV_LABEL[r.type]}</button></>}
+                  {!r.personId && !NAV_LABEL[r.type] && <span className="text-slate-400">-</span>}
+                </td>
               </tr>
             ))}
             {rows.length === 0 && <tr><td colSpan={8} className="px-3 py-10 text-center text-slate-500">현재 처리할 조치사항이 없습니다.</td></tr>}

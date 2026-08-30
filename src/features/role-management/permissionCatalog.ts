@@ -68,6 +68,9 @@ const ACTIONS_BY_TAB: Partial<Record<TabKey, ActionKey[]>> = {
   examExcelImport: ["menu_view", "excel_upload", "excel_download"],
   personnelManagement: ["menu_view", "list", "detail", "create", "update", "delete", "pii_view", "excel_download", "pdf_download", "print"],
   trainingRecords: ["menu_view", "list", "detail", "create", "update", "delete", "status_change", "excel_download", "pdf_download", "print"],
+  // [v2 1B] 조치대상/일정관리 — 읽기 전용(파생 뷰). Excel 다운로드 포함.
+  militaryActionItems: ["menu_view", "list", "detail", "excel_download"],
+  militaryCalendar: ["menu_view", "list", "detail"],
   users: ["menu_view", "admin_config", "audit_view", "pii_view"],
   settings: ADMIN_ACTIONS,
   permissions: ADMIN_ACTIONS,

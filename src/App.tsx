@@ -174,6 +174,7 @@ import MilitaryActionItemsPanel from "./features/military/MilitaryActionItemsPan
 import MilitaryCalendarPanel from "./features/military/MilitaryCalendarPanel";
 import MilitaryPersonnelDetailDrawer from "./features/military/MilitaryPersonnelDetailDrawer";
 import { exportMilitaryXlsx, militaryTodayStamp } from "./features/military/militaryExport";
+import { buildMilitaryActionItems } from "./features/military/militaryDerive";
 import type {
   AuditLog,
   CleaningReport,
@@ -536,6 +537,8 @@ const getTabLabel = (tabKey: TabKey) => {
     case "militaryDashboard": return "군인대시보드";
     case "personnelManagement": return "인사관리";
     case "trainingRecords": return "훈련기록";
+    case "militaryActionItems": return "조치대상";
+    case "militaryCalendar": return "일정관리";
     case "militaryNotices": return "공지사항";
     case "militaryReports": return "군대보고서";
     case "militarySettings": return "군대설정";
@@ -2906,11 +2909,13 @@ export default function App() {
   const [militaryTrainingSearch, setMilitaryTrainingSearch] = useState("");
   const [militaryTrainingStatusFilter, setMilitaryTrainingStatusFilter] = useState<"전체" | string>("전체");
   const [militaryTrainingYearFilter, setMilitaryTrainingYearFilter] = useState<string>("전체");
+  const [militaryTrainingMonthFilter, setMilitaryTrainingMonthFilter] = useState<string>("전체"); // [v2 1B] 월 필터("전체"|"01".."12")
   const [militaryTrainingPersonFilter, setMilitaryTrainingPersonFilter] = useState<string>("전체");
   const [militaryTrainingTypeFilter, setMilitaryTrainingTypeFilter] = useState<string>("전체");
   const [militaryTrainingRoundFilter, setMilitaryTrainingRoundFilter] = useState<string>("전체");
   const [militaryTrainingDepartmentFilter, setMilitaryTrainingDepartmentFilter] = useState<string>("전체");
   const [militaryNoticeSearch, setMilitaryNoticeSearch] = useState("");
+  const [militaryNoticePublishFilter, setMilitaryNoticePublishFilter] = useState<"전체" | "미발송" | "게시완료">("전체"); // [v2 1B] 미발송=!publishedDate(대시보드 KPI 동일 기준)
   const [militaryReportSearch, setMilitaryReportSearch] = useState("");
 
   useEffect(() => {
@@ -4040,7 +4045,7 @@ export default function App() {
   useEffect(() => {
     // 군대 메뉴 탭 키(실제 activeTab 값 기준). 과거 "militaryTraining" 로 잘못 표기되어 훈련기록 탭이
     // fallback 재조회 대상에서 빠져 있었다 → 실제 키 "trainingRecords"(및 대시보드) 로 교정.
-    const MILITARY_TABS = ["militaryDashboard", "personnelManagement", "trainingRecords", "militaryNotices", "militaryReports", "militarySettings"];
+    const MILITARY_TABS = ["militaryDashboard", "personnelManagement", "trainingRecords", "militaryActionItems", "militaryNotices", "militaryCalendar", "militaryReports", "militarySettings"];
     if (!MILITARY_TABS.includes(activeTab)) return;
     if (!isSupabaseAvailable() || !currentUser?.id) return;
     void loadSupabaseMilitaryModule(true);
@@ -9151,12 +9156,22 @@ export default function App() {
   const [militaryStatDetail, setMilitaryStatDetail] = useState<{ title: string; key: string } | null>(null);
   const [militaryStatDetailSearch, setMilitaryStatDetailSearch] = useState("");
   const openMilitaryStatDetail = (title: string, key: string) => { setMilitaryStatDetailSearch(""); setMilitaryStatDetail({ title, key }); };
-  // [v2 1A] 군인대시보드 하위뷰(대시보드/조치대상/일정관리) — 기존 탭 state 재사용(신규 메뉴/router 없음).
-  const [militaryDashView, setMilitaryDashView] = useState<"dashboard" | "actions" | "calendar">("dashboard");
   // [v2 1A] 인사관리/조치대상 개인 상세 Drawer 대상.
   const [militaryDetailPerson, setMilitaryDetailPerson] = useState<MilitaryPersonnel | null>(null);
   const militaryDeptOf = (p: MilitaryPersonnel) => String(p.unit ?? "").trim() || "미지정";
   const openMilitaryPersonDetail = (personId: string) => { const p = militaryPersonnel.find((x) => x.id === personId); if (p) setMilitaryDetailPerson(p); };
+  // [v2 1B] sidebar 조치대상 badge — buildMilitaryActionItems 단일 파생 재사용(추가 DB 조회 없음).
+  const militaryActionItemsCount = useMemo(
+    () => buildMilitaryActionItems({ personnel: militaryPersonnel, training: militaryTrainingRecords, notices: militaryNotices, deptOf: militaryDeptOf }).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [militaryPersonnel, militaryTrainingRecords, militaryNotices],
+  );
+  // [v2 1B] 조치대상 유형별 보조 이동(기존 필터 state 재사용). 새 workflow 없음.
+  const navigateMilitaryActionType = (type: string) => {
+    if (type === "미이수") { setMilitaryTrainingStatusFilter("미이수"); setActiveTab("trainingRecords"); }
+    else if (type === "임박7" || type === "임박30") { setMilitaryTrainingStatusFilter("예정"); setActiveTab("trainingRecords"); }
+    else if (type === "미발송") { setMilitaryNoticePublishFilter("미발송"); setActiveTab("militaryNotices"); }
+  };
 
   // 대상자의 교육일(최근 지난 훈련) / 다음 교육일(가장 가까운 예정) — 훈련기록 기준.
   const militaryTrainingDatesOf = (personId: string) => {
@@ -9245,6 +9260,11 @@ export default function App() {
             String(record.createdAt || "").slice(0, 4);
           if (recordYear !== year) return false;
         }
+        // [v2 1B] 월 필터 — 훈련예정일(없으면 이수일) 기준 MM. KST 로컬 문자열(YYYY-MM-DD) 슬라이스라 UTC 변환 없음.
+        if (militaryTrainingMonthFilter !== "전체") {
+          const recordMonth = String(record.trainingDate || record.completionDate || "").slice(5, 7);
+          if (recordMonth !== militaryTrainingMonthFilter) return false;
+        }
         // 검색(부분검색): 대상자 이름/사번/부서 + 훈련명/훈련유형/상태 (+ 기존 장소/비고 유지). 필터와 동시 적용.
         if (!rawQuery) return true;
         const haystack = [
@@ -9260,15 +9280,18 @@ export default function App() {
         return norm(haystack).includes(qNorm) || compact(haystack).includes(qCompact);
       });
     },
-    [militaryTrainingRecords, militaryTrainingSearch, militaryTrainingStatusFilter, militaryTrainingYearFilter, militaryTrainingPersonFilter, militaryTrainingTypeFilter, militaryTrainingRoundFilter, militaryTrainingDepartmentFilter, militaryPersonnel]
+    [militaryTrainingRecords, militaryTrainingSearch, militaryTrainingStatusFilter, militaryTrainingYearFilter, militaryTrainingMonthFilter, militaryTrainingPersonFilter, militaryTrainingTypeFilter, militaryTrainingRoundFilter, militaryTrainingDepartmentFilter, militaryPersonnel]
   );
 
   const filteredMilitaryNotices = useMemo(
     () => militaryNotices.filter((notice) => {
+      // [v2 1B] 발송 필터 — 미발송=!publishedDate / 게시완료=publishedDate 존재(대시보드 KPI 와 동일 canonical · sentStatus 미혼합)
+      if (militaryNoticePublishFilter === "미발송" && !!notice.publishedDate) return false;
+      if (militaryNoticePublishFilter === "게시완료" && !notice.publishedDate) return false;
       const query = `${notice.title} ${notice.category} ${notice.content}`.toLowerCase();
       return !militaryNoticeSearch || query.includes(militaryNoticeSearch.toLowerCase());
     }),
-    [militaryNotices, militaryNoticeSearch]
+    [militaryNotices, militaryNoticeSearch, militaryNoticePublishFilter]
   );
 
   const filteredMilitaryReports = useMemo(
@@ -15503,6 +15526,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     militaryDashboard: "militaryModule",
     personnelManagement: "militaryModule",
     trainingRecords: "militaryModule",
+    militaryActionItems: "militaryModule",
+    militaryCalendar: "militaryModule",
     militaryNotices: "militaryModule",
     militaryReports: "militaryModule",
     militarySettings: "militaryModule",
@@ -16264,7 +16289,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             {saveStatus === "error" && "저장 실패 · 잠시 후 다시 시도해주세요."}
           </div>
         )}
-        {militaryDirty && ["militaryDashboard", "personnelManagement", "trainingRecords", "militaryNotices", "militaryReports", "militarySettings"].includes(activeTab) && (
+        {militaryDirty && ["militaryDashboard", "personnelManagement", "trainingRecords", "militaryActionItems", "militaryNotices", "militaryCalendar", "militaryReports", "militarySettings"].includes(activeTab) && (
           <div className="fixed inset-x-0 top-0 z-[55] flex flex-wrap items-center justify-center gap-3 border-b border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-900">
             <span>● 군대관리에 저장되지 않은 변경사항이 있습니다. Supabase에 반영하려면 저장하세요.</span>
             {activeTab !== "militarySettings" && (
@@ -16338,7 +16363,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                               className={`w-full justify-start inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm ${activeTab === child.tab ? "bg-slate-900 text-white" : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"}`}
                             >
                               <span className="h-3 w-3 rounded-full bg-slate-300" />
-                              {child.label}
+                              <span className="flex-1 text-left">{child.label}</span>
+                              {/* [v2 1B] 조치대상 건수 badge — 단일 파생 재사용(0 이면 숨김, 99 초과는 99+) */}
+                              {child.tab === "militaryActionItems" && militaryActionItemsCount > 0 && (
+                                <span className={`ml-auto rounded-full px-1.5 py-0.5 text-[0.65rem] font-semibold ${activeTab === child.tab ? "bg-white/20 text-white" : "bg-amber-100 text-amber-700"}`}>{militaryActionItemsCount > 99 ? "99+" : militaryActionItemsCount}</span>
+                              )}
                             </button>
                           ))}
                         </div>
@@ -17452,23 +17481,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           />
         )}
 
+        {/* [v2 1B] 조치대상 · 일정관리는 정식 sidebar 메뉴로 승격(아래 별도 블록). 군인대시보드는 순수 대시보드. */}
+        {activeTab === "militaryActionItems" && (
+          <MilitaryActionItemsPanel darkMode={theme.darkMode} personnel={militaryPersonnel} training={militaryTrainingRecords} notices={militaryNotices} deptOf={militaryDeptOf} formatDate={formatDateOnly} onOpenPerson={openMilitaryPersonDetail} onNavigateType={navigateMilitaryActionType} />
+        )}
+        {activeTab === "militaryCalendar" && (
+          <MilitaryCalendarPanel darkMode={theme.darkMode} personnel={militaryPersonnel} training={militaryTrainingRecords} notices={militaryNotices} />
+        )}
+
         {activeTab === "militaryDashboard" && (
           <div className="space-y-6">
-            {/* [v2 1A] 하위뷰 전환(대시보드/조치대상/일정관리) — 기존 탭 state 방식(신규 메뉴/router 없음) */}
-            <div className="flex flex-wrap gap-1.5">
-              {([["dashboard", "대시보드"], ["actions", "조치대상"], ["calendar", "일정관리"]] as Array<["dashboard" | "actions" | "calendar", string]>).map(([k, label]) => (
-                <button key={k} type="button" onClick={() => setMilitaryDashView(k)} className={`rounded-xl px-3.5 py-1.5 text-sm font-semibold transition ${militaryDashView === k ? "bg-blue-600 text-white" : (theme.darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{label}</button>
-              ))}
-            </div>
-
-            {militaryDashView === "actions" && (
-              <MilitaryActionItemsPanel darkMode={theme.darkMode} personnel={militaryPersonnel} training={militaryTrainingRecords} notices={militaryNotices} deptOf={militaryDeptOf} formatDate={formatDateOnly} onOpenPerson={openMilitaryPersonDetail} />
-            )}
-            {militaryDashView === "calendar" && (
-              <MilitaryCalendarPanel darkMode={theme.darkMode} personnel={militaryPersonnel} training={militaryTrainingRecords} notices={militaryNotices} />
-            )}
-
-            {militaryDashView === "dashboard" && (<>
             {/* KPI 카드 */}
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {([
@@ -17478,8 +17500,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 { label: "대상아님", value: militaryCategoryCounts.none, sub: "비대상", color: "text-slate-500", tab: "personnelManagement" as TabKey, apply: () => setPersonnelCategoryFilter("대상아님") },
                 { label: "미이수자", value: militaryTrainingNotCompletedCount, sub: "교육 미이수", color: "text-rose-700", tab: "trainingRecords" as TabKey, apply: () => setMilitaryTrainingStatusFilter("미이수") },
                 { label: "교육예정자", value: militaryTrainingRecords.filter((r) => r.trainingDate && daysDiff(r.trainingDate) >= 0 && !/(완료|이수)/i.test(r.status || "")).length, sub: "예정 일정", color: "text-amber-700", tab: "trainingRecords" as TabKey, apply: () => setMilitaryTrainingStatusFilter("예정") },
-                { label: "통보서 미발송", value: militaryNotices.filter((n) => !n.publishedDate).length, sub: "미발송", color: "text-purple-700", tab: "militaryNotices" as TabKey },
-                { label: "이번달 교육대상", value: militaryTrainingRecords.filter((r) => (r.trainingDate || "").startsWith(`${reportYear}-${reportMonth}`)).length, sub: `${reportYear}-${reportMonth}`, color: "text-cyan-700", tab: "trainingRecords" as TabKey },
+                { label: "통보서 미발송", value: militaryNotices.filter((n) => !n.publishedDate).length, sub: "미발송", color: "text-purple-700", tab: "militaryNotices" as TabKey, apply: () => setMilitaryNoticePublishFilter("미발송") },
+                { label: "이번달 교육대상", value: militaryTrainingRecords.filter((r) => (r.trainingDate || "").startsWith(`${reportYear}-${reportMonth}`)).length, sub: `${reportYear}-${reportMonth}`, color: "text-cyan-700", tab: "trainingRecords" as TabKey, apply: () => { setMilitaryTrainingYearFilter(String(reportYear)); setMilitaryTrainingMonthFilter(String(reportMonth)); } },
               ] as Array<{ label: string; value: number; sub: string; color: string; tab: TabKey; apply?: () => void }>).map((k) => (
                 <button
                   key={k.label}
@@ -17608,7 +17630,6 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 </div>
               </div>
             )}
-            </>)}
           </div>
         )}
 
@@ -17804,6 +17825,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div>
                 <h2 className="text-lg font-semibold">훈련/교육 기록</h2>
                 <p className="text-sm text-slate-500">훈련 현황을 확인하고 관리하세요.</p>
+                {(militaryTrainingStatusFilter !== "전체" || militaryTrainingYearFilter !== "전체" || militaryTrainingMonthFilter !== "전체") && (
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    {militaryTrainingStatusFilter !== "전체" && <span>상태: <b className="text-slate-700 dark:text-slate-200">{militaryTrainingStatusFilter}</b></span>}
+                    {militaryTrainingYearFilter !== "전체" && <span>연도: <b className="text-slate-700 dark:text-slate-200">{militaryTrainingYearFilter}</b></span>}
+                    {militaryTrainingMonthFilter !== "전체" && <span>월: <b className="text-slate-700 dark:text-slate-200">{Number(militaryTrainingMonthFilter)}월</b></span>}
+                    <button type="button" onClick={() => { setMilitaryTrainingStatusFilter("전체"); setMilitaryTrainingYearFilter("전체"); setMilitaryTrainingMonthFilter("전체"); }} className="rounded-lg border border-slate-300 px-2 py-0.5 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800">필터 초기화</button>
+                  </div>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {/* [v2 1A] Excel 내보내기 — 현재 필터 전체(페이지네이션 이전) */}
@@ -17840,6 +17869,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   <option value="전체">전체 연도</option>
                   {militaryTrainingYearOptions.map((year) => (
                     <option key={year} value={year}>{year}</option>
+                  ))}
+                </select>
+                {/* [v2 1B] 월 필터 */}
+                <select
+                  value={militaryTrainingMonthFilter}
+                  onChange={(e) => setMilitaryTrainingMonthFilter(e.target.value)}
+                  className="rounded-2xl border bg-white px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="전체">전체 월</option>
+                  {Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0")).map((mm) => (
+                    <option key={mm} value={mm}>{Number(mm)}월</option>
                   ))}
                 </select>
                 <select
@@ -18028,8 +18068,20 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div>
                 <h2 className="text-lg font-semibold">공지/알림</h2>
                 <p className="text-sm text-slate-500">예비군 및 민방위 공지를 확인하세요.</p>
+                {militaryNoticePublishFilter !== "전체" && (
+                  <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+                    <span>발송상태: <b className="text-slate-700 dark:text-slate-200">{militaryNoticePublishFilter}</b></span>
+                    <button type="button" onClick={() => setMilitaryNoticePublishFilter("전체")} className="rounded-lg border border-slate-300 px-2 py-0.5 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800">필터 초기화</button>
+                  </div>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                {/* [v2 1B] 발송 빠른필터(미발송=!게시일 · 대시보드 KPI 동일 기준) */}
+                <div className="flex items-center gap-1">
+                  {(["전체", "미발송", "게시완료"] as const).map((k) => (
+                    <button key={k} type="button" onClick={() => setMilitaryNoticePublishFilter(k)} className={`rounded-xl px-2.5 py-1.5 text-xs font-medium transition ${militaryNoticePublishFilter === k ? "bg-blue-600 text-white" : (theme.darkMode ? "border border-slate-600 hover:bg-slate-800" : "border border-slate-300 hover:bg-slate-100")}`}>{k}</button>
+                  ))}
+                </div>
                 <input
                   type="text"
                   value={militaryNoticeSearch}

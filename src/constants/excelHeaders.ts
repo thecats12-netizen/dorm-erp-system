@@ -202,6 +202,8 @@ export const TABLE_TYPE_BY_TAB: Record<TabKey, TableType | null> = {
   militaryDashboard: null,
   personnelManagement: null,
   trainingRecords: null,
+  militaryActionItems: null,
+  militaryCalendar: null,
   militaryNotices: null,
   militaryReports: null,
   militarySettings: null,

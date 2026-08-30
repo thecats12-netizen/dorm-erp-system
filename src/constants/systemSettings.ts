@@ -65,7 +65,10 @@ export function getDefaultSystemSettings(): SystemSettings {
       { id: "16", groupName: "군대관리", menuName: "군인대시보드", tabKey: "militaryDashboard", isVisible: true, order: 1, requiredRoles: ["admin", "viewer"] },
       { id: "17", groupName: "군대관리", menuName: "인사관리", tabKey: "personnelManagement", isVisible: true, order: 2, requiredRoles: ["admin", "viewer"] },
       { id: "18", groupName: "군대관리", menuName: "훈련기록", tabKey: "trainingRecords", isVisible: true, order: 3, requiredRoles: ["admin", "viewer"] },
+      // [v2 1B] 조치대상/일정관리 정식 메뉴 승격(신규 id → mergeMenus 가 기존 저장설정에도 기본값으로 주입). order 소수로 기존 항목 사이 배치(기존 order 미변경).
+      { id: "40", groupName: "군대관리", menuName: "조치대상", tabKey: "militaryActionItems", isVisible: true, order: 3.5, requiredRoles: ["admin", "viewer"] },
       { id: "19", groupName: "군대관리", menuName: "공지사항", tabKey: "militaryNotices", isVisible: true, order: 4, requiredRoles: ["admin", "viewer"] },
+      { id: "41", groupName: "군대관리", menuName: "일정관리", tabKey: "militaryCalendar", isVisible: true, order: 4.5, requiredRoles: ["admin", "viewer"] },
       { id: "20", groupName: "군대관리", menuName: "보고서", tabKey: "militaryReports", isVisible: true, order: 5, requiredRoles: ["admin", "viewer"] },
       { id: "24", groupName: "군대관리", menuName: "군대설정", tabKey: "militarySettings", isVisible: true, order: 6, requiredRoles: ["admin"] },
       { id: "21", groupName: "시스템", menuName: "사용자관리", tabKey: "users", isVisible: true, order: 1, requiredRoles: ["admin"] },
