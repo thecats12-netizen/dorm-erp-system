@@ -108,6 +108,30 @@ export const loadMilitaryModule = async (tenantId: string): Promise<MilitaryModu
   return (data as { data?: MilitaryModuleState } | null)?.data ?? null;
 };
 
+// [군대관리 2G Phase B] viewer sanitized read: 서버 RPC(get_military_module_for_current_user)만 호출.
+//   서버가 auth.uid()+profiles(role/is_active)로 권한 재판정 → 프론트가 role 을 속여도 권한 상승 불가.
+//   ⚠ fail-closed: RPC 오류/거부 시 null 반환. raw military_module_data SELECT 로 절대 폴백하지 않는다.
+export const loadMilitaryModuleSanitized = async (): Promise<MilitaryModuleState | null> => {
+  if (!isSupabaseAvailable()) return null;
+  const { data, error } = await supabase!.rpc("get_military_module_for_current_user");
+  if (error) {
+    console.warn("[loadMilitaryModuleSanitized] RPC 오류(raw 폴백 없음):", error.message);
+    return null; // 권한/세션 문제 → 상위에서 안전 처리(raw 폴백 금지)
+  }
+  if (!data) return null; // 권한 없음/거부(비활성·기타 role)
+  const d = data as Record<string, unknown>;
+  if (d._empty === true) {
+    // 인가되었으나 저장 데이터 없음 → 빈 상태(빈 배열/기본 설정)
+    return {
+      tenantId: "default",
+      militaryPersonnel: [], militaryTrainingRecords: [], militaryNotices: [], militaryReports: [],
+      militarySettings: {}, militaryTrainingRules: [], militaryCodeValues: {},
+      militaryTrainingAutoConfig: { enabled: true, targetStatuses: ["재직"] },
+    } as MilitaryModuleState;
+  }
+  return d as unknown as MilitaryModuleState;
+};
+
 export const saveMilitaryModule = async (payload: MilitaryModuleState, userId?: string | null): Promise<void> => {
   if (!isSupabaseAvailable()) {
     console.warn("Supabase environment variables are not configured. Skipping Supabase save.");

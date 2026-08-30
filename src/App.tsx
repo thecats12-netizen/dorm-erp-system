@@ -56,6 +56,7 @@ import {
   supabase,
   isSupabaseAvailable,
   loadMilitaryModule,
+  loadMilitaryModuleSanitized,
   saveMilitaryModule,
   loadAppSettings,
   saveAppSettings,
@@ -3922,7 +3923,12 @@ export default function App() {
     // 경쟁 상태 방지: 이 요청의 seq. 응답이 도착했을 때 최신 요청이 아니면 결과를 반영하지 않는다.
     const reqSeq = ++militaryLoadSeqRef.current;
     try {
-      const remote = await loadMilitaryModule(tenantId);
+      // [2G Phase B] read 경로 분기: active admin 은 기존 raw read 유지, 그 외(viewer 등)는 sanitized RPC(fail-closed).
+      //   권한 최종 판정은 서버(RPC)가 auth.uid()+profiles 로 수행 — 프론트 role 은 UX 경로 선택용.
+      const isAdminRole = currentUser?.role === "admin";
+      const remote = isAdminRole
+        ? await loadMilitaryModule(tenantId)          // admin: raw military_module_data
+        : await loadMilitaryModuleSanitized();         // viewer 등: sanitized RPC(raw 폴백 없음)
       // 늦게 끝난 이전 요청이 최신 데이터를 덮어쓰지 않도록 stale 응답은 무시(가장 최근 요청 결과만 반영).
       if (reqSeq !== militaryLoadSeqRef.current) return;
       if (remote) {
@@ -6459,8 +6465,9 @@ export default function App() {
       realtimeKeyRef.current = "";
       return;
     }
-    const key = `${tenantId}|${currentUser.id}`;
-    // 이미 같은 세션/테넌트로 구독 중이면 재구독 금지(isLoading 토글 등으로 인한 중복 구독/반복 로그 방지).
+    // [2G Phase B] key 에 role 포함: role 변경(예: admin→viewer 강등) 시 재구독하여 military raw 구독을 즉시 해제.
+    const key = `${tenantId}|${currentUser.id}|${currentUser.role ?? ""}`;
+    // 이미 같은 세션/테넌트/role 로 구독 중이면 재구독 금지(isLoading 토글 등으로 인한 중복 구독/반복 로그 방지).
     if (realtimeKeyRef.current === key && realtimeChannelRef.current) return;
 
     // 이 실행을 식별하는 토큰(비동기 도중 key 변경/언마운트 시 이전 실행 취소용).
@@ -6507,7 +6514,7 @@ export default function App() {
       if (realtimeChannelRef.current && supabase) { try { supabase.removeChannel(realtimeChannelRef.current); } catch { /* noop */ } realtimeChannelRef.current = null; }
 
       try {
-      const ch = supabase
+      let ch = supabase
         .channel(`realtime-${tenantId}`)
         .on(
           "postgres_changes",
@@ -6558,12 +6565,18 @@ export default function App() {
           "postgres_changes",
           { event: "*", schema: "public", table: "pre_move_in_inspections", filter: `tenant_id=eq.${tenantId}` },
           (payload) => handleRealtimeTableRow("pre_move_in_inspections", payload)
-        )
-        .on(
+        );
+      // [2G Phase B] military_module_data raw Realtime 는 active admin 만 구독한다.
+      //   viewer 세션에서는 이 구독을 생성하지 않아 raw PII payload 가 client 로 전달되지 않는다(Phase D 전에도 안전).
+      //   viewer 는 45초 sanitized RPC refetch(loadSupabaseMilitaryModule)로 갱신한다.
+      if (currentUser?.role === "admin") {
+        ch = ch.on(
           "postgres_changes",
           { event: "*", schema: "public", table: "military_module_data", filter: `tenant_id=eq.${tenantId}` },
           (payload) => handleMilitaryRealtimeRow(payload)
-        )
+        );
+      }
+      ch = ch
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "app_settings", filter: `tenant_id=eq.${tenantId}` },
@@ -6608,7 +6621,7 @@ export default function App() {
     // ⚠️ 여기서 cleanup 을 반환하지 않는다: isLoading 토글 등 effect 재실행에도 채널을 유지(위 key 가드로 재구독 차단).
     //    언마운트/세션 변경 시 정리는 아래 별도 effect 가 담당한다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenantId, currentUser?.id, isLoading]);
+  }, [tenantId, currentUser?.id, currentUser?.role, isLoading]);
 
   // 언마운트 시 Realtime 채널을 1회 정리(중복/누수 방지). 앱 사용 중에는 유지.
   useEffect(() => () => {
