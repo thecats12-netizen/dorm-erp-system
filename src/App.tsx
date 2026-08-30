@@ -17468,7 +17468,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
           <MilitaryActionItemsPanel darkMode={theme.darkMode} personnel={militaryPersonnel} training={militaryTrainingRecords} notices={militaryNotices} deptOf={militaryDeptOf} formatDate={formatDateOnly} onOpenPerson={openMilitaryPersonDetail} onNavigateType={navigateMilitaryActionType} />
         )}
         {activeTab === "militaryCalendar" && (
-          <MilitaryCalendarPanel darkMode={theme.darkMode} personnel={militaryPersonnel} training={militaryTrainingRecords} notices={militaryNotices} />
+          <MilitaryCalendarPanel
+            darkMode={theme.darkMode}
+            personnel={militaryPersonnel}
+            training={militaryTrainingRecords}
+            notices={militaryNotices}
+            reports={militaryReports}
+            deptOf={militaryDeptOf}
+            onOpenPerson={openMilitaryPersonDetail}
+            onNavigateSource={(kind) => {
+              if (kind === "training") setActiveTab("trainingRecords");
+              else if (kind === "notice") setActiveTab("militaryNotices");
+              else if (kind === "report") setActiveTab("militaryReports");
+              else if (kind === "personnel") setActiveTab("personnelManagement");
+            }}
+          />
         )}
 
         {activeTab === "militaryDashboard" && (
