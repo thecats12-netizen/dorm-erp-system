@@ -30,7 +30,8 @@ type Props = {
   appAlert: (title: string, message: string) => Promise<void>;
   appConfirm: (title: string, message: string, opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger" }) => Promise<boolean>;
   resolveUserName?: (id?: string | null) => string;
-  dormOptions?: Array<{ id: string; label: string }>;   // 데이터 범위(기숙사 직접선택)용
+  dormOptions?: Array<{ id: string; label: string; region?: string; gender?: string }>;   // 데이터 범위(기숙사 직접선택)용
+  dormsLoading?: boolean;                                // 기숙사 로딩 상태("불러오는 중" vs "없음" 구분)
 };
 
 type FormMode = { kind: "create" } | { kind: "edit"; role: CustomRole } | { kind: "clone"; sourceCode: string; sourceName: string; sourceBase: string | null; sourceRoleId?: string | null };
@@ -38,7 +39,7 @@ type FormMode = { kind: "create" } | { kind: "edit"; role: CustomRole } | { kind
 const fmtDate = (v?: string | null) => (v ? new Date(v).toLocaleDateString("ko-KR") : "-");
 
 export default function RoleManagementPage({
-  darkMode, tenantId, userId, menus, userCountsBySystemRole, onToast, appAlert, appConfirm, resolveUserName, dormOptions = [],
+  darkMode, tenantId, userId, menus, userCountsBySystemRole, onToast, appAlert, appConfirm, resolveUserName, dormOptions = [], dormsLoading = false,
 }: Props) {
   const [roles, setRoles] = useState<CustomRole[]>([]);
   const [tableMissing, setTableMissing] = useState(false);
@@ -132,11 +133,16 @@ export default function RoleManagementPage({
       } else {
         const codeErr = validateRoleCode(values.code);
         if (codeErr) { await appAlert("권한관리", codeErr); return; }
-        await createCustomRole({
+        const created = await createCustomRole({
           code: values.code, name: values.name, description: values.description,
           base_system_role: values.base, permission_mode: values.permissionMode, is_active: values.isActive, notes: values.notes,
         }, tenantId, userId);
-        onToast("사용자 정의 권한을 생성했습니다.");
+        onToast("사용자 정의 권한을 생성했습니다. 이어서 메뉴·데이터 범위를 설정하세요.");
+        await reload();
+        // [신규→edit 전환] 모달을 닫지 않고 방금 생성한 권한의 수정 모드로 전환 → 메뉴·기능/데이터 범위 설정 가능.
+        //  (custom_role_scopes 는 custom_role_id FK 종속이므로 저장 후에만 범위 설정 가능한 구조는 유지)
+        setForm({ kind: "edit", role: created });
+        return;
       }
       setForm(null);
       await reload();
@@ -309,7 +315,7 @@ export default function RoleManagementPage({
 
       {form && (
         <RoleFormModal
-          darkMode={darkMode} mode={form} menus={menus} tenantId={tenantId} actorId={userId} dormOptions={dormOptions}
+          darkMode={darkMode} mode={form} menus={menus} tenantId={tenantId} actorId={userId} dormOptions={dormOptions} dormsLoading={dormsLoading}
           onToast={onToast} appConfirm={appConfirm} onClose={() => setForm(null)} onSubmit={handleSave}
         />
       )}
@@ -324,14 +330,15 @@ export default function RoleManagementPage({
 
 // ── 등록/수정/복제 모달 ─────────────────────────────────────────────────────────
 function RoleFormModal({
-  darkMode, mode, menus, tenantId, actorId, dormOptions, onToast, appConfirm, onClose, onSubmit,
+  darkMode, mode, menus, tenantId, actorId, dormOptions, dormsLoading, onToast, appConfirm, onClose, onSubmit,
 }: {
   darkMode: boolean;
   mode: FormMode;
   menus: MenuItem[];
   tenantId: string;
   actorId: string;
-  dormOptions: Array<{ id: string; label: string }>;
+  dormOptions: Array<{ id: string; label: string; region?: string; gender?: string }>;
+  dormsLoading?: boolean;
   onToast: (m: string) => void;
   appConfirm: (title: string, message: string, opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger" }) => Promise<boolean>;
   onClose: () => void;
@@ -427,14 +434,14 @@ function RoleFormModal({
             <p className="mb-2 text-xs text-slate-500">이 권한이 배정된 계정에 <b>추가로 허용</b>할 데이터 범위(지역·성별·기숙사·공정·소유)를 설정합니다(기존 범위 축소 없음).</p>
             <DataScopeEditor
               roleId={editRole!.id} roleName={editRole!.name} tenantId={tenantId} actorId={actorId}
-              darkMode={darkMode} dormOptions={dormOptions} onToast={onToast} appConfirm={appConfirm}
+              darkMode={darkMode} dormOptions={dormOptions} dormsLoading={dormsLoading} onToast={onToast} appConfirm={appConfirm}
             />
           </div>
         )}
 
         <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className={`rounded-2xl px-4 py-2 text-sm font-semibold ${darkMode ? "border border-slate-600 text-slate-200" : "border border-slate-300 text-slate-700"}`}>취소</button>
-          <button type="button" onClick={submit} disabled={saving} className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60">저장</button>
+          <button type="button" onClick={onClose} className={`rounded-2xl px-4 py-2 text-sm font-semibold ${darkMode ? "border border-slate-600 text-slate-200" : "border border-slate-300 text-slate-700"}`}>{mode.kind === "edit" ? "닫기" : "취소"}</button>
+          <button type="button" onClick={submit} disabled={saving} className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60">{mode.kind === "create" ? "다음: 메뉴·데이터 범위 설정" : mode.kind === "clone" ? "복제 생성" : "저장"}</button>
         </div>
       </div>
     </div>

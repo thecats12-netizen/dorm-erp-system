@@ -9,7 +9,7 @@ import {
 // 사용자 정의 권한의 데이터 범위 설정(자체 저장 + 감사로그).
 //  - add-only(합집합). 기존 지역/성별/담당기숙사 범위 무변경. alert/confirm 은 appConfirm 위임.
 //  - 공정 실제 강제는 exam_user_process_scopes(기존). 여기서는 표시/병합 참고용으로 저장.
-type DormOption = { id: string; label: string };
+type DormOption = { id: string; label: string; region?: string; gender?: string };
 type Props = {
   roleId: string | null;
   roleName: string;
@@ -17,15 +17,17 @@ type Props = {
   actorId: string;
   darkMode: boolean;
   dormOptions: DormOption[];
+  dormsLoading?: boolean;   // 상위(App)의 기숙사 로딩 상태 — "불러오는 중" vs "등록된 기숙사 없음" 구분용
   onToast?: (m: string) => void;
   appConfirm: (title: string, message: string, opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger" }) => Promise<boolean>;
 };
 
 const toggleIn = (set: Set<string>, v: string) => { const n = new Set(set); n.has(v) ? n.delete(v) : n.add(v); return n; };
 
-export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, darkMode, dormOptions, onToast, appConfirm }: Props) {
+export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, darkMode, dormOptions, dormsLoading = false, onToast, appConfirm }: Props) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [dormSearch, setDormSearch] = useState(""); // 기숙사 직접 선택 검색어
   // 공정 옵션에 상위 계층 경로(제품군 > 그룹 > 제품/파트) 포함. 저장값은 여전히 process_id(p.id) 만 사용.
   const [processOptions, setProcessOptions] = useState<Array<{ id: string; processName: string; path: string }>>([]);
   const [processSearch, setProcessSearch] = useState("");
@@ -144,6 +146,16 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
     return processOptions.filter((p) => `${p.path} ${p.processName}`.toLowerCase().includes(q));
   }, [processOptions, processSearch]);
   const chip = (on: boolean) => on ? "bg-slate-900 text-white" : darkMode ? "border border-slate-600 text-slate-300" : "border border-slate-300 text-slate-600";
+  // 선택된 값의 설명(helper text) 조회.
+  const descOf = (arr: ReadonlyArray<{ value: string; desc?: string }>, value: string) => arr.find((o) => o.value === value)?.desc || "";
+  const helpText = "mt-1 block text-xs text-slate-400";
+  // 기숙사 직접 선택 검색(기숙사명·지역·성별). 저장값(id) 무관 · useMemo.
+  const visibleDormOptions = useMemo(() => {
+    const q = dormSearch.trim().toLowerCase();
+    if (!q) return dormOptions;
+    return dormOptions.filter((d) => `${d.label} ${d.region ?? ""} ${d.gender ?? ""}`.toLowerCase().includes(q));
+  }, [dormOptions, dormSearch]);
+  const genderLabel = (g?: string) => (g === "남" ? "남성" : g === "여" ? "여성" : g || "");
 
   if (!roleId) return <div className={`rounded-xl border px-3 py-3 text-sm ${darkMode ? "border-slate-700 text-slate-400" : "border-slate-200 text-slate-500"}`}>먼저 권한을 저장한 뒤 데이터 범위를 설정할 수 있습니다.</div>;
   if (loading) return <div className="px-3 py-6 text-center text-sm text-slate-400">불러오는 중…</div>;
@@ -159,6 +171,7 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
         }} className={`w-full rounded-xl border px-3 py-2 ${inputCls}`}>
           {ORG_VALUES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
+        {descOf(ORG_VALUES, org) && <span className={helpText}>{descOf(ORG_VALUES, org)}</span>}
       </label>
 
       <div><span className="mb-1 block text-slate-500">지역 범위 (선택 없으면 추가 없음)</span>
@@ -178,12 +191,46 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
           {DORM_MODE_VALUES.map((d) => <option key={d.value} value={d.value}>{d.label}</option>)}
           <option value="select">직접 선택</option>
         </select>
+        {dormMode === "select"
+          ? <span className={helpText}>특정 기숙사를 직접 검색·선택합니다.</span>
+          : descOf(DORM_MODE_VALUES, dormMode) && <span className={helpText}>{descOf(DORM_MODE_VALUES, dormMode)}</span>}
       </label>
       {dormMode === "select" && (
-        <div className={`max-h-32 overflow-y-auto rounded-xl border p-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
-          {dormOptions.length === 0 ? <div className="text-xs text-slate-400">기숙사 없음</div> : dormOptions.map((d) => (
-            <label key={d.id} className="flex items-center gap-2 py-0.5 text-xs"><input type="checkbox" checked={dormIds.has(d.id)} onChange={() => setDormIds((s) => toggleIn(s, d.id))} className="h-3.5 w-3.5" />{d.label}</label>
-          ))}
+        <div className={`rounded-xl border ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+          {dormsLoading ? (
+            <div className="px-3 py-4 text-center text-xs text-slate-400">기숙사 목록을 불러오는 중입니다.</div>
+          ) : dormOptions.length === 0 ? (
+            <div className="px-3 py-4 text-center text-xs text-slate-400">등록된 기숙사가 없습니다.</div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-2 border-b p-2 dark:border-slate-700">
+                <input value={dormSearch} onChange={(e) => setDormSearch(e.target.value)} placeholder="기숙사명·지역·성별 검색"
+                  className={`min-w-0 flex-1 rounded-lg border px-2 py-1 text-xs outline-none ${inputCls}`} />
+                <span className="whitespace-nowrap text-[0.7rem] text-slate-400">선택 {dormIds.size}개</span>
+                <button type="button" onClick={() => setDormIds(new Set(dormOptions.map((d) => d.id)))}
+                  className="rounded-lg border border-slate-300 px-2 py-1 text-[0.7rem] dark:border-slate-600">전체 선택</button>
+                <button type="button" onClick={() => setDormIds(new Set())}
+                  className="rounded-lg border border-slate-300 px-2 py-1 text-[0.7rem] dark:border-slate-600">선택 해제</button>
+              </div>
+              <div className="max-h-52 overflow-y-auto p-2">
+                {visibleDormOptions.length === 0 ? (
+                  <div className="px-1 py-2 text-xs text-slate-400">검색 결과 없음</div>
+                ) : visibleDormOptions.map((d) => {
+                  const on = dormIds.has(d.id);
+                  const sub = [d.region, genderLabel(d.gender)].filter(Boolean).join(" · ");
+                  return (
+                    <label key={d.id} className={`flex min-h-[44px] cursor-pointer items-center gap-2 rounded-lg px-2 py-1 ${on ? (darkMode ? "bg-blue-950/30" : "bg-blue-50") : "hover:bg-slate-100 dark:hover:bg-slate-800"}`}>
+                      <input type="checkbox" checked={on} onChange={() => setDormIds((s) => toggleIn(s, d.id))} className="h-4 w-4 shrink-0" />
+                      <span className="min-w-0">
+                        <span className="block truncate text-xs font-medium">{d.label}</span>
+                        {sub && <span className="block truncate text-[0.7rem] text-slate-400">{sub}</span>}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -224,6 +271,8 @@ export default function DataScopeEditor({ roleId, roleName, tenantId, actorId, d
         <select value={owner} onChange={(e) => setOwner(e.target.value)} className={`w-full rounded-xl border px-3 py-2 ${inputCls}`}>
           {OWNER_VALUES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
+        {descOf(OWNER_VALUES, owner) && <span className={helpText}>{descOf(OWNER_VALUES, owner)}</span>}
+        {owner !== "all" && <span className="mt-1 block rounded-lg bg-amber-50 px-2 py-1 text-[0.7rem] text-amber-700">※ 설정값은 저장되며, 실제 화면 적용 범위는 별도 확인이 필요합니다.</span>}
       </label>
 
       <label className="flex items-center gap-2"><input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} className="h-4 w-4" /><span>조회 전용(쓰기 권한을 새로 부여하지 않음)</span></label>

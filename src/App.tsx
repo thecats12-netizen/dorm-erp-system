@@ -15623,7 +15623,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   const roleDormOptions = useMemo(
     () => dorms
       .filter((d) => !d.isDeleted)
-      .map((d) => ({ id: d.id, label: `${d.buildingName} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`.trim() })),
+      .map((d) => ({ id: d.id, label: `${d.buildingName} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`.trim(), region: d.site, gender: d.gender })),
     [dorms]
   );
 
@@ -17473,6 +17473,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             appConfirm={appConfirm}
             resolveUserName={resolveUserName}
             dormOptions={roleDormOptions}
+            dormsLoading={isLoading}
           />
         )}
 
