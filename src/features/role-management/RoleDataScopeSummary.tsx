@@ -83,20 +83,22 @@ export default function RoleDataScopeSummary({ scopeRows, permKeys, dormOptions,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeRows, dormOptions]);
 
-  // 시험 요약(그룹 > 제품군 > 공정)
+  // 시험 요약(그룹 > 제품군 > 공정). resolved(매핑 성공) 만 breadcrumb, unresolved(orphan) 는 개수만 별도 집계.
+  //  → 정상 데이터에서는 unknown 행이 구조적으로 생성되지 않음. 실제 orphan(procPath 부재)만 안전하게 개수 표시.
   const examTree = useMemo(() => {
     const procV = val("process");
-    if (procV.includes("all")) return { all: true, groups: [] as Array<{ group: string; cats: Array<{ cat: string; procs: string[] }> }> };
-    const ids = procV.filter((v) => v !== "all");
+    if (procV.includes("all")) return { all: true, groups: [] as Array<{ group: string; cats: Array<{ cat: string; procs: string[] }> }>, unresolved: 0 };
+    const ids = Array.from(new Set(procV.map((v) => String(v ?? "").trim()).filter((v) => v && v !== "all")));
     const byGroup = new Map<string, Map<string, string[]>>();
+    let unresolved = 0;
     ids.forEach((pid) => {
       const p = procPath.get(pid);
-      const group = p?.group ?? "알 수 없는 공정"; const cat = p?.cat ?? ""; const name = p?.name ?? "알 수 없는 공정";
-      const g = byGroup.get(group) ?? byGroup.set(group, new Map()).get(group)!;
-      (g.get(cat) ?? g.set(cat, []).get(cat)!).push(name);
+      if (!p) { unresolved += 1; return; }                    // 매핑 실패(삭제/부재) → breadcrumb 미생성, 개수만
+      const g = byGroup.get(p.group) ?? byGroup.set(p.group, new Map()).get(p.group)!;
+      (g.get(p.cat) ?? g.set(p.cat, []).get(p.cat)!).push(p.name);
     });
     const groups = Array.from(byGroup.entries()).map(([group, cats]) => ({ group, cats: Array.from(cats.entries()).map(([cat, procs]) => ({ cat, procs })) }));
-    return { all: false, groups };
+    return { all: false, groups, unresolved };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeRows, procPath]);
 
@@ -119,21 +121,29 @@ export default function RoleDataScopeSummary({ scopeRows, permKeys, dormOptions,
       <Section title="시험관리 데이터 범위" active={areas.exam} badge={pendingBadge} darkMode={darkMode}>
         {examTree.all ? (
           <div className="text-xs font-medium text-slate-600 dark:text-slate-300">전체 시험 공정</div>
-        ) : examTree.groups.length === 0 ? (
+        ) : examTree.groups.length === 0 && examTree.unresolved === 0 ? (
           <div className="text-xs text-slate-400">선택한 공정 없음</div>
         ) : (
-          <ul className="space-y-1">
-            {examTree.groups.flatMap((g) => g.cats.flatMap((c) => c.procs.map((p) => ({ group: g.group, cat: c.cat, proc: p, key: `${g.group}|${c.cat}|${p}` }))))
-              .map((b) => (
-                <li key={b.key} className="flex flex-wrap items-center gap-1 text-xs">
-                  <span className="rounded bg-slate-100 px-1.5 py-0.5 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-200">{b.group}</span>
-                  <span className="text-slate-300">›</span>
-                  <span className="text-slate-500">{b.cat || "제품군"}</span>
-                  <span className="text-slate-300">›</span>
-                  <span className="font-medium text-slate-700 dark:text-slate-200">{b.proc}</span>
-                </li>
-              ))}
-          </ul>
+          <>
+            {examTree.groups.length > 0 && (
+              <ul className="space-y-1">
+                {examTree.groups.flatMap((g) => g.cats.flatMap((c) => c.procs.map((p) => ({ group: g.group, cat: c.cat, proc: p, key: `${g.group}|${c.cat}|${p}` }))))
+                  .map((b) => (
+                    <li key={b.key} className="flex flex-wrap items-center gap-1 text-xs">
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-200">{b.group}</span>
+                      <span className="text-slate-300">›</span>
+                      <span className="text-slate-500">{b.cat || "제품군"}</span>
+                      <span className="text-slate-300">›</span>
+                      <span className="font-medium text-slate-700 dark:text-slate-200">{b.proc}</span>
+                    </li>
+                  ))}
+              </ul>
+            )}
+            {/* 실제 orphan(삭제됐거나 조회 불가한 process id)만 개수로 안전 표시 — 정상 매핑에는 렌더되지 않음 */}
+            {examTree.unresolved > 0 && (
+              <div className="mt-1 text-[0.65rem] text-slate-400">알 수 없는 공정 {examTree.unresolved}건(삭제되었거나 조회 권한 없음)</div>
+            )}
+          </>
         )}
         {pendingNote}
       </Section>
