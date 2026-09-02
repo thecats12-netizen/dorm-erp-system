@@ -1,7 +1,7 @@
 // 데이터 범위 카탈로그(코드 단일 원본).
 //  - scope_type × scope_value × action_scope. 화면엔 한글 라벨만 노출.
 //  - add-only(합집합). 기존 role 범위를 축소하지 않는다.
-export type ScopeType = "organization" | "region" | "gender" | "dorm" | "process" | "owner";
+export type ScopeType = "organization" | "region" | "gender" | "dorm" | "process" | "owner" | "military_department";
 export type ActionScope = "read" | "write" | "all";
 
 export const SCOPE_TYPE_LABEL: Record<ScopeType, string> = {
@@ -11,6 +11,7 @@ export const SCOPE_TYPE_LABEL: Record<ScopeType, string> = {
   dorm: "기숙사 범위",
   process: "시험 공정 범위",
   owner: "본인 데이터 범위",
+  military_department: "군대 부서 범위",
 };
 
 export const ACTION_SCOPE_LABEL: Record<ActionScope, string> = {

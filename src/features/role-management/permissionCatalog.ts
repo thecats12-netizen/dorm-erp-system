@@ -82,6 +82,14 @@ const ACTIONS_BY_TAB: Partial<Record<TabKey, ActionKey[]>> = {
 export const NON_GRANTABLE_TABS = new Set<string>(["users", "permissions", "settings", "recycleBin", "militarySettings"]);
 export const isGrantableTab = (tab: string) => !NON_GRANTABLE_TABS.has(tab);
 
+// ── 업무 영역 판별용 실제 tab key 집합(systemSettings 기본 메뉴 기준 · 화면 한글명으로 판별하지 않음) ──
+//  데이터 접근 범위 카드 표시 조건의 단일 원본. UI 문자열/.includes 금지.
+//  · 기숙사: 기숙사관리 그룹(dorms/occupants/dormContracts/newHires) + dorm 데이터 성격의 운영관리 탭(cleaningReports/defects/preMoveInInspection).
+//  · 시험: 전부 "exam" prefix. · 군대: 아래 집합(personnelManagement/trainingRecords 는 prefix 가 military 가 아님에 주의).
+export const DORM_SCOPE_TABS = new Set<string>(["dorms", "occupants", "dormContracts", "newHires", "cleaningReports", "defects", "preMoveInInspection"]);
+export const MILITARY_TABS = new Set<string>(["militaryDashboard", "personnelManagement", "trainingRecords", "militaryActionItems", "militaryNotices", "militaryCalendar", "militaryReports", "militarySettings"]);
+export const isExamTab = (tab: string) => tab.startsWith("exam");
+
 export function actionsForTab(tab: TabKey): ActionDef[] {
   const keys = ACTIONS_BY_TAB[tab] || DEFAULT_ACTIONS;
   return ACTIONS.filter((a) => keys.includes(a.key));

@@ -32,6 +32,7 @@ type Props = {
   resolveUserName?: (id?: string | null) => string;
   dormOptions?: Array<{ id: string; label: string; region?: string; gender?: string }>;   // 데이터 범위(기숙사 직접선택)용
   dormsLoading?: boolean;                                // 기숙사 로딩 상태("불러오는 중" vs "없음" 구분)
+  militaryDeptOptions?: string[];                        // 군대 부서 범위(이름 기준)
 };
 
 type FormMode = { kind: "create" } | { kind: "edit"; role: CustomRole } | { kind: "clone"; sourceCode: string; sourceName: string; sourceBase: string | null; sourceRoleId?: string | null };
@@ -39,7 +40,7 @@ type FormMode = { kind: "create" } | { kind: "edit"; role: CustomRole } | { kind
 const fmtDate = (v?: string | null) => (v ? new Date(v).toLocaleDateString("ko-KR") : "-");
 
 export default function RoleManagementPage({
-  darkMode, tenantId, userId, menus, userCountsBySystemRole, onToast, appAlert, appConfirm, resolveUserName, dormOptions = [], dormsLoading = false,
+  darkMode, tenantId, userId, menus, userCountsBySystemRole, onToast, appAlert, appConfirm, resolveUserName, dormOptions = [], dormsLoading = false, militaryDeptOptions = [],
 }: Props) {
   const [roles, setRoles] = useState<CustomRole[]>([]);
   const [tableMissing, setTableMissing] = useState(false);
@@ -315,7 +316,7 @@ export default function RoleManagementPage({
 
       {form && (
         <RoleFormModal
-          darkMode={darkMode} mode={form} menus={menus} tenantId={tenantId} actorId={userId} dormOptions={dormOptions} dormsLoading={dormsLoading}
+          darkMode={darkMode} mode={form} menus={menus} tenantId={tenantId} actorId={userId} dormOptions={dormOptions} dormsLoading={dormsLoading} militaryDeptOptions={militaryDeptOptions}
           onToast={onToast} appConfirm={appConfirm} onClose={() => setForm(null)} onSubmit={handleSave}
         />
       )}
@@ -330,7 +331,7 @@ export default function RoleManagementPage({
 
 // ── 등록/수정/복제 모달 ─────────────────────────────────────────────────────────
 function RoleFormModal({
-  darkMode, mode, menus, tenantId, actorId, dormOptions, dormsLoading, onToast, appConfirm, onClose, onSubmit,
+  darkMode, mode, menus, tenantId, actorId, dormOptions, dormsLoading, militaryDeptOptions, onToast, appConfirm, onClose, onSubmit,
 }: {
   darkMode: boolean;
   mode: FormMode;
@@ -339,12 +340,16 @@ function RoleFormModal({
   actorId: string;
   dormOptions: Array<{ id: string; label: string; region?: string; gender?: string }>;
   dormsLoading?: boolean;
+  militaryDeptOptions?: string[];
   onToast: (m: string) => void;
   appConfirm: (title: string, message: string, opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger" }) => Promise<boolean>;
   onClose: () => void;
   onSubmit: (v: { code: string; name: string; description: string; base: string | null; permissionMode: PermissionMode; isActive: boolean; notes: string }) => void;
 }) {
   const editRole = mode.kind === "edit" ? mode.role : null;
+  const [permissionVersion, setPermissionVersion] = useState(0); // 메뉴·기능 권한 저장 시마다 +1 → 데이터 범위 카드 자동 갱신
+  const [permDraftKeys, setPermDraftKeys] = useState<string[]>([]); // 현재 메뉴·기능 권한 선택(draft) — DataScopeEditor 업무영역 즉시 판정용
+  const [permDirty, setPermDirty] = useState(false);              // 메뉴·기능 권한 미저장 변경 여부
   const [code, setCode] = useState(editRole?.code || "");
   const [name, setName] = useState(mode.kind === "clone" ? `${mode.sourceName} 복제` : editRole?.name || "");
   const [description, setDescription] = useState(editRole?.description || "");
@@ -424,6 +429,8 @@ function RoleFormModal({
             <PermissionTreeEditor
               roleId={editRole!.id} roleName={editRole!.name} menus={menus}
               tenantId={tenantId} actorId={actorId} darkMode={darkMode} onToast={onToast} appConfirm={appConfirm}
+              onSaved={() => { setPermissionVersion((v) => v + 1); setPermDirty(false); }}
+              onDraftChange={(keys, dirty) => { setPermDraftKeys(keys); setPermDirty(dirty); }}
             />
           </div>
         )}
@@ -434,7 +441,9 @@ function RoleFormModal({
             <p className="mb-2 text-xs text-slate-500">이 권한이 배정된 계정에 <b>추가로 허용</b>할 데이터 범위(지역·성별·기숙사·공정·소유)를 설정합니다(기존 범위 축소 없음).</p>
             <DataScopeEditor
               roleId={editRole!.id} roleName={editRole!.name} tenantId={tenantId} actorId={actorId}
-              darkMode={darkMode} dormOptions={dormOptions} dormsLoading={dormsLoading} onToast={onToast} appConfirm={appConfirm}
+              darkMode={darkMode} dormOptions={dormOptions} dormsLoading={dormsLoading} menus={menus} militaryDeptOptions={militaryDeptOptions}
+              permissionKeys={permDraftKeys} permissionsDirty={permDirty}
+              reloadSignal={permissionVersion} onToast={onToast} appConfirm={appConfirm}
             />
           </div>
         )}

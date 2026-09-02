@@ -15620,12 +15620,22 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   //  visibleDorms 앞으로 이동했다.)
 
   // 권한관리 데이터 범위(기숙사 직접선택)용 옵션. 기존 dorms 를 읽기만 한다.
+  // [권한관리] 기숙사 옵션 source = operationalDorms(계약 기반 · 기숙사관리>기숙사 화면과 동일 source).
+  //  ⚠ 물리 마스터 dorms 는 계약만 있는 환경에서 0건일 수 있어(화면은 operationalDorms 로 표시) → operationalDorms 사용.
   const roleDormOptions = useMemo(
-    () => dorms
+    () => operationalDorms
       .filter((d) => !d.isDeleted)
       .map((d) => ({ id: d.id, label: `${d.buildingName} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`.trim(), region: d.site, gender: d.gender })),
-    [dorms]
+    [operationalDorms]
   );
+
+  // [권한관리 2차] 군대 부서 옵션 = 기준정보(militaryCodeValues.departments) ∪ 실제 인사(personnel.unit) 이름. 안정적 ID 없음(이름 기준).
+  const roleMilitaryDeptOptions = useMemo(() => {
+    const set = new Set<string>();
+    (militaryCodeValues?.departments || []).forEach((d) => { const v = String(d ?? "").trim(); if (v) set.add(v); });
+    militaryPersonnel.forEach((p) => { const v = String(p.unit ?? "").trim(); if (v) set.add(v); });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "ko"));
+  }, [militaryCodeValues, militaryPersonnel]);
 
   const visibleMenuGroups = useMemo(
     () => {
@@ -17474,6 +17484,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             resolveUserName={resolveUserName}
             dormOptions={roleDormOptions}
             dormsLoading={isLoading}
+            militaryDeptOptions={roleMilitaryDeptOptions}
           />
         )}
 

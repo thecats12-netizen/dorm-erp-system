@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { MenuItem } from "../../types";
 import { buildPermissionTree, permKey, DANGER_ACTIONS, isGrantableTab, type ActionDef, type MenuNode } from "./permissionCatalog";
 import { loadRolePermissions, saveRolePermissions } from "./customRolePermissionService";
+import { mergeMenus, getDefaultSystemSettings } from "../../constants/systemSettings";
 
 // 사용자 정의 권한의 메뉴×기능 권한 설정 트리(자체 저장 + 감사로그).
 //  - 기존 role/시스템 권한 무변경. allow 부여만. alert/confirm 은 appConfirm 위임.
@@ -13,6 +14,8 @@ type Props = {
   actorId: string;
   darkMode: boolean;
   onToast?: (m: string) => void;
+  onSaved?: () => void;   // 저장 성공 직후 호출 → 상위가 데이터 범위 카드 자동 갱신
+  onDraftChange?: (keys: string[], dirty: boolean) => void; // 현재 선택(draft) + 미저장 여부를 상위와 공유
   appConfirm: (title: string, message: string, opts?: { confirmText?: string; cancelText?: string; tone?: "default" | "danger" }) => Promise<boolean>;
 };
 
@@ -21,10 +24,15 @@ function triState(checked: boolean, indeterminate: boolean) {
   return (el: HTMLInputElement | null) => { if (el) { el.checked = checked; el.indeterminate = indeterminate; } };
 }
 
-export default function PermissionTreeEditor({ roleId, roleName, menus, tenantId, actorId, darkMode, onToast, appConfirm }: Props) {
+export default function PermissionTreeEditor({ roleId, roleName, menus, tenantId, actorId, darkMode, onToast, onSaved, onDraftChange, appConfirm }: Props) {
   // 관리자 전용 탭(사용자관리/권한관리/시스템설정/휴지통/군대설정)은 부여 대상에서 제외(권한상승 차단).
+  //  ⚠ 권한 부여 대상 트리는 "기본 메뉴 정의"와 병합해서 만든다 — 테넌트가 저장 메뉴를 트리밍/커스터마이즈해도
+  //     기숙사/시험/군대 등 업무 메뉴가 권한관리에서 누락되어 부여 불가가 되는 문제를 방지(NON_GRANTABLE 보호는 그대로).
   const tree = useMemo<MenuNode[]>(
-    () => buildPermissionTree(menus).map((g) => ({ ...g, children: g.children.filter((c) => isGrantableTab(String(c.tab))) })).filter((g) => g.children.length > 0),
+    () => {
+      const fullMenus = mergeMenus(menus, getDefaultSystemSettings().menus);
+      return buildPermissionTree(fullMenus).map((g) => ({ ...g, children: g.children.filter((c) => isGrantableTab(String(c.tab))) })).filter((g) => g.children.length > 0);
+    },
     [menus]
   );
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -53,6 +61,10 @@ export default function PermissionTreeEditor({ roleId, roleName, menus, tenantId
     for (const k of selected) if (!initial.has(k)) return true;
     return false;
   }, [selected, initial]);
+
+  // 현재 선택(draft)과 미저장 여부를 상위와 공유 → DataScopeEditor 업무영역 즉시 반영(저장 전에도).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { onDraftChange?.(Array.from(selected), dirty); }, [selected, dirty]);
 
   const toggle = (key: string, on?: boolean) => setSelected((prev) => {
     const next = new Set(prev);
@@ -109,6 +121,8 @@ export default function PermissionTreeEditor({ roleId, roleName, menus, tenantId
       setInitial(new Set(selected));
       if (res.partialError) onToast?.(`일부 권한 저장 실패: ${res.partialError}`);
       else onToast?.(`메뉴·기능 권한을 저장했습니다. (추가 ${res.added} · 해제 ${res.removed})`);
+      onSaved?.(); // 데이터 범위 카드가 최신 permission 을 다시 읽도록 신호
+
     } catch (e) {
       onToast?.((e as { message?: string })?.message || "권한 저장 중 오류가 발생했습니다.");
     } finally { setSaving(false); }
