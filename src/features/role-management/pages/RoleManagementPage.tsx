@@ -9,11 +9,12 @@ import type { CustomRole, RoleKindFilter, RoleStatusFilter, PermissionMode } fro
 import { PERMISSION_MODES, PERMISSION_MODE_LABELS, PERMISSION_MODE_DESCRIPTIONS, permissionModeLabel, isValidPermissionMode } from "../permissionMode";
 import PermissionTreeEditor from "../PermissionTreeEditor";
 import DataScopeEditor from "../DataScopeEditor";
+import RolePermissionSummary from "../RolePermissionSummary";
+import RoleDataScopeSummary from "../RoleDataScopeSummary";
 import { loadRolePermissions, copyRolePermissions } from "../customRolePermissionService";
 import { loadRoleScopes } from "../customRoleScopeService";
 import { countUsersForRole } from "../userCustomRoleService";
-import { ACTION_LABEL, DANGER_ACTIONS, parsePermKey, buildPermissionTree } from "../permissionCatalog";
-import { SCOPE_TYPE_LABEL, type ScopeRow } from "../scopeCatalog";
+import { type ScopeRow } from "../scopeCatalog";
 import { resetPermissionSchemaState } from "../permissionSchemaState";
 
 // 시스템 > 권한관리 화면.
@@ -322,7 +323,7 @@ export default function RoleManagementPage({
       )}
       {detail && (
         <RoleDetailModal
-          darkMode={darkMode} detail={detail} menus={menus} tenantId={tenantId} onClose={() => setDetail(null)}
+          darkMode={darkMode} detail={detail} menus={menus} tenantId={tenantId} dormOptions={dormOptions} onClose={() => setDetail(null)}
         />
       )}
     </section>
@@ -459,12 +460,13 @@ function RoleFormModal({
 
 // ── 상세 미리보기 모달(읽기 전용) ────────────────────────────────────────────────
 function RoleDetailModal({
-  darkMode, detail, menus, tenantId, onClose,
+  darkMode, detail, menus, tenantId, dormOptions = [], onClose,
 }: {
   darkMode: boolean;
   detail: { system: UserRole } | { custom: CustomRole };
   menus: MenuItem[];
   tenantId: string;
+  dormOptions?: Array<{ id: string; label: string; region?: string; gender?: string }>;
   onClose: () => void;
 }) {
   const panel = darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900";
@@ -494,25 +496,14 @@ function RoleDetailModal({
     return () => { alive = false; };
   }, [customRole, tenantId]);
 
-  const preview = useMemo(() => {
-    const tabLabel = new Map<string, { group: string; label: string }>();
-    buildPermissionTree(menus).forEach((g) => g.children.forEach((c) => tabLabel.set(String(c.tab), { group: g.group, label: c.label })));
-    const menusOn: string[] = []; const dangerOn: string[] = [];
-    const byAction: Record<string, string[]> = {};
-    permKeys.forEach((k) => {
-      const p = parsePermKey(k); if (!p) return;
-      const meta = tabLabel.get(p.tab);
-      const menuName = meta ? `${meta.group} > ${meta.label}` : p.tab;
-      if (p.action === "menu_view") menusOn.push(menuName);
-      if (DANGER_ACTIONS.has(p.action)) dangerOn.push(`${menuName} · ${ACTION_LABEL[p.action] || p.action}`);
-      (byAction[ACTION_LABEL[p.action] || p.action] ||= []).push(menuName);
-    });
-    return { menusOn, dangerOn, byAction };
-  }, [permKeys, menus]);
+  const c = isSystem ? null : (detail as { custom: CustomRole }).custom;
+  const statusLabel = c ? (c.is_deleted ? "삭제됨" : c.is_active ? "사용중" : "사용중지") : "";
+  const statusCls = c ? (c.is_deleted ? "bg-rose-100 text-rose-700" : c.is_active ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700") : "";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className={`w-full max-w-lg rounded-3xl p-5 shadow-xl ${panel}`} onClick={(e) => e.stopPropagation()}>
+      <div className={`flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl shadow-xl ${panel}`} onClick={(e) => e.stopPropagation()}>
+       <div className="overflow-y-auto p-5">
         {isSystem && info ? (
           <>
             <h3 className="mb-1 text-base font-semibold">🔒 {info.name} <span className="font-mono text-xs text-slate-400">({info.code})</span></h3>
@@ -538,74 +529,70 @@ function RoleDetailModal({
               <p className="text-xs text-slate-400">이 화면은 기존 권한을 수정하지 않습니다. 분석 결과를 읽기 전용으로 표시합니다.</p>
             </div>
           </>
-        ) : (
-          <>
-            <h3 className="mb-1 text-base font-semibold">{(detail as { custom: CustomRole }).custom.name} <span className="font-mono text-xs text-slate-400">({(detail as { custom: CustomRole }).custom.code})</span></h3>
-            <p className="mb-3 text-xs text-slate-500">사용자 정의 권한 — 기본정보(메뉴·기능 권한 편집은 다음 단계)</p>
-            {(() => {
-              const c = (detail as { custom: CustomRole }).custom;
-              const row = (k: string, v: string) => (
-                <div className="flex justify-between gap-4 border-b border-slate-100 py-1.5"><span className="text-slate-500">{k}</span><span className="text-right">{v || "-"}</span></div>
-              );
-              return (
-                <div className="text-sm">
-                  {row("설명", c.description || "")}
-                  {row("기준 시스템 권한", c.base_system_role || "")}
-                  {row("권한 적용 방식", permissionModeLabel(c.permission_mode))}
-                  {row("상태", c.is_deleted ? "삭제됨" : c.is_active ? "사용중" : "사용중지")}
-                  {row("복제 출처", c.cloned_from_role_code || "")}
-                  {row("비고", c.notes || "")}
-                  {row("생성일", fmtDate(c.created_at))}
-                  {row("수정일", fmtDate(c.updated_at))}
-                  {row("적용 사용자 수", previewLoading ? "…" : `${userCount}명`)}
-                </div>
-              );
-            })()}
-            <div className="mt-3 border-t border-slate-100 pt-3 text-sm">
-              <div className="mb-1 text-xs font-semibold text-slate-500">권한 미리보기</div>
-              {previewLoading ? (
-                <div className="text-xs text-slate-400">불러오는 중…</div>
-              ) : permKeys.length === 0 ? (
-                <div className="text-xs text-slate-400">부여된 메뉴·기능 권한이 없습니다. (수정에서 설정)</div>
-              ) : (
-                <div className="space-y-2">
-                  <div>
-                    <div className="text-xs font-semibold text-emerald-600">추가로 보이는 메뉴</div>
-                    <ul className="ml-4 list-disc text-xs text-slate-500">{preview.menusOn.length ? preview.menusOn.map((m, i) => <li key={i}>{m}</li>) : <li>없음</li>}</ul>
-                  </div>
-                  <div>
-                    <div className="text-xs font-semibold text-slate-500">기능</div>
-                    <ul className="ml-4 list-disc text-xs text-slate-500">
-                      {Object.entries(preview.byAction).filter(([a]) => a !== "메뉴 보기").map(([a, tabs]) => <li key={a}>{a}: {tabs.length}개 메뉴</li>)}
-                    </ul>
-                  </div>
-                  {preview.dangerOn.length > 0 && (
-                    <div>
-                      <div className="text-xs font-semibold text-rose-500">위험 권한</div>
-                      <ul className="ml-4 list-disc text-xs text-rose-500">{preview.dangerOn.map((d, i) => <li key={i}>{d}</li>)}</ul>
-                    </div>
-                  )}
-                </div>
-              )}
-              <div className="mt-3 border-t border-slate-100 pt-3">
-                <div className="mb-1 text-xs font-semibold text-slate-500">데이터 범위 미리보기 (추가 허용)</div>
-                {scopeRows.length === 0 ? (
-                  <div className="text-xs text-slate-400">추가 데이터 범위 없음 (기본 역할 범위만 적용)</div>
-                ) : (
-                  <ul className="ml-4 list-disc text-xs text-slate-500">
-                    {Object.entries(
-                      scopeRows.reduce<Record<string, string[]>>((acc, r) => { (acc[r.scope_type] ||= []).push(r.scope_value); return acc; }, {})
-                    ).map(([t, vals]) => (
-                      <li key={t}>{SCOPE_TYPE_LABEL[t as keyof typeof SCOPE_TYPE_LABEL] || t}: {vals.join(", ")}{scopeRows.some((s) => s.action_scope === "read") ? " (조회 전용)" : ""}</li>
-                    ))}
-                  </ul>
-                )}
+        ) : c ? (
+          <div className="space-y-5">
+            {/* 헤더 */}
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-lg font-semibold">{c.name}</h3>
+                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusCls}`}>{statusLabel}</span>
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">사용자 정의 권한</span>
+                <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs text-violet-700">{permissionModeLabel(c.permission_mode)}</span>
               </div>
+              <div className="mt-1 text-xs text-slate-400">내부 코드: <span className="font-mono">{c.code}</span></div>
             </div>
-          </>
-        )}
-        <div className="mt-5 flex justify-end">
-          <button type="button" onClick={onClose} className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">닫기</button>
+
+            {/* 적용 사용자 */}
+            {previewLoading ? (
+              <div className={`rounded-2xl border px-3 py-2 text-xs text-slate-400 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50"}`}>적용 사용자 · 불러오는 중…</div>
+            ) : userCount === 0 ? (
+              <div className={`flex items-center gap-2 rounded-2xl border px-3 py-2 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50"}`}>
+                <span className="text-xs font-semibold text-slate-500">적용 사용자</span>
+                <span className="text-sm font-bold">0명</span>
+                <span className="text-xs text-slate-400">· 현재 적용된 사용자가 없습니다.</span>
+              </div>
+            ) : (
+              <div className={`rounded-2xl border p-3 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50"}`}>
+                <div className="text-xs font-semibold text-slate-500">적용 사용자</div>
+                <div className="mt-0.5 text-2xl font-bold">{userCount}명</div>
+              </div>
+            )}
+
+            {/* 권한 요약(메뉴·기능) */}
+            <div>
+              <div className="mb-2 text-sm font-semibold">권한 요약</div>
+              {previewLoading ? <div className="text-xs text-slate-400">불러오는 중…</div>
+                : <RolePermissionSummary menus={menus} permKeys={permKeys} darkMode={darkMode} />}
+            </div>
+
+            {/* 업무별 데이터 범위 */}
+            <div>
+              <div className="mb-2 text-sm font-semibold">업무별 데이터 접근 범위</div>
+              {previewLoading ? <div className="text-xs text-slate-400">불러오는 중…</div>
+                : <RoleDataScopeSummary scopeRows={scopeRows} permKeys={permKeys} dormOptions={dormOptions} tenantId={tenantId} darkMode={darkMode} />}
+            </div>
+
+            {/* 메타 정보 */}
+            <div className={`rounded-2xl border p-3 text-xs ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+              <div className="mb-1 font-semibold text-slate-500">권한 정보</div>
+              {[
+                ["설명", c.description || "등록된 설명이 없습니다."],
+                ["기준 시스템 권한", c.base_system_role || "별도 기준 권한 없음"],
+                ["복제 출처", c.cloned_from_role_code || "없음"],
+                ["비고", c.notes || "없음"],
+                ["생성일", fmtDate(c.created_at)],
+                ["수정일", fmtDate(c.updated_at)],
+                ["상태", statusLabel],
+                ["내부 코드", c.code],
+              ].map(([k, v]) => (
+                <div key={k} className="flex justify-between gap-4 border-b border-slate-100 py-1 last:border-0 dark:border-slate-800"><span className="text-slate-500">{k}</span><span className="text-right text-slate-600 dark:text-slate-300">{v}</span></div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+       </div>
+        <div className={`flex justify-end border-t p-4 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+          <button type="button" onClick={onClose} className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 min-h-[40px]">닫기</button>
         </div>
       </div>
     </div>
