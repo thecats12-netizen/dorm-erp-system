@@ -126,10 +126,11 @@ const COLS: Array<{ key: string; label: string; date?: boolean }> = [
 ];
 
 export default function ExamPmCertificationsPage({
-  darkMode, canEdit, tenantId, userId, onToast, onDataChanged, refreshKey,
+  darkMode, canEdit, tenantId, userId, onToast, onDataChanged, refreshKey, allowedExamProcessIds = null,
 }: {
   darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void;
   onDataChanged?: () => void; refreshKey?: number;
+  allowedExamProcessIds?: Set<string> | null; // 데이터 범위: EquipmentCertificationBoard 로 전달(옵션 scope)
 }) {
   // [설비 인증현황] PM 인증관리 하위 탭(최소 추가 · 기존 PM 화면 무변경).
   const [subTab, setSubTab] = useState<"pm" | "equip">("pm");
@@ -533,7 +534,7 @@ export default function ExamPmCertificationsPage({
     return (
       <section className={`rounded-3xl p-5 shadow-sm ring-1 ${darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"}`}>
         {subTabBar}
-        <EquipmentCertificationBoard darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast} />
+        <EquipmentCertificationBoard darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast} allowedExamProcessIds={allowedExamProcessIds} />
       </section>
     );
   }

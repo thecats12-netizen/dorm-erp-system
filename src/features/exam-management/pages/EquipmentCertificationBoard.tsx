@@ -29,9 +29,9 @@ const STATUS_TABS: Array<{ key: string; label: string }> = [
 const SOURCE_KO = (s: unknown) => (String(s ?? "") === "manual" ? "수동" : "응시");
 const ymd = (v: unknown) => { const s = String(v ?? "").trim(); return s ? s.slice(0, 10) : "-"; };
 
-type Props = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void };
+type Props = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void; allowedExamProcessIds?: Set<string> | null };
 
-export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantId, userId, onToast }: Props) {
+export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantId, userId, onToast, allowedExamProcessIds = null }: Props) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [master, setMaster] = useState<{ groups: ExamRow[]; categories: ExamRow[]; processes: ExamRow[]; equipment: ExamRow[]; levels: ExamRow[]; personnel: ExamRow[]; stageRules: ExamRow[]; applications: ExamRow[]; pmCertifications: ExamRow[] }>({ groups: [], categories: [], processes: [], equipment: [], levels: [], personnel: [], stageRules: [], applications: [], pmCertifications: [] });
   const [view, setView] = useState<"approve" | "progress">("approve"); // 기본: 기존 승인 관리
@@ -86,8 +86,12 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
   const scopeGroupId = (r: ExamRow, pe: ExamRow | undefined) => { const p = procById.get(String(r.process_id ?? "")); return r.group_id ?? p?.group_id ?? pe?.group_id ?? null; };
   const scopeCategoryId = (r: ExamRow, pe: ExamRow | undefined) => { const p = procById.get(String(r.process_id ?? "")); return r.category_id ?? p?.category_id ?? pe?.category_id ?? null; };
 
-  const procOpts = useMemo(() => master.processes.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.processes]);
-  const equipOpts = useMemo(() => master.equipment.filter((r) => r.is_active !== false && (!fProcess || String(r.process_id ?? "") === fProcess)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.equipment, fProcess]);
+  // 데이터 범위: 허용 공정만 옵션. null=전체(admin/무-scope, 무회귀). 데이터 행은 서버 RLS로 이미 강제.
+  const procOpts = useMemo(() => master.processes.filter((r) => r.is_active !== false && (!allowedExamProcessIds || allowedExamProcessIds.has(String(r.id)))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.processes, allowedExamProcessIds]);
+  const equipOpts = useMemo(() => master.equipment.filter((r) => r.is_active !== false && (!allowedExamProcessIds || (r.process_id != null && allowedExamProcessIds.has(String(r.process_id)))) && (!fProcess || String(r.process_id ?? "") === fProcess)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.equipment, fProcess, allowedExamProcessIds]);
+  // cascade reset: 범위 밖 공정/설비 선택값(URL/state 강제 등)은 자동 초기화 → 범위 밖 데이터 노출 방지.
+  useEffect(() => { if (allowedExamProcessIds && fProcess && !allowedExamProcessIds.has(fProcess)) { setFProcess(""); setFEquip(""); } }, [allowedExamProcessIds, fProcess]);
+  useEffect(() => { if (fEquip && !equipOpts.some((o) => o.id === fEquip)) setFEquip(""); }, [equipOpts, fEquip]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -251,28 +255,36 @@ export default function EquipmentCertificationBoard({ darkMode, canEdit, tenantI
 
       {manualOpen && isAdmin && (
         <ManualAcquireModal darkMode={darkMode} tenantId={tenantId} userId={userId} inputCls={inputCls} btn={btn}
-          master={master} onClose={() => setManualOpen(false)} onDone={() => { setManualOpen(false); onToast?.("수동 설비 취득을 등록했습니다."); void reload(); }} onError={setError} />
+          master={master} allowedExamProcessIds={allowedExamProcessIds} onClose={() => setManualOpen(false)} onDone={() => { setManualOpen(false); onToast?.("수동 설비 취득을 등록했습니다."); void reload(); }} onError={setError} />
       )}
     </section>
   );
 }
 
 // 수동 취득 모달(admin) — 직원/공정/설비/취득일/사유. source=manual, 사유 필수, 중복 approved 차단(서비스).
-function ManualAcquireModal({ darkMode, tenantId, userId, inputCls, btn, master, onClose, onDone, onError }: {
+function ManualAcquireModal({ darkMode, tenantId, userId, inputCls, btn, master, allowedExamProcessIds = null, onClose, onDone, onError }: {
   darkMode: boolean; tenantId: string; userId: string; inputCls: string; btn: string;
   master: { groups: ExamRow[]; categories: ExamRow[]; processes: ExamRow[]; equipment: ExamRow[]; levels: ExamRow[]; personnel: ExamRow[] };
+  allowedExamProcessIds?: Set<string> | null;
   onClose: () => void; onDone: () => void; onError: (m: string) => void;
 }) {
   const [emp, setEmp] = useState<EmployeeLite | null>(null);
   const [processId, setProcessId] = useState(""); const [equipId, setEquipId] = useState("");
   const [acquiredDate, setAcquiredDate] = useState(""); const [reason, setReason] = useState(""); const [saving, setSaving] = useState(false);
-  const procOpts = master.processes.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
-  const equipOpts = master.equipment.filter((r) => r.is_active !== false && (!processId || String(r.process_id ?? "") === processId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
+  const procOpts = useMemo(() => master.processes.filter((r) => r.is_active !== false && (!allowedExamProcessIds || allowedExamProcessIds.has(String(r.id)))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [master.processes, allowedExamProcessIds]);
+  const equipOpts = useMemo(() => master.equipment.filter((r) => r.is_active !== false && (!allowedExamProcessIds || (r.process_id != null && allowedExamProcessIds.has(String(r.process_id)))) && (!processId || String(r.process_id ?? "") === processId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [master.equipment, processId, allowedExamProcessIds]);
+  // 범위 밖 공정/설비가 form state 에 강제 주입돼도 선택 상태로 남지 않도록 초기화(defense-in-depth).
+  useEffect(() => { if (allowedExamProcessIds && processId && !allowedExamProcessIds.has(processId)) { setProcessId(""); setEquipId(""); } }, [allowedExamProcessIds, processId]);
+  useEffect(() => { if (equipId && !equipOpts.some((o) => o.id === equipId)) setEquipId(""); }, [equipOpts, equipId]);
   const submit = async () => {
     const pid = emp ? String(emp.id) : "";
     if (!pid) { onError("직원을 선택해 주세요."); return; }
     if (!processId || !equipId) { onError("공정과 설비를 선택해 주세요."); return; }
     if (!reason.trim()) { onError("사유를 입력해 주세요."); return; }
+    // 저장 직전 권한 검증: 공정이 허용 범위 내이고, 설비가 해당 공정에 실제 연결된 설비여야 함.
+    if (allowedExamProcessIds && (!allowedExamProcessIds.has(processId) || !master.equipment.some((r) => String(r.id) === equipId && r.process_id != null && String(r.process_id) === processId))) {
+      onError("접근 권한이 없는 공정 또는 설비입니다."); return;
+    }
     const proc = master.processes.find((r) => String(r.id) === processId);
     setSaving(true);
     try {

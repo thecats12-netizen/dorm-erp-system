@@ -124,6 +124,10 @@ export type MyMenuAccess = {
   //  → additive 역할이어도 "그 역할이 허용한 메뉴·기능만" 보이게 하여 #5(뷰어 전체조회 합쳐짐) 해결.
   //  → 데이터 범위는 여전히 restrictive 역할에만 강제되므로 단일 additive 역할 계정의 데이터 잠김(무범위→0건) 회귀 없음.
   exclusiveActive: boolean; exclusiveTabs: Set<string>; exclusiveKeys: Set<string>;
+  // [fail-closed 신호] 실제 DB 조회 오류(테이블 미적용 제외)로 권한을 확정하지 못한 경우 true.
+  //  호출부는 이 값이 true 면 "restrictive 없음(전체 허용)"으로 오판하지 말고 fail-closed(민감 데이터 미표시) 처리해야 함.
+  //  기존 소비자는 이 옵션 필드를 무시하므로 영향 없음(비파괴적).
+  loadError?: boolean;
 };
 
 export async function loadMyMenuAccess(userId: string, tenantId: string): Promise<MyMenuAccess> {
@@ -139,7 +143,7 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     const { data: ucr, error: e1 } = await supabase
       .from("user_custom_roles").select("custom_role_id")
       .eq("tenant_id", tenantId).eq("user_id", userId).eq("is_active", true);
-    if (e1) { if (isMissingTable(e1)) markPermissionTablesMissing(); dbg("EARLY: user_custom_roles 조회 오류 → empty", { code: (e1 as { code?: string }).code, message: e1.message }); return empty; }
+    if (e1) { if (isMissingTable(e1)) { markPermissionTablesMissing(); dbg("EARLY: user_custom_roles 테이블 미적용 → empty(무범위)"); return empty; } dbg("EARLY: user_custom_roles 조회 오류 → loadError(fail-closed)", { code: (e1 as { code?: string }).code, message: e1.message }); return { ...empty, loadError: true }; }
     const roleIds = ((ucr as { custom_role_id: string }[]) || []).map((r) => r.custom_role_id);
     if (roleIds.length === 0) { dbg("EARLY: 활성 배정 커스텀 권한 0건(user_custom_roles) → empty(기본 역할 메뉴)"); return empty; }
 
@@ -149,7 +153,7 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     const { data: rolesRaw, error: e2 } = await supabase
       .from("custom_roles").select("*")
       .eq("tenant_id", tenantId).in("id", roleIds);
-    if (e2) { if (isMissingTable(e2)) markPermissionTablesMissing(); dbg("EARLY: custom_roles 조회 오류 → empty", { code: (e2 as { code?: string }).code, message: e2.message }); return empty; }
+    if (e2) { if (isMissingTable(e2)) { markPermissionTablesMissing(); dbg("EARLY: custom_roles 테이블 미적용 → empty(무범위)"); return empty; } dbg("EARLY: custom_roles 조회 오류 → loadError(fail-closed)", { code: (e2 as { code?: string }).code, message: e2.message }); return { ...empty, loadError: true }; }
     const roles = ((rolesRaw as { id: string; permission_mode?: string; is_active: boolean; is_deleted: boolean }[]) || [])
       .filter((r) => r.is_active && !r.is_deleted);
     const activeRoleIds = roles.map((r) => r.id);
@@ -172,7 +176,7 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     const { data: perms, error: e3 } = await supabase
       .from("custom_role_permissions").select("custom_role_id, permission_key")
       .eq("tenant_id", tenantId).in("custom_role_id", activeRoleIds).eq("is_active", true);
-    if (e3) { dbg("EARLY: custom_role_permissions 조회 오류 → empty", { code: (e3 as { code?: string }).code, message: e3.message }); return empty; }
+    if (e3) { if (isMissingTable(e3)) { markPermissionTablesMissing(); dbg("EARLY: custom_role_permissions 테이블 미적용 → empty(무범위)"); return empty; } dbg("EARLY: custom_role_permissions 조회 오류 → loadError(fail-closed)", { code: (e3 as { code?: string }).code, message: e3.message }); return { ...empty, loadError: true }; }
     const rows = (perms as { custom_role_id: string; permission_key: string }[]) || [];
 
     const allKeys = new Set(rows.map((r) => r.permission_key));
@@ -203,6 +207,10 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
         const now = Date.now();
         restrictiveScopeRows = ((scopes as Array<ScopeRow & { valid_from?: string | null; valid_until?: string | null }>) || [])
           .filter((s) => (!s.valid_from || Date.parse(s.valid_from) <= now) && (!s.valid_until || Date.parse(s.valid_until) >= now));
+      } else if (!isMissingTable(e4)) {
+        // restrictive 역할인데 범위 조회가 실제 실패 → 전체 허용으로 오판 금지. fail-closed 신호.
+        dbg("custom_role_scopes 조회 오류 → loadError(fail-closed)", { code: (e4 as { code?: string }).code, message: e4.message });
+        return { ...empty, loadError: true };
       }
     }
     // [진단 결과] exclusiveActive=true 면 Sidebar 는 exclusiveTabs 만 표시(선택 메뉴만). false 면 additive(기본 역할과 union).
@@ -215,7 +223,7 @@ export async function loadMyMenuAccess(userId: string, tenantId: string): Promis
     return { allKeys, restrictiveActive: restrictiveRoleIds.size > 0, restrictiveTabs, restrictiveKeys, restrictiveScopeRows,
       exclusiveActive: exclusiveRoleIds.size > 0, exclusiveTabs, exclusiveKeys };
   } catch (err) {
-    dbg("EARLY: 예외 → empty(기본 역할 메뉴)", { message: (err as { message?: string })?.message });
-    return empty;
+    dbg("EARLY: 예외 → loadError(fail-closed)", { message: (err as { message?: string })?.message });
+    return { ...empty, loadError: true };
   }
 }

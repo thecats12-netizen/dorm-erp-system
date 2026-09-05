@@ -9,6 +9,7 @@ import {
   examRefLabel, resolveEquipmentHierarchy, type ExamRow, type ExamMasterTable,
 } from "../services/examMasterService";
 import { isAchieveType } from "../services/processCriteriaRuleService";
+import { deriveExamHierarchyScope, type ExamHierScope } from "../utils/examHierarchyScope";
 
 // 참조 옵션은 라벨뿐 아니라 상위 FK(category_id/group_id/part_id/process_id)와 활성여부를 함께 싣는다(종속 선택용).
 type RefOpt = { id: string; label: string; code?: string | null; name?: string | null; is_active: boolean; category_id?: string | null; group_id?: string | null; part_id?: string | null; process_id?: string | null };
@@ -32,7 +33,7 @@ const CHILD_TAB: Record<string, { key: string; title: string }> = {
 };
 
 export default function ExamMasterGrid({
-  config, darkMode, canEdit, tenantId, userId, onToast, onQuickAdd, initialEdit, onInitialEditConsumed,
+  config, darkMode, canEdit, tenantId, userId, onToast, onQuickAdd, initialEdit, onInitialEditConsumed, allowedExamProcessIds = null,
 }: {
   config: ExamEntityConfig;
   darkMode: boolean;
@@ -40,6 +41,7 @@ export default function ExamMasterGrid({
   tenantId: string;
   userId: string;
   onToast?: (msg: string) => void;
+  allowedExamProcessIds?: Set<string> | null; // 데이터 범위: 허용 process 기준 기준정보 목록 scope(null=전체/무회귀)
   // 하위 빠른 추가: 상위 그리드가 자식 탭 key 와 상위 FK 스코프를 부모(ExamRulesPage)로 전달 → 탭 전환 + 자식 그리드 initialEdit.
   onQuickAdd?: (childKey: string, scope: ExamRow) => void;
   initialEdit?: ExamRow | null;      // 자식 그리드가 열릴 때 미리 채울 상위 FK(신규 등록)
@@ -47,6 +49,20 @@ export default function ExamMasterGrid({
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [refMap, setRefMap] = useState<Record<string, RefOpt[]>>({});
+  // [데이터 범위] 허용 process → 상위 Group/제품군 파생(restrictive custom-role 일 때만 로드). null=제한 없음(전체 유지·무회귀).
+  const [hierScope, setHierScope] = useState<ExamHierScope | null>(null);
+  useEffect(() => {
+    if (!allowedExamProcessIds) { setHierScope(null); return; }
+    let alive = true;
+    void (async () => {
+      const [procs, cats] = await Promise.all([
+        listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
+      ]);
+      if (alive) setHierScope(deriveExamHierarchyScope(allowedExamProcessIds, procs, cats));
+    })();
+    return () => { alive = false; };
+  }, [allowedExamProcessIds, tenantId]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -310,6 +326,24 @@ export default function ExamMasterGrid({
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = rows.filter((r) => {
+      // [데이터 범위] restrictive custom-role: 허용 process 및 그 상위/하위(Group/제품군/공정/장비/규칙) 밖 기준정보는 목록에서 숨김.
+      //  exam_levels 는 process 무관(공유) → 제한하지 않음. hierScope=null(admin/무범위)이면 전체 유지(무회귀).
+      if (hierScope && allowedExamProcessIds) {
+        const t = config.table;
+        const rid = String(r.id);
+        const pid = r.process_id != null ? String(r.process_id) : "";
+        if (t === "exam_processes") { if (!allowedExamProcessIds.has(rid)) return false; }
+        else if (t === "exam_groups") { if (!hierScope.groupIds.has(rid)) return false; }
+        else if (t === "exam_categories") { if (!hierScope.categoryIds.has(rid)) return false; }
+        else if (t === "exam_equipment") { if (!(pid && allowedExamProcessIds.has(pid))) return false; }
+        else if (t === "exam_rules") {
+          const gid = r.group_id != null ? String(r.group_id) : "";
+          const cid = r.category_id != null ? String(r.category_id) : "";
+          const ok = (pid && allowedExamProcessIds.has(pid))
+            || (!pid && ((cid && hierScope.categoryIds.has(cid)) || (gid && hierScope.groupIds.has(gid))));
+          if (!ok) return false;
+        }
+      }
       // 인증 규칙 탭은 "달성기준이 아닌 exam_rules"(취득/유효/목표)만 표시. 달성기준은 공정별 달성기준 탭 전용(행은 DB에 그대로 유지).
       if (isRules && isAchieveType(r.rule_type)) return false;
       if (activeFilter === "사용" && r.is_active === false) return false;
@@ -341,7 +375,7 @@ export default function ExamMasterGrid({
     }
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, search, activeFilter, filterGroup, filterCat, filterProc, sortKey, sortDir, refMap, config.columns]);
+  }, [rows, search, activeFilter, filterGroup, filterCat, filterProc, sortKey, sortDir, refMap, config.columns, hierScope, allowedExamProcessIds]);
 
   const toggleSort = (k: string) => {
     if (sortKey !== k) { setSortKey(k); setSortDir("asc"); }

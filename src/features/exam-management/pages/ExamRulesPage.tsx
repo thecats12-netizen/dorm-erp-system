@@ -18,13 +18,14 @@ const CUSTOM_TAB_PM_CANDIDATE = "__pm_candidate_gen";
 //  · 상단: 등록 순서 안내 + 항목별 요약 카운트 + 통합 Excel(양식/현재데이터) 다운로드.
 //  · 하위 탭 + 단일 등록/수정(ExamMasterGrid)은 기존 그대로 유지.
 export default function ExamRulesPage({
-  darkMode, canEdit, tenantId, userId, onToast,
+  darkMode, canEdit, tenantId, userId, onToast, allowedExamProcessIds = null,
 }: {
   darkMode: boolean;
   canEdit: boolean;
   tenantId: string;
   userId: string;
   onToast?: (msg: string) => void;
+  allowedExamProcessIds?: Set<string> | null;
 }) {
   // 탭/등록 흐름에 노출할 config 만(제품/파트 등 hidden 제외 · 테이블/데이터/config 는 유지).
   const VISIBLE_CONFIGS = EXAM_ENTITY_CONFIGS.filter((c) => !c.hidden);
@@ -115,15 +116,16 @@ export default function ExamRulesPage({
       </div>
 
       {sub === CUSTOM_TAB_EQ_STAGE ? (
-        <EquipmentStageRulesPage darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast} />
+        <EquipmentStageRulesPage darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast} allowedExamProcessIds={allowedExamProcessIds} />
       ) : sub === CUSTOM_TAB_PROC_CRITERIA ? (
-        <ProcessCriteriaRulesPage darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast} />
+        <ProcessCriteriaRulesPage darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast} allowedExamProcessIds={allowedExamProcessIds} />
       ) : sub === CUSTOM_TAB_PREVIEW ? (
         <EmployeeCertificationPreviewPage darkMode={darkMode} tenantId={tenantId} onToast={onToast} />
       ) : sub === CUSTOM_TAB_PM_CANDIDATE ? (
         <PmCandidateGeneratorPage darkMode={darkMode} tenantId={tenantId} userId={userId} onToast={onToast} />
       ) : (
         <ExamMasterGrid key={active.key} config={active} darkMode={darkMode} canEdit={canEdit} tenantId={tenantId} userId={userId} onToast={onToast}
+          allowedExamProcessIds={allowedExamProcessIds}
           onQuickAdd={handleQuickAdd}
           initialEdit={pendingChild && pendingChild.key === active.key ? (pendingChild.scope as Record<string, unknown>) : null}
           onInitialEditConsumed={() => setPendingChild(null)} />

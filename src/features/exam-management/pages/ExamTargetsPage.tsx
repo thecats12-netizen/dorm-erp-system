@@ -4,6 +4,7 @@ import { useRegisteredOverlay, useTableKeyboardNav } from "../../../hooks/overla
 import { UnsavedChangesDialog } from "../../../components/UnsavedChangesDialog";
 import { calculateMonthlyPerformanceYear, calculateAnnualPerformance, calculateEquipmentMonthlyPerformanceYear } from "../services/examAutomationService";
 import { isApplicationAcquired } from "../utils/certificationLevel";
+import { deriveExamHierarchyScope } from "../utils/examHierarchyScope";
 import { listEquipmentCertifications } from "../services/equipmentCertificationService";
 import {
   listExamRows, listExamRefOptions, listTargetScopeRows, upsertExamRow, softDeleteExamRow,
@@ -73,15 +74,16 @@ type GridConfig = {
   actualLabel: string;
 };
 
-function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
+function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast, allowedExamProcessIds = null }: {
   cfg: GridConfig; darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void;
+  allowedExamProcessIds?: Set<string> | null;
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [levels, setLevels] = useState<RefOpt[]>([]);
   // [기준정보 연동] 제품군→그룹 계층 선택용 원본 행(부모 FK 가 필요해 listExamRefOptions 대신 listExamRows 사용).
   //  [Line 전환] exam_annual_targets / exam_monthly_results 에 group_id(nullable FK) 추가됨(20260741 DRAFT 적용).
   //  저장: 텍스트 identity(product_group/group_name/part_name) 유지 + group_id(정규화 축) 저장. 기존 part_id 는 보존.
-  const [master, setMaster] = useState<{ categories: ExamRow[]; groups: ExamRow[]; parts: ExamRow[] }>({ categories: [], groups: [], parts: [] });
+  const [master, setMaster] = useState<{ categories: ExamRow[]; groups: ExamRow[]; parts: ExamRow[]; processes: ExamRow[] }>({ categories: [], groups: [], parts: [], processes: [] });
   const [scopeSel, setScopeSel] = useState<{ categoryId: string; groupId: string; partId: string }>({ categoryId: "", groupId: "", partId: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -133,14 +135,15 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
     if (!examSupabaseReady()) { setError("Supabase 연결이 필요합니다."); setRows([]); return; }
     setLoading(true); setError(null);
     try {
-      const [data, lv, cats, grps, prts] = await Promise.all([
+      const [data, lv, cats, grps, prts, procs] = await Promise.all([
         listExamRows(cfg.table, tenantId),
         hasLevel ? listExamRefOptions("exam_levels", tenantId) : Promise.resolve([] as RefOpt[]),
         listExamRows("exam_categories", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_groups", tenantId).catch(() => [] as ExamRow[]),
         listExamRows("exam_parts", tenantId).catch(() => [] as ExamRow[]),
+        listExamRows("exam_processes", tenantId).catch(() => [] as ExamRow[]),
       ]);
-      setRows(data); setLevels(lv); setMaster({ categories: cats, groups: grps, parts: prts });
+      setRows(data); setLevels(lv); setMaster({ categories: cats, groups: grps, parts: prts, processes: procs });
     } catch (e) { setError((e as { message?: string })?.message || "불러오지 못했습니다."); }
     finally { setLoading(false); }
   }, [cfg.table, tenantId, hasLevel]);
@@ -240,10 +243,17 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
   const mName = (r: ExamRow | undefined) => String(r?.name ?? "").trim();
   const activeOnly = (list: ExamRow[], keepId: string) => list.filter((r) => r.is_active !== false || String(r.id) === keepId);
   // [정본] 그룹 먼저 → 제품군은 선택 그룹 소속(category.group_id === groupId)만. 그룹은 제품군과 무관하게 전체 활성.
-  const groupOpts = useMemo(() => activeOnly(master.groups, scopeSel.groupId), [master.groups, scopeSel.groupId]);
+  // [데이터 범위] 허용 process 가 속한 Group/제품군만 노출(process scope→상위 파생). allowed=null(admin/무범위)→전체 유지.
+  const hierScope = useMemo(() => deriveExamHierarchyScope(allowedExamProcessIds, master.processes, master.categories), [allowedExamProcessIds, master.processes, master.categories]);
+  const groupOpts = useMemo(
+    () => activeOnly(master.groups, scopeSel.groupId).filter((g) => !hierScope || hierScope.groupIds.has(String(g.id)) || String(g.id) === scopeSel.groupId),
+    [master.groups, scopeSel.groupId, hierScope]
+  );
   const catOpts = useMemo(
-    () => activeOnly(master.categories, scopeSel.categoryId).filter((c) => !scopeSel.groupId || String(c.group_id ?? "") === scopeSel.groupId),
-    [master.categories, scopeSel.groupId, scopeSel.categoryId]
+    () => activeOnly(master.categories, scopeSel.categoryId)
+      .filter((c) => !scopeSel.groupId || String(c.group_id ?? "") === scopeSel.groupId)
+      .filter((c) => !hierScope || hierScope.categoryIds.has(String(c.id)) || String(c.id) === scopeSel.categoryId),
+    [master.categories, scopeSel.groupId, scopeSel.categoryId, hierScope]
   );
   // [5] 동일 명칭이 여러 범위에 있을 때만 상위 경로를 덧붙인다. 저장값은 항상 row.id 기준으로 파생.
   const optLabel = (r: ExamRow, siblings: ExamRow[]): string => {
@@ -334,6 +344,10 @@ function TargetGrid({ cfg, darkMode, canEdit, tenantId, userId, onToast }: {
       const cat = master.categories.find((x) => String(x.id) === scopeSel.categoryId);
       if (cat && String(cat.group_id ?? "") !== scopeSel.groupId) { setError("선택한 제품군이 현재 그룹에 속하지 않습니다."); return; }
       if (grp?.is_active === false || cat?.is_active === false) { setError("비활성 기준정보는 새로 선택할 수 없습니다."); return; }
+      // [데이터 범위] restrictive custom-role: 선택 그룹/제품군에 허용 process 가 실제 존재해야 저장 가능.
+      if (hierScope && (!hierScope.groupIds.has(scopeSel.groupId) || !hierScope.categoryIds.has(scopeSel.categoryId))) {
+        setError("접근 권한이 없는 그룹 또는 제품군입니다."); return;
+      }
       // [이중계상 방지 · fail-closed] 화면 rows(부분 로딩 가능) 대신 DB 를 스코프 한정 조회해 반대 유형 공존 확인.
       //  scopeConflictKey 산출 가능(year/group_id/level_id 존재) 시에만 검사. 조회 실패 시 저장 중단(폴백 금지).
       //  Excel Import 와 동일 규칙(findOppositeScopeConflict) 사용. 데이터/통계/DB/identity 무변경.
@@ -702,7 +716,7 @@ const MONTHLY_COLS: Col[] = [
   { key: "notes", label: "비고", type: "text", hideable: true },
 ];
 
-type PageProps = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void; refreshKey?: number };
+type PageProps = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void; refreshKey?: number; allowedExamProcessIds?: Set<string> | null };
 
 export function ExamAnnualTargetsPage(props: PageProps) {
   return (

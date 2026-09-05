@@ -8,6 +8,7 @@ import {
 } from "../services/examMasterService";
 import { calculatePmLevel } from "../services/examAutomationService";
 import { normalizeCertificationLevel, acquiredLevelIds } from "../utils/certificationLevel";
+import { deriveExamHierarchyScope } from "../utils/examHierarchyScope";
 // [자동 라이선스 관리] 인력 저장 후 employee_license_plan 자동 생성(추가 전용·비차단). 기존 저장 흐름 무변경.
 import { generatePlanForEmployeeAuto } from "../services/licensePlanService";
 // [3단계] 인력현황 등록 UX: 공통 사원선택 + 자동입력(조회 전용 기반). 다른 화면 미변경.
@@ -78,9 +79,11 @@ const cellText = (c: Col, r: ExamRow) => {
 };
 
 export default function ExamPersonnelPage({
-  darkMode, canEdit, tenantId, userId, onToast, refreshKey,
+  darkMode, canEdit, tenantId, userId, onToast, refreshKey, allowedExamProcessIds = null,
 }: {
   darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (msg: string) => void; refreshKey?: number;
+  // 데이터 범위(custom-role): 허용 공정 id Set. null = 전체(admin/무-scope). 데이터 행은 서버 RLS로 이미 강제, 이 값은 계층 옵션명 노출 차단용.
+  allowedExamProcessIds?: Set<string> | null;
 }) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [rules, setRules] = useState<ExamRow[]>([]); // exam_rules(PM 승급 요건 검증용)
@@ -141,6 +144,8 @@ export default function ExamPersonnelPage({
       const group_id = r.group_id ? String(r.group_id) : null;
       const process_id = r.process_id ? String(r.process_id) : null;
       const level_id = r.level_id ? String(r.level_id) : null;
+      // 데이터 범위: 허용 공정 밖 조합(그룹/제품군/공정명)은 옵션에서 제외. null=전체(무회귀).
+      if (allowedExamProcessIds && (!process_id || !allowedExamProcessIds.has(process_id))) continue;
       const key = JSON.stringify([category_id, group_id, process_id, level_id]); // 안정적 조합 키(라인 제외)
       if (seen.has(key)) continue;
       seen.add(key);
@@ -149,7 +154,7 @@ export default function ExamPersonnelPage({
       out.push({ key, category_id, group_id, process_id, label });
     }
     return out.sort((a, b) => a.label.localeCompare(b.label, "ko"));
-  }, [rules, categoryMap, groupMap, processMap, levelMap]);
+  }, [rules, categoryMap, groupMap, processMap, levelMap, allowedExamProcessIds]);
   const ruleComboMap = useMemo(() => new Map(ruleCombos.map((c) => [c.key, c])), [ruleCombos]);
   // 조합 선택 → 제품군/그룹/공정만 부분 반영. [라인 제외] line_id 는 변경하지 않음(기존 값 유지). 인력 고유값·cert_level·part 미변경.
   const applyRuleCombo = (key: string) => {
@@ -506,16 +511,20 @@ export default function ExamPersonnelPage({
     const byId = (arr: MRef[], id: unknown) => arr.find((o) => o.id === String(id ?? ""));
     // 현재 선택 id 역추적(단일 resolve 재사용). [신계층] 그룹(독립) → 제품군(그룹 소속) → 공정(그룹+제품군 소속).
     const { groupId, catId } = deriveHier(e);
+    // [데이터 범위] 허용 process 가 속한 Group/제품군만 노출(process scope→상위 파생). 현재 배정값(catId/groupId)은 항상 보존.
+    const hierScope = deriveExamHierarchyScope(allowedExamProcessIds, master.processes, master.categories);
     // [신계층] 제품군: 선택 그룹의 category(exam_categories.group_id === groupId)만. 그룹 미선택 시 표시 안 함. 현재값은 항상 포함.
-    const catOpts = master.categories.filter((o) => (o.is_active || o.id === catId) && (!!groupId && (String(o.group_id ?? "") === groupId || o.id === catId)));
+    const catOpts = master.categories.filter((o) => (o.is_active || o.id === catId) && (!!groupId && (String(o.group_id ?? "") === groupId || o.id === catId)) && (!hierScope || hierScope.categoryIds.has(String(o.id)) || o.id === catId));
     // [신계층] 그룹: 독립 최상위 → 전체 활성(제품군에 종속되지 않음). 현재값 포함.
-    const groupOpts = master.groups.filter((o) => o.is_active || o.id === groupId);
+    const groupOpts = master.groups.filter((o) => (o.is_active || o.id === groupId) && (!hierScope || hierScope.groupIds.has(String(o.id)) || o.id === groupId));
     // [신계층] 공정: 선택 제품군(exam_processes.category_id === catId)만. category_id 없는 legacy 공정은 그룹(group_id) 일치로 fallback.
     const procGroupOf = (o: MRef) => String(o.group_id ?? "") || String(master.parts.find((p) => p.id === String(o.part_id ?? ""))?.group_id ?? "");
     const procMatch = (o: MRef) => catId
       ? (String(o.category_id ?? "") === catId || (!o.category_id && !!groupId && procGroupOf(o) === groupId))
       : false; // 제품군 미선택 시 공정 목록 비움(선택 강제)
-    const procOpts = master.processes.filter((o) => (o.is_active || o.id === String(e.process_id ?? "")) && (procMatch(o) || o.id === String(e.process_id ?? "")));
+    // [데이터 범위] restrictive custom-role 이면 허용 공정만 옵션 노출. 현재 배정값(o.id === process_id)은 항상 보존(기존 legacy/DB 값 표시 유지).
+    const procInScope = (o: MRef) => !allowedExamProcessIds || allowedExamProcessIds.has(String(o.id)) || o.id === String(e.process_id ?? "");
+    const procOpts = master.processes.filter((o) => (o.is_active || o.id === String(e.process_id ?? "")) && (procMatch(o) || o.id === String(e.process_id ?? "")) && procInScope(o));
 
     const set = (patch: Partial<ExamRow>) => setEditRow((f) => ({ ...(f || {}), ...patch }));
     // [신계층 cascade reset] 그룹 변경 → 제품군·공정 초기화. 기존 part_id/part_name 은 보존(자동 null 금지 · legacy/Excel 호환).
