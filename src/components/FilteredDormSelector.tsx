@@ -131,6 +131,12 @@ export default function FilteredDormSelector({
     ? ["전체", "공실", "사용중", "만실", "만료예정", "종료/해지 포함"]
     : ["전체", "사용중"];
 
+  // 지역/성별 필터 옵션도 전달된 (data-scoped) 기숙사 풀에서 파생 — 권한 밖 지역/성별이 필터에 노출되지 않게 함.
+  // domsParam 이 전체(admin/무제한)면 기존과 동일한 ["전체","평택","천안"]/["전체","남","여"] 가 유지된다(무회귀).
+  const accessiblePool = useMemo(() => getAccessibleOperationalDorms(currentUserParam, allDorms), [currentUserParam, allDorms]);
+  const siteFilterOptions = useMemo(() => ["전체", ...["평택", "천안"].filter((s) => accessiblePool.some((d) => String(d.site) === s))], [accessiblePool]);
+  const genderFilterOptions = useMemo(() => ["전체", ...["남", "여"].filter((g) => accessiblePool.some((d) => String(d.gender) === g))], [accessiblePool]);
+
   // 옵션/표시라벨도 useMemo 로 고정(JSX 인라인 map 제거 → SearchableSelect 로 새 배열이 매 렌더 전달되지 않음).
   const dormOptions = useMemo(() => ["", ...filteredDorms.map((d) => d.id)], [filteredDorms]);
   const dormDisplayOptions = useMemo(
@@ -153,13 +159,13 @@ export default function FilteredDormSelector({
           label="지역"
           value={siteFilter}
           onChange={(v) => setSiteFilter(v)}
-          options={["전체", "평택", "천안"]}
+          options={siteFilterOptions}
         />
         <SelectInput
           label="성별"
           value={genderFilter}
           onChange={(v) => setGenderFilter(v)}
-          options={["전체", "남", "여"]}
+          options={genderFilterOptions}
         />
         <SelectInput
           label="상태"

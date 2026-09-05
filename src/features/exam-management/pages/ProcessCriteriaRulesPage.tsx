@@ -7,13 +7,14 @@ import { normalizeCriteria, describeCriteria, isCriteriaEffective } from "../eng
 import { listProcessCriteriaRules, upsertProcessCriteriaRule, softDeleteProcessCriteriaRule, restoreProcessCriteriaRule } from "../services/processCriteriaRuleService";
 import { listEquipmentStageRules } from "../services/equipmentStageRuleService";
 import ProcessCriteriaRuleForm, { type ProcCriteriaMaster } from "../components/ProcessCriteriaRuleForm";
+import { deriveExamHierarchyScope } from "../utils/examHierarchyScope";
 import CriteriaAuditModal from "../components/CriteriaAuditModal";
 
 const PAGE_SIZE = 20;
 const dash = (v: unknown) => { const s = String(v ?? "").trim(); return s || "-"; };
-type Props = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void };
+type Props = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void; allowedExamProcessIds?: Set<string> | null };
 
-export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, userId, onToast }: Props) {
+export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, userId, onToast, allowedExamProcessIds = null }: Props) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [m, setM] = useState<{ groups: ExamRow[]; categories: ExamRow[]; processes: ExamRow[]; equipment: ExamRow[]; levels: ExamRow[]; stageRules: ExamRow[] }>({ groups: [], categories: [], processes: [], equipment: [], levels: [], stageRules: [] });
   const [loading, setLoading] = useState(false);
@@ -63,11 +64,13 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
   const levelOpts = useMemo(() => m.levels.filter((r) => r.is_active !== false)
     .map((r) => ({ id: String(r.id), name: String(r.name ?? "").trim() || String(r.code ?? ""), code: String(r.code ?? ""), rank: Number(r.rank_order ?? 0) }))
     .sort((a, b) => a.rank - b.rank), [m.levels]);
-  const groupOpts = useMemo(() => m.groups.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.groups]);
+  // [데이터 범위] 허용 process → 상위 Group/제품군 파생. null(admin/무범위)=전체 유지(무회귀).
+  const hierScope = useMemo(() => deriveExamHierarchyScope(allowedExamProcessIds, m.processes, m.categories), [allowedExamProcessIds, m.processes, m.categories]);
+  const groupOpts = useMemo(() => m.groups.filter((r) => r.is_active !== false && (!hierScope || hierScope.groupIds.has(String(r.id)))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.groups, hierScope]);
   // 제품군 목록: 선택한 그룹에 속한 항목만(그룹→제품군 계층). DB 상 그룹이 제품군에 속하므로 선택 그룹의 category 로 한정.
   // [계층 역전] 제품군은 그룹 소속(category.group_id)으로 필터 — 선택 그룹의 제품군만 표시.
-  const catOpts = useMemo(() => m.categories.filter((r) => r.is_active !== false && (!fGroup || String(r.group_id ?? "") === fGroup)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.categories, fGroup]);
-  const procOpts = useMemo(() => m.processes.filter((r) => r.is_active !== false && (!fGroup || String(r.group_id ?? "") === fGroup)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.processes, fGroup]);
+  const catOpts = useMemo(() => m.categories.filter((r) => r.is_active !== false && (!fGroup || String(r.group_id ?? "") === fGroup) && (!hierScope || hierScope.categoryIds.has(String(r.id)))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.categories, fGroup, hierScope]);
+  const procOpts = useMemo(() => m.processes.filter((r) => r.is_active !== false && (!fGroup || String(r.group_id ?? "") === fGroup) && (!allowedExamProcessIds || allowedExamProcessIds.has(String(r.id)))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })), [m.processes, fGroup, allowedExamProcessIds]);
   // [수정 복원] 수정 대상이 참조하는 기존 인증단계·선행단계가 캐노니컬(LEVEL_CODES) 밖 legacy(Y072~ 등)여도 옵션에 포함
   //  → dropdown 이 "선택"으로 풀리지 않게. FK 재매핑 없음(원본 level_id 보존). "(기존)" 표기로 legacy 임을 구분.
   const formLevelOpts = useMemo(() => {
@@ -86,7 +89,10 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
     if (!extra.length) return levelOpts;
     return [...levelOpts, ...extra].sort((a, b) => a.rank - b.rank);
   }, [editRow, levelOpts, m.levels]);
-  const formMaster: ProcCriteriaMaster = useMemo(() => ({ groups: m.groups, processes: m.processes, equipment: m.equipment, stageRules: m.stageRules, groupById, catById, procById, equipById, levelOpts: formLevelOpts }), [m.groups, m.processes, m.equipment, m.stageRules, groupById, catById, procById, equipById, formLevelOpts]);
+  // [데이터 범위] 편집 폼(ProcessCriteriaRuleForm)의 공정/설비 옵션 source 도 허용 범위로 한정. groupById/... 라벨맵은 전체 유지(이름 해석).
+  const scopedFormProcesses = useMemo(() => allowedExamProcessIds ? m.processes.filter((r) => allowedExamProcessIds.has(String(r.id))) : m.processes, [m.processes, allowedExamProcessIds]);
+  const scopedFormEquipment = useMemo(() => allowedExamProcessIds ? m.equipment.filter((r) => r.process_id != null && allowedExamProcessIds.has(String(r.process_id))) : m.equipment, [m.equipment, allowedExamProcessIds]);
+  const formMaster: ProcCriteriaMaster = useMemo(() => ({ groups: m.groups, processes: scopedFormProcesses, equipment: scopedFormEquipment, stageRules: m.stageRules, groupById, catById, procById, equipById, levelOpts: formLevelOpts }), [m.groups, scopedFormProcesses, scopedFormEquipment, m.stageRules, groupById, catById, procById, equipById, formLevelOpts]);
 
   // 행 파생: criteria 정규화 + 공정→그룹/제품군.
   const enriched = useMemo(() => rows.map((r) => {
@@ -101,6 +107,8 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
     const q = debounced.trim().toLowerCase();
     const today = new Date();
     return enriched.filter(({ r, c, gid, cid }) => {
+      // [데이터 범위] 허용 process 밖 공정별 달성기준은 숨김(목록 조회 전용).
+      if (allowedExamProcessIds && !(r.process_id != null && allowedExamProcessIds.has(String(r.process_id)))) return false;
       if (!includeDeleted && r.deleted_at) return false;
       if (fGroup && gid !== fGroup) return false;
       if (fCat && cid !== fCat) return false;
@@ -114,7 +122,7 @@ export default function ProcessCriteriaRulesPage({ darkMode, canEdit, tenantId, 
       if (q) { const t = `${nm(procById, r.process_id)} ${nm(groupById, gid)} ${nm(levelById, r.level_id)} ${describeCriteria(c)} ${c.label_ko ?? ""}`.toLowerCase(); if (!t.includes(q)) return false; }
       return true;
     });
-  }, [enriched, includeDeleted, fGroup, fCat, fProc, fLevel, fOp, fActive, fPeriod, debounced, procById, groupById, levelById]);
+  }, [enriched, includeDeleted, fGroup, fCat, fProc, fLevel, fOp, fActive, fPeriod, debounced, procById, groupById, levelById, allowedExamProcessIds]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const curPage = Math.min(page, pageCount);
   const paged = filtered.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);

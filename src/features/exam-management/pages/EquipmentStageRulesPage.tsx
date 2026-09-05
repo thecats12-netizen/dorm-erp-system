@@ -2,14 +2,15 @@
 //  criteria 엔진의 판단 입력(설비 1개 취득=공정 확정 아님). 서비스 재사용 · 한글 표시 · DB 미적용 안전.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listExamRows, examSupabaseReady, type ExamRow } from "../services/examMasterService";
+import { deriveExamHierarchyScope } from "../utils/examHierarchyScope";
 import { loadMyExamPermissions } from "../services/examPermissionService";
 import { listEquipmentStageRules, upsertEquipmentStageRule, softDeleteEquipmentStageRule, restoreEquipmentStageRule } from "../services/equipmentStageRuleService";
 
 const PAGE_SIZE = 20;
 const ymd = (v: unknown) => { const s = String(v ?? "").trim(); return s ? s.slice(0, 10) : "-"; };
-type Props = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void };
+type Props = { darkMode: boolean; canEdit: boolean; tenantId: string; userId: string; onToast?: (m: string) => void; allowedExamProcessIds?: Set<string> | null };
 
-export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, userId, onToast }: Props) {
+export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, userId, onToast, allowedExamProcessIds = null }: Props) {
   const [rows, setRows] = useState<ExamRow[]>([]);
   const [master, setMaster] = useState<{ groups: ExamRow[]; categories: ExamRow[]; processes: ExamRow[]; equipment: ExamRow[]; levels: ExamRow[] }>({ groups: [], categories: [], processes: [], equipment: [], levels: [] });
   const [loading, setLoading] = useState(false);
@@ -64,16 +65,20 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
     const extra = lv ? { id, name: `${String(lv.name ?? "").trim() || String(lv.code ?? "")} (미사용)`, rank: Number(lv.rank_order ?? 900) } : { id, name: "삭제된 기준(현재값 보존)", rank: 999 };
     return [...levelOpts, extra].sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name, "ko"));
   }, [editRow, levelOpts, master.levels]);
-  const groupOpts = useMemo(() => master.groups.filter((r) => r.is_active !== false).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.groups]);
+  // [데이터 범위] 허용 process → 상위 Group/제품군 파생. null(admin/무범위)=전체 유지(무회귀).
+  const hierScope = useMemo(() => deriveExamHierarchyScope(allowedExamProcessIds, master.processes, master.categories), [allowedExamProcessIds, master.processes, master.categories]);
+  const groupOpts = useMemo(() => master.groups.filter((r) => r.is_active !== false && (!hierScope || hierScope.groupIds.has(String(r.id)))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko")), [master.groups, hierScope]);
   // [계층 역전] 제품군은 그룹 소속(category.group_id), 공정은 제품군 소속(process.category_id, 없으면 group_id fallback).
-  const catOptsFor = (groupId: string) => master.categories.filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko"));
-  const procOptsForGroup = (groupId: string) => master.processes.filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId || String(catById.get(String(r.category_id ?? ""))?.group_id ?? "") === groupId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
-  const procOptsForCat = (catId: string, groupId: string) => master.processes.filter((r) => r.is_active !== false && (catId ? (String(r.category_id ?? "") === catId || (!r.category_id && String(r.group_id ?? "") === groupId)) : false)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
-  const equipOptsFor = (processId: string) => master.equipment.filter((r) => r.is_active !== false && (!processId || String(r.process_id ?? "") === processId)).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
+  const catOptsFor = (groupId: string) => master.categories.filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId) && (!hierScope || hierScope.categoryIds.has(String(r.id)))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") })).sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  const procOptsForGroup = (groupId: string) => master.processes.filter((r) => r.is_active !== false && (!groupId || String(r.group_id ?? "") === groupId || String(catById.get(String(r.category_id ?? ""))?.group_id ?? "") === groupId) && (!allowedExamProcessIds || allowedExamProcessIds.has(String(r.id)))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
+  const procOptsForCat = (catId: string, groupId: string) => master.processes.filter((r) => r.is_active !== false && (catId ? (String(r.category_id ?? "") === catId || (!r.category_id && String(r.group_id ?? "") === groupId)) : false) && (!allowedExamProcessIds || allowedExamProcessIds.has(String(r.id)))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
+  const equipOptsFor = (processId: string) => master.equipment.filter((r) => r.is_active !== false && (!processId || String(r.process_id ?? "") === processId) && (!allowedExamProcessIds || (r.process_id != null && allowedExamProcessIds.has(String(r.process_id))))).map((r) => ({ id: String(r.id), name: String(r.name ?? r.code ?? "") }));
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((r) => {
+      // [데이터 범위] 허용 process 밖 설비단계 규칙은 숨김(현재값 보존 불필요 — 목록 조회 전용).
+      if (allowedExamProcessIds && !(r.process_id != null && allowedExamProcessIds.has(String(r.process_id)))) return false;
       if (!includeDeleted && r.deleted_at) return false;
       if (fGroup && String(r.group_id ?? "") !== fGroup) return false;
       if (fProcess && String(r.process_id ?? "") !== fProcess) return false;
@@ -85,7 +90,7 @@ export default function EquipmentStageRulesPage({ darkMode, canEdit, tenantId, u
       if (q) { const t = `${code(equipById, r.equipment_id)} ${nm(equipById, r.equipment_id)} ${nm(procById, r.process_id)} ${nm(groupById, r.group_id)}`.toLowerCase(); if (!t.includes(q)) return false; }
       return true;
     });
-  }, [rows, includeDeleted, fGroup, fProcess, fLevel, fCore, fActive, search, equipById, procById, groupById]);
+  }, [rows, includeDeleted, fGroup, fProcess, fLevel, fCore, fActive, search, equipById, procById, groupById, allowedExamProcessIds]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const curPage = Math.min(page, pageCount);
   const paged = filtered.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);

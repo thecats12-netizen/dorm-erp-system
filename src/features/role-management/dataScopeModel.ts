@@ -68,6 +68,9 @@ export type DataScopeAccess = {
   fullScope: boolean;
   canDorm: (d: { id?: string | null; site?: string | null; gender?: string | null }) => boolean;
   canOccupant: (o: { dormId?: string | null; site?: string | null; gender?: string | null }) => boolean;
+  // 신입사원: 입주자와 동일 규칙 + "미배정(dormId 없음)"은 범위 강제 사용자에게 숨김(안전 기본값).
+  //  active=false(범위 없음) 면 항상 true → 기존/admin/무권한 계정 무회귀(미배정 포함 그대로 표시).
+  canNewHire: (o: { dormId?: string | null; site?: string | null; gender?: string | null }) => boolean;
   canProcessId: (processId?: string | null) => boolean;
   regionValues: string[]; genderValues: string[]; dormValues: string[]; processValues: string[];
 };
@@ -79,7 +82,7 @@ export function buildDataScopeAccess(
 ): DataScopeAccess {
   const passAll: DataScopeAccess = {
     active: false, fullScope: true,
-    canDorm: () => true, canOccupant: () => true, canProcessId: () => true,
+    canDorm: () => true, canOccupant: () => true, canNewHire: () => true, canProcessId: () => true,
     regionValues: [], genderValues: [], dormValues: [], processValues: [],
   };
   if (!restrictiveActive) return passAll; // 기존/additive 계정 → 범위 강제 없음(무회귀)
@@ -112,6 +115,8 @@ export function buildDataScopeAccess(
     fullScope,
     canDorm: (d) => fullScope || (dormModuleHasScope && okRegion(d.site) && okGender(d.gender) && okDorm(d.id)),
     canOccupant: (o) => fullScope || (dormModuleHasScope && okRegion(o.site) && okGender(o.gender) && okDorm(o.dormId)),
+    // 미배정(dormId 없음) → 범위 강제 사용자에게 숨김. 배정자는 입주자와 동일 규칙.
+    canNewHire: (o) => fullScope || (!!o.dormId && dormModuleHasScope && okRegion(o.site) && okGender(o.gender) && okDorm(o.dormId)),
     canProcessId: (pid) => fullScope || processAll || (process.length > 0 && !!pid && processIds.has(pid)),
     regionValues: region, genderValues: gender, dormValues: dorm, processValues: process,
   };

@@ -61,6 +61,8 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
   const [draft, setDraft] = useState<Partial<Adjustment>>({ month: now.getMonth() + 1, region: "전체", gender: "전체", type: "직접 인원 증감", quantity: 0 });
 
   const sites = useMemo(() => Array.from(new Set(base.map((b) => b.site))), [base]);
+  // 데이터 범위: 성별 옵션도 base(scoped)에서 파생 → 범위 밖 성별(예: 평택+남 scope 의 "여") 미표시.
+  const genders = useMemo(() => Array.from(new Set(base.map((b) => b.gender))), [base]);
 
   // 선택 scope(지역/성별) base 집계.
   const baseAgg = useMemo(() => {
@@ -258,7 +260,7 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <select value={year} onChange={(e) => setYear(e.target.value)} className={inputCls}>{Array.from({ length: 6 }, (_, i) => String(now.getFullYear() - 1 + i)).map((y) => <option key={y} value={y}>{y}년</option>)}</select>
         <select value={region} onChange={(e) => setRegion(e.target.value)} className={inputCls}><option value="전체">지역: 전체</option>{sites.map((s) => <option key={s} value={s}>{s}</option>)}</select>
-        <select value={gender} onChange={(e) => setGender(e.target.value as GenderSel)} className={inputCls}><option value="전체">성별: 전체</option><option value="남">남</option><option value="여">여</option></select>
+        <select value={gender} onChange={(e) => setGender(e.target.value as GenderSel)} className={inputCls}><option value="전체">성별: 전체</option>{genders.map((g) => <option key={g} value={g}>{g}</option>)}</select>
         <label className="flex items-center gap-1 text-xs text-slate-500">공실 1실 월비용<input type="text" inputMode="numeric" value={String(vacancyCost)} onChange={(e) => setVacancyCost(Number(e.target.value.replace(/[^0-9]/g, "")) || 0)} className={`${inputCls} w-28`} /></label>
         <label className="flex items-center gap-1 text-xs text-slate-500">예상 기숙사(채)<input type="text" inputMode="numeric" value={expectedDormRaw} onChange={(e) => setExpectedDormRaw(e.target.value.replace(/[^0-9-]/g, ""))} placeholder="0" className={`${inputCls} w-20`} title="시뮬레이션 기숙사 채수 증감(양수/음수)" /></label>
         <span className="ml-auto flex gap-1.5">
@@ -345,7 +347,7 @@ export default function MonthlyToSimulation({ base, occupants = [], contracts = 
               <label className="text-sm">적용월 *<select value={draft.month} onChange={(e) => setDraft((d) => ({ ...d, month: Number(e.target.value) }))} className={`${inputCls} mt-1 w-full`}>{MONTHS.map((m) => <option key={m} value={m}>{m}월</option>)}</select></label>
               <label className="text-sm">종료월(반복)<select value={draft.repeatUntil ?? ""} onChange={(e) => setDraft((d) => ({ ...d, repeatUntil: e.target.value ? Number(e.target.value) : null }))} className={`${inputCls} mt-1 w-full`}><option value="">없음</option>{MONTHS.map((m) => <option key={m} value={m}>{m}월</option>)}</select></label>
               <label className="text-sm">지역 *<select value={draft.region} onChange={(e) => setDraft((d) => ({ ...d, region: e.target.value }))} className={`${inputCls} mt-1 w-full`}><option value="전체">전체</option>{sites.map((s) => <option key={s} value={s}>{s}</option>)}</select></label>
-              <label className="text-sm">성별<select value={draft.gender} onChange={(e) => setDraft((d) => ({ ...d, gender: e.target.value as GenderSel }))} className={`${inputCls} mt-1 w-full`}><option value="전체">전체</option><option value="남">남</option><option value="여">여</option></select></label>
+              <label className="text-sm">성별<select value={draft.gender} onChange={(e) => setDraft((d) => ({ ...d, gender: e.target.value as GenderSel }))} className={`${inputCls} mt-1 w-full`}><option value="전체">전체</option>{genders.map((g) => <option key={g} value={g}>{g}</option>)}</select></label>
               <label className="col-span-2 text-sm">유형 *<select value={draft.type} onChange={(e) => setDraft((d) => ({ ...d, type: e.target.value as AdjType }))} className={`${inputCls} mt-1 w-full`}>{ADJ_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
               <label className="col-span-2 text-sm">증감수 * <span className="text-slate-400">(직접 인원 증감은 음수 허용)</span><input type="text" inputMode="numeric" value={String(draft.quantity ?? "")} onChange={(e) => setDraft((d) => ({ ...d, quantity: Number(e.target.value.replace(/[^0-9-]/g, "")) || 0 }))} className={`${inputCls} mt-1 w-full`} /></label>
               <label className="col-span-2 text-sm">비고<input type="text" value={draft.notes ?? ""} onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))} className={`${inputCls} mt-1 w-full`} /></label>

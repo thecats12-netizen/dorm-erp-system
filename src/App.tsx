@@ -3208,6 +3208,13 @@ export default function App() {
       void appAlert("알림", "기숙사를 선택하세요.");
       return;
     }
+    // [데이터 범위] restrictive custom-role: 선택 기숙사가 허용 범위 밖이면 저장 차단.
+    if (dataScope.active) {
+      const sd = operationalDorms.find((d) => d.id === settlementItemForm.dormId);
+      if (!dataScope.canDorm({ id: settlementItemForm.dormId, site: sd?.site, gender: sd?.gender })) {
+        void appAlert("기숙사 ERP 알림", "접근 권한이 없는 기숙사입니다."); return;
+      }
+    }
     if (!settlementItemForm.amount.trim() || Number.isNaN(Number(settlementItemForm.amount))) {
       void appAlert("알림", "유효한 금액을 입력하세요.");
       return;
@@ -5778,150 +5785,8 @@ export default function App() {
   };
 
   // 자동 생성된 알림 항목들
-  const autoNotifications = useMemo(() => {
-    const notifications: typeof dashboardAlerts = [];
-    const today = new Date().toISOString().slice(0, 10);
-
-    // 1. 계약 만료 30일 이내
-    dormContracts.forEach((contract) => {
-      if (!contract.contractEnd) return;
-      const daysLeft = Math.ceil(
-        (new Date(contract.contractEnd).getTime() - new Date(today).getTime()) /
-          (1000 * 60 * 60 * 24)
-      );
-      if (daysLeft >= 0 && daysLeft <= 30) {
-        const endLabel = formatDateOnly(contract.contractEnd) || "-";
-        notifications.push({
-          id: `contract-${contract.id}`,
-          type: "contract",
-          title: `계약 만료 예정: ${contract.buildingName}`,
-          detail: `${endLabel} 계약 종료`,
-          when: `${daysLeft}일`,
-        });
-      }
-      if (contract.contractStatus === "종료" || contract.contractStatus === "해지") {
-        notifications.push({
-          id: `contract-status-${contract.id}`,
-          type: "contract",
-          title: `${contract.buildingName} 계약 ${contract.contractStatus}`,
-          detail: `계약 상태가 ${contract.contractStatus}입니다.`,
-          when: "주의",
-        });
-      }
-    });
-
-    // 2. 퇴실 예정
-    occupants.forEach((occ) => {
-      if (!occ.moveOutDueDate) return;
-      const daysLeft = Math.ceil(
-        (new Date(occ.moveOutDueDate).getTime() - new Date(today).getTime()) /
-          (1000 * 60 * 60 * 24)
-      );
-      if (daysLeft >= 0 && daysLeft <= 14 && occ.status !== "퇴실") {
-        const dueLabel = formatDateOnly(occ.moveOutDueDate) || "-";
-        notifications.push({
-          id: `moveout-${occ.id}`,
-          type: "occupant",
-          title: `${occ.employeeName} 퇴실 예정`,
-          detail: `${dueLabel} 거주기한 만료`,
-          when: `${daysLeft}일`,
-        });
-      }
-    });
-
-    occupants.forEach((occ) => {
-      if (["퇴실", "천안이동", "만료예정"].includes(occ.status)) {
-        notifications.push({
-          id: `occupant-status-${occ.id}`,
-          type: "occupant",
-          title: `${occ.employeeName} ${occ.status}`,
-          detail: `${occ.status} 상태입니다.`,
-          when: "주의",
-        });
-      }
-    });
-
-    // 3. 청소 미제출 (당월)
-    const currentMonth = `${new Date().getMonth() + 1}월`;
-    users
-      .filter((u) => u.role === "maintenance_reporter" && u.dormId)
-      .forEach((manager) => {
-        let allSubmitted = true;
-        for (let week = 1; week <= 5; week++) {
-          const status = getCleaningWeekStatus(manager.id, week, currentMonth);
-          if (status === "X") {
-            allSubmitted = false;
-            break;
-          }
-        }
-        if (!allSubmitted) {
-          notifications.push({
-            id: `cleaning-${manager.id}`,
-            type: "cleaning",
-            title: `${manager.displayName} 청소보고 미제출`,
-            detail: `금주 청소보고서 제출 필요`,
-            when: "긴급",
-          });
-        }
-      });
-
-    // 3-1. 청소 불량/재청소요청 상태
-    cleaningReports.forEach((report) => {
-      if (report.cleanStatus === "불량" || report.cleanStatus === "재청소요청") {
-        notifications.push({
-          id: `cleaning-status-${report.id}`,
-          type: "cleaning",
-          title: `${report.buildingName} 청소 불량`,
-          detail: `${report.cleanStatus} 상태 - 재청소 필요`,
-          when: "주의",
-        });
-      }
-    });
-
-    // 4. 미완료 하자
-    defects.forEach((defect) => {
-      if (defect.defectStatus !== "완료") {
-        notifications.push({
-          id: `defect-${defect.id}`,
-          type: "defect",
-          title: `미완료 하자: ${defect.buildingName} ${formatDong(defect.dong)}-${formatRoomHo(defect.ho)}`,
-          detail: defect.requestText || "상세 정보 없음",
-          when: "진행중",
-        });
-      }
-    });
-
-    // 5. 비품 저수량
-    inventory.forEach((item) => {
-      if (item.quantity <= 2) {
-        notifications.push({
-          id: `inventory-${item.id}`,
-          type: "inventory",
-          title: `저수량: ${item.itemName}`,
-          detail: `현재 수량: ${item.quantity}개`,
-          when: "경고",
-        });
-      }
-    });
-
-    // 6. 정원초과
-    dorms.forEach((dorm) => {
-      const occupantCount = occupants.filter(
-        (o) => o.dormId === dorm.id && !["퇴실", "천안이동"].includes(o.status) && !o.isDeleted
-      ).length;
-      if (occupantCount > getDormCapacity(dorm)) {
-        notifications.push({
-          id: `overcrowded-${dorm.id}`,
-          type: "occupant",
-          title: `정원초과: ${dorm.buildingName} ${dorm.dong}-${dorm.roomHo}`,
-          detail: `정원 ${getDormCapacity(dorm)}명 > 현재 ${occupantCount}명`,
-          when: "주의",
-        });
-      }
-    });
-
-    return notifications;
-  }, [dormContracts, occupants, dorms, users, cleaningReports, defects, inventory]);
+  // [데이터 범위 이동] autoNotifications(알림관리 KPI/목록의 실제 소스)는 scoped 파생을 참조하므로
+  //  scope 파생 블록 선언 이후로 이동함(아래). 기존 알림 로직 동일 + dorm scope 필터만 추가.
 
   // ============================================
   // 알림센터 항목 (11종 카테고리 + 정렬용 날짜 + 심각도)
@@ -5930,140 +5795,8 @@ export default function App() {
   type NotifItem = { id: string; category: string; level: "중요" | "경고" | "정보"; title: string; detail: string; date: string };
   const notifTodayStr = new Date().toISOString().slice(0, 10);
 
-  // 1) 계약 만료 60/30/15/7일 (계약별 가장 임박한 임계값 1건)
-  const notifContractExpiry = useMemo<NotifItem[]>(() => {
-    const items: NotifItem[] = [];
-    dormContracts.forEach((c) => {
-      if (c.isDeleted || !c.contractEnd) return;
-      if (["종료", "해지"].includes(c.contractStatus)) return;
-      const d = daysDiff(c.contractEnd);
-      if (d < 0 || d > 60) return;
-      const threshold = d <= 7 ? 7 : d <= 15 ? 15 : d <= 30 ? 30 : 60;
-      const level = threshold <= 7 ? "중요" : threshold <= 30 ? "경고" : "정보";
-      items.push({
-        id: `contract-exp-${c.id}`,
-        category: "계약만료",
-        level,
-        title: `계약 만료 ${threshold}일 이내: ${c.buildingName} ${formatDong(c.dong)}-${formatRoomHo(c.roomHo)}`,
-        detail: `만료일 ${formatDateOnly(c.contractEnd) || "-"} · D-${d}`,
-        date: formatDateOnly(c.contractEnd) || notifTodayStr,
-      });
-    });
-    return items;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dormContracts]);
-
-  // 2) 오늘 입주/퇴실 알림
-  const notifMoveInOut = useMemo<NotifItem[]>(() => {
-    const items: NotifItem[] = [];
-    const moveInToday = [
-      ...occupants.filter((o) => !o.isDeleted && o.moveInDate === notifTodayStr),
-      ...newHires.filter((h) => !h.isDeleted && h.moveInDate === notifTodayStr && !occupants.some((o) => o.sourceNewHireId === h.id)),
-    ];
-    moveInToday.forEach((o) => {
-      const name = "employeeName" in o ? (o as Occupant).employeeName : (o as NewHireEmployee).name;
-      items.push({ id: `movein-${o.id}`, category: "오늘입주", level: "정보", title: `오늘 입주 예정: ${name}`, detail: `입실일 ${formatDateOnly(notifTodayStr)}`, date: notifTodayStr });
-    });
-    occupants
-      .filter((o) => !o.isDeleted && (o.actualMoveOutDate === notifTodayStr || (!o.actualMoveOutDate && o.moveOutDueDate === notifTodayStr)))
-      .forEach((o) => {
-        items.push({ id: `moveout-today-${o.id}`, category: "오늘퇴실", level: "경고", title: `오늘 퇴실 예정: ${o.employeeName}`, detail: `퇴실일 ${formatDateOnly(o.actualMoveOutDate || o.moveOutDueDate) || "-"}`, date: notifTodayStr });
-      });
-    return items;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [occupants, newHires]);
-
-  // 3) 미배정 신입사원
-  const notifUnassigned = useMemo<NotifItem[]>(() => {
-    return newHires
-      .filter((h) => !h.isDeleted && (!h.dormId || !h.buildingName || !h.address))
-      .map((h) => ({
-        id: `unassigned-${h.id}`,
-        category: "미배정",
-        level: "정보" as const,
-        title: `미배정 신입사원: ${h.name}`,
-        detail: `${h.site} · ${h.department || "-"} · 예상입실 ${formatDateOnly(h.expectedMoveInDate) || "-"}`,
-        date: formatDateOnly(h.expectedMoveInDate) || formatDateOnly(h.createdAt) || notifTodayStr,
-      }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newHires]);
-
-  // 4) 청소 미제출 (담당자 기준)
-  const notifCleaningMissing = useMemo<NotifItem[]>(() => {
-    const items: NotifItem[] = [];
-    const currentMonthLabel = `${new Date().getMonth() + 1}월`;
-    users
-      .filter((u) => u.role === "maintenance_reporter" && u.dormId)
-      .forEach((manager) => {
-        let missing = false;
-        for (let week = 1; week <= 5; week++) {
-          if (getCleaningWeekStatus(manager.id, week, currentMonthLabel) === "X") { missing = true; break; }
-        }
-        if (missing) {
-          items.push({ id: `cleaning-miss-${manager.id}`, category: "청소미제출", level: "경고", title: `청소보고 미제출: ${manager.displayName}`, detail: "당월 청소보고서 제출 필요", date: notifTodayStr });
-        }
-      });
-    return items;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [users, cleaningReports]);
-
-  // 5) 하자 미처리
-  const notifDefectOpen = useMemo<NotifItem[]>(() => {
-    return defects
-      .filter((d) => !d.isDeleted && d.defectStatus !== "완료")
-      .map((d) => ({
-        id: `defect-open-${d.id}`,
-        category: "하자미처리",
-        level: "중요" as const,
-        title: `하자 미처리: ${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.ho)}`,
-        detail: `${d.defectStatus} · ${d.requestText || "상세 없음"}`,
-        date: formatDateOnly(d.receiptDate) || notifTodayStr,
-      }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defects]);
-
-  // 6) 비품 교체 예정 (고장/노후/저수량)
-  const notifInventory = useMemo<NotifItem[]>(() => {
-    return inventory
-      .filter((i) => !i.isDeleted && (["고장", "노후"].includes(i.status) || (i.quantity ?? 0) <= 2))
-      .map((i) => ({
-        id: `inv-replace-${i.id}`,
-        category: "비품교체",
-        level: "경고" as const,
-        title: `비품 교체 예정: ${i.itemName}`,
-        detail: `${i.buildingName || "-"} · 상태 ${i.status} · 수량 ${i.quantity ?? 0}`,
-        date: formatDateOnly(i.purchaseDate) || notifTodayStr,
-      }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inventory]);
-
-  // 7) 정원 초과
-  const notifOvercrowded = useMemo<NotifItem[]>(() => {
-    const items: NotifItem[] = [];
-    dorms.forEach((dorm) => {
-      if (dorm.isDeleted) return;
-      const count = occupants.filter((o) => o.dormId === dorm.id && !o.isDeleted && !["퇴실", "천안이동"].includes(o.status)).length;
-      if (count > getDormCapacity(dorm)) {
-        items.push({ id: `overcrowded-${dorm.id}`, category: "정원초과", level: "중요", title: `정원 초과: ${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}`, detail: `정원 ${getDormCapacity(dorm)}명 < 현재 ${count}명`, date: notifTodayStr });
-      }
-    });
-    return items;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dorms, occupants]);
-
-  // 합산 (기존 화면과 동일한 단일 배열)
-  const notificationCenterItems = useMemo<NotifItem[]>(
-    () => [
-      ...notifContractExpiry,
-      ...notifMoveInOut,
-      ...notifUnassigned,
-      ...notifCleaningMissing,
-      ...notifDefectOpen,
-      ...notifInventory,
-      ...notifOvercrowded,
-    ],
-    [notifContractExpiry, notifMoveInOut, notifUnassigned, notifCleaningMissing, notifDefectOpen, notifInventory, notifOvercrowded]
-  );
+  // [데이터 범위 이동] notif* 알림 memo 들은 scoped 파생(allowedDormIds/scopedDefects 등)을 참조하므로
+  //  scope 파생 블록 선언 이후로 이동함(아래 scoped* 선언 뒤). 기존 알림 로직 동일 + dorm scope 필터만 추가.
 
   // ============================================
   // 8. 자동화 연결 부분
@@ -6977,21 +6710,8 @@ export default function App() {
   };
 
   // [월별 TO 시뮬레이션] base forecast 입력용 정규화 입주자(미삭제) — 지역/성별/입주·퇴실(예정)일자. 원본 불변 · 1회 memo(행별 DB 호출 없음).
-  const simOccupants = useMemo(() => normalizedOccupants
-    .filter((o) => !o.isDeleted && !o.deletedAt && !o.isPermanentDeleted)
-    .map((o) => ({
-      id: o.id, site: o.site, gender: o.gender, status: String(o.status ?? ""),
-      isResident: o.status === "거주중" || o.status === "만료예정",
-      moveInDate: o.moveInDate, expectedMoveInDate: o.expectedMoveInDate,
-      moveOutDueDate: o.moveOutDueDate, expectedMoveOutDate: o.expectedMoveOutDate, actualMoveOutDate: o.actualMoveOutDate,
-    })), [normalizedOccupants]);
-
-  // [월별 TO 시뮬레이션] 임차 만기/추가임차(채)·임차 해지예정(TO) 산정용 계약(미삭제). dormId 대신 정규화 룸키(건물|동|호)로 distinct.
-  //  ⚠ 해지 계약도 포함해야 임차 해지예정 TO 차감이 가능(operationalDorms 는 해지 제외이므로 엔진에서 가산 후 차감).
-  const simContracts = useMemo(() => dormContracts
-    .filter((c) => !c.isDeleted && !c.deletedAt && !c.isPermanentDeleted)
-    .map((c) => ({ id: c.id, site: c.site, gender: c.gender as string, dormId: normalizeRoomKey(c.buildingName, c.dong, c.roomHo), capacity: c.capacity, contractStart: c.contractStart, contractEnd: c.contractEnd, contractStatus: c.contractStatus, contractType: c.contractType })),
-    [dormContracts]);
+  // [데이터 범위 이동] simOccupants/simContracts(월별 TO 시뮬레이션 엔진 입력)는 scoped 파생을 참조하므로
+  //  scope 파생 블록 선언 이후로 이동함(아래). 집계 원천 단계에서 custom-role scope 적용.
 
   // 호실키(건물+동+호 정규화)별 "현재 거주자 수" 맵. 배정 신입사원 포함(normalizedOccupants),
   // 실제 퇴실/삭제 제외(isCurrentResidentOccupant). occupant 엔 호실 정보가 없으므로 dorm 을 경유해 키로 집계.
@@ -7228,72 +6948,8 @@ export default function App() {
     setSettlementDetailDorm(dorm); // 상세보기 모달 열기
   };
 
-  const reportPeriod = `${reportYear}-${reportMonth}`;
-
-  const reportFilteredOperationalDorms = useMemo(() => {
-    return operationalDorms.filter((dorm) => {
-      if (reportSiteFilter !== "전체" && dorm.site !== reportSiteFilter) return false;
-      if (reportGenderFilter !== "전체" && dorm.gender !== reportGenderFilter) return false;
-      return true;
-    });
-  }, [operationalDorms, reportSiteFilter, reportGenderFilter]);
-
-  const reportData = useMemo(() => {
-    const totalDorms = reportFilteredOperationalDorms.length;
-    const vacantDorms = reportFilteredOperationalDorms.filter((dorm) => getVacancyStatus(dorm.id) === "공실").length;
-    // 공실률: 정원 기준(대시보드와 동일 공통 함수). 빈 호실 수가 아니라 (정원-거주자)/정원.
-    const vacancyRate = computeVacancyStats(reportFilteredOperationalDorms, occupants).vacancyRate.toFixed(1);
-    const vacancyDormCount = vacantDorms;
-    const totalDormCount = totalDorms;
-
-    const relatedDormIds = new Set(reportFilteredOperationalDorms.map((d) => d.id));
-    const relatedDormKeys = new Set(
-      reportFilteredOperationalDorms.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo))
-    );
-
-    // 청소 제출률 = 제출한 기숙사 수 / 활성(제출 대상) 기숙사 수 (해당 월, 미제출 제외, 0분모 0%)
-    const submittedDormIds = new Set(
-      cleaningReports
-        .filter((r) => !r.isDeleted && r.reportDate.startsWith(reportPeriod) && relatedDormIds.has(r.dormId) && r.cleanStatus !== "미제출")
-        .map((r) => r.dormId)
-    );
-    const requiredCleaningCount = reportFilteredOperationalDorms.length;
-    const submittedCleaningCount = submittedDormIds.size;
-    const cleaningSubmissionRate =
-      requiredCleaningCount > 0
-        ? ((submittedCleaningCount / requiredCleaningCount) * 100).toFixed(1)
-        : "0";
-
-    const periodDefects = defects.filter(
-      (d) => !d.isDeleted && d.receiptDate.startsWith(reportPeriod) && relatedDormIds.has(d.dormId)
-    );
-    const completedDefects = periodDefects.filter((d) => d.defectStatus === "완료").length;
-    const defectCompletionRate =
-      periodDefects.length > 0 ? ((completedDefects / periodDefects.length) * 100).toFixed(1) : "0";
-    const completedDefectCount = completedDefects;
-    const totalDefectCount = periodDefects.length;
-
-    const expiringContractCount = dormContracts.filter(
-      (c) =>
-        !c.isDeleted &&
-        c.contractEnd.startsWith(reportPeriod) &&
-        relatedDormKeys.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo))
-    ).length;
-
-    return {
-      vacancyRate,
-      defectCompletionRate,
-      vacancyDormCount,
-      totalDormCount,
-      cleaningSubmissionRate,
-      requiredCleaningCount,
-      submittedCleaningCount,
-      completedDefectCount,
-      totalDefectCount,
-      expiringContractCount,
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reportFilteredOperationalDorms, reportPeriod, cleaningReports, defects, dormContracts, occupants]);
+  // [TDZ 정리] reportPeriod/reportFilteredOperationalDorms/reportData 는 scopedDefects 를 참조하므로
+  //  scope 파생 블록(allowedDormIds/scopedDefects 등) 선언 이후로 이동함. (아래 scoped* 선언 뒤 참조)
 
   const filteredUnassignedNewHires = useMemo(() => {
     return newHires.filter((hire) => {
@@ -7528,30 +7184,64 @@ export default function App() {
   // ── 권한/데이터 범위 계산 (파생 목록·핸들러보다 먼저 선언) ────────────────────
   const EMPTY_MENU_ACCESS: MyMenuAccess = { allKeys: new Set(), restrictiveActive: false, restrictiveTabs: new Set(), restrictiveKeys: new Set(), restrictiveScopeRows: [], exclusiveActive: false, exclusiveTabs: new Set(), exclusiveKeys: new Set() };
   const [myMenuAccess, setMyMenuAccess] = useState<MyMenuAccess>(EMPTY_MENU_ACCESS);
+  // [권한 플래시 방지] 사용자 정의 권한/데이터 범위 로딩 완료 여부. 로딩 전에는 dataScope 를 DENY-ALL 로 게이트해
+  //  전체 데이터가 한 프레임도 렌더되지 않게 한다(fail-closed). 로딩 실패(throw)/미완료 시에도 게이트 유지.
+  const [scopeLoaded, setScopeLoaded] = useState(false);
+  const [scopeLoadError, setScopeLoadError] = useState(false); // 권한 조회 실패(fail-closed) — 민감 데이터 미표시 + 안내
   useEffect(() => {
     const role = currentUser?.role;
     const uid = currentUser?.id;
-    if (!uid || role === "maintenance_reporter" || role === "dorm_manager") { setMyMenuAccess(EMPTY_MENU_ACCESS); return; }
+    setScopeLoaded(false); setScopeLoadError(false); // 사용자/역할 변경 시 재게이트
+    if (!uid || role === "maintenance_reporter" || role === "dorm_manager") { setMyMenuAccess(EMPTY_MENU_ACCESS); setScopeLoaded(true); return; }
     let alive = true;
     (async () => {
-      const access = await loadMyMenuAccess(uid, tenantId);
-      if (alive) setMyMenuAccess(access);
-      // [진단] 개발 환경 전용: 로그인 사용자의 시스템 역할 + 배타모드 적용 결과를 확인(운영 build 미노출, userId 마스킹).
-      //  exclusiveActive=false 인데 커스텀 역할이 있으면 = additive(union)로 기본 역할 메뉴가 합쳐짐 → 원인.
-      if (import.meta.env.DEV) console.debug("[perm/app] 로그인 권한 계산", {
-        user: (uid || "").slice(0, 8) + "…", systemRole: role,
-        exclusiveActive: access.exclusiveActive, exclusiveTabs: Array.from(access.exclusiveTabs),
-        restrictiveActive: access.restrictiveActive, permissionKeyCount: access.allKeys.size,
-      });
+      try {
+        const access = await loadMyMenuAccess(uid, tenantId);
+        if (!alive) return;
+        if (access.loadError) {
+          // 실제 DB 조회 실패 → 전체 노출 fallback 금지. 게이트 유지 + 오류 안내.
+          setMyMenuAccess(EMPTY_MENU_ACCESS); setScopeLoadError(true);
+          return;
+        }
+        setMyMenuAccess(access);
+        setScopeLoaded(true); // 로딩 완료(정상) 후에만 게이트 해제
+        // [진단] 개발 환경 전용: 로그인 사용자의 시스템 역할 + 배타모드 적용 결과를 확인(운영 build 미노출, userId 마스킹).
+        if (import.meta.env.DEV) console.debug("[perm/app] 로그인 권한 계산", {
+          user: (uid || "").slice(0, 8) + "…", systemRole: role,
+          exclusiveActive: access.exclusiveActive, exclusiveTabs: Array.from(access.exclusiveTabs),
+          restrictiveActive: access.restrictiveActive, permissionKeyCount: access.allKeys.size,
+        });
+      } catch {
+        // fail-closed: 예외 시 게이트 유지(scopeLoaded=false) → 민감 데이터 미렌더. 전체 노출 fallback 금지.
+        if (alive) { setMyMenuAccess(EMPTY_MENU_ACCESS); setScopeLoadError(true); }
+      }
     })();
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.id, currentUser?.role, tenantId]);
   const myPerms = useMemo(() => buildEffectivePermissions(myMenuAccess.allKeys), [myMenuAccess]);
+  // [권한 플래시 방지] 권한 범위 준비 완료 여부. admin/maintenance/dorm_manager 는 custom scope 미적용 → 즉시 준비.
+  //  그 외(viewer 등)는 loadMyMenuAccess 완료(scopeLoaded)까지 미준비 → 아래 dataScope 를 DENY-ALL 로 게이트.
+  const permissionScopeReady = useMemo(() => {
+    const role = currentUser?.role;
+    if (!currentUser) return false;
+    if (role === "admin" || role === "maintenance_reporter" || role === "dorm_manager") return true;
+    return scopeLoaded;
+  }, [currentUser, scopeLoaded]);
   // 데이터 범위(9단계): restrictive 역할의 활성 범위로 접근 판정. restrictive 없음 → active=false(전부 허용, 무회귀).
+  //  ⚠ 준비 전(permissionScopeReady=false)에는 DENY-ALL(active=true·모든 canX=false) 로 게이트 → 로딩 중 전체 데이터 미노출.
   const dataScope = useMemo(
-    () => buildDataScopeAccess(myMenuAccess.restrictiveActive, myMenuAccess.restrictiveScopeRows, { assignedDormId: currentUser?.dormId }),
-    [myMenuAccess, currentUser]
+    () => {
+      if (!permissionScopeReady) {
+        return {
+          active: true, fullScope: false,
+          canDorm: () => false, canOccupant: () => false, canNewHire: () => false, canProcessId: () => false,
+          regionValues: [], genderValues: [], dormValues: [], processValues: [],
+        } as ReturnType<typeof buildDataScopeAccess>;
+      }
+      return buildDataScopeAccess(myMenuAccess.restrictiveActive, myMenuAccess.restrictiveScopeRows, { assignedDormId: currentUser?.dormId });
+    },
+    [myMenuAccess, currentUser, permissionScopeReady]
   );
   // 대시보드·통계 집계용 스코프 적용 배열. 데이터 범위 없는 계정(dataScope.active=false)은 원본을 그대로
   //  반환하므로 기존 동작 100% 동일(무회귀). 목록과 동일한 dataScope 함수 재사용(별도 계산 없음).
@@ -7567,6 +7257,389 @@ export default function App() {
     () => dataScope.active ? normalizedOccupants.filter((o) => dataScope.canOccupant({ dormId: o.dormId, site: o.site, gender: o.gender })) : normalizedOccupants,
     [normalizedOccupants, dataScope]
   );
+  // 신규계약은 dormId 가 없고 site+건물+동+호 로만 dorm 과 연결된다. 스코프 통과 dorm 들의 안정 키(getDormKey)
+  //  집합을 1회 계산해 계약을 정확 매칭(문자열 부분검색 금지). active=false 면 null → 필터 미적용(무회귀).
+  const allowedDormKeySet = useMemo<Set<string> | null>(
+    () => dataScope.active ? new Set(scopedOperationalDorms.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo))) : null,
+    [scopedOperationalDorms, dataScope]
+  );
+  // 공통 dorm scope(dormId 보유 레코드용): 허용 dorm id 집합. null=미적용(기존 전체 동작·무회귀).
+  //  화면마다 region/gender 재계산하지 않고 이 Set 으로 O(1) membership 판정. dormId 없는 계약은 allowedDormKeySet 사용.
+  const allowedDormIds = useMemo<Set<string> | null>(
+    () => dataScope.active ? new Set(scopedOperationalDorms.map((d) => d.id)) : null,
+    [scopedOperationalDorms, dataScope]
+  );
+  // 공통 필터 옵션(지역/성별): custom scope 활성 시 허용 dorm 에 존재하는 지역/성별만. scope 미적용(admin/무범위)=전체(무회귀).
+  //  "전체" = 권한 범위 전체 의미. 데이터 필터 dropdown 전반에서 재사용(권한부여 설정 dropdown 은 제외).
+  const scopedSiteOptions = useMemo<string[]>(
+    () => { if (!allowedDormIds) return ["전체", "평택", "천안"]; const s = new Set<string>(scopedOperationalDorms.map((d) => String(d.site))); return ["전체", ...["평택", "천안"].filter((x) => s.has(x))]; },
+    [allowedDormIds, scopedOperationalDorms]
+  );
+  const scopedGenderOptions = useMemo<string[]>(
+    () => { if (!allowedDormIds) return ["전체", "남", "여"]; const g = new Set<string>(scopedOperationalDorms.map((d) => String(d.gender))); return ["전체", ...["남", "여"].filter((x) => g.has(x))]; },
+    [allowedDormIds, scopedOperationalDorms]
+  );
+  // 등록/수정 폼용(값 선택 · "전체" 제외): scope 활성 시 허용 지역/성별만 선택 가능. scope 미적용(admin/무범위)=전체(무회귀). 권한부여 UI 는 제외.
+  const formSiteOptions = useMemo<string[]>(() => scopedSiteOptions.filter((s) => s !== "전체"), [scopedSiteOptions]);
+  const formGenderOptions = useMemo<string[]>(() => scopedGenderOptions.filter((g) => g !== "전체"), [scopedGenderOptions]);
+  // 공통 스코프 파생 배열(비품/하자/청소): scope 미적용 시 원본 그대로 반환 → 무회귀. isDeleted/검색 등 하위 필터는 소비처에서 그대로.
+  const scopedInventory = useMemo(
+    () => allowedDormIds ? inventory.filter((i) => allowedDormIds.has(i.dormId)) : inventory,
+    [inventory, allowedDormIds]
+  );
+  const scopedDefects = useMemo(
+    () => allowedDormIds ? defects.filter((d) => allowedDormIds.has(d.dormId)) : defects,
+    [defects, allowedDormIds]
+  );
+  const scopedCleaningReports = useMemo(
+    () => allowedDormIds ? cleaningReports.filter((r) => allowedDormIds.has(r.dormId)) : cleaningReports,
+    [cleaningReports, allowedDormIds]
+  );
+
+  // ── 군대 부서 scope(defense-in-depth) ── 서버 RPC(get_military_module_for_current_user)가 이미 부서 필터하나,
+  //  UI 일관성 + 로컬폴백/이중방어용으로 프론트도 동일 canonical 규칙 적용. null = 부서 scope 없음 → 전체(무회귀).
+  const allowedMilitaryDepartments = useMemo<string[] | null>(() => {
+    const rows = myMenuAccess.restrictiveScopeRows
+      .filter((r) => r.scope_type === "military_department")
+      .map((r) => (r.scope_value || "").trim())
+      .filter(Boolean);
+    return rows.length ? Array.from(new Set(rows)) : null;
+  }, [myMenuAccess]);
+  // 서버와 동일: btrim → 맨앞 'D-'/'F-' 만 제거 → case-insensitive exact(부분검색 금지).
+  const militaryUnitInScope = useCallback((unit?: string | null): boolean => {
+    if (!allowedMilitaryDepartments) return true;
+    const u = (unit || "").trim();
+    if (!u) return false;
+    const canon = (u.startsWith("D-") || u.startsWith("F-")) ? u.slice(2) : u;
+    return allowedMilitaryDepartments.some((a) => a.trim().toLowerCase() === canon.toLowerCase());
+  }, [allowedMilitaryDepartments]);
+  const scopedMilitaryPersonnel = useMemo(
+    () => allowedMilitaryDepartments ? militaryPersonnel.filter((p) => militaryUnitInScope(p.unit)) : militaryPersonnel,
+    [militaryPersonnel, allowedMilitaryDepartments, militaryUnitInScope]
+  );
+  // 군인 등록/수정 폼 부서 옵션(값 선택): 부서 scope 활성 시 허용 부서만. 권한부여 UI(roleMilitaryDeptOptions)와 달리 데이터 입력용이므로 scoped.
+  const scopedMilitaryDepartmentOptions = useMemo(
+    () => { const all = militaryCodeValues.departments || []; return allowedMilitaryDepartments ? all.filter((d) => militaryUnitInScope(d)) : all; },
+    [militaryCodeValues.departments, allowedMilitaryDepartments, militaryUnitInScope]
+  );
+
+  // ── 시험관리 custom-role 허용 공정 id(UI 옵션 scope용) ── custom_role_scopes(process) = myMenuAccess.restrictiveScopeRows.
+  //  데이터 행은 서버 resource-aware RLS로 이미 강제됨. 이 값은 Group/공정/설비 dropdown·hierarchy 옵션명 노출 차단용.
+  //  null = 공정 scope 없음('all' 포함) 또는 admin/무-restrictive → 전체 옵션(무회귀). Set = 허용 공정 id.
+  const allowedExamProcessIds = useMemo<Set<string> | null>(() => {
+    if (!myMenuAccess.restrictiveActive) return null;
+    const rows = myMenuAccess.restrictiveScopeRows.filter((r) => r.scope_type === "process");
+    if (rows.length === 0 || rows.some((r) => r.scope_value === "all")) return null;
+    const ids = rows.map((r) => (r.scope_value || "").trim()).filter((v) => v && v !== "all");
+    return ids.length ? new Set(ids) : null;
+  }, [myMenuAccess]);
+
+  // [이동+scope] 월별 TO 시뮬레이션 엔진 입력. 원천(occupant/contract) 단계에서 custom-role dorm scope 적용.
+  //  occupant = scopedNormalizedOccupants(canOccupant 반영), contract = allowedDormKeySet 정확 매칭. scope 미적용 시 전체(무회귀).
+  const simOccupants = useMemo(() => scopedNormalizedOccupants
+    .filter((o) => !o.isDeleted && !o.deletedAt && !o.isPermanentDeleted)
+    .map((o) => ({
+      id: o.id, site: o.site, gender: o.gender, status: String(o.status ?? ""),
+      isResident: o.status === "거주중" || o.status === "만료예정",
+      moveInDate: o.moveInDate, expectedMoveInDate: o.expectedMoveInDate,
+      moveOutDueDate: o.moveOutDueDate, expectedMoveOutDate: o.expectedMoveOutDate, actualMoveOutDate: o.actualMoveOutDate,
+    })), [scopedNormalizedOccupants]);
+
+  // [월별 TO 시뮬레이션] 임차 만기/추가임차(채)·임차 해지예정(TO) 산정용 계약(미삭제). dormId 대신 정규화 룸키(건물|동|호)로 distinct.
+  //  ⚠ 해지 계약도 포함해야 임차 해지예정 TO 차감이 가능. 데이터 범위: allowedDormKeySet 정확 매칭(부분검색 금지).
+  const simContracts = useMemo(() => dormContracts
+    .filter((c) => !c.isDeleted && !c.deletedAt && !c.isPermanentDeleted
+      && (!allowedDormKeySet || allowedDormKeySet.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo))))
+    .map((c) => ({ id: c.id, site: c.site, gender: c.gender as string, dormId: normalizeRoomKey(c.buildingName, c.dong, c.roomHo), capacity: c.capacity, contractStart: c.contractStart, contractEnd: c.contractEnd, contractStatus: c.contractStatus, contractType: c.contractType })),
+    [dormContracts, allowedDormKeySet]);
+
+  // [월별 TO base] 지역/성별별 정원=TO·현재거주자·기숙사수. getRegionStats 로직을 scoped 소스로 미러(입력 단계 scope).
+  //  · dorm = scopedOperationalDorms(canDorm) · 거주자 = unifiedCurrentResidents 중 허용 dorm 만.
+  //  · scope 활성 시 허용 dorm 0 콤보(예: 천안/평택여)는 base 에서 제외 → 컴포넌트 지역/성별 옵션도 자동 축소.
+  //  · scope 미적용(admin/무범위)=allowedDormIds null → 전체 콤보·전체 수치(기존 getRegionStats 와 동일, 무회귀).
+  const monthlyToBase = useMemo(() => {
+    const residentsPool = allowedDormIds ? unifiedCurrentResidents.filter((o) => allowedDormIds.has(o.dormId)) : unifiedCurrentResidents;
+    const out: Array<{ site: Site; gender: "남" | "여"; capacity: number; currentResidents: number; dormCount: number }> = [];
+    (["평택", "천안"] as const).forEach((site) => (["남", "여"] as const).forEach((g) => {
+      const rd = scopedOperationalDorms.filter((d) => d.site === site && d.gender === g);
+      if (allowedDormIds && rd.length === 0) return; // scope 밖 콤보 제외
+      out.push({
+        site, gender: g,
+        capacity: rd.reduce((sum, d) => sum + (d.capacity || 0), 0),
+        currentResidents: residentsPool.filter((o) => { const dorm = operationalDormById.get(o.dormId); return dorm?.site === site && dorm?.gender === g; }).length,
+        dormCount: rd.length,
+      });
+    }));
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedOperationalDorms, unifiedCurrentResidents, operationalDormById, allowedDormIds]);
+
+  // [TDZ 이동] scopedDefects 참조를 위해 scope 파생 블록 뒤로 옮긴 보고서 통계(기존 로직 100% 동일).
+  const reportPeriod = `${reportYear}-${reportMonth}`;
+
+  const reportFilteredOperationalDorms = useMemo(() => {
+    return operationalDorms.filter((dorm) => {
+      if (reportSiteFilter !== "전체" && dorm.site !== reportSiteFilter) return false;
+      if (reportGenderFilter !== "전체" && dorm.gender !== reportGenderFilter) return false;
+      return true;
+    });
+  }, [operationalDorms, reportSiteFilter, reportGenderFilter]);
+
+  const reportData = useMemo(() => {
+    const totalDorms = reportFilteredOperationalDorms.length;
+    const vacantDorms = reportFilteredOperationalDorms.filter((dorm) => getVacancyStatus(dorm.id) === "공실").length;
+    // 공실률: 정원 기준(대시보드와 동일 공통 함수). 빈 호실 수가 아니라 (정원-거주자)/정원.
+    const vacancyRate = computeVacancyStats(reportFilteredOperationalDorms, occupants).vacancyRate.toFixed(1);
+    const vacancyDormCount = vacantDorms;
+    const totalDormCount = totalDorms;
+
+    const relatedDormIds = new Set(reportFilteredOperationalDorms.map((d) => d.id));
+    const relatedDormKeys = new Set(
+      reportFilteredOperationalDorms.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo))
+    );
+
+    // 청소 제출률 = 제출한 기숙사 수 / 활성(제출 대상) 기숙사 수 (해당 월, 미제출 제외, 0분모 0%)
+    const submittedDormIds = new Set(
+      cleaningReports
+        .filter((r) => !r.isDeleted && r.reportDate.startsWith(reportPeriod) && relatedDormIds.has(r.dormId) && r.cleanStatus !== "미제출")
+        .map((r) => r.dormId)
+    );
+    const requiredCleaningCount = reportFilteredOperationalDorms.length;
+    const submittedCleaningCount = submittedDormIds.size;
+    const cleaningSubmissionRate =
+      requiredCleaningCount > 0
+        ? ((submittedCleaningCount / requiredCleaningCount) * 100).toFixed(1)
+        : "0";
+
+    const periodDefects = scopedDefects.filter(
+      (d) => !d.isDeleted && d.receiptDate.startsWith(reportPeriod) && relatedDormIds.has(d.dormId)
+    );
+    const completedDefects = periodDefects.filter((d) => d.defectStatus === "완료").length;
+    const defectCompletionRate =
+      periodDefects.length > 0 ? ((completedDefects / periodDefects.length) * 100).toFixed(1) : "0";
+    const completedDefectCount = completedDefects;
+    const totalDefectCount = periodDefects.length;
+
+    const expiringContractCount = dormContracts.filter(
+      (c) =>
+        !c.isDeleted &&
+        c.contractEnd.startsWith(reportPeriod) &&
+        relatedDormKeys.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo))
+    ).length;
+
+    return {
+      vacancyRate,
+      defectCompletionRate,
+      vacancyDormCount,
+      totalDormCount,
+      cleaningSubmissionRate,
+      requiredCleaningCount,
+      submittedCleaningCount,
+      completedDefectCount,
+      totalDefectCount,
+      expiringContractCount,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportFilteredOperationalDorms, reportPeriod, cleaningReports, scopedDefects, dormContracts, occupants]);
+
+  // ── [이동+scope] 대시보드 알림(오늘 일정/만료/미처리 등): scope 파생 뒤에서 dorm 범위 적용 ──────────────
+  //  각 알림 원천에 dorm 연결이 있으면 allowedDormIds/allowedDormKeySet/canX 로 제한. scope 미적용(null) 시 기존 전체(무회귀).
+  // 1) 계약 만료 60/30/15/7일
+  const notifContractExpiry = useMemo<NotifItem[]>(() => {
+    const items: NotifItem[] = [];
+    dormContracts.forEach((c) => {
+      if (c.isDeleted || !c.contractEnd) return;
+      if (["종료", "해지"].includes(c.contractStatus)) return;
+      if (allowedDormKeySet && !allowedDormKeySet.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo))) return; // 데이터 범위
+      const d = daysDiff(c.contractEnd);
+      if (d < 0 || d > 60) return;
+      const threshold = d <= 7 ? 7 : d <= 15 ? 15 : d <= 30 ? 30 : 60;
+      const level = threshold <= 7 ? "중요" : threshold <= 30 ? "경고" : "정보";
+      items.push({
+        id: `contract-exp-${c.id}`, category: "계약만료", level,
+        title: `계약 만료 ${threshold}일 이내: ${c.buildingName} ${formatDong(c.dong)}-${formatRoomHo(c.roomHo)}`,
+        detail: `만료일 ${formatDateOnly(c.contractEnd) || "-"} · D-${d}`,
+        date: formatDateOnly(c.contractEnd) || notifTodayStr,
+      });
+    });
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dormContracts, allowedDormKeySet]);
+
+  // 2) 오늘 입주/퇴실 알림 (occupant=canOccupant, newHire=canNewHire)
+  const notifMoveInOut = useMemo<NotifItem[]>(() => {
+    const items: NotifItem[] = [];
+    const moveInToday = [
+      ...occupants.filter((o) => !o.isDeleted && o.moveInDate === notifTodayStr && dataScope.canOccupant({ dormId: o.dormId, site: o.site, gender: o.gender })),
+      ...newHires.filter((h) => !h.isDeleted && h.moveInDate === notifTodayStr && !occupants.some((o) => o.sourceNewHireId === h.id) && dataScope.canNewHire({ dormId: h.dormId, site: h.site, gender: h.gender })),
+    ];
+    moveInToday.forEach((o) => {
+      const name = "employeeName" in o ? (o as Occupant).employeeName : (o as NewHireEmployee).name;
+      items.push({ id: `movein-${o.id}`, category: "오늘입주", level: "정보", title: `오늘 입주 예정: ${name}`, detail: `입실일 ${formatDateOnly(notifTodayStr)}`, date: notifTodayStr });
+    });
+    occupants
+      .filter((o) => !o.isDeleted && (o.actualMoveOutDate === notifTodayStr || (!o.actualMoveOutDate && o.moveOutDueDate === notifTodayStr)) && dataScope.canOccupant({ dormId: o.dormId, site: o.site, gender: o.gender }))
+      .forEach((o) => {
+        items.push({ id: `moveout-today-${o.id}`, category: "오늘퇴실", level: "경고", title: `오늘 퇴실 예정: ${o.employeeName}`, detail: `퇴실일 ${formatDateOnly(o.actualMoveOutDate || o.moveOutDueDate) || "-"}`, date: notifTodayStr });
+      });
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [occupants, newHires, dataScope]);
+
+  // 3) 미배정 신입사원 — dorm scope 활성 사용자에게는 미배정(범위 판정 불가) 노출하지 않음(canNewHire=미배정 false).
+  const notifUnassigned = useMemo<NotifItem[]>(() => {
+    if (allowedDormIds) return []; // 범위 강제 사용자: 미배정 알림 숨김
+    return newHires
+      .filter((h) => !h.isDeleted && (!h.dormId || !h.buildingName || !h.address))
+      .map((h) => ({
+        id: `unassigned-${h.id}`, category: "미배정", level: "정보" as const,
+        title: `미배정 신입사원: ${h.name}`,
+        detail: `${h.site} · ${h.department || "-"} · 예상입실 ${formatDateOnly(h.expectedMoveInDate) || "-"}`,
+        date: formatDateOnly(h.expectedMoveInDate) || formatDateOnly(h.createdAt) || notifTodayStr,
+      }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newHires, allowedDormIds]);
+
+  // 4) 청소 미제출 (담당자 기준) — 담당 기숙사(dormId)가 허용 범위인 담당자만
+  const notifCleaningMissing = useMemo<NotifItem[]>(() => {
+    const items: NotifItem[] = [];
+    const currentMonthLabel = `${new Date().getMonth() + 1}월`;
+    users
+      .filter((u) => u.role === "maintenance_reporter" && u.dormId && (!allowedDormIds || allowedDormIds.has(u.dormId)))
+      .forEach((manager) => {
+        let missing = false;
+        for (let week = 1; week <= 5; week++) {
+          if (getCleaningWeekStatus(manager.id, week, currentMonthLabel) === "X") { missing = true; break; }
+        }
+        if (missing) {
+          items.push({ id: `cleaning-miss-${manager.id}`, category: "청소미제출", level: "경고", title: `청소보고 미제출: ${manager.displayName}`, detail: "당월 청소보고서 제출 필요", date: notifTodayStr });
+        }
+      });
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [users, cleaningReports, allowedDormIds]);
+
+  // 5) 하자 미처리 (scopedDefects)
+  const notifDefectOpen = useMemo<NotifItem[]>(() => {
+    return scopedDefects
+      .filter((d) => !d.isDeleted && d.defectStatus !== "완료")
+      .map((d) => ({
+        id: `defect-open-${d.id}`, category: "하자미처리", level: "중요" as const,
+        title: `하자 미처리: ${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.ho)}`,
+        detail: `${d.defectStatus} · ${d.requestText || "상세 없음"}`,
+        date: formatDateOnly(d.receiptDate) || notifTodayStr,
+      }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedDefects]);
+
+  // 6) 비품 교체 예정 (scopedInventory)
+  const notifInventory = useMemo<NotifItem[]>(() => {
+    return scopedInventory
+      .filter((i) => !i.isDeleted && (["고장", "노후"].includes(i.status) || (i.quantity ?? 0) <= 2))
+      .map((i) => ({
+        id: `inv-replace-${i.id}`, category: "비품교체", level: "경고" as const,
+        title: `비품 교체 예정: ${i.itemName}`,
+        detail: `${i.buildingName || "-"} · 상태 ${i.status} · 수량 ${i.quantity ?? 0}`,
+        date: formatDateOnly(i.purchaseDate) || notifTodayStr,
+      }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedInventory]);
+
+  // 7) 정원 초과 — 허용 dorm 만
+  const notifOvercrowded = useMemo<NotifItem[]>(() => {
+    const items: NotifItem[] = [];
+    dorms.forEach((dorm) => {
+      if (dorm.isDeleted) return;
+      if (allowedDormIds && !allowedDormIds.has(dorm.id)) return; // 데이터 범위
+      const count = occupants.filter((o) => o.dormId === dorm.id && !o.isDeleted && !["퇴실", "천안이동"].includes(o.status)).length;
+      if (count > getDormCapacity(dorm)) {
+        items.push({ id: `overcrowded-${dorm.id}`, category: "정원초과", level: "중요", title: `정원 초과: ${dorm.buildingName} ${formatDong(dorm.dong)}-${formatRoomHo(dorm.roomHo)}`, detail: `정원 ${getDormCapacity(dorm)}명 < 현재 ${count}명`, date: notifTodayStr });
+      }
+    });
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dorms, occupants, allowedDormIds]);
+
+  // 합산 (기존 화면과 동일한 단일 배열)
+  const notificationCenterItems = useMemo<NotifItem[]>(
+    () => [
+      ...notifContractExpiry, ...notifMoveInOut, ...notifUnassigned,
+      ...notifCleaningMissing, ...notifDefectOpen, ...notifInventory, ...notifOvercrowded,
+    ],
+    [notifContractExpiry, notifMoveInOut, notifUnassigned, notifCleaningMissing, notifDefectOpen, notifInventory, notifOvercrowded]
+  );
+
+  // [이동+scope] 알림관리(autoNotifications) — KPI 카드/목록의 실제 소스. dorm 범위 적용(scope 미적용 시 전체·무회귀).
+  const autoNotifications = useMemo(() => {
+    const notifications: typeof dashboardAlerts = [];
+    const today = new Date().toISOString().slice(0, 10);
+    // 1. 계약(만료/상태) — 계약은 dormId 없음 → allowedDormKeySet
+    dormContracts.forEach((contract) => {
+      if (allowedDormKeySet && !allowedDormKeySet.has(getDormKey(contract.site, contract.buildingName, contract.dong, contract.roomHo))) return;
+      if (contract.contractEnd) {
+        const daysLeft = Math.ceil((new Date(contract.contractEnd).getTime() - new Date(today).getTime()) / (1000 * 60 * 60 * 24));
+        if (daysLeft >= 0 && daysLeft <= 30) {
+          notifications.push({ id: `contract-${contract.id}`, type: "contract", title: `계약 만료 예정: ${contract.buildingName}`, detail: `${formatDateOnly(contract.contractEnd) || "-"} 계약 종료`, when: `${daysLeft}일` });
+        }
+      }
+      if (contract.contractStatus === "종료" || contract.contractStatus === "해지") {
+        notifications.push({ id: `contract-status-${contract.id}`, type: "contract", title: `${contract.buildingName} 계약 ${contract.contractStatus}`, detail: `계약 상태가 ${contract.contractStatus}입니다.`, when: "주의" });
+      }
+    });
+    // 2. 퇴실 예정 / 상태 — scopedOccupants
+    scopedOccupants.forEach((occ) => {
+      if (!occ.moveOutDueDate) return;
+      const daysLeft = Math.ceil((new Date(occ.moveOutDueDate).getTime() - new Date(today).getTime()) / (1000 * 60 * 60 * 24));
+      if (daysLeft >= 0 && daysLeft <= 14 && occ.status !== "퇴실") {
+        notifications.push({ id: `moveout-${occ.id}`, type: "occupant", title: `${occ.employeeName} 퇴실 예정`, detail: `${formatDateOnly(occ.moveOutDueDate) || "-"} 거주기한 만료`, when: `${daysLeft}일` });
+      }
+    });
+    scopedOccupants.forEach((occ) => {
+      if (["퇴실", "천안이동", "만료예정"].includes(occ.status)) {
+        notifications.push({ id: `occupant-status-${occ.id}`, type: "occupant", title: `${occ.employeeName} ${occ.status}`, detail: `${occ.status} 상태입니다.`, when: "주의" });
+      }
+    });
+    // 3. 청소 미제출 — 담당 dormId ∈ allowed
+    const currentMonth = `${new Date().getMonth() + 1}월`;
+    users
+      .filter((u) => u.role === "maintenance_reporter" && u.dormId && (!allowedDormIds || allowedDormIds.has(u.dormId)))
+      .forEach((manager) => {
+        let allSubmitted = true;
+        for (let week = 1; week <= 5; week++) { if (getCleaningWeekStatus(manager.id, week, currentMonth) === "X") { allSubmitted = false; break; } }
+        if (!allSubmitted) {
+          notifications.push({ id: `cleaning-${manager.id}`, type: "cleaning", title: `${manager.displayName} 청소보고 미제출`, detail: `금주 청소보고서 제출 필요`, when: "긴급" });
+        }
+      });
+    // 3-1. 청소 불량/재청소 — scopedCleaningReports
+    scopedCleaningReports.forEach((report) => {
+      if (report.cleanStatus === "불량" || report.cleanStatus === "재청소요청") {
+        notifications.push({ id: `cleaning-status-${report.id}`, type: "cleaning", title: `${report.buildingName} 청소 불량`, detail: `${report.cleanStatus} 상태 - 재청소 필요`, when: "주의" });
+      }
+    });
+    // 4. 미완료 하자 — scopedDefects
+    scopedDefects.forEach((defect) => {
+      if (defect.defectStatus !== "완료") {
+        notifications.push({ id: `defect-${defect.id}`, type: "defect", title: `미완료 하자: ${defect.buildingName} ${formatDong(defect.dong)}-${formatRoomHo(defect.ho)}`, detail: defect.requestText || "상세 정보 없음", when: "진행중" });
+      }
+    });
+    // 5. 비품 저수량 — scopedInventory
+    scopedInventory.forEach((item) => {
+      if (item.quantity <= 2) {
+        notifications.push({ id: `inventory-${item.id}`, type: "inventory", title: `저수량: ${item.itemName}`, detail: `현재 수량: ${item.quantity}개`, when: "경고" });
+      }
+    });
+    // 6. 정원초과 — 허용 dorm 만 + scopedOccupants
+    dorms.forEach((dorm) => {
+      if (allowedDormIds && !allowedDormIds.has(dorm.id)) return;
+      const occupantCount = scopedOccupants.filter((o) => o.dormId === dorm.id && !["퇴실", "천안이동"].includes(o.status) && !o.isDeleted).length;
+      if (occupantCount > getDormCapacity(dorm)) {
+        notifications.push({ id: `overcrowded-${dorm.id}`, type: "occupant", title: `정원초과: ${dorm.buildingName} ${dorm.dong}-${dorm.roomHo}`, detail: `정원 ${getDormCapacity(dorm)}명 > 현재 ${occupantCount}명`, when: "주의" });
+      }
+    });
+    return notifications;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dormContracts, scopedOccupants, dorms, users, cleaningReports, scopedCleaningReports, scopedDefects, scopedInventory, allowedDormIds, allowedDormKeySet]);
+
   // 공통 권한 판정(회귀 방지: 호출부 기존 게이트 baseGate 를 전달, 사용자 정의 권한 없으면 기존과 100% 동일).
   const hasPermission = useCallback((tab: TabKey | string, action: string, baseGate = false): boolean => {
     const key = `${tab}.${action}`;
@@ -7663,6 +7736,10 @@ export default function App() {
         return false;
       }
 
+      // 데이터 범위(custom-role): 계약은 getDormKey 로만 dorm 과 연결 → 스코프 통과 dorm 키 집합에 속할 때만.
+      //  검색/상태필터/정렬/페이지네이션보다 먼저 적용. active=false 면 allowedDormKeySet=null → 무회귀.
+      if (allowedDormKeySet && !allowedDormKeySet.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo))) return false;
+
       if (dormContractSiteFilter !== "전체" && c.site !== dormContractSiteFilter) return false;
       if (dormContractExpiryMonthFilter !== "전체" && (c.contractEnd || "").slice(0, 7) !== dormContractExpiryMonthFilter) return false;
       const status = getContractDisplayStatus(c);
@@ -7673,7 +7750,7 @@ export default function App() {
       }
       return true;
     });
-  }, [dormContracts, dormContractSearch, dormContractSiteFilter, dormContractStatusFilter, dormContractExpiryMonthFilter, dorms, occupants, currentUser, operationalDorms]);
+  }, [dormContracts, dormContractSearch, dormContractSiteFilter, dormContractStatusFilter, dormContractExpiryMonthFilter, dorms, occupants, currentUser, operationalDorms, allowedDormKeySet]);
 
   const visibleNewHires = useMemo(() => {
     return newHires.filter((h) => {
@@ -7692,6 +7769,9 @@ export default function App() {
         operationalDorms.find((d) => d.id === h.dormId) ||
         dorms.find((d) => d.id === h.dormId);
       const site = dorm?.site || h.site;
+      // 데이터 범위(custom-role): 배정자는 canDorm 규칙, 미배정(dormId 없음)은 범위 강제 사용자에게 숨김.
+      //  검색/필터/정렬/페이지네이션보다 먼저 적용. active=false 면 canNewHire=true → 무회귀(미배정 포함).
+      if (!dataScope.canNewHire({ dormId: h.dormId, site, gender: h.gender })) return false;
       if (newHireSiteFilter !== "전체" && site !== newHireSiteFilter) return false;
       if (newHireGenderFilter !== "전체" && h.gender !== newHireGenderFilter) return false;
       const isUnassigned = isUnassignedNewHire(h); // 공통 미배정 기준(대시보드와 동일)
@@ -7706,7 +7786,7 @@ export default function App() {
       return true;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newHires, newHireSearch, newHireSiteFilter, newHireGenderFilter, newHireAssignmentFilter, newHireStatusFilter, currentUser]);
+  }, [newHires, newHireSearch, newHireSiteFilter, newHireGenderFilter, newHireAssignmentFilter, newHireStatusFilter, currentUser, dataScope, operationalDorms, dorms]);
 
   // [1] 통계 합계 검증(개발 모드): 거주중+퇴실+만료예정+미배정 = 총 신입사원 이 아니면 경고.
   useEffect(() => {
@@ -7803,7 +7883,8 @@ export default function App() {
   // 입주자 메뉴의 기숙사 범위: 기숙사 메뉴 검색(dormSearch)과 독립.
   // 검색어 없으면 권한+지역/성별 범위의 전체 기숙사, 검색 시에는 "검색에 매칭되는 입주자가 있는 기숙사"만.
   const filteredDormsForOccupantMenu = useMemo(() => {
-    const base = operationalDorms.filter((dorm) => {
+    // 데이터 범위: 상단 기숙사 카드도 scopedOperationalDorms 기준(입주자 행과 동일 경계). scope 미적용 시 원본과 동일.
+    const base = scopedOperationalDorms.filter((dorm) => {
       if (!hasAccessToDorm(currentUser, dorm.id)) return false;
       if (occupantMenuFilterSite !== "전체" && dorm.site !== occupantMenuFilterSite) return false;
       if (occupantMenuFilterGender !== "전체" && dorm.gender !== occupantMenuFilterGender) return false;
@@ -7815,7 +7896,7 @@ export default function App() {
     );
     return base.filter((d) => matchedDormIds.has(d.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operationalDorms, currentUser, occupantMenuFilterSite, occupantMenuFilterGender, occupantMenuFilterSearch, visibleOccupants]);
+  }, [scopedOperationalDorms, currentUser, occupantMenuFilterSite, occupantMenuFilterGender, occupantMenuFilterSearch, visibleOccupants]);
 
   // 입주자가 "현재 입주자 메뉴 범위"에 속하는지 판정.
   // occupant 에는 호실 정보가 없고 dormId 가 과거 계약/기숙사 id 와 어긋날 수 있어, 기숙사 카드 id 매칭에만
@@ -7867,7 +7948,7 @@ export default function App() {
   }, [users, userSearch, currentUser, showInactiveUsers, showDeletedUsers]);
 
   const visibleInventory = useMemo(() => {
-    const filtered = inventory.filter((i) => {
+    const filtered = scopedInventory.filter((i) => {
       if (i.isDeleted) return false;
       if (!hasText(i.itemName)) return false; // sanitize: 비품명 없는 행 제외
       // 권한 필터링
@@ -7911,7 +7992,7 @@ export default function App() {
       const d = t(b.createdAt) - t(a.createdAt);
       return d !== 0 ? d : String(b.id).localeCompare(String(a.id));
     });
-  }, [inventory, inventorySearch, inventoryStatusFilter, inventoryYearFilter, inventoryMonthFilter, inventoryDayFilter, currentUser, selectedInventoryDormId]);
+  }, [scopedInventory, inventorySearch, inventoryStatusFilter, inventoryYearFilter, inventoryMonthFilter, inventoryDayFilter, currentUser, selectedInventoryDormId]);
 
   const visibleLeases = useMemo(() => {
     return leases.filter((lease) => {
@@ -8020,18 +8101,20 @@ export default function App() {
     };
 
     // 필터/검색 결과 안에서만 정렬(미완료 먼저 → 접수일 최신 → 생성일 최신 → id).
+    //  데이터 범위(custom-role): scopedDefects 기준(scope 미적용 시 원본과 동일).
     if (currentUser?.role === "maintenance_reporter") {
-      return sortDefectRequests(defects.filter((d) => d.reporterUserId === currentUser.id && filterDefects(d)));
+      return sortDefectRequests(scopedDefects.filter((d) => d.reporterUserId === currentUser.id && filterDefects(d)));
     }
-    return sortDefectRequests(defects.filter(filterDefects));
-  }, [defects, currentUser, defectSearch, defectStatusFilter, defectReceiptMonthFilter]);
+    return sortDefectRequests(scopedDefects.filter(filterDefects));
+  }, [scopedDefects, currentUser, defectSearch, defectStatusFilter, defectReceiptMonthFilter]);
 
   // Settlement Management Calculations
 
 
   const visibleCleaningReports = useMemo(() => {
     try {
-    return cleaningReports.filter((report) => {
+    // 데이터 범위(custom-role): scopedCleaningReports 기준(scope 미적용 시 원본과 동일).
+    return scopedCleaningReports.filter((report) => {
       if (report.isDeleted) return false;
       const reportDate = parseSafeDate(report.reportDate);
       const reportDorm = findOperationalDormForCleaningReport(report);
@@ -8084,9 +8167,9 @@ export default function App() {
     } catch (error) {
       // 필터 중 예외가 나도 화면이 하얗게 죽지 않도록: 원본 목록을 그대로 표시(삭제된 항목만 제외).
       console.warn("[청소관리 필터 오류] 원본 목록 표시로 대체:", error);
-      return cleaningReports.filter((r) => !r.isDeleted);
+      return scopedCleaningReports.filter((r) => !r.isDeleted);
     }
-  }, [cleaningReports, cleaningYear, cleaningMonth, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, cleaningStatusFilter, selectedCleaningDormId, users, currentUser]);
+  }, [scopedCleaningReports, cleaningYear, cleaningMonth, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, cleaningStatusFilter, selectedCleaningDormId, users, currentUser]);
 
   const deletedDorms = useMemo(() => dorms.filter(isInTrash), [dorms]);
   const deletedDormContracts = useMemo(() => dormContracts.filter(isInTrash), [dormContracts]);
@@ -8355,7 +8438,8 @@ export default function App() {
   }, [currentUser, operationalDorms]);
 
   const visibleCleaningDormRows = useMemo(() => {
-    return operationalDorms.filter((dorm) => {
+    // 데이터 범위: 청소 기숙사 카드도 scopedOperationalDorms 기준(범위 밖 기숙사 카드 미표시). scope 미적용 시 원본 동일.
+    return scopedOperationalDorms.filter((dorm) => {
       if (currentUser?.role === "maintenance_reporter" && currentUser.dormId) {
         if (dorm.id !== currentUser.dormId) return false;
       }
@@ -8370,7 +8454,7 @@ export default function App() {
       }
       return true;
     });
-  }, [operationalDorms, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, users, currentUser]);
+  }, [scopedOperationalDorms, cleaningDormSiteFilter, cleaningDormSearch, cleaningManagerFilter, users, currentUser]);
 
   // 선택한 기숙사가 현재 필터 범위에서 사라지면 선택 해제(잘못된 빈 요약 방지).
   useEffect(() => {
@@ -8541,7 +8625,11 @@ export default function App() {
   // 기본("전체")은 활성만(종료/해지 숨김), "종료/해지 포함" 선택 시 과거 기숙사도 표시.
   const assignmentDormRows = useMemo(() => {
     const includePast = assignmentStatusFilter === "종료/해지 포함";
-    const pool = [...operationalDorms, ...(includePast ? pastDormsForAssign.list : [])];
+    // 데이터 범위: 배정 대상 기숙사도 scopedOperationalDorms 만(범위 밖 기숙사에 신규 배정 불가). past 포함분도 허용 dorm 만.
+    const pastPool = includePast
+      ? (allowedDormIds ? pastDormsForAssign.list.filter((d) => allowedDormIds.has(d.id)) : pastDormsForAssign.list)
+      : [];
+    const pool = [...scopedOperationalDorms, ...pastPool];
     return pool.filter((d) => {
       if (assignmentSiteFilter !== "전체" && d.site !== assignmentSiteFilter) return false;
       if (assignmentGenderFilter !== "전체" && d.gender !== assignmentGenderFilter) return false;
@@ -8550,7 +8638,7 @@ export default function App() {
       if (assignmentStatusFilter === "종료/해지 포함") return true;
       return s === assignmentStatusFilter;
     });
-  }, [operationalDorms, pastDormsForAssign, dormAssignStatusAll, assignmentSiteFilter, assignmentGenderFilter, assignmentStatusFilter]);
+  }, [scopedOperationalDorms, allowedDormIds, pastDormsForAssign, dormAssignStatusAll, assignmentSiteFilter, assignmentGenderFilter, assignmentStatusFilter]);
 
   // 계약 등록/수정 폼의 자동계산 상태(안내문용): 종료/해지(수동) → 그대로, 만료일 경과 → 만료, 그 외 → 실제 인원 기준(공실/사용중/만실).
   // 모달 자동계산 표시 = 신규계약 테이블과 동일한 공통 함수 사용(표·모달 일치).
@@ -8558,10 +8646,11 @@ export default function App() {
 
   // 현재 사용중(operationalDorms = 종료/해지/isDeleted 제외) 기숙사 중 계약 만료 예정 전체 목록(가까운 순).
   const expiringDormsAll = useMemo(() => {
-    return [...operationalDorms]
+    // 데이터 범위: raw → scope → 정렬 → TOP10 순서. scopedOperationalDorms 기준(scope 미적용 시 원본 동일).
+    return [...scopedOperationalDorms]
       .filter((d) => d.contractEnd && daysDiff(d.contractEnd) >= 0)
       .sort((a, b) => daysDiff(a.contractEnd) - daysDiff(b.contractEnd));
-  }, [operationalDorms]);
+  }, [scopedOperationalDorms]);
   const expiringDormsTop10 = useMemo(() => expiringDormsAll.slice(0, 10), [expiringDormsAll]);
 
   const parseDateValue = (value: any) => {
@@ -8585,6 +8674,8 @@ export default function App() {
     const uniqueDormMap = new Map<string, DormContract>();
     dormContracts.forEach((contract) => {
       if (contract.isDeleted) return;
+      // 데이터 범위: 허용 dorm(getDormKey) 계약만 월별 TO 집계에 포함(scope 미적용 시 전체·무회귀).
+      if (allowedDormKeySet && !allowedDormKeySet.has(getDormKey(contract.site, contract.buildingName, contract.dong, contract.roomHo))) return;
       const key = getUniqueDormKey(contract.site, contract.buildingName, contract.dong, contract.roomHo);
       const existing = uniqueDormMap.get(key);
       if (!existing || (contract.updatedAt && existing.updatedAt && new Date(contract.updatedAt) > new Date(existing.updatedAt))) {
@@ -8610,7 +8701,8 @@ export default function App() {
       //   중도퇴거가 누락되므로 연결된 신입사원(sourceNewHireId)의 날짜로 보완(occupant 값이 비어있을 때만).
       const nhById = new Map(newHires.map((h) => [h.id, h]));
       const allOccupants = [
-        ...occupants.filter((o) => !o.isDeleted).map((o) => {
+        // 데이터 범위: 원천 occupant = scopedOccupants(canOccupant 반영·직접선택 dorm scope 포함). scope 미적용 시 전체.
+        ...scopedOccupants.filter((o) => !o.isDeleted).map((o) => {
           const h = o.sourceNewHireId ? nhById.get(o.sourceNewHireId) : undefined;
           if (!h) return o;
           return {
@@ -8628,6 +8720,7 @@ export default function App() {
             (h) =>
               !h.isDeleted &&
               h.dormId &&
+              dataScope.canNewHire({ dormId: h.dormId, site: h.site, gender: h.gender }) && // 데이터 범위
               !occupants.some((o) => o.sourceNewHireId === h.id)
           )
           .map((h) => ({
@@ -8786,7 +8879,8 @@ export default function App() {
     }
 
     return results;
-  }, [dormContracts, dorms, occupants, newHires, simulationYear]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dormContracts, dorms, occupants, newHires, simulationYear, scopedOccupants, dataScope, allowedDormKeySet]);
 
   // [9] 개발용 디버그 로그: 선택 월 기준 월별 통계/중도퇴거 후보 확인(운영 빌드에는 출력 없음).
   useEffect(() => {
@@ -8845,9 +8939,11 @@ export default function App() {
     );
   }, [simulationYear, simulationMonth, occupants, newHires, simulationMonthlyStats]);
 
+  // 데이터 범위: 허용 dorm 이 존재하는 (지역,성별) 콤보만 시뮬레이션에 표시/집계. scope 미적용 시 전체(무회귀).
+  const simComboAllowed = (site: string, gender: string) => !allowedDormIds || scopedOperationalDorms.some((d) => d.site === site && d.gender === gender);
   const simulationRows = useMemo(() => {
     const month = Number(simulationMonth);
-    return simulationMonthlyStats.filter((s) => s.month === month && s.site !== "전체").map((s) => ({
+    return simulationMonthlyStats.filter((s) => s.month === month && s.site !== "전체" && simComboAllowed(s.site, s.gender)).map((s) => ({
       ...s,
       key: `${s.site}-${s.gender}`,
       usageRate: s.residentTo ? Math.round((s.currentResidents / s.residentTo) * 100) : 0,
@@ -8855,11 +8951,12 @@ export default function App() {
       vacancyLossEstimate: 0, // 임시 값
       expireRiskCount: 0, // 임시 값
     }));
-  }, [simulationMonthlyStats, simulationYear, simulationMonth]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simulationMonthlyStats, simulationYear, simulationMonth, allowedDormIds, scopedOperationalDorms]);
 
   const simulationTotal = useMemo(() => {
     const month = Number(simulationMonth);
-    const currentMonthStats = simulationMonthlyStats.filter((s) => s.month === month && s.site !== "전체");
+    const currentMonthStats = simulationMonthlyStats.filter((s) => s.month === month && s.site !== "전체" && simComboAllowed(s.site, s.gender));
 
     const dormCount = currentMonthStats.reduce((sum, r) => sum + r.dormCount, 0);
     const residentTo = currentMonthStats.reduce((sum, r) => sum + r.residentTo, 0);
@@ -8913,7 +9010,8 @@ export default function App() {
       totalVacancyLoss,
       totalExpireRisk,
     };
-  }, [simulationMonthlyStats, simulationYear, simulationMonth]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simulationMonthlyStats, simulationYear, simulationMonth, allowedDormIds, scopedOperationalDorms]);
 
   // [10] 운영시뮬레이션 통계 클릭 시: 해당 카테고리(현거주자/만료자/중도퇴거/신규입주/천안이동)의 인원 목록을
   //      선택 연/월 + 지역/성별 기준으로 산출(통계와 동일한 소스·판정 함수 재사용 → 숫자와 목록이 정확히 일치).
@@ -8940,7 +9038,8 @@ export default function App() {
     const s = simCostSettings;
     const parseMoney = (v: unknown) => Number(String(v ?? "").replace(/[^0-9.-]/g, "")) || 0;
 
-    const inScope = operationalDorms.filter(
+    // 데이터 범위: 시뮬레이션 dorm 기준도 scopedOperationalDorms(범위 밖 기숙사 미포함). scope 미적용 시 원본 동일.
+    const inScope = scopedOperationalDorms.filter(
       (d) =>
         (simulationSiteFilter === "전체" || d.site === simulationSiteFilter) &&
         (simulationGenderFilter === "전체" || d.gender === simulationGenderFilter)
@@ -8989,7 +9088,7 @@ export default function App() {
       },
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operationalDorms, dormContracts, occupancyCountByDorm, simulationSiteFilter, simulationGenderFilter, simulationMonth, simCostSettings]);
+  }, [scopedOperationalDorms, dormContracts, occupancyCountByDorm, simulationSiteFilter, simulationGenderFilter, simulationMonth, simCostSettings]);
 
   const visibleDashboard = useMemo(() => {
     return expiringDormsTop10.filter((d) => {
@@ -9019,19 +9118,19 @@ export default function App() {
   }, [visibleSimulationRows, reportSiteFilter, reportGenderFilter]);
 
   const militaryTrainingNotCompletedCount = useMemo(
-    () => militaryPersonnel.filter((person) => {
+    () => scopedMilitaryPersonnel.filter((person) => {
       // 빈 status는 자동생성과 동일하게 "재직"으로 간주(집계 누락 방지)
       const effStatus = (person.status || "").trim() || "재직";
       if (!militaryTrainingAutoConfig.targetStatuses?.includes(effStatus)) return false;
       const training = computeRequiredTraining(person);
       return training.hours > 0 && computeTrainingStatus(person) === "미이수";
     }).length,
-    [militaryPersonnel, militaryTrainingRecords, militaryTrainingRules, militaryTrainingAutoConfig]
+    [scopedMilitaryPersonnel, militaryTrainingRecords, militaryTrainingRules, militaryTrainingAutoConfig]
   );
 
   const militaryPendingNoticeCount = useMemo(
     () => {
-      const targetPersonnelIds = militaryPersonnel
+      const targetPersonnelIds = scopedMilitaryPersonnel
         .filter((p) => militaryTrainingAutoConfig.targetStatuses?.includes((p.status || "").trim() || "재직"))
         .map((p) => p.id);
       return militaryNotices.filter((n) => {
@@ -9040,28 +9139,28 @@ export default function App() {
         return n.personnelIds?.some((pid) => targetPersonnelIds.includes(pid));
       }).length;
     },
-    [militaryNotices, militaryPersonnel, militaryTrainingAutoConfig]
+    [militaryNotices, scopedMilitaryPersonnel, militaryTrainingAutoConfig]
   );
 
   const militaryUpcomingDischargeCount = useMemo(
-    () => militaryPersonnel.filter((p) => p.dischargeDate && daysDiff(p.dischargeDate) >= 0 && daysDiff(p.dischargeDate) <= 30).length,
+    () => scopedMilitaryPersonnel.filter((p) => p.dischargeDate && daysDiff(p.dischargeDate) >= 0 && daysDiff(p.dischargeDate) <= 30).length,
     [militaryPersonnel]
   );
 
   const militaryCategoryCounts = useMemo(() => {
     const counts = { reserve: 0, civilDefense: 0, none: 0 };
-    militaryPersonnel.forEach((person) => {
+    scopedMilitaryPersonnel.forEach((person) => {
       const category = getMilitaryCategory(person, effectiveMilitaryReferenceYear);
       if (category === "예비군") counts.reserve += 1;
       else if (category === "민방위") counts.civilDefense += 1;
       else counts.none += 1;
     });
     return counts;
-  }, [militaryPersonnel, effectiveMilitaryReferenceYear]);
+  }, [scopedMilitaryPersonnel, effectiveMilitaryReferenceYear]);
 
   const militaryPersonnelSummary = useMemo(() => {
     const today = new Date();
-    return militaryPersonnel.map((person) => {
+    return scopedMilitaryPersonnel.map((person) => {
       const enlistDate = person.enlistmentDate ? new Date(person.enlistmentDate) : null;
       const daysOfService = enlistDate ? Math.max(0, Math.floor((today.getTime() - enlistDate.getTime()) / (1000 * 60 * 60 * 24))) : 0;
       const years = Math.floor(daysOfService / 365);
@@ -9095,7 +9194,7 @@ export default function App() {
         noticeSent: personNotices.length > 0,
       };
     });
-  }, [militaryPersonnel, militaryTrainingRecords, militaryNotices]);
+  }, [scopedMilitaryPersonnel, militaryTrainingRecords, militaryNotices]);
 
   // 훈련기록 모달이 닫히면 직전에 클릭/포커스한 행으로 포커스 복귀(모달을 행에서 연 경우에만).
   useEffect(() => {
@@ -9144,9 +9243,9 @@ export default function App() {
   const openMilitaryPersonDetail = (personId: string) => { const p = militaryPersonnel.find((x) => x.id === personId); if (p) setMilitaryDetailPerson(p); };
   // [v2 1B] sidebar 조치대상 badge — buildMilitaryActionItems 단일 파생 재사용(추가 DB 조회 없음).
   const militaryActionItemsCount = useMemo(
-    () => buildMilitaryActionItems({ personnel: militaryPersonnel, training: militaryTrainingRecords, notices: militaryNotices, deptOf: militaryDeptOf }).length,
+    () => buildMilitaryActionItems({ personnel: scopedMilitaryPersonnel, training: militaryTrainingRecords, notices: militaryNotices, deptOf: militaryDeptOf }).length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [militaryPersonnel, militaryTrainingRecords, militaryNotices],
+    [scopedMilitaryPersonnel, militaryTrainingRecords, militaryNotices],
   );
   // [v2 1B] 조치대상 유형별 보조 이동(기존 필터 state 재사용). 새 workflow 없음.
   const navigateMilitaryActionType = (type: string) => {
@@ -9209,14 +9308,14 @@ export default function App() {
   );
 
   const militaryTrainingDepartmentOptions = useMemo(
-    () => Array.from(new Set(["전체", ...militaryPersonnel.map((person) => person.unit || "").filter(Boolean)])) as string[],
-    [militaryPersonnel]
+    () => Array.from(new Set(["전체", ...scopedMilitaryPersonnel.map((person) => person.unit || "").filter(Boolean)])) as string[],
+    [scopedMilitaryPersonnel]
   );
 
   const filteredMilitaryTrainingRecords = useMemo(
     () => {
-      // 대상자(인적사항) 조인용 — 부서 필터/검색에서 공통 사용(레코드마다 find 하지 않도록 Map).
-      const personById = new Map(militaryPersonnel.map((p) => [p.id, p]));
+      // 대상자(인적사항) 조인용 — 부서 필터/검색에서 공통 사용(레코드마다 find 하지 않도록 Map). 데이터 범위: scoped 인원만.
+      const personById = new Map(scopedMilitaryPersonnel.map((p) => [p.id, p]));
       // 검색 정규화: 대소문자 무시(lowercase) + 공백 영향 제거(연속공백 1칸 / 공백 완전제거 두 형태로 비교).
       const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
       const compact = (s: string) => s.toLowerCase().replace(/\s+/g, "");
@@ -9309,18 +9408,18 @@ export default function App() {
   }), [militaryPersonnelSummary, militaryPersonnelStatusFilter, personnelDeptFilter, personnelCategoryFilter, personnelTrainingFilter, personnelYearFilter, militaryPersonnelSearch]);
   const personnelPg = usePagination(filteredPersonnelRows, { resetKey: `${militaryPersonnelStatusFilter}|${personnelDeptFilter}|${personnelCategoryFilter}|${personnelTrainingFilter}|${personnelYearFilter}|${militaryPersonnelSearch}` });
   // 문서관리: 기숙사별 문서 현황(운영 기숙사 목록)
-  const documentPg = usePagination(operationalDorms, { resetKey: "" });
+  const documentPg = usePagination(scopedOperationalDorms, { resetKey: "" });
 
   const dashboardAlerts = useMemo(() => {
     const items: { id: string; title: string; detail: string; when: string; type: string }[] = [];
-    operationalDorms.forEach((d) => {
+    scopedOperationalDorms.forEach((d) => {
       const due = d.contractEnd;
       const days = daysDiff(due);
       if (due && days >= 0 && days <= 30) {
         items.push({ id: d.id, title: "계약 만료 예정", detail: `${d.site} ${d.buildingName} ${formatDong(d.dong)} ${formatRoomHo(d.roomHo)}`, when: `D-${days}`, type: "contract" });
       }
     });
-    defects.filter((d) => d.defectStatus !== "완료").forEach((d) => {
+    scopedDefects.filter((d) => d.defectStatus !== "완료").forEach((d) => {
       items.push({ id: d.id, title: "미완료 하자", detail: `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.ho)}`, when: d.receiptDate, type: "defect" });
     });
 
@@ -9333,10 +9432,10 @@ export default function App() {
     });
 
     return items.sort((a, b) => a.when.localeCompare(b.when)).slice(0, 5);
-  }, [operationalDorms, defects, militaryNotices, militaryTrainingRecords]);
+  }, [scopedOperationalDorms, scopedDefects, militaryNotices, militaryTrainingRecords]);
 
   const dormSummary = useMemo(() => {
-    return operationalDorms
+    return scopedOperationalDorms
       .filter((d) => {
         if (dashboardSiteFilter !== "전체" && d.site !== dashboardSiteFilter) return false;
         if (dashboardStatusFilter !== "전체" && d.leaseStatus !== dashboardStatusFilter) return false;
@@ -9368,7 +9467,7 @@ export default function App() {
           address: d.address,
         };
       });
-  }, [operationalDorms, occupancyCountByDorm, users, dashboardSiteFilter, dashboardStatusFilter, dashboardSearch]);
+  }, [scopedOperationalDorms, occupancyCountByDorm, users, dashboardSiteFilter, dashboardStatusFilter, dashboardSearch]);
 
   // 대시보드 요약 통계
   const dashboardSummaryStats = useMemo(() => {
@@ -9376,10 +9475,12 @@ export default function App() {
     const unassignedCount = newHires.filter(isUnassignedNewHire).length;
 
     // 2. 계약 만료 예정 수 (오늘~30일 이내, 종료/해지/삭제/빈 날짜 제외)
+    //    데이터 범위: 계약은 dormId 없음 → allowedDormKeySet(안정 키)로 제한. null 이면 전체(무회귀).
     const expiringCount = dormContracts.filter(c => {
       if (c.isDeleted) return false;
       if (c.contractStatus === "종료" || c.contractStatus === "해지") return false;
       if (!c.contractEnd) return false;
+      if (allowedDormKeySet && !allowedDormKeySet.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo))) return false;
       const days = daysDiff(c.contractEnd);
       return days >= 0 && days <= 30;
     }).length;
@@ -9387,8 +9488,8 @@ export default function App() {
     // 3. 공실률 (정원 기준, 활성 기숙사 기준 — 데이터 범위 적용 배열 사용)
     const vacancyRate = computeVacancyStats(scopedOperationalDorms, scopedOccupants).vacancyRate;
 
-    // 4. 미처리 하자 수
-    const unprocessedDefects = defects.filter(d =>
+    // 4. 미처리 하자 수 (데이터 범위: scopedDefects)
+    const unprocessedDefects = scopedDefects.filter(d =>
       !d.isDeleted && (d.defectStatus === "접수" || d.defectStatus === "진행중")
     ).length;
 
@@ -9401,7 +9502,7 @@ export default function App() {
     const wkEnd = new Date(wkStart);
     wkEnd.setDate(wkStart.getDate() + 6);
     wkEnd.setHours(23, 59, 59, 999); // 이번 주 일요일 23:59
-    const activeReports = cleaningReports.filter((r) => !r.isDeleted && !r.isPermanentDeleted);
+    const activeReports = scopedCleaningReports.filter((r) => !r.isDeleted && !r.isPermanentDeleted);
     const dormKeyOf = (s: string, b: string, dg: string, h: string) =>
       `${(s || "").trim().toLowerCase()}|${(b || "").trim().toLowerCase()}|${stripDongHoSuffix(dg).toLowerCase()}|${stripDongHoSuffix(h).toLowerCase()}`;
     const unreportedCleaning = scopedOperationalDorms.filter((dorm) => {
@@ -9414,8 +9515,8 @@ export default function App() {
       return !reported;
     }).length;
 
-    // 6. 비품 노후/부족 수
-    const outdatedInventory = inventory.filter(i =>
+    // 6. 비품 노후/부족 수 (데이터 범위: scopedInventory)
+    const outdatedInventory = scopedInventory.filter(i =>
       !i.isDeleted && (i.status === "고장" || i.quantity === 0)
     ).length;
 
@@ -9427,32 +9528,35 @@ export default function App() {
       unreportedCleaning,
       outdatedInventory,
     };
-  }, [newHires, dormContracts, defects, cleaningReports, inventory, scopedOperationalDorms, scopedOccupants]);
+  }, [newHires, dormContracts, scopedDefects, scopedCleaningReports, scopedInventory, allowedDormKeySet, scopedOperationalDorms, scopedOccupants]);
 
   // 대시보드: 오늘의 일정(입주/퇴실) + 미배정 신입사원 목록
   const dashboardOpsData = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
+    // 데이터 범위: occupant=scopedOccupants, newHire=canNewHire(미배정은 범위 사용자에게 숨김). scope 미적용 시 원본 동일.
+    const scopedHires = newHires.filter((h) => dataScope.canNewHire({ dormId: h.dormId, site: h.site, gender: h.gender }));
 
     const moveInTodayCount = [
-      ...occupants.filter((o) => !o.isDeleted && o.moveInDate === today),
-      ...newHires.filter(
+      ...scopedOccupants.filter((o) => !o.isDeleted && o.moveInDate === today),
+      ...scopedHires.filter(
         (h) =>
           !h.isDeleted &&
           h.moveInDate === today &&
-          !occupants.some((o) => o.sourceNewHireId === h.id)
+          !scopedOccupants.some((o) => o.sourceNewHireId === h.id)
       ),
     ].length;
 
-    const moveOutTodayCount = occupants.filter(
+    const moveOutTodayCount = scopedOccupants.filter(
       (o) =>
         !o.isDeleted &&
         (o.actualMoveOutDate === today || (!o.actualMoveOutDate && o.moveOutDueDate === today))
     ).length;
 
-    const unassignedNewHires = newHires.filter(isUnassignedNewHire);
+    // 미배정 신입사원: 범위 강제 사용자에게는 노출하지 않음(범위 판정 불가). scope 미적용 시 기존 전체.
+    const unassignedNewHires = allowedDormIds ? [] : newHires.filter(isUnassignedNewHire);
 
-    // 전체 신입사원 배정 현황 (미배정 우선 정렬, isDeleted 제외)
-    const newHireAssignments = newHires
+    // 전체 신입사원 배정 현황 (미배정 우선 정렬, isDeleted 제외 · scope 반영)
+    const newHireAssignments = scopedHires
       .filter((h) => !h.isDeleted)
       .map((h) => ({ hire: h, assigned: !isUnassignedNewHire(h) }))
       .sort((a, b) => {
@@ -9463,7 +9567,8 @@ export default function App() {
       });
 
     return { moveInTodayCount, moveOutTodayCount, unassignedNewHires, newHireAssignments };
-  }, [occupants, newHires]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedOccupants, newHires, dataScope, allowedDormIds]);
 
   // 대시보드 퇴실 예정: 오늘 / 30일 이내 / 이번 달(1~말일).
   // 우선순위(중복 방지): 오늘 퇴실 > 30일 이내 > 이번 달. 퇴실예정일은 실제퇴실/예상퇴실/퇴실예정 중 유효값.
@@ -9494,7 +9599,7 @@ export default function App() {
       return st === "퇴실" || st === "과거거주"; // ③ 거주상태가 퇴실
     };
     const seenPersons = new Set<string>();
-    const enriched = occupants
+    const enriched = scopedOccupants
       .filter((o) => !o.isDeleted && !o.isPermanentDeleted)
       .filter((o) => !restrictOwn || o.dormId === ownDormId)
       // 실제퇴실 처리된 사람은 계약종료일이 남아 있어도 3개 퇴실 예정 목록에서 제외.
@@ -9541,7 +9646,7 @@ export default function App() {
 
     return { today, within30, thisMonth };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [occupants, newHires, operationalDorms, dorms, currentUser?.role, currentUser?.dormId]);
+  }, [scopedOccupants, newHires, operationalDorms, dorms, currentUser?.role, currentUser?.dormId]);
 
   // ============================================
   // 오버레이(모달/미리보기/메뉴) 닫기 우선순위 + 키보드 단축키 + 모바일 뒤로가기
@@ -9674,44 +9779,46 @@ export default function App() {
       return out.slice(0, 20);
     }
 
-    // 기숙사
-    for (const d of operationalDorms) {
+    // 기숙사 (데이터 범위: scoped 소스만 검색 → 타 기숙사 결과 노출 차단. scope 미적용 시 원본과 동일)
+    for (const d of scopedOperationalDorms) {
       if (out.length >= 60) break;
       if (hit(d.buildingName, d.address, d.dong, d.roomHo, d.site))
         out.push({ key: `dorm-${d.id}`, category: "기숙사", label: `${d.buildingName} ${dh(d.dong, d.roomHo)}`, sub: `${d.site} · ${d.address}`, tab: "dorms" });
     }
     // 입주자
-    for (const o of occupants) {
+    for (const o of scopedNormalizedOccupants) {
       if (o.isDeleted) continue;
       if (hit(o.employeeName, o.phone, o.department))
         out.push({ key: `occ-${o.id}`, category: "입주자", label: o.employeeName, sub: `${o.department || "-"} · ${o.status}`, tab: "occupants" });
     }
-    // 신규계약
+    // 신규계약 (dormId 없음 → allowedDormKeySet 로 제한)
     for (const c of dormContracts) {
       if (c.isDeleted) continue;
+      if (allowedDormKeySet && !allowedDormKeySet.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo))) continue;
       if (hit(c.buildingName, c.address, c.landlordName, c.realEstateName, c.dong, c.roomHo))
         out.push({ key: `dc-${c.id}`, category: "신규계약", label: `${c.buildingName} ${dh(c.dong, c.roomHo)}`, sub: `${c.site} · ${c.contractStatus}`, tab: "dormContracts" });
     }
-    // 신입사원
+    // 신입사원 (dormId 기준 canNewHire, 미배정/범위 밖 제외)
     for (const h of newHires) {
       if (h.isDeleted) continue;
+      if (!dataScope.canNewHire({ dormId: h.dormId, site: h.site, gender: h.gender })) continue;
       if (hit(h.name, h.phone, h.department))
         out.push({ key: `nh-${h.id}`, category: "신입사원", label: h.name, sub: `${h.site} · ${h.department || "-"} · ${getNewHireStatus(h)}`, tab: "newHires" });
     }
     // 청소관리
-    for (const r of cleaningReports) {
+    for (const r of scopedCleaningReports) {
       if (r.isDeleted) continue;
       if (hit(r.buildingName, r.cleanerName, r.managerName, r.dong, r.roomHo))
         out.push({ key: `cr-${r.id}`, category: "청소관리", label: `${r.buildingName} ${dh(r.dong, r.roomHo)}`, sub: `${formatDateOnly(r.reportDate) || "-"} · ${r.cleanStatus}`, tab: "cleaningReports" });
     }
     // 하자접수
-    for (const d of defects) {
+    for (const d of scopedDefects) {
       if (d.isDeleted) continue;
       if (hit(d.buildingName, d.requestText, d.reporterName, d.dong, d.ho))
         out.push({ key: `df-${d.id}`, category: "하자접수", label: `${d.buildingName} ${dh(d.dong, d.ho)}`, sub: `${d.defectStatus} · ${d.requestText || "-"}`, tab: "defects" });
     }
     // 비품관리
-    for (const i of inventory) {
+    for (const i of scopedInventory) {
       if (i.isDeleted) continue;
       if (hit(i.itemName, i.maker, i.modelName, i.buildingName))
         out.push({ key: `inv-${i.id}`, category: "비품관리", label: i.itemName, sub: `${i.buildingName || "-"} · ${i.status} · ${i.quantity ?? 0}개`, tab: "inventory" });
@@ -9722,18 +9829,20 @@ export default function App() {
       if (hit(it.targetName, it.details, it.category, it.memo))
         out.push({ key: `set-${it.id}`, category: "정산관리", label: `${it.category} ${it.targetName || ""}`.trim(), sub: `${formatNumber(it.amount)}원 · ${it.burdenType}`, tab: "settlementManagement" });
     }
-    // 군대관리 — 인원/훈련/공지
-    for (const p of militaryPersonnel) {
+    // 군대관리 — 인원/훈련/공지 ([데이터 범위] 부서 scope 사용자는 허용 부서 인원/그 훈련만 검색 노출)
+    const searchMilitaryIds = new Set(scopedMilitaryPersonnel.map((p) => p.id));
+    for (const p of scopedMilitaryPersonnel) {
       if (hit(p.name, p.unit, p.rank, p.phone))
         out.push({ key: `mp-${p.id}`, category: "군대관리·인사", label: p.name, sub: `${p.unit || "-"} · ${p.rank || "-"}`, tab: "personnelManagement" });
     }
     for (const t of militaryTrainingRecords) {
-      const person = militaryPersonnel.find((p) => p.id === t.personnelId);
+      if (allowedMilitaryDepartments && !searchMilitaryIds.has(t.personnelId)) continue;
+      const person = scopedMilitaryPersonnel.find((p) => p.id === t.personnelId);
       if (hit(t.subject, t.trainingType, t.location, person?.name))
         out.push({ key: `mt-${t.id}`, category: "군대관리·훈련", label: `${t.subject || t.trainingType || "훈련"}`, sub: `${person?.name || "-"} · ${formatDateOnly(t.trainingDate) || "-"}`, tab: "trainingRecords" });
     }
     for (const n of militaryNotices) {
-      const names = (n.personnelIds || []).map((id) => militaryPersonnel.find((p) => p.id === id)?.name || "").join(", ");
+      const names = (n.personnelIds || []).map((id) => scopedMilitaryPersonnel.find((p) => p.id === id)?.name || "").join(", ");
       if (hit(n.title, n.category, n.content, names))
         out.push({ key: `mn-${n.id}`, category: "군대관리·공지", label: n.title, sub: `${n.category || "-"} · ${names || "-"}`, tab: "militaryNotices" });
     }
@@ -9745,7 +9854,7 @@ export default function App() {
     const timer = setTimeout(() => setGlobalSearchResults(computeGlobalSearchResults(globalSearch)), 250);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [globalSearch, operationalDorms, occupants, dormContracts, newHires, cleaningReports, defects, inventory, settlementItems, militaryPersonnel, militaryTrainingRecords, militaryNotices, currentUser?.role, currentUser?.dormId]);
+  }, [globalSearch, operationalDorms, occupants, dormContracts, newHires, cleaningReports, defects, inventory, settlementItems, militaryPersonnel, scopedMilitaryPersonnel, allowedMilitaryDepartments, militaryTrainingRecords, militaryNotices, currentUser?.role, currentUser?.dormId]);
 
   const applyGlobalSearchToTab = (tab: TabKey, term: string) => {
     switch (tab) {
@@ -10210,6 +10319,10 @@ export default function App() {
 
   const saveDormContract = () => {
     if (!canWriteTab("dormContracts")) { void appAlert("권한 안내", "이 작업을 수행할 권한이 없습니다."); return; }
+    // [데이터 범위] restrictive custom-role: 허용 범위(지역/성별/기숙사) 밖 저장 차단(강제 입력값 방어).
+    if (dataScope.active && !dataScope.canDorm({ site: dormContractForm.site, gender: dormContractForm.gender })) {
+      void appAlert("기숙사 ERP 알림", "접근 권한이 없는 기숙사입니다."); return;
+    }
     if (!dormContractForm.buildingName.trim() || !dormContractForm.address.trim()) {
       void appAlert("알림", "건물명과 도로명주소는 필수입니다.");
       return;
@@ -10336,6 +10449,10 @@ export default function App() {
 
   const saveNewHire = async () => {
     if (!canWriteTab("newHires")) { void appAlert("권한 안내", "이 작업을 수행할 권한이 없습니다."); return; }
+    // [데이터 범위] restrictive custom-role: 허용 범위(지역/성별/기숙사) 밖 저장 차단.
+    if (dataScope.active && !dataScope.canDorm({ id: newHireForm.dormId || null, site: newHireForm.site, gender: newHireForm.gender })) {
+      void appAlert("기숙사 ERP 알림", "접근 권한이 없는 기숙사입니다."); return;
+    }
     if (!newHireForm.name.trim()) {
       void appAlert("알림", "이름은 필수입니다.");
       return;
@@ -10439,11 +10556,18 @@ export default function App() {
 
   const saveInventory = async () => {
     if (!canEditData(currentUser)) return;
+    // [데이터 범위] restrictive custom-role: 선택 기숙사가 허용 범위 밖이면 저장 차단(성별은 선택 기숙사 속성에서 해석).
+    if (dataScope.active && inventoryForm.dormId) {
+      const invDorm = operationalDorms.find((d) => d.id === inventoryForm.dormId);
+      if (!dataScope.canDorm({ id: inventoryForm.dormId, site: invDorm?.site ?? inventoryForm.site, gender: invDorm?.gender })) {
+        void appAlert("기숙사 ERP 알림", "접근 권한이 없는 기숙사입니다."); return;
+      }
+    }
     if (inventorySavingRef.current) return; // 연속 클릭/업로드 대기 중복 실행 방지
     inventorySavingRef.current = true;
     try {
       const existing = editingInventoryId
-        ? inventory.find((i) => i.id === editingInventoryId)
+        ? scopedInventory.find((i) => i.id === editingInventoryId)
         : null;
 
       const id = editingInventoryId || crypto.randomUUID();
@@ -10495,6 +10619,10 @@ export default function App() {
 
   const saveLease = () => {
     if (!canEditData(currentUser)) return;
+    // [데이터 범위] restrictive custom-role: 허용 범위(지역/성별) 밖 저장 차단.
+    if (dataScope.active && !dataScope.canDorm({ site: leaseForm.site, gender: leaseForm.gender })) {
+      void appAlert("기숙사 ERP 알림", "접근 권한이 없는 기숙사입니다."); return;
+    }
     const payload: LeaseContract = { id: editingLeaseId || crypto.randomUUID(), ...leaseForm };
     setLeases((prev) => (editingLeaseId ? prev.map((l) => (l.id === editingLeaseId ? payload : l)) : [payload, ...prev]));
     setLeaseForm(leaseTemplate());
@@ -10545,7 +10673,7 @@ export default function App() {
     }
 
     const existing = editingDefectId
-      ? defects.find((d) => d.id === editingDefectId)
+      ? scopedDefects.find((d) => d.id === editingDefectId)
       : null;
 
     const today = new Date().toISOString().slice(0, 10);
@@ -10809,7 +10937,7 @@ export default function App() {
 
       // 이미 저장된 보고서면 즉시 반영(원본/보완 연결·보고일·주차·상태·차수·관리자 의견 등은 그대로 유지, 사진 1장만 제거).
       if (editingCleaningReportId) {
-        const existing = cleaningReports.find((r) => r.id === editingCleaningReportId);
+        const existing = scopedCleaningReports.find((r) => r.id === editingCleaningReportId);
         if (existing) {
           const updated: CleaningReport = {
             ...existing,
@@ -11434,6 +11562,8 @@ export default function App() {
     const term = preInspectionSearch.trim().toLowerCase();
     return preMoveInInspections
       .filter((r) => !r.isDeleted && !r.isPermanentDeleted)
+      // 데이터 범위(custom-role): dormId 보유 → allowedDormIds 멤버십. 미배정(빈 dormId)은 scope 사용자에게 숨김. null=전체(무회귀).
+      .filter((r) => !allowedDormIds || (!!r.dormId && allowedDormIds.has(r.dormId)))
       .filter((r) => preInspectionCompletenessFilter === "전체" || (preInspectionCompletenessFilter === "확인 필요" ? isIncompletePreInspection(r) : !isIncompletePreInspection(r)))
       .filter((r) => preInspectionSiteFilter === "전체" || r.site === preInspectionSiteFilter)
       .filter((r) => preInspectionGenderFilter === "전체" || r.gender === preInspectionGenderFilter)
@@ -11444,7 +11574,7 @@ export default function App() {
       .filter((r) => preInspectionMonthFilter === "전체" || (r.inspectionDate || "").slice(0, 7) === preInspectionMonthFilter)
       .filter((r) => !term || `${r.buildingName} ${r.dong} ${r.roomHo} ${r.expectedMoveInName} ${r.inspectorName} ${r.defectDescription}`.toLowerCase().includes(term))
       .sort((a, b) => (b.inspectionDate || "").localeCompare(a.inspectionDate || ""));
-  }, [preMoveInInspections, preInspectionSearch, preInspectionSiteFilter, preInspectionGenderFilter, preInspectionStatusFilter, preInspectionCleaningFilter, preInspectionDefectFilter, preInspectionManagerFilter, preInspectionMonthFilter, preInspectionCompletenessFilter]);
+  }, [preMoveInInspections, preInspectionSearch, preInspectionSiteFilter, preInspectionGenderFilter, preInspectionStatusFilter, preInspectionCleaningFilter, preInspectionDefectFilter, preInspectionManagerFilter, preInspectionMonthFilter, preInspectionCompletenessFilter, allowedDormIds]);
 
   const preInspectionManagerOptions = useMemo(
     () => ["전체", ...Array.from(new Set(preMoveInInspections.filter((r) => !r.isDeleted).map((r) => r.inspectorName).filter(Boolean)))],
@@ -11803,7 +11933,7 @@ export default function App() {
     const formPhotoCount =
       (cleaningReportForm.beforePhotoDataUrls?.length || 0) + (cleaningReportForm.afterPhotoDataUrls?.length || 0);
     const existingForPhotoCheck = editingCleaningReportId
-      ? cleaningReports.find((r) => r.id === editingCleaningReportId)
+      ? scopedCleaningReports.find((r) => r.id === editingCleaningReportId)
       : null;
     const existingPhotoCount =
       (existingForPhotoCheck?.beforePhotoDataUrls?.length || 0) + (existingForPhotoCheck?.afterPhotoDataUrls?.length || 0);
@@ -11844,7 +11974,7 @@ export default function App() {
     try {
 
     const existing = editingCleaningReportId
-      ? cleaningReports.find((r) => r.id === editingCleaningReportId)
+      ? scopedCleaningReports.find((r) => r.id === editingCleaningReportId)
       : null;
 
     if (existing) {
@@ -12487,6 +12617,10 @@ export default function App() {
       void appAlert("알림", "이름을 입력하세요.");
       return;
     }
+    // [데이터 범위] 부서 scope 활성 시 허용 부서 밖 저장 차단(직접입력/강제값 방어).
+    if (allowedMilitaryDepartments && !militaryUnitInScope(militaryPersonnelForm.unit)) {
+      void appAlert("군대 관리 알림", "접근 권한이 없는 부서입니다."); return;
+    }
     const existing = editingMilitaryPersonnelId ? militaryPersonnel.find((item) => item.id === editingMilitaryPersonnelId) : null;
     const payload: MilitaryPersonnel = {
       ...militaryPersonnelForm,
@@ -12724,7 +12858,7 @@ export default function App() {
     let notTarget = 0;      // 대상아님 / 예비군 7~8년차 / 종료 (교육 비대상)
     let statusExcluded = 0; // 군대설정 대상 재직상태가 아님
 
-    militaryPersonnel.forEach((person) => {
+    scopedMilitaryPersonnel.forEach((person) => {
       if ((person as { isDeleted?: boolean }).isDeleted) return;
       const effStatus = (person.status || "").trim() || "재직"; // 빈 값은 재직으로 간주
       if (!targetStatuses.includes(effStatus)) { statusExcluded += 1; return; }
@@ -12812,6 +12946,10 @@ export default function App() {
       return;
     }
     const person = militaryPersonnel.find((p) => p.id === militaryTrainingForm.personnelId);
+    // [데이터 범위] 부서 scope 활성 시 허용 부서 밖 대상자에 대한 훈련기록 저장 차단.
+    if (allowedMilitaryDepartments && !(person && militaryUnitInScope(person.unit))) {
+      void appAlert("군대 관리 알림", "접근 권한이 없는 부서의 대상자입니다."); return;
+    }
     const enteredHours = Number(militaryTrainingForm.trainingHours) || 0;
     // [상태] 훈련 상태는 관리자가 직접 관리한다(훈련 종료 후 진행중/완료/불참 등으로 변경).
     //  신규 등록 기본값은 "예정" — 이수시간으로 완료/미이수를 자동 확정하지 않는다(기존 저장 데이터는 그대로 유지).
@@ -13042,7 +13180,7 @@ export default function App() {
     const now = new Date().toISOString().slice(0,10);
     const reports: MilitaryReport[] = [];
 
-    const reserveList = militaryPersonnel.filter((p) => getMilitaryCategory(p, effectiveMilitaryReferenceYear) === '예비군');
+    const reserveList = scopedMilitaryPersonnel.filter((p) => getMilitaryCategory(p, effectiveMilitaryReferenceYear) === '예비군');
     reports.push({
       id: crypto.randomUUID(),
       title: '예비군 대상자 현황',
@@ -13055,7 +13193,7 @@ export default function App() {
       updatedAt: now,
     });
 
-    const civilList = militaryPersonnel.filter((p) => getMilitaryCategory(p, effectiveMilitaryReferenceYear) === '민방위');
+    const civilList = scopedMilitaryPersonnel.filter((p) => getMilitaryCategory(p, effectiveMilitaryReferenceYear) === '민방위');
     reports.push({
       id: crypto.randomUUID(),
       title: '민방위 대상자 현황',
@@ -13126,7 +13264,7 @@ export default function App() {
     });
 
     const byDept: Record<string, number> = {};
-    militaryPersonnel.forEach((p) => {
+    scopedMilitaryPersonnel.forEach((p) => {
       const d = p.unit || '미지정';
       byDept[d] = (byDept[d] || 0) + 1;
     });
@@ -13137,7 +13275,7 @@ export default function App() {
       type: '부서',
       author: currentUser?.displayName || currentUser?.username || '',
       status: '완료',
-      notes: `총 ${militaryPersonnel.length}명\n${formatReportNotes(byDept)}`,
+      notes: `총 ${scopedMilitaryPersonnel.length}명\n${formatReportNotes(byDept)}`,
       createdAt: now,
       updatedAt: now,
     });
@@ -13793,7 +13931,9 @@ const exportExcel = () => {
     fileName = "신규계약현황.xlsx";
   } else if (activeTab === "dormContracts") {
     // [4] 기본 내보내기는 화면 상태 필터와 무관하게 전체 이력(종료/해지 포함). 삭제만 제외 + 빈 행 sanitize.
-    rows = sanitizeDormContracts(dormContracts.filter((c) => !c.isDeleted)).map((c) => ({
+    //  단, custom-role 데이터 범위는 반드시 적용(raw 전체 다운로드 우회 차단). active=false 면 allowedDormKeySet=null → 무회귀.
+    rows = sanitizeDormContracts(dormContracts.filter((c) => !c.isDeleted
+      && (!allowedDormKeySet || allowedDormKeySet.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo))))).map((c) => ({
       지역: c.site,
       도로명주소: c.address,
       건물명: c.buildingName,
@@ -13879,7 +14019,9 @@ const exportExcel = () => {
     fileName = "정산관리.xlsx";
   } else if (activeTab === "newHires") {
     // [4] 기본 내보내기는 화면 상태 필터와 무관하게 전체 이력(거주중/연장/만료예정/미배정/퇴실 모두). 삭제만 제외 + 빈 행 sanitize.
-    rows = sanitizeNewHires(newHires.filter((h) => !h.isDeleted)).map((h) => {
+    //  단, custom-role 데이터 범위 적용(raw 우회 차단): 미배정/범위 밖 제외. active=false 면 canNewHire=true → 무회귀.
+    rows = sanitizeNewHires(newHires.filter((h) => !h.isDeleted
+      && dataScope.canNewHire({ dormId: h.dormId, site: h.site, gender: h.gender }))).map((h) => {
       const dorm =
         operationalDorms.find((d) => d.id === h.dormId) ||
         dorms.find((d) => d.id === h.dormId) || null;
@@ -14099,7 +14241,7 @@ const exportExcel = () => {
 };
 
 const exportDormSummaryExcel = () => {
-  const rows = operationalDorms.map((dorm) => {
+  const rows = scopedOperationalDorms.map((dorm) => {
     const currentResidents = occupancyCountByDorm.get(dorm.id) || 0;
     const capacityVal = getDormCapacity(dorm);
     const vacancy = Math.max(capacityVal - currentResidents, 0);
@@ -14298,7 +14440,7 @@ const exportDormSettlementExcel = (dorm: OperationalDorm) => {
 // ============================================
 const downloadOperationalReport = () => {
   const today = new Date().toISOString().slice(0, 10);
-  const filtered = operationalDorms.filter((d) => {
+  const filtered = scopedOperationalDorms.filter((d) => {
     if (reportSiteFilter !== "전체" && d.site !== reportSiteFilter) return false;
     if (reportGenderFilter !== "전체" && d.gender !== reportGenderFilter) return false;
     return true;
@@ -14345,7 +14487,7 @@ const downloadUnassignedReport = () => {
 
 const downloadDefectReport = () => {
   const today = new Date().toISOString().slice(0, 10);
-  const rows = defects.filter(d => !d.isDeleted).map((d) => ({
+  const rows = scopedDefects.filter(d => !d.isDeleted).map((d) => ({
     기숙사: d.buildingName,
     위치: `${formatDong(d.dong)}-${formatRoomHo(d.ho)}`,
     상태: d.defectStatus,
@@ -14382,7 +14524,7 @@ const downloadCleaningReport = () => {
 
 const downloadInventoryReport = () => {
   const today = new Date().toISOString().slice(0, 10);
-  const rows = inventory.filter(i => !i.isDeleted).map((i) => {
+  const rows = scopedInventory.filter(i => !i.isDeleted).map((i) => {
     const dorm = operationalDorms.find(d => d.id === i.dormId) || dorms.find(d => d.id === i.dormId);
     return {
       기숙사: dorm?.buildingName || "",
@@ -14433,7 +14575,7 @@ const buildPdfReport = (type: PdfReportType): {
 } => {
   const period = `${reportYear}-${reportMonth}`;
   const dongHo = (dong: string, roomHo: string) => `${formatDong(dong)}-${formatRoomHo(roomHo)}`;
-  const dorms_ = operationalDorms.filter(
+  const dorms_ = scopedOperationalDorms.filter(
     (d) =>
       (reportSiteFilter === "전체" || d.site === reportSiteFilter) &&
       (reportGenderFilter === "전체" || d.gender === reportGenderFilter) &&
@@ -14508,7 +14650,7 @@ const buildPdfReport = (type: PdfReportType): {
   }
 
   if (type === "cleaning") {
-    const list = cleaningReports.filter((r) => !r.isDeleted && (r.reportDate || "").startsWith(period) && (pdfReportDormId === "전체" ? dormIdSet.has(r.dormId) || dormIdSet.size === operationalDorms.length : r.dormId === pdfReportDormId));
+    const list = scopedCleaningReports.filter((r) => !r.isDeleted && (r.reportDate || "").startsWith(period) && (pdfReportDormId === "전체" ? dormIdSet.has(r.dormId) || dormIdSet.size === operationalDorms.length : r.dormId === pdfReportDormId));
     const rows = list.map((r) => [
       pdfCell(formatDateOnly(r.reportDate) || "-"), pdfCell(r.buildingName), pdfCell(dongHo(r.dong, r.roomHo)),
       pdfCell(getDormManagerDisplayName(r.dormId)), pdfCell(r.cleanStatus),
@@ -14525,7 +14667,7 @@ const buildPdfReport = (type: PdfReportType): {
   }
 
   if (type === "defect") {
-    const list = defects.filter((d) => !d.isDeleted && (d.receiptDate || "").startsWith(period) && (pdfReportDormId === "전체" || d.dormId === pdfReportDormId));
+    const list = scopedDefects.filter((d) => !d.isDeleted && (d.receiptDate || "").startsWith(period) && (pdfReportDormId === "전체" || d.dormId === pdfReportDormId));
     const rows = list.map((d) => [
       pdfCell(formatDateOnly(d.receiptDate) || "-"), pdfCell(d.buildingName), pdfCell(dongHo(d.dong, d.ho)),
       pdfCell(d.defectStatus), pdfCell(d.requestText),
@@ -14542,7 +14684,7 @@ const buildPdfReport = (type: PdfReportType): {
   }
 
   if (type === "inventory") {
-    const list = inventory.filter((i) => !i.isDeleted && (pdfReportDormId === "전체" || i.dormId === pdfReportDormId));
+    const list = scopedInventory.filter((i) => !i.isDeleted && (pdfReportDormId === "전체" || i.dormId === pdfReportDormId));
     const rows = list.map((i) => {
       const dorm = operationalDorms.find((d) => d.id === i.dormId);
       return [
@@ -15770,24 +15912,26 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   }));
 
   const inventoryAlerts = useMemo(() => {
-    const lowStock = inventory.filter((item) => item.quantity <= 2 && !item.soldDate && !item.disposalDate).length;
-    const expiringSoon = inventory.filter((item) => ["고장", "노후"].includes(item.status)).length;
+    const lowStock = scopedInventory.filter((item) => item.quantity <= 2 && !item.soldDate && !item.disposalDate).length;
+    const expiringSoon = scopedInventory.filter((item) => ["고장", "노후"].includes(item.status)).length;
     return { lowStock, expiringSoon };
-  }, [inventory]);
+  }, [scopedInventory]);
 
   const inventoryByDorm = useMemo(() => {
+    // 데이터 범위: 기숙사별 비품 카드의 "기준 dorm"도 scopedOperationalDorms 로 한정(범위 밖 기숙사 카드 자체 미생성).
+    //  비품 집계도 scopedInventory. scope 미적용 시 원본과 동일(무회귀).
     const groups: Record<string, { dormName: string; itemCount: number; totalAmount: number; currentItems: number }> = {};
-    operationalDorms.forEach((dorm) => {
-      const dormItems = inventory.filter((item) => item.dormId === dorm.id && !item.soldDate && !item.disposalDate && !["매각", "폐기"].includes(item.status));
+    scopedOperationalDorms.forEach((dorm) => {
+      const dormItems = scopedInventory.filter((item) => item.dormId === dorm.id && !item.soldDate && !item.disposalDate && !["매각", "폐기"].includes(item.status));
       groups[dorm.id] = {
         dormName: `${dorm.site} ${dorm.buildingName} ${dorm.dong}-${dorm.roomHo}`,
-        itemCount: inventory.filter((item) => item.dormId === dorm.id).length,
-        totalAmount: inventory.filter((item) => item.dormId === dorm.id).reduce((sum, item) => sum + item.purchaseAmount, 0),
+        itemCount: scopedInventory.filter((item) => item.dormId === dorm.id).length,
+        totalAmount: scopedInventory.filter((item) => item.dormId === dorm.id).reduce((sum, item) => sum + item.purchaseAmount, 0),
         currentItems: dormItems.length,
       };
     });
     return groups;
-  }, [inventory, operationalDorms]);
+  }, [scopedInventory, scopedOperationalDorms]);
 
   const uniqueActiveDormContracts = useMemo(() => {
     const uniqueMap = new Map<string, DormContract>();
@@ -15828,7 +15972,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     wkEnd.setHours(23, 59, 59, 999);
     const submittedIdSet = new Set<string>();
     const submittedKeySet = new Set<string>();
-    cleaningReports.forEach((r) => {
+    scopedCleaningReports.forEach((r) => {
       if (r.isDeleted || r.isPermanentDeleted) return;
       const d = parseSafeDate(r.reportDate);
       if (!d || d < wkStart || d > wkEnd) return;
@@ -15836,19 +15980,27 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
       submittedKeySet.add(makeDormMatchKey(r.site, r.buildingName, r.dong, r.roomHo));
     });
 
+    // 데이터 범위: raw → scope → groupBy 순서. scope 미적용(allowedDormIds=null)이면 원본과 동일(무회귀).
+    const scopedResidents = allowedDormIds ? unifiedCurrentResidents.filter((o) => allowedDormIds.has(o.dormId)) : unifiedCurrentResidents;
+    const scopedContracts = allowedDormKeySet
+      ? uniqueActiveDormContracts.filter((d) => allowedDormKeySet.has(getDormKey(d.site, d.buildingName, d.dong, d.roomHo)))
+      : uniqueActiveDormContracts;
+
     return combinations.map(({ site, gender }) => {
-      const regionDorms = uniqueActiveDormContracts.filter((d) => d.site === site && d.gender === gender);
-      const operationalRegionDorms = operationalDorms.filter((d) => d.site === site && d.gender === gender);
+      const regionDorms = scopedContracts.filter((d) => d.site === site && d.gender === gender);
+      const operationalRegionDorms = scopedOperationalDorms.filter((d) => d.site === site && d.gender === gender);
       const dormCount = regionDorms.length;
       const operationalDormCount = operationalRegionDorms.length;
-      // 공통 기준 getRegionStats 로 현재 거주자/정원/공실/입주율 산출(대시보드 v4 현거주자 합계와 일치)
-      const rs = getRegionStats(site, gender);
-      const totalCapacity = rs.totalCapacity;
-      const currentResidents = rs.currentResidents;
-      const vacancy = rs.vacancy;
-      const occupancyRate = rs.occupancyRate;
+      // getRegionStats 와 동일 로직을 scope 반영해 인라인 계산(대시보드 v4 현거주자 합계와 일치, scope 시 허용 dorm 만).
+      const totalCapacity = operationalRegionDorms.reduce((s, d) => s + (d.capacity || 0), 0);
+      const currentResidents = scopedResidents.filter((o) => {
+        const dorm = operationalDormById.get(o.dormId);
+        return dorm?.site === site && dorm?.gender === gender;
+      }).length;
+      const vacancy = Math.max(totalCapacity - currentResidents, 0);
+      const occupancyRate = totalCapacity > 0 ? Math.round((currentResidents / totalCapacity) * 100) : 0;
       const expiringCount = operationalRegionDorms.filter((d) => d.leaseStatus === "만료예정").length;
-      const unprocessedDefects = defects.filter(
+      const unprocessedDefects = scopedDefects.filter(
         (d) => !d.isDeleted && d.defectStatus !== "완료" && operationalRegionDorms.some((room) => room.id === d.dormId)
       ).length;
       // 이번 주 제출 완료 기숙사(id 또는 호실키 매칭) 수를 대상 수에서 차감. 음수 방지(Math.max).
@@ -15870,9 +16022,11 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         unprocessedDefects,
         unsubmittedCleaning,
       };
-    });
+    })
+    // 데이터 범위 활성 시 허용 dorm 이 0개인 지역/성별 카드는 숨김(평택+남 scope → 평택(남)만).
+    .filter((s) => !allowedDormIds || s.operationalDormCount > 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dorms, operationalDorms, occupants, newHires, defects, cleaningReports, unifiedCurrentResidents]);
+  }, [dorms, scopedOperationalDorms, occupants, newHires, scopedDefects, scopedCleaningReports, unifiedCurrentResidents, allowedDormIds, allowedDormKeySet, uniqueActiveDormContracts, operationalDormById]);
 
   // [항목4] 9개 보고서 공통 설정(ReportView 재사용). 기존 메모/데이터 재사용 — 새 조회/저장 없음.
   const reportConfigs = useMemo<Record<string, ReportConfig>>(() => {
@@ -15883,7 +16037,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     // ① 전체 운영 현황
     // 임차만기: 선택 연/월에 계약종료일이 포함되는 기숙사(해지/종료·삭제 제외 = operationalDorms, 호실별 중복 제거됨).
     const reportPeriodYM = `${reportYear}-${String(reportMonth).padStart(2, "0")}`;
-    const leaseExpiryCount = operationalDorms.filter((d) => (d.contractEnd || "").slice(0, 7) === reportPeriodYM).length;
+    const leaseExpiryCount = scopedOperationalDorms.filter((d) => (d.contractEnd || "").slice(0, 7) === reportPeriodYM).length;
     const overallTotalCap = siteGenderStats.reduce((a, s) => a + s.totalCapacity, 0);
     const overallResidents = siteGenderStats.reduce((a, s) => a + s.currentResidents, 0);
     // 전체 잔여 = 전체 정원 - 전체 재원(원본값 유지 — 음수면 정원초과). 정원/재원은 동일 기준(siteGenderStats)이라 상·하단 합계 일치.
@@ -15917,14 +16071,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     //   기숙사 컬럼만 좌측 정렬, 나머지(지역/성별/정원/현재인원/잔여/상태)는 가운데 정렬(컬럼별 align override).
     const dormOcc: ReportConfig = {
       title: "기숙사별 입주 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: operationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 지역: d.site, 성별: d.gender, 기숙사: dormLabel(d), 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
+      rows: scopedOperationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 지역: d.site, 성별: d.gender, 기숙사: dormLabel(d), 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
       columns: [{ key: "지역", label: "지역", align: "center" }, { key: "성별", label: "성별", align: "center" }, { key: "기숙사", label: "기숙사", align: "left" }, { key: "정원", label: "정원", align: "center" }, { key: "현재인원", label: "현재인원", align: "center" }, { key: "공실", label: "잔여", align: "center" }, { key: "상태", label: "상태", align: "center" }],
       filterKeys: ["지역", "성별", "상태"], chart: { type: "pie", groupKey: "상태", label: "입주 상태 분포" },
     };
     // ③ 계약 만료 예정
     const expiry: ReportConfig = {
       title: "계약 만료 예정 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: operationalDorms.filter((d) => d.contractEnd).map((d) => { const dd = daysDiff(d.contractEnd); return { 기숙사: dormLabel(d), 지역: d.site, 계약시작: formatDateOnly(d.contractStart || ""), 계약종료: formatDateOnly(d.contractEnd || ""), "D-day": dd >= 0 ? `D-${dd}` : `만료 ${-dd}일 경과`, 만료월: (d.contractEnd || "").slice(0, 7), 상태: d.leaseStatus, _end: (d.contractEnd || "").slice(0, 10) }; }),
+      rows: scopedOperationalDorms.filter((d) => d.contractEnd).map((d) => { const dd = daysDiff(d.contractEnd); return { 기숙사: dormLabel(d), 지역: d.site, 계약시작: formatDateOnly(d.contractStart || ""), 계약종료: formatDateOnly(d.contractEnd || ""), "D-day": dd >= 0 ? `D-${dd}` : `만료 ${-dd}일 경과`, 만료월: (d.contractEnd || "").slice(0, 7), 상태: d.leaseStatus, _end: (d.contractEnd || "").slice(0, 10) }; }),
       columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "계약시작", label: "계약시작" }, { key: "계약종료", label: "계약종료" }, { key: "D-day", label: "D-day" }, { key: "상태", label: "상태" }],
       filterKeys: ["지역", "상태"], dateField: "_end", chart: { type: "bar", groupKey: "만료월", label: "월별 만료 건수" },
     };
@@ -15932,7 +16086,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     //   잔여 = 정원 - 현재인원(기존 정책과 동일하게 0 하한 · 초과 시 0). 입주율 = 현재인원/정원*100, 정원 0 → 0%.
     const vacancy: ReportConfig = {
       title: "잔여/입주율 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: operationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 기숙사: dormLabel(d), 지역: d.site, 성별: d.gender, 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), 입주율: `${k ? Math.round((c / k) * 100) : 0}%`, 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
+      rows: scopedOperationalDorms.map((d) => { const c = cur(d.id), k = getDormCapacity(d); return { 기숙사: dormLabel(d), 지역: d.site, 성별: d.gender, 현재인원: c, 정원: k, 공실: Math.max(k - c, 0), 입주율: `${k ? Math.round((c / k) * 100) : 0}%`, 상태: c >= k ? "만실" : c > 0 ? "사용중" : "공실" }; }),
       columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "성별", label: "성별" }, { key: "정원", label: "정원" }, { key: "현재인원", label: "현재인원" }, { key: "공실", label: "잔여" }, { key: "입주율", label: "입주율" }, { key: "상태", label: "상태" }],
       // 입주율은 "80%" 문자열이라 기본 비교가 문자열 정렬로 빠진다 → 이 보고서에서만 숫자 정렬로 지정(다른 보고서 영향 없음).
       numericKeys: ["입주율"],
@@ -15942,21 +16096,21 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     // ⑤ 청소 점검
     const cleaning: ReportConfig = {
       title: "청소 점검 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: cleaningReports.filter((r) => !r.isDeleted && !r.isPermanentDeleted).map((r) => ({ 보고일: formatDateOnly(r.reportDate || ""), 기숙사: `${r.buildingName || ""} ${formatDong(r.dong || "")}-${formatRoomHo(r.roomHo || "")}`.trim(), 지역: r.site, 상태: r.cleanStatus, 점수: r.score ?? "", 담당자: r.managerName || "", _date: (r.reportDate || "").slice(0, 10) })),
+      rows: scopedCleaningReports.filter((r) => !r.isDeleted && !r.isPermanentDeleted).map((r) => ({ 보고일: formatDateOnly(r.reportDate || ""), 기숙사: `${r.buildingName || ""} ${formatDong(r.dong || "")}-${formatRoomHo(r.roomHo || "")}`.trim(), 지역: r.site, 상태: r.cleanStatus, 점수: r.score ?? "", 담당자: r.managerName || "", _date: (r.reportDate || "").slice(0, 10) })),
       columns: [{ key: "보고일", label: "보고일" }, { key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "상태", label: "상태" }, { key: "점수", label: "점수" }, { key: "담당자", label: "담당자" }],
       filterKeys: ["지역", "상태"], dateField: "_date", chart: { type: "pie", groupKey: "상태", label: "청소 상태 분포" },
     };
     // ⑥ 하자 접수 현황
     const defect: ReportConfig = {
       title: "하자 접수 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: defects.filter((d) => !d.isDeleted && !d.isPermanentDeleted).map((d) => ({ 접수일: formatDateOnly(d.receiptDate || ""), 기숙사: `${d.buildingName || ""} ${formatDong(d.dong || "")}-${formatRoomHo(d.ho || "")}`.trim(), 지역: d.site, 상태: d.defectStatus, 내용: (d.requestText || "").slice(0, 40), _date: (d.receiptDate || "").slice(0, 10) })),
+      rows: scopedDefects.filter((d) => !d.isDeleted && !d.isPermanentDeleted).map((d) => ({ 접수일: formatDateOnly(d.receiptDate || ""), 기숙사: `${d.buildingName || ""} ${formatDong(d.dong || "")}-${formatRoomHo(d.ho || "")}`.trim(), 지역: d.site, 상태: d.defectStatus, 내용: (d.requestText || "").slice(0, 40), _date: (d.receiptDate || "").slice(0, 10) })),
       columns: [{ key: "접수일", label: "접수일" }, { key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "상태", label: "상태" }, { key: "내용", label: "내용" }],
       filterKeys: ["지역", "상태"], dateField: "_date", chart: { type: "pie", groupKey: "상태", label: "하자 상태 분포" },
     };
     // ⑦ 비품 현황
     const inv: ReportConfig = {
       title: "비품 현황 보고서", subtitle: `${reportYear}-${reportMonth}`,
-      rows: inventory.filter((i) => !i.isDeleted && !i.isPermanentDeleted).map((i) => ({ 기숙사: `${i.buildingName || ""} ${formatDong(i.dong || "")}-${formatRoomHo(i.roomHo || "")}`.trim(), 지역: i.site, 비품명: i.itemName || "", 수량: i.quantity ?? "", 상태: i.status, 구매일: formatDateOnly(i.purchaseDate || ""), 구매업체: i.purchaseVendor || "", _date: (i.purchaseDate || "").slice(0, 10) })),
+      rows: scopedInventory.filter((i) => !i.isDeleted && !i.isPermanentDeleted).map((i) => ({ 기숙사: `${i.buildingName || ""} ${formatDong(i.dong || "")}-${formatRoomHo(i.roomHo || "")}`.trim(), 지역: i.site, 비품명: i.itemName || "", 수량: i.quantity ?? "", 상태: i.status, 구매일: formatDateOnly(i.purchaseDate || ""), 구매업체: i.purchaseVendor || "", _date: (i.purchaseDate || "").slice(0, 10) })),
       columns: [{ key: "기숙사", label: "기숙사" }, { key: "지역", label: "지역" }, { key: "비품명", label: "비품명" }, { key: "수량", label: "수량" }, { key: "상태", label: "상태" }, { key: "구매일", label: "구매일" }, { key: "구매업체", label: "구매업체" }],
       filterKeys: ["지역", "상태"], dateField: "_date", chart: { type: "pie", groupKey: "상태", label: "비품 상태 분포" },
     };
@@ -16068,7 +16222,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
     // 4) 하자 발생 추이 (최근 6개월): 접수/진행중/완료
     const defectTrend = months.map((m) => {
-      const md = defects.filter((d) => !d.isDeleted && (d.receiptDate || "").slice(0, 7) === m.ym);
+      const md = scopedDefects.filter((d) => !d.isDeleted && (d.receiptDate || "").slice(0, 7) === m.ym);
       return {
         label: m.label,
         ym: m.ym,
@@ -16081,7 +16235,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
     // 5) 청소 점수 추이 (최근 6개월): 평균 점수 / 미제출 건수
     const cleaningTrend = months.map((m) => {
-      const mr = cleaningReports.filter((r) => !r.isDeleted && (r.reportDate || "").slice(0, 7) === m.ym);
+      const mr = scopedCleaningReports.filter((r) => !r.isDeleted && (r.reportDate || "").slice(0, 7) === m.ym);
       const scored = mr.filter((r) => r.cleanStatus !== "미제출" && typeof r.score === "number" && r.score > 0);
       const avg = scored.length > 0 ? Math.round(scored.reduce((sum, r) => sum + r.score, 0) / scored.length) : 0;
       return { label: m.label, avg, missing: mr.filter((r) => r.cleanStatus === "미제출").length };
@@ -16089,7 +16243,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
     return { regionStatus, occupancyTrend, expiryTrend, defectTrend, cleaningTrend };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [siteGenderStats, scopedOperationalDorms, occupants, scopedNormalizedOccupants, defects, cleaningReports, occupancyCountByDorm]);
+  }, [siteGenderStats, scopedOperationalDorms, occupants, scopedNormalizedOccupants, scopedDefects, scopedCleaningReports, occupancyCountByDorm]);
 
   // 월 필터 옵션 (데이터 내 실제 월 + 차트 표시 구간 합집합, 오름차순)
   const dormContractMonthOptions = useMemo(() => {
@@ -16107,12 +16261,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
   }, [defects, dashboardChartData]);
 
   const dashboardStat = {
-    dormCount: uniqueActiveDormContracts.length,
+    // 데이터 범위: scope 활성 시 허용 dorm 기준(무회귀: null 이면 기존 전체 수치)
+    dormCount: allowedDormIds ? scopedOperationalDorms.length : uniqueActiveDormContracts.length,
     // 공통 기준: 현재 사용중 기숙사의 현재 거주자 단일 목록(지역별 상세 통계 합계와 동일)
-    currentResidents: unifiedCurrentResidents.length,
+    currentResidents: allowedDormIds ? unifiedCurrentResidents.filter((o) => allowedDormIds.has(o.dormId)).length : unifiedCurrentResidents.length,
     totalVacancy: dormSummary.reduce((sum, item) => sum + item.vacancy, 0),
-    openDefects: defects.filter((d) => !d.isDeleted && d.defectStatus !== "완료").length,
-    inventoryCount: inventory.filter((i) => !i.isDeleted).length,
+    openDefects: scopedDefects.filter((d) => !d.isDeleted && d.defectStatus !== "완료").length,
+    inventoryCount: scopedInventory.filter((i) => !i.isDeleted).length,
   };
 
   const settlementManagementStats = useMemo(() => {
@@ -16123,7 +16278,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     const periodStart = new Date(settlementYearNum, settlementMonthNum - 1, 1);
     const periodEnd = getMonthEnd(settlementYearNum, settlementMonthNum);
 
-    const filteredDorms = operationalDorms
+    const filteredDorms = scopedOperationalDorms
       .filter((dorm) => {
         const siteMatch = settlementSiteFilter === "전체" || dorm.site === settlementSiteFilter;
         const genderMatch = settlementGenderFilter === "전체" || dorm.gender === settlementGenderFilter;
@@ -16189,12 +16344,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     const filteredSettlementItems = settlementItems.filter(
       (item) =>
         item.settlementYear === safeSettlementYear &&
-        item.settlementMonth === safeSettlementMonth
+        item.settlementMonth === safeSettlementMonth &&
+        (!allowedDormIds || allowedDormIds.has(item.dormId)) // 데이터 범위: 허용 dorm 정산항목만
     );
 
     return { filteredDorms, filteredSettlementItems };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operationalDorms, settlementSiteFilter, settlementGenderFilter, settlementSearch, settlementShowUnpaid, settlementYear, settlementMonth, occupants, inventory, defects, settlementRecords, settlementItems, settlementResidentsByDorm]);
+  }, [scopedOperationalDorms, allowedDormIds, settlementSiteFilter, settlementGenderFilter, settlementSearch, settlementShowUnpaid, settlementYear, settlementMonth, occupants, inventory, defects, settlementRecords, settlementItems, settlementResidentsByDorm]);
 
   React.useEffect(() => {
     if (activeTab !== "dashboard") {
@@ -16642,6 +16798,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
             )}
           </header>
+
+          {scopeLoadError && (
+            <div className="mb-6 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              권한 정보를 불러오지 못했습니다. 다시 시도해 주세요.
+            </div>
+          )}
 
           {showDormOperationStats && (
           <section className={`mb-6 rounded-3xl ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"} p-5 shadow-sm ring-1`}>
@@ -17381,6 +17543,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               tenantId={tenantId}
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
+              allowedExamProcessIds={allowedExamProcessIds}
             />
           ) : activeTab === "examPersonnel" ? (
             <ExamPersonnelPage
@@ -17390,6 +17553,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
               refreshKey={examDataVersion}
+              allowedExamProcessIds={allowedExamProcessIds}
             />
           ) : activeTab === "examApplications" ? (
             <ExamApplicationsPage
@@ -17409,6 +17573,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               onToast={showNetworkToast}
               onDataChanged={bumpExamData}
               refreshKey={examDataVersion}
+              allowedExamProcessIds={allowedExamProcessIds}
             />
           ) : activeTab === "examDmCertifications" ? (
             <ExamDmCertificationsPage
@@ -17428,6 +17593,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
               refreshKey={examDataVersion}
+              allowedExamProcessIds={allowedExamProcessIds}
             />
           ) : activeTab === "examMonthlyResults" ? (
             <ExamMonthlyResultsPage
@@ -17437,6 +17603,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               userId={currentUser?.id || ""}
               onToast={showNetworkToast}
               refreshKey={examDataVersion}
+              allowedExamProcessIds={allowedExamProcessIds}
             />
           ) : activeTab === "examExcelImport" ? (
             <ExamExcelImportPage
@@ -17490,12 +17657,12 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
         {/* [v2 1B] 조치대상 · 일정관리는 정식 sidebar 메뉴로 승격(아래 별도 블록). 군인대시보드는 순수 대시보드. */}
         {activeTab === "militaryActionItems" && (
-          <MilitaryActionItemsPanel darkMode={theme.darkMode} personnel={militaryPersonnel} training={militaryTrainingRecords} notices={militaryNotices} deptOf={militaryDeptOf} formatDate={formatDateOnly} onOpenPerson={openMilitaryPersonDetail} onNavigateType={navigateMilitaryActionType} />
+          <MilitaryActionItemsPanel darkMode={theme.darkMode} personnel={scopedMilitaryPersonnel} training={militaryTrainingRecords} notices={militaryNotices} deptOf={militaryDeptOf} formatDate={formatDateOnly} onOpenPerson={openMilitaryPersonDetail} onNavigateType={navigateMilitaryActionType} />
         )}
         {activeTab === "militaryCalendar" && (
           <MilitaryCalendarPanel
             darkMode={theme.darkMode}
-            personnel={militaryPersonnel}
+            personnel={scopedMilitaryPersonnel}
             training={militaryTrainingRecords}
             notices={militaryNotices}
             reports={militaryReports}
@@ -17909,7 +18076,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   className="rounded-2xl border bg-white px-3 py-2 text-sm shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="전체">전체 대상자</option>
-                  {militaryPersonnel.map((person) => (
+                  {scopedMilitaryPersonnel.map((person) => (
                     <option key={person.id} value={person.id}>{person.name}</option>
                   ))}
                 </select>
@@ -18845,7 +19012,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   label="지역"
                   value={dormContractSiteFilter}
                   onChange={(v) => setDormContractSiteFilter(v as Site | "전체")}
-                  options={["전체", "평택", "천안"]}
+                  options={scopedSiteOptions}
                 />
                 <FilterSelect
                   label="상태"
@@ -19084,7 +19251,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   label="지역"
                   value={newHireSiteFilter}
                   onChange={(v) => setNewHireSiteFilter(v as Site | "전체")}
-                  options={["전체", "평택", "천안"]}
+                  options={scopedSiteOptions}
                 />
                 <FilterSelect
                   label="성별"
@@ -19397,13 +19564,13 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   label="지역"
                   value={dormSiteFilter}
                   onChange={(v) => setDormSiteFilter(v as Site | "전체")}
-                  options={["전체", "평택", "천안"]}
+                  options={scopedSiteOptions}
                 />
                 <FilterSelect
                   label="성별"
                   value={dormGenderFilter}
                   onChange={(v) => setDormGenderFilter(v as "남" | "여" | "전체")}
-                  options={["전체", "남", "여"]}
+                  options={scopedGenderOptions}
                 />
                 <FilterSelect
                   label="상태"
@@ -19581,8 +19748,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className="mb-4 flex flex-wrap items-center gap-2 justify-between">
               <div className="flex flex-wrap items-center gap-2">
-                <FilterSelect label="지역" value={occupantMenuFilterSite} onChange={(v) => setOccupantMenuFilterSite(v as Site | "전체")} options={["전체", "평택", "천안"]} />
-                <FilterSelect label="성별" value={occupantMenuFilterGender} onChange={(v) => setOccupantMenuFilterGender(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
+                <FilterSelect label="지역" value={occupantMenuFilterSite} onChange={(v) => setOccupantMenuFilterSite(v as Site | "전체")} options={scopedSiteOptions} />
+                <FilterSelect label="성별" value={occupantMenuFilterGender} onChange={(v) => setOccupantMenuFilterGender(v as "남" | "여" | "전체")} options={scopedGenderOptions} />
                 <FilterSelect label="상태" value={occupantMenuFilterStatus} onChange={(v) => setOccupantMenuFilterStatus(v as "전체" | "거주중" | "만료예정" | "대기중" | "퇴실")} options={["전체", "거주중", "만료예정", "대기중", "퇴실"]} />
                 <input type="text" placeholder="이름/부서/연락처/건물/동/호/현관 검색..." value={occupantMenuFilterSearch} onChange={(e) => setOccupantMenuFilterSearch(e.target.value)} className={`${theme.darkMode ? "rounded-2xl border border-slate-600 px-3 py-2 text-sm outline-none focus:border-slate-400" : "rounded-2xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-400"}`} />
               </div>
@@ -20017,7 +20184,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     setSelectedDormForAssignment("");
                     setSelectedNewHiresForAssignment([]);
                   }}
-                  options={["전체", "평택", "천안"]}
+                  options={scopedSiteOptions}
                 />
                 <FilterSelect
                   label="성별"
@@ -20027,7 +20194,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     setSelectedDormForAssignment("");
                     setSelectedNewHiresForAssignment([]);
                   }}
-                  options={["전체", "남", "여"]}
+                  options={scopedGenderOptions}
                 />
                 <FilterSelect
                   label="기숙사 상태"
@@ -20554,7 +20721,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
             {simSubMenu === "monthlyTo" && (
               <MonthlyToSimulation
-                base={(["평택", "천안"] as const).flatMap((site) => (["남", "여"] as const).map((g) => { const s = getRegionStats(site, g); return { site, gender: g, capacity: s.totalCapacity, currentResidents: s.currentResidents, dormCount: s.dormCount }; }))}
+                base={monthlyToBase}
                 occupants={simOccupants}
                 contracts={simContracts}
                 darkMode={theme.darkMode}
@@ -20638,8 +20805,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
-                <FilterSelect label="지역" value={simulationSiteFilter} onChange={(v) => setSimulationSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
-                <FilterSelect label="성별" value={simulationGenderFilter} onChange={(v) => setSimulationGenderFilter(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
+                <FilterSelect label="지역" value={simulationSiteFilter} onChange={(v) => setSimulationSiteFilter(v as Site | "전체")} options={scopedSiteOptions} />
+                <FilterSelect label="성별" value={simulationGenderFilter} onChange={(v) => setSimulationGenderFilter(v as "남" | "여" | "전체")} options={scopedGenderOptions} />
               </div>
               <input
                 type="text"
@@ -20869,7 +21036,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">총 등록 품목</div>
-                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{inventory.length}</div>
+                <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{scopedInventory.length}</div>
                 <div className="mt-2 text-sm text-slate-500">전체 비품 수</div>
               </div>
             </div>
@@ -20947,15 +21114,15 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <div className="grid gap-4 xl:grid-cols-3">
                 <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">등록된 비품 항목</div>
-                  <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{inventory.length}</div>
+                  <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{scopedInventory.length}</div>
                 </div>
                 <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">총 구매액</div>
-                  <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{formatNumber(inventory.reduce((sum, item) => sum + item.purchaseAmount, 0))}원</div>
+                  <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{formatNumber(scopedInventory.reduce((sum, item) => sum + item.purchaseAmount, 0))}원</div>
                 </div>
                 <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">최근 기록</div>
-                  <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{inventory.slice(-1)[0]?.issuedDate || "-"}</div>
+                  <div className={`${theme.darkMode ? "mt-3 text-2xl font-semibold text-slate-100" : "mt-3 text-2xl font-semibold text-slate-900"}`}>{scopedInventory.slice(-1)[0]?.issuedDate || "-"}</div>
                 </div>
               </div>
             ) : (
@@ -21290,8 +21457,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 onBlur={() => setSettlementMonth(getValidSettlementMonth(settlementMonth) || currentSettlementMonth)}
                 placeholder="MM"
               />
-              <SelectInput label="지역" value={settlementSiteFilter} onChange={(v) => setSettlementSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
-              <SelectInput label="성별" value={settlementGenderFilter} onChange={(v) => setSettlementGenderFilter(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
+              <SelectInput label="지역" value={settlementSiteFilter} onChange={(v) => setSettlementSiteFilter(v as Site | "전체")} options={scopedSiteOptions} />
+              <SelectInput label="성별" value={settlementGenderFilter} onChange={(v) => setSettlementGenderFilter(v as "남" | "여" | "전체")} options={scopedGenderOptions} />
               <Input label="기숙사명" value={settlementSearch} onChange={(v) => setSettlementSearch(v)} placeholder="검색" />
               <div className="flex items-end gap-2">
                 <label className="flex items-center gap-2 cursor-pointer">
@@ -21302,10 +21469,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
 
             <div className="grid gap-3 md:grid-cols-4 mb-6">
-              <MiniStat label="기숙사 수" value={`${operationalDorms.length}개`} />
+              <MiniStat label="기숙사 수" value={`${scopedOperationalDorms.length}개`} />
               <MiniStat label="현재 거주인" value={`${settlementResidentCount}명`} />
-              <MiniStat label="비품 총액" value={`${formatNumber(inventory.reduce((sum, i) => sum + (i.purchaseAmount || 0), 0))}원`} />
-              <MiniStat label="미완료 하자" value={`${defects.filter(d => !d.isDeleted && d.defectStatus !== "완료").length}건`} />
+              <MiniStat label="비품 총액" value={`${formatNumber(scopedInventory.reduce((sum, i) => sum + (i.purchaseAmount || 0), 0))}원`} />
+              <MiniStat label="미완료 하자" value={`${scopedDefects.filter(d => !d.isDeleted && d.defectStatus !== "완료").length}건`} />
             </div>
 
             <div className="mb-4 flex flex-wrap gap-2">
@@ -21355,6 +21522,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 const periodEnd = getMonthEnd(settlementYearNum, settlementMonthNum);
 
                 const filteredDorms = settlementScopeDorms
+                  .filter((dorm) => !allowedDormIds || allowedDormIds.has(dorm.id)) // 데이터 범위: 허용 dorm 만(총액/평균/카드/상세 모두 이 배열 기준)
                   .map((dorm) => {
                     const dormOccupants = settlementResidentsByDorm.get(getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo)) || []; // KPI와 동일 출처(중복 제거 포함)
                     const invDormKey = getDormKey(dorm.site, dorm.buildingName, dorm.dong, dorm.roomHo);
@@ -21815,7 +21983,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         value={settlementItemForm.dormId}
                         onChange={(dormId) => setSettlementItemForm((prev) => ({ ...prev, dormId }))}
                         currentUser={currentUser}
-                        operationalDorms={operationalDorms}
+                        operationalDorms={scopedOperationalDorms}
                         label="기숙사"
                       />
                       <SelectInput label="항목" value={settlementItemForm.category} onChange={(v) => setSettlementItemForm((prev) => ({ ...prev, category: v as SettlementItemCategory }))} options={settlementItemCategories} />
@@ -22110,17 +22278,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="grid gap-4 md:grid-cols-4">
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-blue-50 to-blue-100 p-4" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-blue-50 to-blue-100 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-blue-600">계약 문서</div>
-                <div className="mt-3 text-2xl font-semibold text-blue-900">{dormContracts.length}</div>
+                <div className="mt-3 text-2xl font-semibold text-blue-900">{visibleDormContracts.length}</div>
                 <div className="mt-2 text-sm text-blue-700">등록된 계약</div>
               </div>
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-green-50 to-green-100 p-4" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-green-50 to-green-100 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-green-600">청소 보고서</div>
-                <div className="mt-3 text-2xl font-semibold text-green-900">{cleaningReports.length}</div>
+                <div className="mt-3 text-2xl font-semibold text-green-900">{scopedCleaningReports.filter((r) => !r.isDeleted).length}</div>
                 <div className="mt-2 text-sm text-green-700">제출된 보고서</div>
               </div>
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-orange-50 to-orange-100 p-4" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-orange-50 to-orange-100 p-4"}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-orange-600">하자 기록</div>
-                <div className="mt-3 text-2xl font-semibold text-orange-900">{defects.length}</div>
+                <div className="mt-3 text-2xl font-semibold text-orange-900">{scopedDefects.filter((d) => !d.isDeleted).length}</div>
                 <div className="mt-2 text-sm text-orange-700">등록된 하자</div>
               </div>
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-gradient-to-br from-purple-50 to-purple-100 p-4" : "rounded-3xl border border-slate-200 bg-gradient-to-br from-purple-50 to-purple-100 p-4"}`}>
@@ -22191,7 +22359,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                         </tr>
                       );
                     })}
-                    {operationalDorms.length === 0 && (
+                    {scopedOperationalDorms.length === 0 && (
                       <tr>
                         <td colSpan={6} className="px-3 py-6 text-center text-slate-500">
                           운영 중인 기숙사가 없습니다.
@@ -22208,9 +22376,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className="mt-6 grid gap-4 lg:grid-cols-3">
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>최근 계약 문서</div>
-                {dormContracts.slice(-5).reverse().length > 0 ? (
+                {visibleDormContracts.slice(-5).reverse().length > 0 ? (
                   <div className="space-y-2">
-                    {dormContracts.slice(-5).reverse().map((contract) => (
+                    {visibleDormContracts.slice(-5).reverse().map((contract) => (
                       <div key={contract.id} className={`rounded-2xl p-3 shadow-sm text-xs ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
                         <div className={`font-medium truncate ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{contract.buildingName} {formatDong(contract.dong)}-{formatRoomHo(contract.roomHo)}</div>
                         <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>{formatDateOnly(contract.contractStart) || "-"}</div>
@@ -22225,9 +22393,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>최근 청소 보고서</div>
-                {cleaningReports.slice(-5).reverse().length > 0 ? (
+                {scopedCleaningReports.slice(-5).reverse().length > 0 ? (
                   <div className="space-y-2">
-                    {cleaningReports.slice(-5).reverse().map((report) => (
+                    {scopedCleaningReports.slice(-5).reverse().map((report) => (
                       <div key={report.id} className={`rounded-2xl p-3 shadow-sm text-xs ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
                         <div className={`font-medium truncate ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{report.buildingName} {formatDong(report.dong)}-{formatRoomHo(report.roomHo)}</div>
                         <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>{getCleaningWeekInfo(report.reportDate)?.label || `${report.monthLabel} ${report.weekLabel}`}</div>
@@ -22242,9 +22410,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               </div>
               <div className={`${theme.darkMode ? "rounded-3xl border border-slate-700 bg-slate-950 p-4" : "rounded-3xl border border-slate-200 bg-slate-50 p-4"}`}>
                 <div className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>최근 하자 기록</div>
-                {defects.slice(-5).reverse().length > 0 ? (
+                {scopedDefects.slice(-5).reverse().length > 0 ? (
                   <div className="space-y-2">
-                    {defects.slice(-5).reverse().map((defect) => (
+                    {scopedDefects.slice(-5).reverse().map((defect) => (
                       <div key={defect.id} className={`rounded-2xl p-3 shadow-sm text-xs ${theme.darkMode ? "bg-slate-900" : "bg-white"}`}>
                         <div className={`font-medium truncate ${theme.darkMode ? "text-slate-100" : "text-slate-700"}`}>{defect.buildingName} {formatDong(defect.dong)}-{formatRoomHo(defect.ho)}</div>
                         <div className={`text-xs ${theme.darkMode ? "text-slate-400" : "text-slate-500"}`}>{defect.defectStatus}</div>
@@ -22287,8 +22455,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
 
             {/* 필터/검색 */}
             <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
-              <FilterSelect label="지역" value={preInspectionSiteFilter} onChange={setPreInspectionSiteFilter} options={["전체", "평택", "천안"]} />
-              <FilterSelect label="성별" value={preInspectionGenderFilter} onChange={setPreInspectionGenderFilter} options={["전체", "남", "여"]} />
+              <FilterSelect label="지역" value={preInspectionSiteFilter} onChange={setPreInspectionSiteFilter} options={scopedSiteOptions} />
+              <FilterSelect label="성별" value={preInspectionGenderFilter} onChange={setPreInspectionGenderFilter} options={scopedGenderOptions} />
               <FilterSelect label="점검상태" value={preInspectionStatusFilter} onChange={setPreInspectionStatusFilter} options={["전체", ...INSPECTION_STATUS_OPTIONS]} />
               <FilterSelect label="청소상태" value={preInspectionCleaningFilter} onChange={setPreInspectionCleaningFilter} options={["전체", ...CLEANING_STATUS_OPTIONS]} />
               <FilterSelect label="하자여부" value={preInspectionDefectFilter} onChange={setPreInspectionDefectFilter} options={["전체", ...DEFECT_YN_OPTIONS]} />
@@ -22376,7 +22544,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <label className="mb-2 block text-sm font-medium text-slate-700">기숙사 계약 선택</label>
                     <select value={preInspectionForm.contractId} onChange={(e) => applyContractToInspection(e.target.value)} className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-slate-400">
                       <option value="">미선택 (직접 입력 가능)</option>
-                      {dormContracts.filter((c) => !c.isDeleted && !c.isPermanentDeleted).map((c) => (
+                      {dormContracts.filter((c) => !c.isDeleted && !c.isPermanentDeleted && (!allowedDormKeySet || allowedDormKeySet.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo)))).map((c) => (
                         <option key={c.id} value={c.id}>{`${c.buildingName || "-"} ${c.dong || ""}-${c.roomHo || ""} (${c.site || ""})`}</option>
                       ))}
                     </select>
@@ -22385,7 +22553,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <label className="mb-2 block text-sm font-medium text-slate-700">입주예정자(신입사원) 선택</label>
                     <select value={preInspectionForm.occupantId} onChange={(e) => applyOccupantToInspection(e.target.value)} className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 text-slate-900 outline-none focus:border-slate-400">
                       <option value="">미선택 (배정 전에도 등록 가능)</option>
-                      {newHires.filter((h) => !h.isDeleted && isRealName(h.name)).map((h) => (
+                      {newHires.filter((h) => !h.isDeleted && isRealName(h.name) && dataScope.canNewHire({ dormId: h.dormId, site: h.site, gender: h.gender })).map((h) => (
                         <option key={h.id} value={h.id}>{`${h.name} ${h.phone || ""} ${h.department || ""}`}</option>
                       ))}
                     </select>
@@ -22396,8 +22564,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               {/* 기본/위치 정보 */}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input label="점검일" type="date-text" value={preInspectionForm.inspectionDate} onChange={(v) => setPreInspectionForm((f) => ({ ...f, inspectionDate: v }))} />
-                <SelectInput label="지역" value={preInspectionForm.site} onChange={(v) => setPreInspectionForm((f) => ({ ...f, site: v }))} options={["", "평택", "천안"]} />
-                <SelectInput label="성별" value={preInspectionForm.gender} onChange={(v) => setPreInspectionForm((f) => ({ ...f, gender: v }))} options={["", "남", "여"]} />
+                <SelectInput label="지역" value={preInspectionForm.site} onChange={(v) => setPreInspectionForm((f) => ({ ...f, site: v }))} options={["", ...formSiteOptions]} />
+                <SelectInput label="성별" value={preInspectionForm.gender} onChange={(v) => setPreInspectionForm((f) => ({ ...f, gender: v }))} options={["", ...formGenderOptions]} />
                 <Input label="담당자" value={preInspectionForm.inspectorName} onChange={(v) => setPreInspectionForm((f) => ({ ...f, inspectorName: v }))} />
                 <Input label="건물명" value={preInspectionForm.buildingName} onChange={(v) => setPreInspectionForm((f) => ({ ...f, buildingName: v }))} />
                 <Input label="동" value={preInspectionForm.dong} onChange={(v) => setPreInspectionForm((f) => ({ ...f, dong: v }))} />
@@ -22593,8 +22761,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="grid gap-3 sm:grid-cols-4">
                   <Input label="연도" value={reportYear} onChange={(v) => setReportYear(v)} placeholder="YYYY" />
                   <Input label="월" value={reportMonth} onChange={(v) => setReportMonth(v)} placeholder="MM" />
-                  <SelectInput label="지역" value={reportSiteFilter} onChange={(v) => setReportSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
-                  <SelectInput label="성별" value={reportGenderFilter} onChange={(v) => setReportGenderFilter(v as "남" | "여" | "전체")} options={["전체", "남", "여"]} />
+                  <SelectInput label="지역" value={reportSiteFilter} onChange={(v) => setReportSiteFilter(v as Site | "전체")} options={scopedSiteOptions} />
+                  <SelectInput label="성별" value={reportGenderFilter} onChange={(v) => setReportGenderFilter(v as "남" | "여" | "전체")} options={scopedGenderOptions} />
                 </div>
               </div>
 
@@ -22613,8 +22781,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   label="기숙사 선택"
                   value={pdfReportDormId}
                   onChange={(v) => setPdfReportDormId(v)}
-                  options={["전체", ...operationalDorms.map((d) => d.id)]}
-                  displayOptions={["전체", ...operationalDorms.map((d) => `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`)]}
+                  options={["전체", ...scopedOperationalDorms.map((d) => d.id)]}
+                  displayOptions={["전체", ...scopedOperationalDorms.map((d) => `${d.buildingName} ${formatDong(d.dong)}-${formatRoomHo(d.roomHo)}`)]}
                 />
                 <div className="flex flex-wrap items-end gap-2">
                   <button
@@ -22776,7 +22944,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <SelectInput label="연도" value={cleaningYear} onChange={(v) => setCleaningYear(v)} options={["전체", ...cleaningYearOptions]} />
               <SelectInput label="월" value={cleaningMonth} onChange={(v) => setCleaningMonth(v)} options={["전체", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]} />
               {!isMaintenanceReporter && (
-                <SelectInput label="지역" value={cleaningDormSiteFilter} onChange={(v) => setCleaningDormSiteFilter(v as Site | "전체")} options={["전체", "평택", "천안"]} />
+                <SelectInput label="지역" value={cleaningDormSiteFilter} onChange={(v) => setCleaningDormSiteFilter(v as Site | "전체")} options={scopedSiteOptions} />
               )}
             </div>
             {!isMaintenanceReporter && cleaningView === "status" && (
@@ -25662,7 +25830,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   value={cleaningReportForm.dormId}
                   onChange={(_dormId, dorm) => handleCleaningReportDormChange(dorm || null)}
                   currentUser={currentUser}
-                  operationalDorms={operationalDorms}
+                  operationalDorms={scopedOperationalDorms}
                   defaultSite={cleaningReportForm.site}
                   // 성별은 청소보고서 저장 필드가 아니라 선택된 기숙사의 속성이다.
                   //  기존 보고서를 열 때 지역(defaultSite)처럼 선택 기숙사 성별을 초기값으로 넘겨
@@ -25848,8 +26016,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         {showDormForm && modalWrap(
           "기숙사 등록/수정",
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <SelectInput label="지역" value={dormForm.site} onChange={(v) => setDormForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
-            <SelectInput label="성별" value={dormForm.gender} onChange={(v) => setDormForm((f) => ({ ...f, gender: v as "남" | "여" }))} options={["남", "여"]} />
+            <SelectInput label="지역" value={dormForm.site} onChange={(v) => setDormForm((f) => ({ ...f, site: v as Site }))} options={formSiteOptions} />
+            <SelectInput label="성별" value={dormForm.gender} onChange={(v) => setDormForm((f) => ({ ...f, gender: v as "남" | "여" }))} options={formGenderOptions} />
             <Input label="건물명" value={dormForm.buildingName} onChange={(v) => setDormForm((f) => ({ ...f, buildingName: v }))} />
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
@@ -25895,8 +26063,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <div className={`${theme.darkMode ? "rounded-2xl border border-slate-700 bg-slate-950 p-4" : "rounded-2xl border border-slate-200 bg-slate-50 p-4"}`}>
               <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>계약 기본</h4>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <SelectInput label="지역" value={dormContractForm.site} onChange={(v) => setDormContractForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
-                <SelectInput label="성별" value={dormContractForm.gender} onChange={(v) => setDormContractForm((f) => ({ ...f, gender: v as Gender }))} options={["남", "여"]} />
+                <SelectInput label="지역" value={dormContractForm.site} onChange={(v) => setDormContractForm((f) => ({ ...f, site: v as Site }))} options={formSiteOptions} />
+                <SelectInput label="성별" value={dormContractForm.gender} onChange={(v) => setDormContractForm((f) => ({ ...f, gender: v as Gender }))} options={formGenderOptions} />
                 <Input label="임대인명" value={dormContractForm.landlordName} onChange={(v) => setDormContractForm((f) => ({ ...f, landlordName: v }))} />
                 <Input label="임대인연락처" value={dormContractForm.landlordPhone} onChange={(v) => setDormContractForm((f) => ({ ...f, landlordPhone: v }))} />
                 <Input label="계약시작일" type="date-text" value={dormContractForm.contractStart} onChange={(v) => setDormContractForm((f) => ({ ...f, contractStart: v }))} />
@@ -26007,8 +26175,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               <h4 className={`${theme.darkMode ? "mb-3 text-sm font-semibold text-slate-300" : "mb-3 text-sm font-semibold text-slate-700"}`}>기본정보</h4>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Input label="이름" value={newHireForm.name} onChange={(v) => setNewHireForm((f) => ({ ...f, name: v }))} />
-                <SelectInput label="지역" value={newHireForm.site} onChange={(v) => setNewHireForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
-                <SelectInput label="성별" value={newHireForm.gender} onChange={(v) => setNewHireForm((f) => ({ ...f, gender: v as Gender }))} options={["남", "여"]} />
+                <SelectInput label="지역" value={newHireForm.site} onChange={(v) => setNewHireForm((f) => ({ ...f, site: v as Site }))} options={formSiteOptions} />
+                <SelectInput label="성별" value={newHireForm.gender} onChange={(v) => setNewHireForm((f) => ({ ...f, gender: v as Gender }))} options={formGenderOptions} />
                 <Input label="부서" value={newHireForm.department} onChange={(v) => setNewHireForm((f) => ({ ...f, department: v }))} />
                 <Input label="연락처" value={newHireForm.phone} onChange={(v) => setNewHireForm((f) => ({ ...f, phone: v }))} />
               </div>
@@ -26037,7 +26205,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   }
                 }}
                 currentUser={currentUser}
-                operationalDorms={operationalDorms}
+                operationalDorms={scopedOperationalDorms}
                 defaultSite={newHireForm.site}
                 defaultGender={newHireForm.gender}
                 label="기숙사"
@@ -26172,7 +26340,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 setAssigningNewHireId(null);
               }}
               currentUser={currentUser}
-              operationalDorms={operationalDorms}
+              operationalDorms={scopedOperationalDorms}
               defaultSite={newHires.find(h => h.id === assigningNewHireId)?.site}
               defaultGender={newHires.find(h => h.id === assigningNewHireId)?.gender}
               label="기숙사 선택"
@@ -26213,7 +26381,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   if (!dormId) setAssignManagerToDorm(false);
                 }}
                 currentUser={currentUser}
-                operationalDorms={operationalDorms}
+                operationalDorms={scopedOperationalDorms}
                 defaultSite={occupantForm.site}
                 label="기숙사"
                 assignMode
@@ -26286,7 +26454,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   }));
                 }}
                 currentUser={currentUser}
-                operationalDorms={operationalDorms}
+                operationalDorms={scopedOperationalDorms}
                 defaultSite={inventoryForm.site}
                 // 성별은 비품 저장 필드가 아니라 선택된 기숙사의 속성(FilteredDormSelector 필터).
                 //  수정 재오픈 시 지역(defaultSite)처럼 선택 기숙사 성별을 초기값으로 넘겨 "전체"로만 보이던 문제를 해소.
@@ -26297,7 +26465,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 label="기숙사"
               />
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 mt-4">
-                <SelectInput label="지역" value={inventoryForm.site} onChange={(v) => setInventoryForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
+                <SelectInput label="지역" value={inventoryForm.site} onChange={(v) => setInventoryForm((f) => ({ ...f, site: v as Site }))} options={formSiteOptions} />
                 <Input label="주소" value={inventoryForm.dormAddress} onChange={(v) => setInventoryForm((f) => ({ ...f, dormAddress: v }))} readOnly />
                 <Input label="건물명" value={inventoryForm.buildingName} onChange={(v) => setInventoryForm((f) => ({ ...f, buildingName: v }))} readOnly />
                 <Input label="동" value={formatDong(inventoryForm.dong)} onChange={(v) => setInventoryForm((f) => ({ ...f, dong: stripDongHoSuffix(v) }))} readOnly />
@@ -26428,8 +26596,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             <Input label="선납계약금" type="number" value={String(leaseForm.prepaymentDeposit)} onChange={(v) => setLeaseForm((f) => ({ ...f, prepaymentDeposit: Number(v || 0) }))} />
             <Input label="부동산명" value={leaseForm.realEstateName} onChange={(v) => setLeaseForm((f) => ({ ...f, realEstateName: v }))} />
             <Input label="잔금일" type="date-text" value={leaseForm.balanceDate} onChange={(v) => setLeaseForm((f) => ({ ...f, balanceDate: v }))} />
-            <SelectInput label="지역" value={leaseForm.site} onChange={(v) => setLeaseForm((f) => ({ ...f, site: v as Site }))} options={["평택", "천안"]} />
-            <SelectInput label="성별" value={leaseForm.gender} onChange={(v) => setLeaseForm((f) => ({ ...f, gender: v as "남" | "여" }))} options={["남", "여"]} />
+            <SelectInput label="지역" value={leaseForm.site} onChange={(v) => setLeaseForm((f) => ({ ...f, site: v as Site }))} options={formSiteOptions} />
+            <SelectInput label="성별" value={leaseForm.gender} onChange={(v) => setLeaseForm((f) => ({ ...f, gender: v as "남" | "여" }))} options={formGenderOptions} />
             <Input label="참고사항" value={leaseForm.notes} onChange={(v) => setLeaseForm((f) => ({ ...f, notes: v }))} />
           </div>,
           () => setShowLeaseForm(false),
@@ -26503,7 +26671,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                       setDefectForm((f) => ({ ...f, dormId, site: dorm?.site || f.site }));
                     }}
                     currentUser={currentUser}
-                    operationalDorms={operationalDorms}
+                    operationalDorms={scopedOperationalDorms}
                     defaultSite={defectForm.site}
                     label="기숙사 (선택 시 주소 자동 입력)"
                   />
@@ -26735,8 +26903,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     label="부서(검색 또는 선택)"
                     value={militaryPersonnelForm.unit || ""}
                     onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, unit: v }))}
-                    options={militaryCodeValues.departments || []}
-                    displayOptions={militaryCodeValues.departments || []}
+                    options={scopedMilitaryDepartmentOptions}
+                    displayOptions={scopedMilitaryDepartmentOptions}
                   />
                   <Input label="부서 직접입력 (선택)" value={militaryPersonnelForm.unit} onChange={(v) => setMilitaryPersonnelForm((f) => ({ ...f, unit: v }))} />
                 </div>
@@ -26870,7 +27038,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-3 outline-none focus:border-slate-400"
               >
                 <option value="">선택하세요</option>
-                {militaryPersonnel.map((person) => (
+                {scopedMilitaryPersonnel.map((person) => (
                   <option key={person.id} value={person.id}>
                     {person.name} ({person.rank})
                   </option>
@@ -27006,6 +27174,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     )}
                   </select>
                 </div>
+                {/* ⚠ 권한 부여 설정(계정에 지역/성별 권한 부여) — 데이터 필터가 아니므로 항상 전체 옵션 유지(admin이 임의 범위 부여 가능). */}
                 <SelectInput label="지역 권한" value={userForm.siteAccess} onChange={(v) => setUserForm((f) => ({ ...f, siteAccess: v as Site | "전체" }))} options={["전체", "평택", "천안"]} />
                 <SelectInput label="성별 권한" value={userForm.genderAccess || "전체"} onChange={(v) => setUserForm((f) => ({ ...f, genderAccess: v as "남" | "여" | "전체" }))} options={["전체", "남", "여"]} />
               </div>
