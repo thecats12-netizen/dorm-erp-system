@@ -115,6 +115,7 @@ import { validateExcel, type ExcelTableType, type ExcelValidationResult } from "
 import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
 import FilteredDormSelector from "./components/FilteredDormSelector";
+import ErrorBoundary from "./components/ErrorBoundary";
 import ContractFilesSection from "./components/ContractFilesSection";
 import DormitoryContractsTab from "./components/DormitoryContractsTab";
 import FilePreviewModal, { type FilePreviewTarget } from "./components/FilePreviewModal";
@@ -16805,6 +16806,10 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
           )}
 
+          {/* [ErrorBoundary] 모듈 단위 격리: 현재 탭 렌더 오류가 헤더/사이드바/다른 탭까지 죽이지 않도록 감싼다.
+              key={activeTab} → 탭 이동 시 경계가 재마운트되어 오류 상태 자동 초기화(무한 재발 방지). */}
+          <ErrorBoundary key={activeTab} moduleName={activeTab} onGoHome={() => setActiveTab("dashboard")}>
+
           {showDormOperationStats && (
           <section className={`mb-6 rounded-3xl ${theme.darkMode ? "bg-slate-900 ring-slate-700" : "bg-white ring-slate-200"} p-5 shadow-sm ring-1`}>
             <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -20400,6 +20405,8 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
             </div>
           </div>
         )}
+
+          </ErrorBoundary>
 
         {showExpiringDormsModal && modalWrap(
           `계약 만료 예정 목록 (전체 ${expiringDormsAll.length}곳)`,
