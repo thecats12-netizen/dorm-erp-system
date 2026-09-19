@@ -2239,6 +2239,10 @@ export default function App() {
   const [militaryTrainingRules, setMilitaryTrainingRules] = useState<any[]>([]);
   const [militaryCodeValues, setMilitaryCodeValues] = useState<MilitaryCodeValues>(defaultMilitaryCodeValues);
   const [militaryTrainingAutoConfig, setMilitaryTrainingAutoConfig] = useState<{ enabled: boolean; targetStatuses: string[] }>({ enabled: true, targetStatuses: ["재직"] });
+  // [P0 데이터 소실 재발방지] 군대 모듈 hydration(Supabase 로드+state 반영) 상태. "ready" 일 때만 저장/자동저장 허용.
+  //   idle: 로드 전 · loading: 로드 중 · ready: 정상 로드 완료(또는 정상 no-row) · failed: 실제 로드 실패(저장 잠금).
+  //   localStorage 일부 복원만으로는 절대 ready 가 되지 않는다(Supabase 로드 성공/정상 empty 확인 시에만 ready).
+  const [militaryHydrationStatus, setMilitaryHydrationStatus] = useState<"idle" | "loading" | "ready" | "failed">("idle");
   const realtimeUpdateSourceRef = useRef<Set<string>>(new Set());
   // Realtime 단일 구독 유지용(중복 구독/반복 재연결 방지). key = tenantId|userId.
   const realtimeChannelRef = useRef<any>(null);
@@ -3892,6 +3896,11 @@ export default function App() {
   // (인사/훈련/통보/보고/설정 변경, 자동생성 등 모든 변경을 한 곳에서 포착)
   useEffect(() => {
     if (isLoading) return;
+    // [P0] hydration 미완료/실패 시 dirty 표시·저장 트리거 금지(빈/부분 state 를 변경으로 오인해 덮어쓰기 방지).
+    if (militaryHydrationStatus !== "ready") {
+      if (militaryDirty) setMilitaryDirty(false);
+      return;
+    }
     // 권한 없는 계정(군대 데이터 편집 불가)은 저장 필요 표시를 하지 않음.
     if (!canEditData(currentUser)) {
       if (militaryDirty) setMilitaryDirty(false);
@@ -3907,7 +3916,7 @@ export default function App() {
     }
     setMilitaryDirty(snap !== lastMilitarySnapshotRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [militaryPersonnel, militaryTrainingRecords, militaryNotices, militaryReports, militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig, militaryLastSavedAt, isLoading, currentUser?.role]);
+  }, [militaryPersonnel, militaryTrainingRecords, militaryNotices, militaryReports, militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig, militaryLastSavedAt, isLoading, currentUser?.role, militaryHydrationStatus]);
 
   // 저장 필요 상태에서 새로고침/창닫기 경고 (앱 내부 탭 이동은 막지 않음)
   useEffect(() => {
@@ -3930,6 +3939,8 @@ export default function App() {
 
     // 경쟁 상태 방지: 이 요청의 seq. 응답이 도착했을 때 최신 요청이 아니면 결과를 반영하지 않는다.
     const reqSeq = ++militaryLoadSeqRef.current;
+    // 최초 로드는 loading 으로 표시(저장 잠금 유지). 이미 ready 인 세션은 silent 45s 재조회 중에도 ready 유지(저장 중단 방지).
+    setMilitaryHydrationStatus((prev) => (prev === "ready" ? prev : "loading"));
     try {
       // [2G Phase B] read 경로 분기: active admin 은 기존 raw read 유지, 그 외(viewer 등)는 sanitized RPC(fail-closed).
       //   권한 최종 판정은 서버(RPC)가 auth.uid()+profiles 로 수행 — 프론트 role 은 UX 경로 선택용.
@@ -3985,8 +3996,11 @@ export default function App() {
           },
           militaryTrainingAutoConfig: (rAutoConfig && (rAutoConfig as any).targetStatuses) ? (rAutoConfig as any) : { enabled: true, targetStatuses: ["재직"] },
         });
+        setMilitaryHydrationStatus("ready"); // 정상 로드+state 반영 완료 → 저장 허용
         if (!silent) setSupabaseSyncStatus("Supabase 불러오기가 완료되었습니다.");
       } else {
+        // remote === null: 실제 오류는 loadMilitaryModule 이 throw 하므로 여기 도달 = "행 없음(정상 empty)". 저장 허용(신규 tenant).
+        setMilitaryHydrationStatus("ready");
         if (!silent) setSupabaseSyncStatus("Supabase에 저장된 군대 모듈 데이터가 없습니다.");
       }
     } catch (error) {
@@ -4000,7 +4014,10 @@ export default function App() {
         raw: error,
       });
       const friendly = translateSupabaseError((err && err.message) || String(error));
-      if (!silent) setSupabaseSyncStatus(`Supabase 불러오기에 실패했습니다. ${friendly}`);
+      // [P0 fail-closed] 실제 로드 실패 → hydration=failed 로 저장 잠금. 단 이미 ready(정상 로드된 세션)면 유지
+      //   (silent 45s 재조회의 일시적 실패가 정상 데이터가 있는 세션의 저장을 잠그지 않도록).
+      if (reqSeq === militaryLoadSeqRef.current) setMilitaryHydrationStatus((prev) => (prev === "ready" ? prev : "failed"));
+      if (!silent) setSupabaseSyncStatus(`Supabase 불러오기에 실패했습니다. 데이터 보호를 위해 저장이 잠겼습니다. ${friendly}`);
     } finally {
       if (!silent) setIsSupabaseSyncing(false);
     }
@@ -4009,6 +4026,11 @@ export default function App() {
   const saveSupabaseMilitaryModule = async () => {
     if (!isSupabaseAvailable()) {
       setSupabaseSyncStatus("Supabase 환경변수 미설정");
+      return;
+    }
+    // [P0 fail-closed] hydration 성공 전/실패 시 저장 잠금 — 빈/부분 state 가 기존 데이터를 덮어쓰지 않도록 보호.
+    if (militaryHydrationStatus !== "ready") {
+      setSupabaseSyncStatus("군대관리 데이터를 불러오지 못했습니다. 데이터 보호를 위해 저장 기능이 일시적으로 잠겼습니다.");
       return;
     }
     // 직전 저장과 동일한 데이터면 Supabase 저장 생략 (동일 데이터 반복 저장 방지)
@@ -4022,7 +4044,7 @@ export default function App() {
     setSupabaseSyncStatus("Supabase에 군대 모듈 데이터를 저장 중입니다...");
 
     try {
-      await saveMilitaryModule(getMilitaryModuleState(), currentUser?.id ?? null);
+      await saveMilitaryModule(getMilitaryModuleState(), currentUser?.id ?? null, { hydrated: militaryHydrationStatus === "ready" });
       lastMilitarySnapshotRef.current = snapshot;
       const savedAt = new Date().toLocaleString();
       setMilitaryLastSavedAt(savedAt);   // 마지막 저장 시간
@@ -4077,6 +4099,8 @@ export default function App() {
     if (!isSupabaseAvailable()) return;
     const timer = setTimeout(() => {
       if (isLoading) return;
+      // [P0] hydration 성공(ready) 전에는 자동저장 절대 금지 — load 실패/미완료의 빈 state 가 DB 를 덮어쓰는 사고 차단.
+      if (militaryHydrationStatus !== "ready") return;
       if (!canEditData(currentUser)) return; // 군대 데이터는 admin 편집 → 그 외 자동저장 생략
       // Realtime 수신분은 이미 서버 반영 상태 → 스냅샷만 갱신하고 재저장 생략(루프 방지)
       if (realtimeUpdateSourceRef.current.has("military_module")) {
@@ -4089,7 +4113,7 @@ export default function App() {
     }, 500);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [militaryPersonnel, militaryTrainingRecords, militaryNotices, militaryReports, militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig, currentUser?.role, isLoading]);
+  }, [militaryPersonnel, militaryTrainingRecords, militaryNotices, militaryReports, militarySettings, militaryTrainingRules, militaryCodeValues, militaryTrainingAutoConfig, currentUser?.role, isLoading, militaryHydrationStatus]);
 
   const restoreDefaultSystemSettings = async () => {
     if (!canManageUsers(currentUser)) { await appAlert("기숙사 ERP 알림", "이 기능은 관리자만 사용할 수 있습니다."); return; }
@@ -4239,7 +4263,7 @@ export default function App() {
             militaryTrainingRules: defaultMilitaryTrainingRules,
             militaryCodeValues: defaultMilitaryCodeValues,
             militaryTrainingAutoConfig: { enabled: true, targetStatuses: ["재직"] },
-          });
+          }, currentUser?.id ?? null, { allowEmptyOverwrite: true }); // 의도적 전체 초기화 → empty overwrite 명시 허용
         } catch (e) {
           console.error("[resetAllData] military reset 실패", e);
         }

@@ -101,9 +101,11 @@ export const loadMilitaryModule = async (tenantId: string): Promise<MilitaryModu
     .maybeSingle();
 
   if (error) {
+    // [P0 fail-closed] "행 없음"(PGRST116)만 정상 empty 로 취급해 null 반환. 그 외 실제 오류(권한/RLS/네트워크)는
+    //   상위(loadSupabaseMilitaryModule)가 hydration=failed 로 처리하고 저장을 잠그도록 throw 한다(빈 상태 오인 방지).
     if (error.code === "PGRST116" || /no rows|multiple/i.test(error.message || "")) return null;
-    console.warn("[loadMilitaryModule] 로드 경고(로컬 폴백):", error.message);
-    return null;
+    console.warn("[loadMilitaryModule] 로드 오류(throw → 상위 fail-closed):", error.message);
+    throw error;
   }
   return (data as { data?: MilitaryModuleState } | null)?.data ?? null;
 };
@@ -132,7 +134,10 @@ export const loadMilitaryModuleSanitized = async (): Promise<MilitaryModuleState
   return d as unknown as MilitaryModuleState;
 };
 
-export const saveMilitaryModule = async (payload: MilitaryModuleState, userId?: string | null): Promise<void> => {
+// opts.hydrated: 프론트가 Supabase 로드/state 반영을 정상 완료(ready)했을 때만 true. hydration 미완료/실패 상태의
+//   빈 payload 가 기존 non-empty 데이터를 덮어쓰는 사고를 서버 저장부에서 2차 차단한다.
+// opts.allowEmptyOverwrite: "전체 데이터 초기화" 등 의도적 empty 저장만 명시적으로 허용(정상 삭제 흐름 보존).
+export const saveMilitaryModule = async (payload: MilitaryModuleState, userId?: string | null, opts?: { hydrated?: boolean; allowEmptyOverwrite?: boolean }): Promise<void> => {
   if (!isSupabaseAvailable()) {
     console.warn("Supabase environment variables are not configured. Skipping Supabase save.");
     return;
@@ -169,6 +174,24 @@ export const saveMilitaryModule = async (payload: MilitaryModuleState, userId?: 
   }
 
   const existingRow = existing && existing.length > 0 ? (existing[0] as { id?: string; data?: Record<string, any> }) : null;
+
+  // [P0 파괴적 empty overwrite 방어] hydration 미완료(또는 미명시) 상태에서 기존 non-empty 핵심 배열을 []로 덮어쓰지 않는다.
+  //   의도적 전체 초기화(resetAllData)는 allowEmptyOverwrite=true 로 명시 우회. 정상 CRUD(마지막 1건 삭제 등)는
+  //   로드 완료(hydrated=true) 후 실행되므로 차단되지 않는다.
+  const allowEmpty = opts?.hydrated === true || opts?.allowEmptyOverwrite === true;
+  if (!allowEmpty && existingRow?.data) {
+    const CORE_ARRAYS = ["militaryPersonnel", "militaryTrainingRecords", "militaryNotices", "militaryReports"] as const;
+    for (const k of CORE_ARRAYS) {
+      const ex = (existingRow.data as Record<string, unknown>)[k];
+      const nx = (payload as unknown as Record<string, unknown>)[k];
+      if (Array.isArray(ex) && ex.length > 0 && Array.isArray(nx) && nx.length === 0) {
+        const guardErr = new Error(`[saveMilitaryModule] 파괴적 empty overwrite 차단: ${k} (기존 ${ex.length}건 → 0건, hydration 미완료 추정). 저장을 중단합니다.`);
+        logErr("guard", guardErr);
+        throw guardErr;
+      }
+    }
+  }
+
   const mergedData = { ...(existingRow?.data || {}), ...payload }; // 기존 data 보존 + 현재 군대 모듈 상태 반영
   const row = {
     tenant_id: payload.tenantId,
