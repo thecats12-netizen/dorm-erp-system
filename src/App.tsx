@@ -116,6 +116,14 @@ import { usePersistedState } from "./hooks/usePersistedState";
 import { DateFilter } from "./components";
 import FilteredDormSelector from "./components/FilteredDormSelector";
 import ErrorBoundary from "./components/ErrorBoundary";
+import DrBackupPanel from "./features/backup/DrBackupPanel";
+import RestoreWizard from "./features/backup/RestoreWizard";
+import {
+  type CanonicalBackup as DrCanonicalBackup, type CanonicalModules as DrCanonicalModules,
+  type RestorePlan as DrRestorePlan, type Selection as DrSelection, type PolicyChoice as DrPolicyChoice,
+  type MilitaryModuleData as DrMilitaryModuleData, checkMilitaryIntegrity as drCheckMilitaryIntegrity,
+} from "./services/backupService";
+import { runDrRestore, type RestoreDeps as DrRestoreDeps } from "./services/backupRestore";
 import ContractFilesSection from "./components/ContractFilesSection";
 import DormitoryContractsTab from "./components/DormitoryContractsTab";
 import FilePreviewModal, { type FilePreviewTarget } from "./components/FilePreviewModal";
@@ -2243,6 +2251,9 @@ export default function App() {
   //   idle: 로드 전 · loading: 로드 중 · ready: 정상 로드 완료(또는 정상 no-row) · failed: 실제 로드 실패(저장 잠금).
   //   localStorage 일부 복원만으로는 절대 ready 가 되지 않는다(Supabase 로드 성공/정상 empty 확인 시에만 ready).
   const [militaryHydrationStatus, setMilitaryHydrationStatus] = useState<"idle" | "loading" | "ready" | "failed">("idle");
+  // [P0 DR 복원] 선택 복원 write 중 기존 autosave(dorm/operational/military)가 복원 데이터를 덮어쓰는 경합 방지.
+  //   restore executor 가 write 직전 true → 사후검증/재하이드레이션 완료 후 false. 모든 autosave effect 가 이 ref 로 차단.
+  const restoreInProgressRef = useRef<boolean>(false);
   const realtimeUpdateSourceRef = useRef<Set<string>>(new Set());
   // Realtime 단일 구독 유지용(중복 구독/반복 재연결 방지). key = tenantId|userId.
   const realtimeChannelRef = useRef<any>(null);
@@ -4093,12 +4104,71 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, currentUser?.id, tenantId]);
 
+  // ── [P0 DR 백업/복원] 라이브 데이터 제공 + canonical 스냅샷 + 잠금형 선택 복원 실행자 ──────────
+  // DR 백업에 담을 라이브 데이터(사진/미디어 제외 — 기존 buildBackupData 와 동일 정책).
+  const getLiveDrData = () => ({
+    tenantId, appVersion: (import.meta.env.VITE_APP_VERSION as string | undefined),
+    dorm: { dorms, occupants, newHires, dormContracts },
+    operational: {
+      cleaningReports: stripHeavyMedia(cleaningReports as unknown as Record<string, unknown>[]) as unknown as CleaningReport[],
+      defects: stripHeavyMedia(defects as unknown as Record<string, unknown>[]) as unknown as DefectRequest[],
+      inventory, settlementRecords, settlementItems,
+    },
+    military: getMilitaryModuleState() as unknown as import("./services/backupService").MilitaryModuleData,
+    system: { systemSettings, theme, customTemplates, cleaningSettings },
+    audit: { auditLogs },
+  });
+  // 복원 dry-run 비교용 현재 상태(canonical). READ-ONLY.
+  const getCurrentModulesCanonical = (): DrCanonicalModules => ({
+    dorm: { dorms, occupants, newHires, dormContracts },
+    operational: { cleaningReports, defects, inventory, settlementRecords, settlementItems },
+    military: getMilitaryModuleState() as unknown as import("./services/backupService").MilitaryModuleData,
+    system: { systemSettings, theme, customTemplates, cleaningSettings },
+    audit: { auditLogs },
+  });
+  // 선택 복원 실행자: restore lock → 스냅샷 → write → 재하이드레이션 → 검증 → 해제. 실패 시 rollback.
+  // 군대 state 반영 + hydration status/snapshot 동기화(hydrate = 재조회 데이터 setState). runDrRestore hydrate/rollback 공용.
+  const drHydrateMilitary = (m: DrMilitaryModuleData) => {
+    setMilitaryPersonnel((m.militaryPersonnel as MilitaryPersonnel[]) || []);
+    setMilitaryTrainingRecords((m.militaryTrainingRecords as TrainingRecord[]) || []);
+    setMilitaryNotices((m.militaryNotices as MilitaryNotice[]) || []);
+    setMilitaryReports((m.militaryReports as MilitaryReport[]) || []);
+    setMilitarySettings((m.militarySettings as Record<string, string>) || {});
+    setMilitaryTrainingRules((m.militaryTrainingRules as unknown[]) || []);
+    if (m.militaryCodeValues) setMilitaryCodeValues(m.militaryCodeValues as typeof militaryCodeValues);
+    if (m.militaryTrainingAutoConfig) setMilitaryTrainingAutoConfig(m.militaryTrainingAutoConfig as typeof militaryTrainingAutoConfig);
+    setMilitaryHydrationStatus("ready");
+    lastMilitarySnapshotRef.current = JSON.stringify(getMilitaryModuleState());
+  };
+  // 선택 복원 실행자 = 공통 orchestrator(runDrRestore)에 실제 부수효과(save/load/setState/lock)를 주입. App·테스트 동일 알고리즘.
+  const executeDrRestore = async (backup: DrCanonicalBackup, plan: DrRestorePlan, _selection: DrSelection, _policy: DrPolicyChoice): Promise<{ ok: boolean; message: string }> => {
+    const deps: DrRestoreDeps = {
+      isAdmin: () => canManageUsers(currentUser),
+      getUserId: async () => (await getCurrentSession())?.user?.id ?? null,
+      currentTenantId: tenantId,
+      setLock: (v) => { restoreInProgressRef.current = v; },
+      snapshotMilitary: () => getMilitaryModuleState() as unknown as DrMilitaryModuleData,
+      applyMilitaryState: (m) => drHydrateMilitary(m),
+      saveMilitary: (m, uid) => saveMilitaryModule(m as unknown as MilitaryModuleState, uid, { hydrated: true, allowEmptyOverwrite: true }),
+      fetchMilitary: async () => { const r = await loadMilitaryModule(tenantId); return (r ?? getMilitaryModuleState()) as unknown as DrMilitaryModuleData; },
+      verifyMilitary: (m) => drCheckMilitaryIntegrity(m).ok,
+      hydrateMilitary: (m) => drHydrateMilitary(m),
+      applyDormState: (d) => { setDorms(d.dorms as Dorm[]); setOccupants(d.occupants as Occupant[]); setNewHires(d.newHires as NewHireEmployee[]); setDormContracts(d.dormContracts as DormContract[]); },
+      saveDorm: (d, uid) => saveDormModule({ tenantId, dorms: d.dorms as Dorm[], occupants: d.occupants as Occupant[], dormContracts: d.dormContracts as DormContract[], newHires: d.newHires as NewHireEmployee[] }, uid),
+      applyOperationalState: (o) => { setCleaningReports(o.cleaningReports as CleaningReport[]); setDefects(o.defects as DefectRequest[]); setInventory(o.inventory as InventoryItem[]); setSettlementRecords(o.settlementRecords as SettlementRecord[]); setSettlementItems(o.settlementItems as SettlementItem[]); },
+      saveOperational: (o, uid) => saveOperationalModule({ tenantId, cleaningReports: o.cleaningReports as CleaningReport[], defects: o.defects as DefectRequest[], inventory: o.inventory as InventoryItem[], settlementRecords: o.settlementRecords as SettlementRecord[], settlementItems: o.settlementItems as SettlementItem[], auditLogs: [] }, uid).then(() => undefined),
+    };
+    const r = await runDrRestore(deps, backup, plan);
+    return { ok: r.ok, message: r.message };
+  };
+
   // 군대 모듈 자동저장 (Dorm/Operational 모듈과 동일: 500ms 디바운스 + 스냅샷 비교 + Realtime 루프 방지).
   // 저장 자체는 기존 saveSupabaseMilitaryModule 재사용(동일 데이터 skip·상태표시·오류처리·dirty 갱신 포함).
   useEffect(() => {
     if (!isSupabaseAvailable()) return;
     const timer = setTimeout(() => {
       if (isLoading) return;
+      if (restoreInProgressRef.current) return; // [P0 DR] 복원 write 중 autosave 차단(경합 방지)
       // [P0] hydration 성공(ready) 전에는 자동저장 절대 금지 — load 실패/미완료의 빈 state 가 DB 를 덮어쓰는 사고 차단.
       if (militaryHydrationStatus !== "ready") return;
       if (!canEditData(currentUser)) return; // 군대 데이터는 admin 편집 → 그 외 자동저장 생략
@@ -5972,6 +6042,7 @@ export default function App() {
       // 실제 저장이 일어날 때만 아래에서 [SAVE] 로그를 출력한다.
       // Do not run Supabase save during initial loading or when the change originated from realtime.
       if (isLoading || !isInitialLoadCompleteRef.current) return; // 최초 로딩 완료 전 저장 차단(중복 방지)
+      if (restoreInProgressRef.current) return; // [P0 DR] 복원 write 중 autosave 차단(경합 방지)
       // 하자접수 담당자(maintenance_reporter)는 기숙사/계약/신입사원/입주자 관리자 데이터를 저장하지 않음(401 방지).
       if (currentUser?.role === "maintenance_reporter") return;
       // 사용자 액션 기반 저장: 직전 저장 이후 사용자 변경(등록/수정/삭제/배정/엑셀 등)이 없으면 저장하지 않는다.
@@ -6058,6 +6129,7 @@ export default function App() {
 
     const timer = setTimeout(async () => {
       if (isLoading || !isInitialLoadCompleteRef.current) return; // 최초 로딩 완료 전 저장 차단(중복 방지)
+      if (restoreInProgressRef.current) return; // [P0 DR] 복원 write 중 autosave 차단(경합 방지)
       // 사용자 액션 기반 저장: 직전 저장 이후 사용자 변경이 없으면 저장하지 않음(에코/파생/fetch churn 무시).
       const tick = userMutationTickRef.current;
       if (tick === lastSavedOpTickRef.current) return;
@@ -23512,6 +23584,19 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
               {backupImportError && (
                 <div className="mt-2 text-sm text-rose-600">백업 복원 오류: {backupImportError}</div>
               )}
+
+              {/* [P0 DR] 전체 재해복구 백업 + 선택 복원(기존 일반 백업/복원과 별개, 추가형) */}
+              <div className="mt-6 space-y-4">
+                <DrBackupPanel darkMode={theme.darkMode} isAdmin={canManageUsers(currentUser)} getLiveData={getLiveDrData} onToast={showNetworkToast} />
+                <RestoreWizard
+                  darkMode={theme.darkMode}
+                  isAdmin={canManageUsers(currentUser)}
+                  currentTenantId={tenantId}
+                  getCurrentModules={getCurrentModulesCanonical}
+                  onExecuteRestore={(backup, plan, selection, policy) => executeDrRestore(backup as DrCanonicalBackup, plan as DrRestorePlan, selection as DrSelection, policy as DrPolicyChoice)}
+                  onToast={showNetworkToast}
+                />
+              </div>
             </div>
 
             <div className={`${theme.darkMode ? "mb-6 rounded-3xl border border-slate-700 bg-slate-950 p-4 shadow-sm" : "mb-6 rounded-3xl border border-slate-200 bg-white p-4 shadow-sm"}`}>
