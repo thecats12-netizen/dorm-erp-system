@@ -4145,6 +4145,7 @@ export default function App() {
     const deps: DrRestoreDeps = {
       isAdmin: () => canManageUsers(currentUser),
       getUserId: async () => (await getCurrentSession())?.user?.id ?? null,
+      currentTenantId: tenantId,
       setLock: (v) => { restoreInProgressRef.current = v; },
       snapshotMilitary: () => getMilitaryModuleState() as unknown as DrMilitaryModuleData,
       applyMilitaryState: (m) => drHydrateMilitary(m),
@@ -23590,6 +23591,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <RestoreWizard
                   darkMode={theme.darkMode}
                   isAdmin={canManageUsers(currentUser)}
+                  currentTenantId={tenantId}
                   getCurrentModules={getCurrentModulesCanonical}
                   onExecuteRestore={(backup, plan, selection, policy) => executeDrRestore(backup as DrCanonicalBackup, plan as DrRestorePlan, selection as DrSelection, policy as DrPolicyChoice)}
                   onToast={showNetworkToast}

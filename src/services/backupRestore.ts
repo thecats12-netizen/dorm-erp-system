@@ -9,6 +9,7 @@ import { MILITARY_KEYS, mergeById, type CanonicalBackup, type RestorePlan, type 
 export type RestoreDeps = {
   isAdmin: () => boolean;
   getUserId: () => Promise<string | null>;
+  currentTenantId?: string; // 현재 앱 tenant. backup.tenantId 와 불일치 시 write 전 차단(legacy=null 은 허용).
   setLock: (v: boolean) => void;
   // 군대
   snapshotMilitary: () => MilitaryModuleData;      // 현재 상태(롤백 원본)
@@ -35,6 +36,10 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
   if (!uid) return { ok: false, message: "로그인 세션이 없어 복원할 수 없습니다.", steps };
   if (plan.hasBlocking) return { ok: false, message: "차단 항목이 있어 복원을 중단했습니다.", steps };
   if (plan.willWriteTargets.length === 0) return { ok: false, message: "복원(쓰기)할 항목이 없습니다.", steps };
+  // tenant 안전 가드: 백업 tenantId 가 있고 현재 tenant 와 다르면 write 전 차단. legacy(tenantId 없음)는 단일 tenant 구조상 허용.
+  if (backup.tenantId && deps.currentTenantId && backup.tenantId !== deps.currentTenantId) {
+    return { ok: false, message: "다른 조직의 백업 파일은 복원할 수 없습니다.", steps };
+  }
 
   const rowOf = (k: string) => plan.rows.find((r) => r.key === k);
   const snap = deps.snapshotMilitary();

@@ -9,6 +9,7 @@ type ExecResult = { ok: boolean; message: string };
 type Props = {
   darkMode: boolean;
   isAdmin: boolean;
+  currentTenantId: string;
   getCurrentModules: () => CanonicalModules;
   onExecuteRestore: (backup: CanonicalBackup, plan: RestorePlan, selection: Selection, policy: PolicyChoice) => Promise<ExecResult>;
   onToast?: (msg: string) => void;
@@ -18,13 +19,14 @@ type Step = "idle" | "inspect" | "select" | "plan" | "executing" | "result";
 // P0 선택 복원 지원 모듈: 기숙사·운영·군대(8키). system/audit 복원은 P0 미지원(백업엔 포함되나 선택 복원 대상 아님).
 const MODULE_KEYS: Array<"dorm" | "operational"> = ["dorm", "operational"];
 
-export default function RestoreWizard({ darkMode, isAdmin, getCurrentModules, onExecuteRestore, onToast }: Props) {
+export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getCurrentModules, onExecuteRestore, onToast }: Props) {
   const [step, setStep] = useState<Step>("idle");
   const [backup, setBackup] = useState<CanonicalBackup | null>(null);
   const [fileErr, setFileErr] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection>({});
   const [policy, setPolicy] = useState<PolicyChoice>({});
   const [result, setResult] = useState<ExecResult | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   const btn = `inline-flex items-center gap-2 rounded-2xl border px-3 py-1.5 text-sm font-semibold ${darkMode ? "border-slate-600 bg-slate-900 text-slate-100 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"}`;
   const primary = "rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900";
@@ -55,18 +57,29 @@ export default function RestoreWizard({ darkMode, isAdmin, getCurrentModules, on
   const setPol = (k: RestoreTargetKey, p: RestorePolicy) => setPolicy((s) => ({ ...s, [k]: p }));
 
   const anySelected = Object.values(selection).some(Boolean);
+  // tenant 안전: 백업 tenantId 가 있고 현재와 다르면 불일치(차단). tenantId 없으면 legacy(단일 tenant 허용).
+  const isLegacyNoTenant = !!backup && !backup.tenantId;
+  const tenantMismatch = !!backup && !!backup.tenantId && backup.tenantId !== currentTenantId;
 
-  const execute = async () => {
+  // "선택 항목 복원" → 재확인 모달만 연다(실제 write 없음).
+  const requestExecute = () => {
     if (!backup || !plan) return;
+    if (tenantMismatch) { onToast?.("다른 조직의 백업 파일은 복원할 수 없습니다."); return; }
     if (plan.hasBlocking) { onToast?.("차단 항목이 있어 복원할 수 없습니다. 경고를 확인하세요."); return; }
     if (plan.willWriteTargets.length === 0) { onToast?.("복원(쓰기)할 항목이 없습니다."); return; }
+    setConfirmOpen(true);
+  };
+  // 재확인 모달의 "복원 실행" → 실제 executor 호출. 취소 시 이 함수는 호출되지 않음(write 0).
+  const runExecute = async () => {
+    if (!backup || !plan) return;
+    setConfirmOpen(false);
     setStep("executing");
     const r = await onExecuteRestore(backup, plan, selection, policy);
     setResult(r); setStep("result");
     onToast?.(r.message);
   };
 
-  const reset = () => { setStep("idle"); setBackup(null); setSelection({}); setPolicy({}); setResult(null); setFileErr(null); };
+  const reset = () => { setStep("idle"); setBackup(null); setSelection({}); setPolicy({}); setResult(null); setFileErr(null); setConfirmOpen(false); };
 
   if (!isAdmin) return (
     <section className={`rounded-3xl border p-5 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50"}`}>
@@ -101,6 +114,15 @@ export default function RestoreWizard({ darkMode, isAdmin, getCurrentModules, on
             </div>
             <div className="mt-2">포함: {Object.entries(backup.recordCounts).map(([k, v]) => `${k} ${v}`).join(" · ") || "(없음)"}</div>
             <div className="mt-1 text-amber-600 dark:text-amber-400">백업되지 않음: {backup.completeness.excluded.join(" / ")}</div>
+            {(backup.modules.system || backup.modules.audit) && (
+              <div className="mt-1 text-slate-500">기본·설정 / 변경 이력(감사 로그): <b>백업 포함 · 현재 버전 복원 미지원</b></div>
+            )}
+            {tenantMismatch && (
+              <div className="mt-1 font-semibold text-rose-600 dark:text-rose-400">⚠ 다른 조직의 백업 파일입니다(현재 tenant 와 불일치). 복원할 수 없습니다.</div>
+            )}
+            {isLegacyNoTenant && (
+              <div className="mt-1 text-slate-500">이 파일은 tenant 정보가 없는 legacy 백업입니다(단일 조직 환경에서 복원 허용).</div>
+            )}
             {integrity && (
               <div className={`mt-1 ${integrity.ok ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
                 군대 무결성: {integrity.ok ? "정상" : `문제(중복인사 ${integrity.dupPersonnelId}, 중복훈련 ${integrity.dupTrainingId}, orphan ${integrity.orphanTraining}, 미지정 ${integrity.emptyPersonnelId})`}
@@ -166,11 +188,32 @@ export default function RestoreWizard({ darkMode, isAdmin, getCurrentModules, on
 
           {anySelected && plan && (
             <div className="flex items-center gap-2">
-              <button type="button" className={primary} disabled={step === "executing" || plan.hasBlocking || plan.willWriteTargets.length === 0} onClick={execute}>
+              <button type="button" className={primary} disabled={step === "executing" || plan.hasBlocking || tenantMismatch || plan.willWriteTargets.length === 0} onClick={requestExecute}>
                 {step === "executing" ? "복원 중…" : `선택 항목 복원(${plan.willWriteTargets.length})`}
               </button>
               {plan.hasBlocking && <span className="text-xs text-rose-500">차단 항목이 있어 복원할 수 없습니다.</span>}
+              {tenantMismatch && <span className="text-xs text-rose-500">다른 조직 백업이라 복원할 수 없습니다.</span>}
               <span className="text-xs text-slate-400">복원 전 현재 상태가 자동 스냅샷되며, 실패 시 되돌립니다.</span>
+            </div>
+          )}
+
+          {/* 실제 복원 재확인 모달 — "복원 실행" 눌러야만 executor 호출(취소 시 write 0) */}
+          {confirmOpen && plan && (
+            <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" onClick={() => setConfirmOpen(false)}>
+              <div className={`w-full max-w-md rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+                <h4 className="mb-2 text-lg font-semibold">복원을 실행할까요?</h4>
+                <ul className="mb-4 list-disc space-y-1 pl-5 text-sm text-slate-500">
+                  <li><b>실제 데이터가 변경됩니다.</b></li>
+                  <li>선택한 항목만 복원됩니다({plan.willWriteTargets.length}개).</li>
+                  <li>기숙사·운영은 기존 행을 삭제하지 않고 추가·갱신합니다.</li>
+                  <li>복원 중에는 창을 닫거나 새로고침하지 마세요.</li>
+                  <li>실행 전 현재 상태의 되돌림(rollback) 스냅샷을 생성합니다.</li>
+                </ul>
+                <div className="flex justify-end gap-2">
+                  <button type="button" className={btn} onClick={() => setConfirmOpen(false)}>취소</button>
+                  <button type="button" className={primary} onClick={() => void runExecute()}>복원 실행</button>
+                </div>
+              </div>
             </div>
           )}
 
