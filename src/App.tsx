@@ -13540,7 +13540,46 @@ export default function App() {
       void appAlert("알림", "기숙사 정원 값에 오류가 있어 업로드를 중단했습니다.\n\n" + capacityErrors.slice(0, 15).join("\n") + (capacityErrors.length > 15 ? `\n… 외 ${capacityErrors.length - 15}건` : ""));
       return;
     }
-    setDormContracts((prev) => [...mapped, ...prev]);
+    // [P1 중복 방지] Excel 각 행을 무조건 새 UUID 로 INSERT 하지 않는다.
+    //   ① 파일 내부 동일 객실키 중복 → 1건만 등록  ② 기존 ACTIVE 계약과 동일 객실키 → 자동 INSERT 안 함(기존 데이터 보존, overwrite 없음).
+    //   ACTIVE 판정 = isCanonicalContractCandidate(삭제/영구삭제/종료/해지 제외) — operationalDorms 대표 규칙과 동일 기준.
+    //   종료/해지/soft-deleted 만 있는 객실은 재계약으로 보고 등록 허용(기존 lifecycle 정책 유지).
+    //   객실 식별값(건물명/주소)이 전혀 없는 행은 dedup 대상에서 제외 → 기존 sanitize(저장 시) 가 처리(검증 우회 없음).
+    const activeRoomKeys = new Set(
+      dormContracts
+        .filter(isCanonicalContractCandidate)
+        .map((c) => getDormKey(c.site, c.buildingName, c.dong, c.roomHo))
+    );
+    const seenKeys = new Set<string>();
+    const toAdd: typeof mapped = [];
+    const dupInFile: string[] = [];
+    const dupExisting: string[] = [];
+    mapped.forEach((c, idx) => {
+      const hasRoomIdentity = hasText(c.buildingName) || hasText(c.address);
+      if (!hasRoomIdentity) { toAdd.push(c); return; } // 식별값 없음 → 기존 흐름대로(저장 시 sanitize 제외)
+      const key = getDormKey(c.site, c.buildingName, c.dong, c.roomHo);
+      const label = `${idx + 2}행: ${[c.site, c.buildingName, c.dong, c.roomHo].filter(Boolean).join(" ")}`;
+      if (seenKeys.has(key)) { dupInFile.push(label); return; }       // 파일 내부 중복
+      if (activeRoomKeys.has(key)) { dupExisting.push(label); return; } // 기존 ACTIVE 계약과 중복
+      seenKeys.add(key);
+      toAdd.push(c);
+    });
+    if (toAdd.length > 0) setDormContracts((prev) => [...toAdd, ...prev]);
+    const skipped = dupInFile.length + dupExisting.length;
+    const detailLines = [
+      ...dupInFile.map((s) => `· (파일 내 중복) ${s}`),
+      ...dupExisting.map((s) => `· (기존 ACTIVE 계약과 중복) ${s}`),
+    ];
+    void appAlert(
+      "신규계약 Excel 업로드 결과",
+      `전체 ${mapped.length}행\n등록 ${toAdd.length}건\n중복 건너뜀 ${skipped}건` +
+        (skipped > 0
+          ? ` (파일 내 ${dupInFile.length} · 기존 ACTIVE ${dupExisting.length})\n\n` +
+            detailLines.slice(0, 15).join("\n") +
+            (detailLines.length > 15 ? `\n… 외 ${detailLines.length - 15}건` : "") +
+            `\n\n※ 중복 객실의 기존 계약은 변경하지 않았습니다(덮어쓰기 없음).`
+          : "")
+    );
   };
 
   const uploadNewHiresExcel = async (file: File) => {
