@@ -627,6 +627,52 @@ function recordDormKey(x: { site?: string; buildingName?: string; dong?: string;
 // 로드(fetch)·저장(Supabase/localStorage)·Realtime 수신 시 공통 적용. 기존 정상 데이터는 보존.
 // ============================================================================
 const hasText = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
+// ============================================================================
+// [대표 계약(canonical) 선택 helper] — 동일 객실키(getDormKey)의 중복 dormContracts 중
+//   화면 대표(operationalDorms)와 "일괄 정원 설정" 수정 대상이 반드시 같은 1건이 되도록 공통화.
+//   deterministic: 배열 순서에 의존하지 않는다(legacy 불완전 중복이 updatedAt 동률로 대표를 가로채는 문제 수정).
+// ============================================================================
+// 대표 후보 유효성: 삭제/영구삭제/종료/해지 제외(기존 operationalDorms 규칙과 동일 — 새 업무규칙 추가 없음).
+function isCanonicalContractCandidate(c: DormContract): boolean {
+  if (c.isDeleted || c.deletedAt || c.isPermanentDeleted) return false;
+  if (c.contractStatus === "종료" || c.contractStatus === "해지") return false;
+  return true;
+}
+// 계약 완성도(동률 tie-break용): 핵심 상세필드가 "값 있음"인 개수.
+//   DormContract 의 상세필드는 모두 string 이므로 "0"(0원 등)도 유효값으로 계산됨(truthy 함정 없음 → hasText 로 공백만 제외).
+const CANONICAL_COMPLETENESS_FIELDS: Array<keyof DormContract> = [
+  "pyeong", "landlordName", "address", "contractStart", "contractEnd", "deposit", "monthlyRentOrMaintenance",
+];
+function dormContractCompleteness(c: DormContract): number {
+  let n = 0;
+  for (const f of CANONICAL_COMPLETENESS_FIELDS) if (hasText(c[f] as unknown)) n += 1;
+  return n;
+}
+// a 가 b 보다 더 "대표적"이면 true. 우선순위: updatedAt 최신 → 완성도 → createdAt 최신 → id 사전순(작은 것).
+//   (updatedAt 동률만으로 배열 후순위가 대표가 되던 문제 → 완성도/createdAt/id 로 deterministic 결정.)
+function isMoreCanonicalContract(a: DormContract, b: DormContract): boolean {
+  const au = a.updatedAt ? Date.parse(a.updatedAt) || 0 : 0;
+  const bu = b.updatedAt ? Date.parse(b.updatedAt) || 0 : 0;
+  if (au !== bu) return au > bu;
+  const ac = dormContractCompleteness(a);
+  const bc = dormContractCompleteness(b);
+  if (ac !== bc) return ac > bc;
+  const act = a.createdAt ? Date.parse(a.createdAt) || 0 : 0;
+  const bct = b.createdAt ? Date.parse(b.createdAt) || 0 : 0;
+  if (act !== bct) return act > bct;
+  return (a.id || "") < (b.id || "");
+}
+// 객실키 → 대표 계약 Map. operationalDorms 대표선택과 applyBulkCapacity 수정대상이 동일 결과를 쓰도록 공통 사용.
+function canonicalDormContractsByRoomKey(contracts: DormContract[]): Map<string, DormContract> {
+  const m = new Map<string, DormContract>();
+  for (const c of contracts) {
+    if (!isCanonicalContractCandidate(c)) continue;
+    const key = getDormKey(c.site, c.buildingName, c.dong, c.roomHo);
+    const existing = m.get(key);
+    if (!existing || isMoreCanonicalContract(c, existing)) m.set(key, c);
+  }
+  return m;
+}
 // 신규계약: 건물명/주소/임대인명 중 하나라도 있어야 유효(셋 다 비면 제외)
 function sanitizeDormContracts<T extends { buildingName?: string; address?: string; landlordName?: string }>(arr: T[]): T[] {
   if (!Array.isArray(arr)) return [];
@@ -6580,20 +6626,9 @@ export default function App() {
     // 중요: "유효 계약만 먼저 필터" 후 호실별 최신 1건을 고른다.
     // (전체 계약으로 먼저 dedup 하면, 같은 호실의 종료/해지 기록이 updatedAt 이 더 최신일 때
     //  유효 계약을 덮어써서 카드가 누락되던 버그 수정 → 신규계약 유효 수와 카드 수 일치)
-    const validContracts = dormContracts
-      .filter((c) => !c.isDeleted && !c.deletedAt && !c.isPermanentDeleted)
-      .filter((c) => c.contractStatus !== "종료" && c.contractStatus !== "해지");
-
-    const latestContractByDorm = new Map<string, DormContract>();
-    validContracts.forEach((contract) => {
-      const key = getDormKey(contract.site, contract.buildingName, contract.dong, contract.roomHo);
-      const existing = latestContractByDorm.get(key);
-      const currentUpdatedAt = contract.updatedAt ? Date.parse(contract.updatedAt) : 0;
-      const existingUpdatedAt = existing?.updatedAt ? Date.parse(existing.updatedAt) : 0;
-      if (!existing || currentUpdatedAt >= existingUpdatedAt) {
-        latestContractByDorm.set(key, contract);
-      }
-    });
+    // [대표 계약 공통화] 객실키별 대표 1건을 canonical selector 로 선택(배열 순서 비의존, deterministic).
+    //   applyBulkCapacity 의 수정 대상과 동일 helper 를 사용해 "화면 대표 = 정원 변경 대상"을 보장한다.
+    const latestContractByDorm = canonicalDormContractsByRoomKey(dormContracts);
 
     const contractBased = Array.from(latestContractByDorm.values())
       .map((contract) => {
@@ -15071,12 +15106,20 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
         ? { ...dm, capacity: cap, updatedAt: nowIso }
         : dm
     ));
-    // 연결된 유효(미삭제) 계약만 동일 정원으로 동기화(다른 계약 불변).
-    setDormContracts((prev) => prev.map((c) =>
-      (!c.isDeleted && roomKeys.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo)))
-        ? { ...c, capacity: cap, updatedAt: todayStr }
-        : c
-    ));
+    // [중복 대표행 전환 방지] 동일 객실키의 모든 계약을 수정하지 않는다.
+    //   선택 객실마다 canonical 계약 1건만 정원 변경 → 나머지 legacy 중복은 untouched(updatedAt 불변) → 대표행 전환/재upsert 유발 안 함.
+    setDormContracts((prev) => {
+      const canonicalByKey = canonicalDormContractsByRoomKey(prev);
+      const targetIds = new Set<string>();
+      roomKeys.forEach((rk) => {
+        const canonical = canonicalByKey.get(rk);
+        if (canonical) targetIds.add(canonical.id);
+      });
+      if (targetIds.size === 0) return prev;
+      return prev.map((c) =>
+        targetIds.has(c.id) ? { ...c, capacity: cap, updatedAt: todayStr } : c
+      );
+    });
     showNetworkToast(`선택한 기숙사 ${selectedDorms.length}곳의 정원을 ${cap}명으로 변경했습니다.`);
     setBulkCapacitySaving(false);
     setBulkCapacityOpen(false);
