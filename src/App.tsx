@@ -10491,6 +10491,31 @@ export default function App() {
       );
     }
 
+    // [P1 동일 객실 ACTIVE 중복 생성 차단] "저장이 대상 객실에 새로운 ACTIVE 충돌을 만드는가" 관점.
+    //   - 충돌 후보 = 자기 자신(editingDormContractId) 제외 + isCanonicalContractCandidate(삭제/영구삭제/종료/해지 제외) + 동일 객실키.
+    //   - 신규 등록: 대상 객실에 ACTIVE 계약이 있으면 BLOCK.
+    //   - 수정: 객실키를 "다른 객실로 변경"할 때만 대상 객실 ACTIVE 충돌을 BLOCK.
+    //     (객실키 그대로인 수정은 기존 legacy 중복이 있어도 '새 중복 생성'이 아니므로 평수/임대인 등 보정 저장 허용.)
+    const originalRoomKey = existing
+      ? getDormKey(existing.site, existing.buildingName, existing.dong, existing.roomHo)
+      : null;
+    const roomKeyChanged = !editingDormContractId || originalRoomKey !== roomKey;
+    if (roomKeyChanged) {
+      const conflict = dormContracts.some(
+        (c) =>
+          c.id !== editingDormContractId &&
+          isCanonicalContractCandidate(c) &&
+          getDormKey(c.site, c.buildingName, c.dong, c.roomHo) === roomKey
+      );
+      if (conflict) {
+        void appAlert(
+          "신규계약 등록 불가",
+          "동일한 객실에 진행 중인 계약이 이미 존재합니다.\n기존 계약을 수정하거나 종료/해지 후 새 계약을 등록해주세요."
+        );
+        return;
+      }
+    }
+
     // [요청2] DB 저장값을 계산값으로 덮어쓰지 않는다 — 폼 값(기본 "자동선택" 또는 수동값)을 그대로 저장.
     //   자동선택이면 표시(getContractDisplayStatus/getContractTypeDisplay)에서만 계산하고, 수동 선택 시 그 값이 우선.
     const finalPayload: DormContract = {
