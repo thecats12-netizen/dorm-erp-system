@@ -1,14 +1,14 @@
 import { useState } from "react";
 import {
   buildDrBackup, serializeDrBackup, P0_EXCLUDED, MODULE_LABELS, MILITARY_KEY_LABELS, MILITARY_KEYS,
-  type DormModuleData, type OperationalModuleData, type MilitaryModuleData, type SystemModuleData, type AuditModuleData,
+  type DormModuleData, type OperationalModuleData, type AssetModuleData, type MilitaryModuleData, type SystemModuleData, type AuditModuleData,
 } from "../../services/backupService";
 
 // DR(재해복구) 백업 생성 패널 — 관리자 전용. 포함/제외를 명확히 표시하고 PII 경고 후 다운로드.
 // 라이브 데이터는 App 이 getLiveData 로 주입(백업서비스는 순수 함수).
 type LiveData = {
   tenantId: string; appVersion?: string;
-  dorm?: DormModuleData; operational?: OperationalModuleData; military?: MilitaryModuleData; system?: SystemModuleData; audit?: AuditModuleData;
+  dorm?: DormModuleData; operational?: OperationalModuleData; asset?: AssetModuleData; military?: MilitaryModuleData; system?: SystemModuleData; audit?: AuditModuleData;
 };
 
 type Props = {
@@ -58,7 +58,8 @@ export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, onToast 
           <div className="mb-2 text-sm font-semibold text-emerald-700 dark:text-emerald-300">✓ 백업됨</div>
           <ul className="space-y-0.5 text-xs text-slate-600 dark:text-slate-300">
             <li>{MODULE_LABELS.dorm}(기숙사/입주자/신입사원/계약)</li>
-            <li>{MODULE_LABELS.operational}(청소/하자/비품/정산 · 사진 제외)</li>
+            <li>{MODULE_LABELS.operational}(청소/하자/비품/정산/입주전점검 · 사진 제외)</li>
+            <li>{MODULE_LABELS.asset}(임차현황·비품매각)</li>
             <li>{MODULE_LABELS.military}: {MILITARY_KEYS.map((k) => MILITARY_KEY_LABELS[k]).join(", ")}</li>
             <li>{MODULE_LABELS.system} · {MODULE_LABELS.audit}</li>
           </ul>

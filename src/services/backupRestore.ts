@@ -4,7 +4,7 @@
 //  · 순서 보장: lock ON → snapshot → save → fetch(재조회) → integrity 검증 → hydration → (finally) lock OFF.
 //  · 실패 시 rollback(스냅샷 재적용/재저장/재조회/hydration). rollback 까지 실패하면 "복구 확인 필요"(성공 표기 금지).
 // ============================================================================
-import { MILITARY_KEYS, mergeById, type CanonicalBackup, type RestorePlan, type MilitaryModuleData, type DormModuleData, type OperationalModuleData } from "./backupService";
+import { MILITARY_KEYS, DORM_DATASET_KEYS, OPERATIONAL_RESTORE_DATASET_KEYS, mergeById, type CanonicalBackup, type RestorePlan, type MilitaryModuleData, type DormModuleData, type OperationalModuleData } from "./backupService";
 
 export type RestoreDeps = {
   isAdmin: () => boolean;
@@ -18,9 +18,11 @@ export type RestoreDeps = {
   fetchMilitary: () => Promise<MilitaryModuleData>; // DB 재조회(raw). 실패 시 throw.
   verifyMilitary: (m: MilitaryModuleData) => boolean; // 사후 무결성(false → 검증 실패)
   hydrateMilitary: (m: MilitaryModuleData) => void;  // state 반영(+status ready). 실패 시 throw.
-  // 기숙사/운영(모듈 REPLACE, upsert 기반)
+  // 기숙사/운영(세부 dataset 단위, upsert 기반). snapshot* 는 비선택 dataset 보존·롤백용 현재 상태.
+  snapshotDorm?: () => DormModuleData;
   applyDormState: (d: DormModuleData) => void;
   saveDorm: (d: DormModuleData, userId: string) => Promise<void>;
+  snapshotOperational?: () => OperationalModuleData;
   applyOperationalState: (o: OperationalModuleData) => void;
   saveOperational: (o: OperationalModuleData, userId: string) => Promise<void>;
   log?: (event: string) => void;
@@ -43,6 +45,9 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
 
   const rowOf = (k: string) => plan.rows.find((r) => r.key === k);
   const snap = deps.snapshotMilitary();
+  // dataset 단위 롤백용 현재 상태 스냅샷(복원 시작 전).
+  const snapDorm = deps.snapshotDorm?.();
+  const snapOp = deps.snapshotOperational?.();
 
   deps.setLock(true); L("lock:on");
   try {
@@ -60,17 +65,46 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
       deps.applyMilitaryState(next as unknown as MilitaryModuleData); L("military:apply");
       await deps.saveMilitary(next as unknown as MilitaryModuleData, uid); L("military:save");
     }
-    // 2) 기숙사(모듈 REPLACE · upsert)
-    const dr = rowOf("dorm");
-    if (dr && !dr.blocked && dr.action === "restore-replace" && backup.modules.dorm) {
-      deps.applyDormState(backup.modules.dorm); L("dorm:apply");
-      await deps.saveDorm(backup.modules.dorm, uid); L("dorm:save");
+    // 2) 기숙사 — 세부 dataset 단위(선택한 dataset 만). 비선택 dataset: state=현재값 유지, 저장 payload=[](upsert no-op → DB 미변경).
+    if (backup.modules.dorm && deps.snapshotDorm) {
+      const touched = DORM_DATASET_KEYS.filter((ds) => { const r = rowOf(`dorm.${ds}`); return r && !r.blocked && r.action !== "skip"; });
+      if (touched.length) {
+        const cur = deps.snapshotDorm() as unknown as Record<string, unknown>;
+        const bk = backup.modules.dorm as unknown as Record<string, unknown>;
+        const nextState: Record<string, unknown> = { ...cur };           // 비선택 dataset = 현재값 보존
+        const savePayload: Record<string, unknown> = { dorms: [], occupants: [], newHires: [], dormContracts: [] };
+        for (const ds of touched) {
+          const r = rowOf(`dorm.${ds}`)!;
+          let val: unknown;
+          if (r.action === "restore-replace") val = bk[ds];
+          else { const merged = mergeById(cur[ds] as unknown[], bk[ds] as unknown[]); if (!merged) throw new Error(`${r.label} 병합 불가(ID 누락)`); val = merged; }
+          nextState[ds] = val; savePayload[ds] = val;
+        }
+        // 불변식 가드: 비선택 dataset 은 nextState 가 현재값과 동일해야 한다.
+        for (const ds of DORM_DATASET_KEYS) if (!touched.includes(ds) && nextState[ds] !== cur[ds]) throw new Error(`비선택 dataset(${ds}) 변경 감지 — 중단`);
+        deps.applyDormState(nextState as unknown as DormModuleData); L("dorm:apply");
+        await deps.saveDorm(savePayload as unknown as DormModuleData, uid); L("dorm:save");
+      }
     }
-    // 3) 운영(모듈 REPLACE · upsert)
-    const op = rowOf("operational");
-    if (op && !op.blocked && op.action === "restore-replace" && backup.modules.operational) {
-      deps.applyOperationalState(backup.modules.operational); L("op:apply");
-      await deps.saveOperational(backup.modules.operational, uid); L("op:save");
+    // 3) 운영 — 세부 dataset 단위(동일 방식).
+    if (backup.modules.operational && deps.snapshotOperational) {
+      const touched = OPERATIONAL_RESTORE_DATASET_KEYS.filter((ds) => { const r = rowOf(`operational.${ds}`); return r && !r.blocked && r.action !== "skip"; });
+      if (touched.length) {
+        const cur = deps.snapshotOperational() as unknown as Record<string, unknown>;
+        const bk = backup.modules.operational as unknown as Record<string, unknown>;
+        const nextState: Record<string, unknown> = { ...cur };
+        const savePayload: Record<string, unknown> = { cleaningReports: [], defects: [], inventory: [], settlementRecords: [], settlementItems: [] };
+        for (const ds of touched) {
+          const r = rowOf(`operational.${ds}`)!;
+          let val: unknown;
+          if (r.action === "restore-replace") val = bk[ds];
+          else { const merged = mergeById(cur[ds] as unknown[], bk[ds] as unknown[]); if (!merged) throw new Error(`${r.label} 병합 불가(ID 누락)`); val = merged; }
+          nextState[ds] = val; savePayload[ds] = val;
+        }
+        for (const ds of OPERATIONAL_RESTORE_DATASET_KEYS) if (!touched.includes(ds) && nextState[ds] !== cur[ds]) throw new Error(`비선택 dataset(${ds}) 변경 감지 — 중단`);
+        deps.applyOperationalState(nextState as unknown as OperationalModuleData); L("op:apply");
+        await deps.saveOperational(savePayload as unknown as OperationalModuleData, uid); L("op:save");
+      }
     }
     // 4) 재조회 → 무결성 → hydration
     const fetched = await deps.fetchMilitary(); L("fetch");
@@ -80,10 +114,33 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
     return { ok: true, message: "선택한 항목을 복원했습니다. 최신 데이터로 동기화되었습니다.", steps };
   } catch (e) {
     const errMsg = (e as { message?: string })?.message || String(e);
-    // rollback(군대 원자 복원). dorm/op 는 upsert 특성상 자동 원복 불가 → 메시지로 안내.
+    // rollback: 군대(원자 복원) + 기숙사/운영(선택했던 dataset 만 복원 전 값으로 재적용·재저장).
+    //   ※ upsert 특성상 백업으로 "새로 INSERT 된 id"는 물리 삭제가 불가(기존 한계) → state/기존행은 원복, 신규 id 잔존 가능.
     try {
       deps.applyMilitaryState(snap); L("rollback:apply");
       await deps.saveMilitary(snap, uid); L("rollback:save");
+      // 기숙사 dataset 롤백
+      if (snapDorm) {
+        const touched = DORM_DATASET_KEYS.filter((ds) => { const r = rowOf(`dorm.${ds}`); return r && !r.blocked && r.action !== "skip"; });
+        if (touched.length) {
+          const cur = snapDorm as unknown as Record<string, unknown>;
+          const payload: Record<string, unknown> = { dorms: [], occupants: [], newHires: [], dormContracts: [] };
+          for (const ds of touched) payload[ds] = cur[ds];
+          deps.applyDormState(snapDorm); L("rollback:dorm:apply");
+          await deps.saveDorm(payload as unknown as DormModuleData, uid); L("rollback:dorm:save");
+        }
+      }
+      // 운영 dataset 롤백
+      if (snapOp) {
+        const touched = OPERATIONAL_RESTORE_DATASET_KEYS.filter((ds) => { const r = rowOf(`operational.${ds}`); return r && !r.blocked && r.action !== "skip"; });
+        if (touched.length) {
+          const cur = snapOp as unknown as Record<string, unknown>;
+          const payload: Record<string, unknown> = { cleaningReports: [], defects: [], inventory: [], settlementRecords: [], settlementItems: [] };
+          for (const ds of touched) payload[ds] = cur[ds];
+          deps.applyOperationalState(snapOp); L("rollback:op:apply");
+          await deps.saveOperational(payload as unknown as OperationalModuleData, uid); L("rollback:op:save");
+        }
+      }
       const rf = await deps.fetchMilitary(); L("rollback:fetch");
       deps.hydrateMilitary(rf); L("rollback:hydrate");
       return { ok: false, message: `복원 실패로 롤백했습니다: ${errMsg}`, steps, rolledBack: true };

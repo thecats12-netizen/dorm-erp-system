@@ -4159,7 +4159,11 @@ export default function App() {
       cleaningReports: stripHeavyMedia(cleaningReports as unknown as Record<string, unknown>[]) as unknown as CleaningReport[],
       defects: stripHeavyMedia(defects as unknown as Record<string, unknown>[]) as unknown as DefectRequest[],
       inventory, settlementRecords, settlementItems,
+      // [DR V2] 입주전 점검 — 사진 등 대용량 미디어는 제외(cleaning/defects 와 동일 정책).
+      preMoveInInspections: stripHeavyMedia(preMoveInInspections as unknown as Record<string, unknown>[]) as unknown as PreMoveInInspection[],
     },
+    // [DR V2] 자산관리(임차·매각) — 현재 localStorage 기반 데이터. 백업엔 포함(DR 파일 누락 방지).
+    asset: { leases, sales },
     military: getMilitaryModuleState() as unknown as import("./services/backupService").MilitaryModuleData,
     system: { systemSettings, theme, customTemplates, cleaningSettings },
     audit: { auditLogs },
@@ -4167,7 +4171,8 @@ export default function App() {
   // 복원 dry-run 비교용 현재 상태(canonical). READ-ONLY.
   const getCurrentModulesCanonical = (): DrCanonicalModules => ({
     dorm: { dorms, occupants, newHires, dormContracts },
-    operational: { cleaningReports, defects, inventory, settlementRecords, settlementItems },
+    operational: { cleaningReports, defects, inventory, settlementRecords, settlementItems, preMoveInInspections },
+    asset: { leases, sales },
     military: getMilitaryModuleState() as unknown as import("./services/backupService").MilitaryModuleData,
     system: { systemSettings, theme, customTemplates, cleaningSettings },
     audit: { auditLogs },
@@ -4199,8 +4204,10 @@ export default function App() {
       fetchMilitary: async () => { const r = await loadMilitaryModule(tenantId); return (r ?? getMilitaryModuleState()) as unknown as DrMilitaryModuleData; },
       verifyMilitary: (m) => drCheckMilitaryIntegrity(m).ok,
       hydrateMilitary: (m) => drHydrateMilitary(m),
+      snapshotDorm: () => ({ dorms, occupants, newHires, dormContracts }) as unknown as import("./services/backupService").DormModuleData,
       applyDormState: (d) => { setDorms(d.dorms as Dorm[]); setOccupants(d.occupants as Occupant[]); setNewHires(d.newHires as NewHireEmployee[]); setDormContracts(d.dormContracts as DormContract[]); },
       saveDorm: (d, uid) => saveDormModule({ tenantId, dorms: d.dorms as Dorm[], occupants: d.occupants as Occupant[], dormContracts: d.dormContracts as DormContract[], newHires: d.newHires as NewHireEmployee[] }, uid),
+      snapshotOperational: () => ({ cleaningReports, defects, inventory, settlementRecords, settlementItems }) as unknown as import("./services/backupService").OperationalModuleData,
       applyOperationalState: (o) => { setCleaningReports(o.cleaningReports as CleaningReport[]); setDefects(o.defects as DefectRequest[]); setInventory(o.inventory as InventoryItem[]); setSettlementRecords(o.settlementRecords as SettlementRecord[]); setSettlementItems(o.settlementItems as SettlementItem[]); },
       saveOperational: (o, uid) => saveOperationalModule({ tenantId, cleaningReports: o.cleaningReports as CleaningReport[], defects: o.defects as DefectRequest[], inventory: o.inventory as InventoryItem[], settlementRecords: o.settlementRecords as SettlementRecord[], settlementItems: o.settlementItems as SettlementItem[], auditLogs: [] }, uid).then(() => undefined),
     };
@@ -23692,8 +23699,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="mt-2 text-sm text-rose-600">백업 복원 오류: {backupImportError}</div>
               )}
 
-              {/* [P0 DR] 전체 재해복구 백업 + 선택 복원(기존 일반 백업/복원과 별개, 추가형) */}
+              {/* [DR V2] 백업 및 복구 — 목적별 구분(엔진은 유지, 진입점만 한 화면에서 설명) */}
               <div className="mt-6 space-y-4">
+                <div className={`rounded-2xl border p-3 text-xs ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-300" : "border-slate-200 bg-white text-slate-600"}`}>
+                  <div className={`mb-1 text-sm font-semibold ${theme.darkMode ? "text-slate-100" : "text-slate-900"}`}>백업 및 복구</div>
+                  <ul className="space-y-0.5">
+                    <li><b>일반 백업</b>(위 버튼): 설정·비민감 운영 데이터만. 로그인/개인정보/군 인사정보 제외.</li>
+                    <li><b>전체 재해복구 백업</b>(아래): 업무·개인정보 포함 전체 재해복구용(관리자 전용).</li>
+                    <li><b>백업 파일 검사 · 선택 복구</b>(아래): 백업을 검사하고 항목을 골라 복구(미리보기 후 실행).</li>
+                    <li>※ 휴지통 메뉴의 "백업/복원"은 앱 내부 스냅샷(수동/자동) 목록으로 별도 보관됩니다.</li>
+                  </ul>
+                </div>
                 <DrBackupPanel darkMode={theme.darkMode} isAdmin={canManageUsers(currentUser)} getLiveData={getLiveDrData} onToast={showNetworkToast} />
                 <RestoreWizard
                   darkMode={theme.darkMode}

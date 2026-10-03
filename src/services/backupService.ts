@@ -7,12 +7,15 @@
 import { hasDangerousKeys, isPlainObject, MAX_BACKUP_BYTES } from "../utils/backupSecurity";
 
 export const DR_FORMAT_ID = "hts-dr";
-export const DR_SCHEMA_VERSION = 1;
+export const DR_SCHEMA_VERSION = 2; // V2: asset(임차·매각) + operational.preMoveInInspections 추가. v1/legacy 파일도 계속 파싱(하위호환).
 export const DR_BACKUP_TYPE = "disaster-recovery";
 
 // P0 canonical 모듈 구조(각 모듈은 선택적 — 백업/복원 단위)
 export type DormModuleData = { dorms: unknown[]; occupants: unknown[]; newHires: unknown[]; dormContracts: unknown[] };
-export type OperationalModuleData = { cleaningReports: unknown[]; defects: unknown[]; inventory: unknown[]; settlementRecords: unknown[]; settlementItems: unknown[] };
+// preMoveInInspections 는 V2 추가(선택적) — v1/legacy 백업에는 없을 수 있으므로 optional.
+export type OperationalModuleData = { cleaningReports: unknown[]; defects: unknown[]; inventory: unknown[]; settlementRecords: unknown[]; settlementItems: unknown[]; preMoveInInspections?: unknown[] };
+// 자산관리(임차·매각) — V2 추가. 현재 localStorage 기반 데이터라 백업엔 담되 선택 복원은 후속(registry.restoreSupported=false).
+export type AssetModuleData = { leases: unknown[]; sales: unknown[] };
 export type MilitaryModuleData = {
   militaryPersonnel: unknown[]; militaryTrainingRecords: unknown[]; militaryNotices: unknown[]; militaryReports: unknown[];
   militarySettings: Record<string, unknown>; militaryTrainingRules: unknown[]; militaryCodeValues: unknown; militaryTrainingAutoConfig: unknown;
@@ -23,6 +26,7 @@ export type AuditModuleData = { auditLogs: unknown[] };
 export type CanonicalModules = {
   dorm?: DormModuleData;
   operational?: OperationalModuleData;
+  asset?: AssetModuleData;
   military?: MilitaryModuleData;
   system?: SystemModuleData;
   audit?: AuditModuleData;
@@ -44,22 +48,10 @@ export type CanonicalBackup = {
   checksum: string | null;
 };
 
-// 군대 8키(정규 순서) + 업무명(사용자 표기)
-export const MILITARY_KEYS = [
-  "militaryPersonnel", "militaryTrainingRecords", "militaryNotices", "militaryReports",
-  "militarySettings", "militaryTrainingRules", "militaryCodeValues", "militaryTrainingAutoConfig",
-] as const;
-export type MilitaryKey = (typeof MILITARY_KEYS)[number];
-export const MILITARY_KEY_LABELS: Record<MilitaryKey, string> = {
-  militaryPersonnel: "군 인사", militaryTrainingRecords: "훈련 기록", militaryNotices: "공지·통보",
-  militaryReports: "보고서", militaryTrainingRules: "훈련 규칙", militarySettings: "군대관리 설정",
-  militaryCodeValues: "부서·코드", militaryTrainingAutoConfig: "훈련 자동화 설정",
-};
-export const MODULE_LABELS: Record<string, string> = {
-  dorm: "기숙사관리", operational: "운영관리", military: "군대관리", system: "기본·설정", audit: "변경 이력(감사 로그)",
-};
-// P0 에서 이 백업에 담기지 않는 데이터(사용자에게 "백업되지 않음"으로 반드시 표시)
-export const P0_EXCLUDED: string[] = ["시험관리(전체)", "사용자 계정·권한", "첨부파일 원본(사진/증빙/계약서)"];
+// 군대 8키·라벨·모듈 라벨·제외 목록은 dataset registry(단일 소스)에서 가져와 re-export(기존 import 호환 유지).
+import { MILITARY_KEYS, MILITARY_KEY_LABELS, MODULE_LABELS, P0_EXCLUDED, type MilitaryKey } from "./datasetRegistry";
+export { MILITARY_KEYS, MILITARY_KEY_LABELS, MODULE_LABELS, P0_EXCLUDED };
+export type { MilitaryKey };
 
 const asArray = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const asObj = (v: unknown): Record<string, unknown> => (isPlainObject(v) ? v : {});
@@ -117,8 +109,14 @@ function buildDorm(src: Record<string, unknown>): DormModuleData | undefined {
   return { dorms: asArray(src.dorms), occupants: asArray(src.occupants), newHires: asArray(src.newHires), dormContracts: asArray(src.dormContracts) };
 }
 function buildOperational(src: Record<string, unknown>): OperationalModuleData | undefined {
-  if (![ "cleaningReports", "defects", "inventory", "settlementRecords", "settlementItems" ].some((k) => src[k] !== undefined)) return undefined;
-  return { cleaningReports: asArray(src.cleaningReports), defects: asArray(src.defects), inventory: asArray(src.inventory), settlementRecords: asArray(src.settlementRecords), settlementItems: asArray(src.settlementItems) };
+  if (![ "cleaningReports", "defects", "inventory", "settlementRecords", "settlementItems", "preMoveInInspections" ].some((k) => src[k] !== undefined)) return undefined;
+  const base: OperationalModuleData = { cleaningReports: asArray(src.cleaningReports), defects: asArray(src.defects), inventory: asArray(src.inventory), settlementRecords: asArray(src.settlementRecords), settlementItems: asArray(src.settlementItems) };
+  if (src.preMoveInInspections !== undefined) base.preMoveInInspections = asArray(src.preMoveInInspections); // V2(없으면 생략 → 하위호환)
+  return base;
+}
+function buildAsset(src: Record<string, unknown>): AssetModuleData | undefined {
+  if (![ "leases", "sales" ].some((k) => src[k] !== undefined)) return undefined;
+  return { leases: asArray(src.leases), sales: asArray(src.sales) };
 }
 function buildSystem(src: Record<string, unknown>): SystemModuleData | undefined {
   if (![ "systemSettings", "theme", "customTemplates", "cleaningSettings" ].some((k) => src[k] !== undefined)) return undefined;
@@ -132,7 +130,8 @@ function buildAudit(src: Record<string, unknown>): AuditModuleData | undefined {
 function computeCounts(m: CanonicalModules): Record<string, number> {
   const c: Record<string, number> = {};
   if (m.dorm) { c["기숙사"] = m.dorm.dorms.length; c["입주자"] = m.dorm.occupants.length; c["신입사원"] = m.dorm.newHires.length; c["계약"] = m.dorm.dormContracts.length; }
-  if (m.operational) { c["청소보고서"] = m.operational.cleaningReports.length; c["하자"] = m.operational.defects.length; c["비품"] = m.operational.inventory.length; c["정산기록"] = m.operational.settlementRecords.length; c["정산항목"] = m.operational.settlementItems.length; }
+  if (m.operational) { c["청소보고서"] = m.operational.cleaningReports.length; c["하자"] = m.operational.defects.length; c["비품"] = m.operational.inventory.length; c["정산기록"] = m.operational.settlementRecords.length; c["정산항목"] = m.operational.settlementItems.length; if (Array.isArray(m.operational.preMoveInInspections)) c["입주전점검"] = m.operational.preMoveInInspections.length; }
+  if (m.asset) { c["임차현황"] = m.asset.leases.length; c["비품매각"] = m.asset.sales.length; }
   if (m.military) for (const k of MILITARY_KEYS) if (Array.isArray((m.military as Record<string, unknown>)[k])) c[MILITARY_KEY_LABELS[k]] = ((m.military as Record<string, unknown>)[k] as unknown[]).length;
   if (m.audit) c["감사로그"] = m.audit.auditLogs.length;
   return c;
@@ -151,13 +150,14 @@ export function adaptToCanonical(raw: unknown): CanonicalBackup {
     src = { ...d, ...mm };
   } else if (fmt === "dr") {
     const mods = asObj(root.modules);
-    src = { ...asObj(mods.dorm), ...asObj(mods.operational), ...asObj(mods.military), ...asObj(mods.system), ...asObj(mods.audit) };
+    src = { ...asObj(mods.dorm), ...asObj(mods.operational), ...asObj(mods.asset), ...asObj(mods.military), ...asObj(mods.system), ...asObj(mods.audit) };
   } else if (fmt === "general") {
     src = asObj(root.data);
   }
   const modules: CanonicalModules = {};
   const dorm = buildDorm(src); if (dorm) modules.dorm = dorm;
   const operational = buildOperational(src); if (operational) modules.operational = operational;
+  const asset = buildAsset(src); if (asset) modules.asset = asset;
   const military = buildMilitary(src); if (military) modules.military = military;
   const system = buildSystem(src); if (system) modules.system = system;
   const audit = buildAudit(src); if (audit) modules.audit = audit;
@@ -181,11 +181,12 @@ export function adaptToCanonical(raw: unknown): CanonicalBackup {
 // ── DR 백업 생성(라이브 앱 데이터 → canonical → 직렬화) ──────────────────────
 export function buildDrBackup(input: {
   tenantId: string; appVersion?: string;
-  dorm?: DormModuleData; operational?: OperationalModuleData; military?: MilitaryModuleData; system?: SystemModuleData; audit?: AuditModuleData;
+  dorm?: DormModuleData; operational?: OperationalModuleData; asset?: AssetModuleData; military?: MilitaryModuleData; system?: SystemModuleData; audit?: AuditModuleData;
 }): CanonicalBackup {
   const modules: CanonicalModules = {};
   if (input.dorm) modules.dorm = input.dorm;
   if (input.operational) modules.operational = input.operational;
+  if (input.asset) modules.asset = input.asset;
   if (input.military) modules.military = input.military;
   if (input.system) modules.system = input.system;
   if (input.audit) modules.audit = input.audit;
@@ -250,10 +251,40 @@ export function checkMilitaryIntegrity(m: MilitaryModuleData): MilitaryIntegrity
 
 // ── 복원 계획(dry-run · DB write 없음) ───────────────────────────────────────
 export type RestorePolicy = "REPLACE" | "MERGE" | "SKIP";
-// 대상 키: 모듈 단위(dorm/operational/system/audit) + 군대는 8키 개별
-export type RestoreTargetKey = "dorm" | "operational" | "system" | "audit" | MilitaryKey;
+// 기숙사/운영 세부 dataset 키(세부 선택 복원 단위). preMoveInInspections 는 restoreSupported=false 라 제외.
+export const DORM_DATASET_KEYS = ["dorms", "occupants", "newHires", "dormContracts"] as const;
+export type DormDatasetKey = (typeof DORM_DATASET_KEYS)[number];
+export const OPERATIONAL_RESTORE_DATASET_KEYS = ["cleaningReports", "defects", "inventory", "settlementRecords", "settlementItems"] as const;
+export type OperationalRestoreDatasetKey = (typeof OPERATIONAL_RESTORE_DATASET_KEYS)[number];
+export type DormTargetKey = `dorm.${DormDatasetKey}`;
+export type OperationalTargetKey = `operational.${OperationalRestoreDatasetKey}`;
+// dataset 라벨(= computeCounts recordCounts 키와 정합).
+export const DORM_DATASET_LABELS: Record<DormDatasetKey, string> = { dorms: "기숙사", occupants: "입주자", newHires: "신입사원", dormContracts: "계약" };
+export const OPERATIONAL_DATASET_LABELS: Record<OperationalRestoreDatasetKey, string> = { cleaningReports: "청소보고서", defects: "하자", inventory: "비품", settlementRecords: "정산기록", settlementItems: "정산항목" };
+
+// 대상 키: 기숙사/운영은 세부 dataset 단위(dorm.*/operational.*), 군대는 8키 개별, system/audit 은 모듈(복원 미지원).
+//  · 하위호환: 과거 "dorm"/"operational" 모듈 키도 허용(normalizeSelection 이 세부 키로 확장).
+export type RestoreTargetKey = "dorm" | "operational" | "system" | "audit" | MilitaryKey | DormTargetKey | OperationalTargetKey;
 export type Selection = Partial<Record<RestoreTargetKey, boolean>>;
 export type PolicyChoice = Partial<Record<RestoreTargetKey, RestorePolicy>>;
+
+// [하위호환 adapter] 과거/모듈 단위 selection(dorm/operational=true)을 세부 dataset 키로 확장.
+//  · 이미 세부 키로 들어온 경우는 그대로. 모듈 키는 해당 모듈의 restoreSupported dataset 전체를 선택한 것으로 해석.
+//  · 군대/system/audit 키는 변경하지 않음.
+export function normalizeSelection(selection: Selection, policy: PolicyChoice): { selection: Selection; policy: PolicyChoice } {
+  const s: Selection = { ...selection };
+  const p: PolicyChoice = { ...policy };
+  if (selection.dorm) for (const ds of DORM_DATASET_KEYS) { const k = `dorm.${ds}` as DormTargetKey; if (s[k] === undefined) s[k] = true; if (policy.dorm !== undefined && p[k] === undefined) p[k] = policy.dorm; }
+  if (selection.operational) for (const ds of OPERATIONAL_RESTORE_DATASET_KEYS) { const k = `operational.${ds}` as OperationalTargetKey; if (s[k] === undefined) s[k] = true; if (policy.operational !== undefined && p[k] === undefined) p[k] = policy.operational; }
+  delete s.dorm; delete s.operational; // 모듈 키는 세부 키로 치환
+  return { selection: s, policy: p };
+}
+export function restoreTargetLabel(key: RestoreTargetKey): string {
+  if (key.startsWith("dorm.")) return `기숙사-${DORM_DATASET_LABELS[key.slice(5) as DormDatasetKey] || key.slice(5)}`;
+  if (key.startsWith("operational.")) return `운영-${OPERATIONAL_DATASET_LABELS[key.slice(12) as OperationalRestoreDatasetKey] || key.slice(12)}`;
+  if ((MILITARY_KEYS as readonly string[]).includes(key)) return MILITARY_KEY_LABELS[key as MilitaryKey];
+  return MODULE_LABELS[key] || key;
+}
 
 export type PlanRow = {
   key: RestoreTargetKey; label: string;
@@ -271,23 +302,40 @@ export type RestorePlan = { rows: PlanRow[]; militaryIntegrity: MilitaryIntegrit
 const cnt = (v: unknown): number => (Array.isArray(v) ? v.length : (isPlainObject(v) && Object.keys(v).length > 0 ? 1 : 0));
 
 // current: 현재 앱 데이터(같은 canonical 구조), backup: 복원 원본 canonical, selection/policy: 사용자 선택
-export function planRestore(currentMods: CanonicalModules, backup: CanonicalBackup, selection: Selection, policy: PolicyChoice): RestorePlan {
+export function planRestore(currentMods: CanonicalModules, backupArg: CanonicalBackup, selectionArg: Selection, policyArg: PolicyChoice): RestorePlan {
   const rows: PlanRow[] = [];
-  const b = backup.modules;
+  const backup = backupArg; const b = backup.modules;
+  // [하위호환] 모듈 키(dorm/operational) → 세부 dataset 키 확장. 이후 로직은 세부 키만 본다.
+  const { selection, policy } = normalizeSelection(selectionArg, policyArg);
 
-  const pushModuleRow = (key: "dorm" | "operational" | "system" | "audit", curCount: number, bkCount: number) => {
+  // 세부 dataset 행(기숙사/운영) — 선택된 dataset 만, dataset 별 policy/action.
+  const pushDatasetRow = (key: RestoreTargetKey, label: string, moduleData: Record<string, unknown> | undefined, bkData: Record<string, unknown> | undefined, dsKey: string) => {
+    if (!selection[key]) return;
+    if (!bkData) { rows.push({ key, label, currentCount: cnt(moduleData?.[dsKey]), backupCount: 0, currentEmpty: cnt(moduleData?.[dsKey]) === 0, backupHasData: false, defaultPolicy: "SKIP", chosenPolicy: "SKIP", action: "skip", conflict: false, warnings: ["백업에 이 데이터가 없습니다."], blocked: false }); return; }
+    const curCount = cnt(moduleData?.[dsKey]); const bkCount = cnt(bkData?.[dsKey]);
+    const currentEmpty = curCount === 0, backupHasData = bkCount > 0, conflict = !currentEmpty && backupHasData;
+    const def: RestorePolicy = conflict ? "SKIP" : (backupHasData ? "REPLACE" : "SKIP");
+    const chosen = policy[key] ?? def;
+    rows.push({ key, label, currentCount: curCount, backupCount: bkCount, currentEmpty, backupHasData, defaultPolicy: def, chosenPolicy: chosen, action: chosen === "REPLACE" ? "restore-replace" : chosen === "MERGE" ? "restore-merge" : "skip", conflict, warnings: conflict && chosen === "REPLACE" ? ["이 데이터를 백업값으로 적용(추가·갱신)합니다."] : [], blocked: false });
+  };
+
+  const curDorm = currentMods.dorm as Record<string, unknown> | undefined;
+  const bkDorm = b.dorm as Record<string, unknown> | undefined;
+  for (const ds of DORM_DATASET_KEYS) pushDatasetRow(`dorm.${ds}` as RestoreTargetKey, restoreTargetLabel(`dorm.${ds}` as RestoreTargetKey), curDorm, bkDorm, ds);
+  const curOp = currentMods.operational as Record<string, unknown> | undefined;
+  const bkOp = b.operational as Record<string, unknown> | undefined;
+  for (const ds of OPERATIONAL_RESTORE_DATASET_KEYS) pushDatasetRow(`operational.${ds}` as RestoreTargetKey, restoreTargetLabel(`operational.${ds}` as RestoreTargetKey), curOp, bkOp, ds);
+
+  // system/audit 모듈 단위(복원 미지원 — selection 에 들어오지 않지만 호환상 유지).
+  const pushModuleRow = (key: "system" | "audit", curCount: number, bkCount: number) => {
     if (!selection[key]) return;
     if (!(b as Record<string, unknown>)[key]) { rows.push({ key, label: MODULE_LABELS[key], currentCount: curCount, backupCount: 0, currentEmpty: curCount === 0, backupHasData: false, defaultPolicy: "SKIP", chosenPolicy: "SKIP", action: "skip", conflict: false, warnings: ["백업에 이 모듈이 없습니다."], blocked: false }); return; }
     const currentEmpty = curCount === 0, backupHasData = bkCount > 0, conflict = !currentEmpty && backupHasData;
     const def: RestorePolicy = conflict ? "SKIP" : (backupHasData ? "REPLACE" : "SKIP");
     const chosen = policy[key] ?? def;
-    rows.push({ key, label: MODULE_LABELS[key], currentCount: curCount, backupCount: bkCount, currentEmpty, backupHasData, defaultPolicy: def, chosenPolicy: chosen, action: chosen === "REPLACE" ? "restore-replace" : chosen === "MERGE" ? "restore-merge" : "skip", conflict, warnings: conflict && chosen === "REPLACE" ? ["현재 데이터를 전부 교체합니다."] : [], blocked: false });
+    rows.push({ key, label: MODULE_LABELS[key], currentCount: curCount, backupCount: bkCount, currentEmpty, backupHasData, defaultPolicy: def, chosenPolicy: chosen, action: chosen === "REPLACE" ? "restore-replace" : chosen === "MERGE" ? "restore-merge" : "skip", conflict, warnings: [], blocked: false });
   };
-
-  // 모듈 단위 count(대표 배열 합)
   const modCount = (m: CanonicalModules[keyof CanonicalModules] | undefined, keys: string[]): number => keys.reduce((s, k) => s + cnt((m as Record<string, unknown> | undefined)?.[k]), 0);
-  pushModuleRow("dorm", modCount(currentMods.dorm, ["dorms", "occupants", "newHires", "dormContracts"]), modCount(b.dorm, ["dorms", "occupants", "newHires", "dormContracts"]));
-  pushModuleRow("operational", modCount(currentMods.operational, ["cleaningReports", "defects", "inventory", "settlementRecords", "settlementItems"]), modCount(b.operational, ["cleaningReports", "defects", "inventory", "settlementRecords", "settlementItems"]));
   pushModuleRow("system", modCount(currentMods.system, ["systemSettings", "theme", "customTemplates", "cleaningSettings"]), modCount(b.system, ["systemSettings", "theme", "customTemplates", "cleaningSettings"]));
   pushModuleRow("audit", modCount(currentMods.audit, ["auditLogs"]), modCount(b.audit, ["auditLogs"]));
 
