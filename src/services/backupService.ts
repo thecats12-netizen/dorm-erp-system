@@ -158,6 +158,21 @@ export function canonicalizeModulesForChecksum(modules: CanonicalModules): Canon
   return out;
 }
 
+// JSON 직렬화 경계를 동일하게 적용(실제 파일 저장 표현으로 정규화).
+//  · undefined/function 제거, Date→ISO, NaN/Infinity→null, sparse array→null 등 JSON.stringify semantics 전체 반영.
+//  · 생성(인메모리)과 검증(파일 parse 후)이 "같은 JSON 표현"을 해시하도록 양쪽에서 호출.
+//  · 직렬화 불가(순환 참조 등)·top-level undefined 는 조용히 넘기지 않고 throw(fail-closed).
+function normalizeJsonForChecksum(value: unknown): unknown {
+  let s: string;
+  try { const r = JSON.stringify(value); if (r === undefined) throw new Error("JSON 직렬화 결과 undefined"); s = r; }
+  catch { throw new Error("checksum 정규화 실패: JSON 직렬화 불가(순환 참조 등)"); }
+  return JSON.parse(s);
+}
+// checksum 단일 소스: raw/parsed modules 모두 canonical→JSON정규화→안정직렬화→FNV 해시.
+function checksumOfModules(modules: CanonicalModules): string {
+  return integrityChecksum(stableStringify(normalizeJsonForChecksum(canonicalizeModulesForChecksum(modules))));
+}
+
 // ── 어댑터: 임의 백업 → canonical ─────────────────────────────────────────────
 export function adaptToCanonical(raw: unknown): CanonicalBackup {
   const fmt = detectFormat(raw);
@@ -211,7 +226,7 @@ export function buildDrBackup(input: {
   if (input.military) modules.military = input.military;
   if (input.system) modules.system = input.system;
   if (input.audit) modules.audit = input.audit;
-  const checksum = integrityChecksum(stableStringify(canonicalizeModulesForChecksum(modules)));
+  const checksum = checksumOfModules(modules);
   return {
     formatId: DR_FORMAT_ID, schemaVersion: DR_SCHEMA_VERSION, backupType: DR_BACKUP_TYPE,
     generatedAt: new Date().toISOString(), tenantId: input.tenantId, appVersion: input.appVersion ?? null,
@@ -230,7 +245,9 @@ export function serializeDrBackup(cb: CanonicalBackup): string {
 // 파일 무결성: 저장된 checksum vs 재계산(있을 때만)
 export function verifyChecksum(cb: CanonicalBackup): { checked: boolean; ok: boolean } {
   if (!cb.checksum) return { checked: false, ok: true };
-  return { checked: true, ok: cb.checksum === integrityChecksum(stableStringify(canonicalizeModulesForChecksum(cb.modules))) };
+  // 재계산 실패(직렬화 불가 등)는 "검증 실패(불일치)"로 fail-closed — 조용한 통과 금지.
+  try { return { checked: true, ok: cb.checksum === checksumOfModules(cb.modules) }; }
+  catch { return { checked: true, ok: false }; }
 }
 
 // ── 검증 ─────────────────────────────────────────────────────────────────────
