@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import {
   safeParseBackup, adaptToCanonical, validateCanonical, verifyChecksum, checkMilitaryIntegrity,
-  planRestore, MILITARY_KEYS, MILITARY_KEY_LABELS, MODULE_LABELS,
+  planRestore,
   type CanonicalBackup, type CanonicalModules, type Selection, type PolicyChoice, type RestorePlan, type RestoreTargetKey, type RestorePolicy,
 } from "../../services/backupService";
+import { buildModuleNodes, moduleTriState, toggleModule, toggleKey, type ModuleNode, type NodeStatus } from "./restoreSelectionModel";
 
 type ExecResult = { ok: boolean; message: string };
 type Props = {
@@ -16,8 +17,20 @@ type Props = {
 };
 
 type Step = "idle" | "inspect" | "select" | "plan" | "executing" | "result";
-// P0 선택 복원 지원 모듈: 기숙사·운영·군대(8키). system/audit 복원은 P0 미지원(백업엔 포함되나 선택 복원 대상 아님).
-const MODULE_KEYS: Array<"dorm" | "operational"> = ["dorm", "operational"];
+
+// indeterminate 지원 체크박스(React 는 prop 미지원 → ref 로 설정).
+function TriCheckbox({ state, disabled, onChange }: { state: "all" | "some" | "none"; disabled?: boolean; onChange: () => void }) {
+  return (
+    <input
+      type="checkbox"
+      disabled={disabled}
+      checked={state === "all"}
+      ref={(el) => { if (el) el.indeterminate = state === "some"; }}
+      onChange={onChange}
+    />
+  );
+}
+const statusText: Record<NodeStatus, string> = { selectable: "", preparing: "백업 포함 · 선택 복구 준비 중", missing: "백업에 없음" };
 
 export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getCurrentModules, onExecuteRestore, onToast }: Props) {
   const [step, setStep] = useState<Step>("idle");
@@ -53,8 +66,9 @@ export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getC
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backup, selection, policy]);
 
-  const toggleSel = (k: RestoreTargetKey) => setSelection((s) => ({ ...s, [k]: !s[k] }));
   const setPol = (k: RestoreTargetKey, p: RestorePolicy) => setPolicy((s) => ({ ...s, [k]: p }));
+  // [V2] datasetRegistry 기반 트리 노드(단일 소스). 하드코딩 MODULE_KEYS 제거.
+  const nodes: ModuleNode[] = useMemo(() => (backup ? buildModuleNodes(backup.modules, backup.recordCounts) : []), [backup]);
 
   const anySelected = Object.values(selection).some(Boolean);
   // tenant 안전: 백업 tenantId 가 있고 현재와 다르면 불일치(차단). tenantId 없으면 legacy(단일 tenant 허용).
@@ -130,28 +144,51 @@ export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getC
             )}
           </div>
 
-          {/* 모듈/세부 선택 */}
+          {/* 모듈/세부 선택 — datasetRegistry 기반 트리(V2) */}
           <div className="mb-3 space-y-2">
             <div className="text-sm font-semibold">복원할 항목 선택</div>
-            {MODULE_KEYS.filter((k) => backup.modules[k]).map((k) => (
-              <label key={k} className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={!!selection[k]} onChange={() => toggleSel(k)} />
-                {MODULE_LABELS[k]}
-              </label>
-            ))}
-            {backup.modules.military && (
-              <div className="rounded-2xl border border-slate-200 p-2 dark:border-slate-700">
-                <div className="mb-1 text-sm font-semibold">{MODULE_LABELS.military}(세부)</div>
-                <div className="grid grid-cols-2 gap-1">
-                  {MILITARY_KEYS.map((mk) => (
-                    <label key={mk} className="flex items-center gap-2 text-sm">
-                      <input type="checkbox" checked={!!selection[mk]} onChange={() => toggleSel(mk)} />
-                      {MILITARY_KEY_LABELS[mk]}
-                    </label>
-                  ))}
+            {nodes.map((node) => {
+              const tri = moduleTriState(node, selection);
+              const parentDisabled = !node.anySelectable; // 선택 가능한 하위가 없으면 부모 비활성
+              return (
+                <div key={node.module} className="rounded-2xl border border-slate-200 p-2 dark:border-slate-700">
+                  <label className={`flex items-center gap-2 text-sm font-semibold ${parentDisabled ? "text-slate-400" : ""}`}>
+                    <TriCheckbox state={tri} disabled={parentDisabled} onChange={() => setSelection((s) => toggleModule(node, s, moduleTriState(node, s) !== "all"))} />
+                    {node.label}
+                    {!node.present && <span className="text-xs font-normal text-slate-400">· 백업에 없음</span>}
+                    {parentDisabled && node.present && <span className="text-xs font-normal text-amber-600 dark:text-amber-400">· 선택 복구 준비 중</span>}
+                  </label>
+                  {node.children.length > 0 && (
+                    <div className="mt-1 grid grid-cols-1 gap-0.5 pl-5 sm:grid-cols-2">
+                      {node.children.map((c, i) => {
+                        const cnt = c.count != null ? `${c.count}건` : "";
+                        if (c.selKey) {
+                          // 군대 8키: 개별 선택
+                          return (
+                            <label key={c.label + i} className={`flex items-center gap-2 text-xs ${c.status !== "selectable" ? "text-slate-400" : ""}`}>
+                              <input type="checkbox" disabled={c.status !== "selectable"} checked={!!selection[c.selKey]} onChange={() => setSelection((s) => toggleKey(s, c.selKey!))} />
+                              {c.label} <span className="text-slate-400">{cnt}</span>
+                            </label>
+                          );
+                        }
+                        // dorm/operational/asset/system/audit 하위: 표시(건수) — 선택 단위는 부모(모듈). 미지원은 안내.
+                        return (
+                          <div key={c.label + i} className={`flex items-center gap-2 text-xs ${c.status === "selectable" ? "text-slate-500" : "text-slate-400"}`}>
+                            <span className="inline-block w-3 text-center">·</span>
+                            {c.label} <span className="text-slate-400">{cnt}</span>
+                            {c.status !== "selectable" && <span className="text-amber-600 dark:text-amber-400">[{statusText[c.status]}]</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })}
+            {/* 시험관리: 서버 다중테이블(FK) — 백업/복구 미지원(가짜 활성화 금지) */}
+            <div className="rounded-2xl border border-dashed border-slate-300 p-2 text-xs text-slate-400 dark:border-slate-700">
+              시험관리 — 백업/복구 준비 중(서버 다중테이블, 별도 복구 체계 필요)
+            </div>
           </div>
 
           {/* Dry-run 미리보기(변경 없음) */}
@@ -171,12 +208,12 @@ export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getC
                         {r.conflict ? (
                           <select value={r.chosenPolicy} onChange={(e) => setPol(r.key, e.target.value as RestorePolicy)} className={`rounded border px-1 ${darkMode ? "bg-slate-900 border-slate-600" : "bg-white border-slate-300"}`}>
                             <option value="SKIP">건너뛰기</option>
-                            <option value="REPLACE">{r.key === "dorm" || r.key === "operational" ? "적용(추가·갱신)" : "덮어쓰기"}</option>
+                            <option value="REPLACE">{r.key.startsWith("dorm.") || r.key.startsWith("operational.") ? "적용(추가·갱신)" : "덮어쓰기"}</option>
                             <option value="MERGE">병합</option>
                           </select>
                         ) : r.chosenPolicy}
                       </td>
-                      <td className="px-2 py-1">{r.blocked ? "차단" : r.action === "skip" ? "건너뜀" : r.action === "restore-replace" ? ((r.key === "dorm" || r.key === "operational") ? "복원(적용·기존행 유지)" : "복원(교체)") : "복원(병합)"}</td>
+                      <td className="px-2 py-1">{r.blocked ? "차단" : r.action === "skip" ? "건너뜀" : r.action === "restore-replace" ? ((r.key.startsWith("dorm.") || r.key.startsWith("operational.")) ? "복원(적용·기존행 유지)" : "복원(교체)") : "복원(병합)"}</td>
                       <td className="px-2 py-1 text-amber-600 dark:text-amber-400">{r.warnings.join("; ")}</td>
                     </tr>
                   ))}

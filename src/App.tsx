@@ -61,6 +61,8 @@ import {
   loadAppSettings,
   saveAppSettings,
   deleteRowsByIds,
+  deleteRowsByIdsStrict,
+  fetchAllRowIdsStrict,
   translateSupabaseError,
   type MilitaryModuleState,
 } from "./services/supabaseService";
@@ -627,6 +629,52 @@ function recordDormKey(x: { site?: string; buildingName?: string; dong?: string;
 // 로드(fetch)·저장(Supabase/localStorage)·Realtime 수신 시 공통 적용. 기존 정상 데이터는 보존.
 // ============================================================================
 const hasText = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
+// ============================================================================
+// [대표 계약(canonical) 선택 helper] — 동일 객실키(getDormKey)의 중복 dormContracts 중
+//   화면 대표(operationalDorms)와 "일괄 정원 설정" 수정 대상이 반드시 같은 1건이 되도록 공통화.
+//   deterministic: 배열 순서에 의존하지 않는다(legacy 불완전 중복이 updatedAt 동률로 대표를 가로채는 문제 수정).
+// ============================================================================
+// 대표 후보 유효성: 삭제/영구삭제/종료/해지 제외(기존 operationalDorms 규칙과 동일 — 새 업무규칙 추가 없음).
+function isCanonicalContractCandidate(c: DormContract): boolean {
+  if (c.isDeleted || c.deletedAt || c.isPermanentDeleted) return false;
+  if (c.contractStatus === "종료" || c.contractStatus === "해지") return false;
+  return true;
+}
+// 계약 완성도(동률 tie-break용): 핵심 상세필드가 "값 있음"인 개수.
+//   DormContract 의 상세필드는 모두 string 이므로 "0"(0원 등)도 유효값으로 계산됨(truthy 함정 없음 → hasText 로 공백만 제외).
+const CANONICAL_COMPLETENESS_FIELDS: Array<keyof DormContract> = [
+  "pyeong", "landlordName", "address", "contractStart", "contractEnd", "deposit", "monthlyRentOrMaintenance",
+];
+function dormContractCompleteness(c: DormContract): number {
+  let n = 0;
+  for (const f of CANONICAL_COMPLETENESS_FIELDS) if (hasText(c[f] as unknown)) n += 1;
+  return n;
+}
+// a 가 b 보다 더 "대표적"이면 true. 우선순위: updatedAt 최신 → 완성도 → createdAt 최신 → id 사전순(작은 것).
+//   (updatedAt 동률만으로 배열 후순위가 대표가 되던 문제 → 완성도/createdAt/id 로 deterministic 결정.)
+function isMoreCanonicalContract(a: DormContract, b: DormContract): boolean {
+  const au = a.updatedAt ? Date.parse(a.updatedAt) || 0 : 0;
+  const bu = b.updatedAt ? Date.parse(b.updatedAt) || 0 : 0;
+  if (au !== bu) return au > bu;
+  const ac = dormContractCompleteness(a);
+  const bc = dormContractCompleteness(b);
+  if (ac !== bc) return ac > bc;
+  const act = a.createdAt ? Date.parse(a.createdAt) || 0 : 0;
+  const bct = b.createdAt ? Date.parse(b.createdAt) || 0 : 0;
+  if (act !== bct) return act > bct;
+  return (a.id || "") < (b.id || "");
+}
+// 객실키 → 대표 계약 Map. operationalDorms 대표선택과 applyBulkCapacity 수정대상이 동일 결과를 쓰도록 공통 사용.
+function canonicalDormContractsByRoomKey(contracts: DormContract[]): Map<string, DormContract> {
+  const m = new Map<string, DormContract>();
+  for (const c of contracts) {
+    if (!isCanonicalContractCandidate(c)) continue;
+    const key = getDormKey(c.site, c.buildingName, c.dong, c.roomHo);
+    const existing = m.get(key);
+    if (!existing || isMoreCanonicalContract(c, existing)) m.set(key, c);
+  }
+  return m;
+}
 // 신규계약: 건물명/주소/임대인명 중 하나라도 있어야 유효(셋 다 비면 제외)
 function sanitizeDormContracts<T extends { buildingName?: string; address?: string; landlordName?: string }>(arr: T[]): T[] {
   if (!Array.isArray(arr)) return [];
@@ -4113,7 +4161,11 @@ export default function App() {
       cleaningReports: stripHeavyMedia(cleaningReports as unknown as Record<string, unknown>[]) as unknown as CleaningReport[],
       defects: stripHeavyMedia(defects as unknown as Record<string, unknown>[]) as unknown as DefectRequest[],
       inventory, settlementRecords, settlementItems,
+      // [DR V2] 입주전 점검 — 사진 등 대용량 미디어는 제외(cleaning/defects 와 동일 정책).
+      preMoveInInspections: stripHeavyMedia(preMoveInInspections as unknown as Record<string, unknown>[]) as unknown as PreMoveInInspection[],
     },
+    // [DR V2] 자산관리(임차·매각) — 현재 localStorage 기반 데이터. 백업엔 포함(DR 파일 누락 방지).
+    asset: { leases, sales },
     military: getMilitaryModuleState() as unknown as import("./services/backupService").MilitaryModuleData,
     system: { systemSettings, theme, customTemplates, cleaningSettings },
     audit: { auditLogs },
@@ -4121,7 +4173,8 @@ export default function App() {
   // 복원 dry-run 비교용 현재 상태(canonical). READ-ONLY.
   const getCurrentModulesCanonical = (): DrCanonicalModules => ({
     dorm: { dorms, occupants, newHires, dormContracts },
-    operational: { cleaningReports, defects, inventory, settlementRecords, settlementItems },
+    operational: { cleaningReports, defects, inventory, settlementRecords, settlementItems, preMoveInInspections },
+    asset: { leases, sales },
     military: getMilitaryModuleState() as unknown as import("./services/backupService").MilitaryModuleData,
     system: { systemSettings, theme, customTemplates, cleaningSettings },
     audit: { auditLogs },
@@ -4153,10 +4206,36 @@ export default function App() {
       fetchMilitary: async () => { const r = await loadMilitaryModule(tenantId); return (r ?? getMilitaryModuleState()) as unknown as DrMilitaryModuleData; },
       verifyMilitary: (m) => drCheckMilitaryIntegrity(m).ok,
       hydrateMilitary: (m) => drHydrateMilitary(m),
+      snapshotDorm: () => ({ dorms, occupants, newHires, dormContracts }) as unknown as import("./services/backupService").DormModuleData,
       applyDormState: (d) => { setDorms(d.dorms as Dorm[]); setOccupants(d.occupants as Occupant[]); setNewHires(d.newHires as NewHireEmployee[]); setDormContracts(d.dormContracts as DormContract[]); },
       saveDorm: (d, uid) => saveDormModule({ tenantId, dorms: d.dorms as Dorm[], occupants: d.occupants as Occupant[], dormContracts: d.dormContracts as DormContract[], newHires: d.newHires as NewHireEmployee[] }, uid),
+      snapshotOperational: () => ({ cleaningReports, defects, inventory, settlementRecords, settlementItems }) as unknown as import("./services/backupService").OperationalModuleData,
       applyOperationalState: (o) => { setCleaningReports(o.cleaningReports as CleaningReport[]); setDefects(o.defects as DefectRequest[]); setInventory(o.inventory as InventoryItem[]); setSettlementRecords(o.settlementRecords as SettlementRecord[]); setSettlementItems(o.settlementItems as SettlementItem[]); },
       saveOperational: (o, uid) => saveOperationalModule({ tenantId, cleaningReports: o.cleaningReports as CleaningReport[], defects: o.defects as DefectRequest[], inventory: o.inventory as InventoryItem[], settlementRecords: o.settlementRecords as SettlementRecord[], settlementItems: o.settlementItems as SettlementItem[], auditLogs: [] }, uid).then(() => undefined),
+      // [P1 INSERT residue] 복원 직전 실제 DB id(삭제 대상 식별) = tenant-scoped keyset 완전 수집(max_rows 상한 무관).
+      //   어느 테이블이든 조회 실패 시 throw → runDrRestore 가 catch 하여 해당 모듈 삭제 비활성(fail-closed).
+      fetchPreRestoreDormIds: async () => ({
+        dorms: await fetchAllRowIdsStrict("dorms", tenantId),
+        occupants: await fetchAllRowIdsStrict("occupants", tenantId),
+        newHires: await fetchAllRowIdsStrict("new_hires", tenantId),
+        dormContracts: await fetchAllRowIdsStrict("dorm_contracts", tenantId),
+      }),
+      //   · cleaningReports 포함: 지연로딩/limit 300 화면 로더 대신 전용 완전 reader 를 쓰므로 rollback delete 활성(KNOWN LIMITATION 해소).
+      fetchPreRestoreOperationalIds: async () => ({
+        cleaningReports: await fetchAllRowIdsStrict("cleaning_reports", tenantId),
+        defects: await fetchAllRowIdsStrict("defect_requests", tenantId),
+        inventory: await fetchAllRowIdsStrict("inventory_items", tenantId),
+        settlementRecords: await fetchAllRowIdsStrict("settlement_records", tenantId),
+        settlementItems: await fetchAllRowIdsStrict("settlement_items", tenantId),
+      }),
+      deleteDormRows: async (byDataset) => {
+        const tableOf: Record<string, string> = { dorms: "dorms", occupants: "occupants", newHires: "new_hires", dormContracts: "dorm_contracts" };
+        for (const [ds, rowIds] of Object.entries(byDataset)) { const t = tableOf[ds]; if (t && rowIds.length) await deleteRowsByIdsStrict(t, rowIds, tenantId); }
+      },
+      deleteOperationalRows: async (byDataset) => {
+        const tableOf: Record<string, string> = { cleaningReports: "cleaning_reports", defects: "defect_requests", inventory: "inventory_items", settlementRecords: "settlement_records", settlementItems: "settlement_items" };
+        for (const [ds, rowIds] of Object.entries(byDataset)) { const t = tableOf[ds]; if (t && rowIds.length) await deleteRowsByIdsStrict(t, rowIds, tenantId); }
+      },
     };
     const r = await runDrRestore(deps, backup, plan);
     return { ok: r.ok, message: r.message };
@@ -6580,20 +6659,9 @@ export default function App() {
     // 중요: "유효 계약만 먼저 필터" 후 호실별 최신 1건을 고른다.
     // (전체 계약으로 먼저 dedup 하면, 같은 호실의 종료/해지 기록이 updatedAt 이 더 최신일 때
     //  유효 계약을 덮어써서 카드가 누락되던 버그 수정 → 신규계약 유효 수와 카드 수 일치)
-    const validContracts = dormContracts
-      .filter((c) => !c.isDeleted && !c.deletedAt && !c.isPermanentDeleted)
-      .filter((c) => c.contractStatus !== "종료" && c.contractStatus !== "해지");
-
-    const latestContractByDorm = new Map<string, DormContract>();
-    validContracts.forEach((contract) => {
-      const key = getDormKey(contract.site, contract.buildingName, contract.dong, contract.roomHo);
-      const existing = latestContractByDorm.get(key);
-      const currentUpdatedAt = contract.updatedAt ? Date.parse(contract.updatedAt) : 0;
-      const existingUpdatedAt = existing?.updatedAt ? Date.parse(existing.updatedAt) : 0;
-      if (!existing || currentUpdatedAt >= existingUpdatedAt) {
-        latestContractByDorm.set(key, contract);
-      }
-    });
+    // [대표 계약 공통화] 객실키별 대표 1건을 canonical selector 로 선택(배열 순서 비의존, deterministic).
+    //   applyBulkCapacity 의 수정 대상과 동일 helper 를 사용해 "화면 대표 = 정원 변경 대상"을 보장한다.
+    const latestContractByDorm = canonicalDormContractsByRoomKey(dormContracts);
 
     const contractBased = Array.from(latestContractByDorm.values())
       .map((contract) => {
@@ -10456,6 +10524,31 @@ export default function App() {
       );
     }
 
+    // [P1 동일 객실 ACTIVE 중복 생성 차단] "저장이 대상 객실에 새로운 ACTIVE 충돌을 만드는가" 관점.
+    //   - 충돌 후보 = 자기 자신(editingDormContractId) 제외 + isCanonicalContractCandidate(삭제/영구삭제/종료/해지 제외) + 동일 객실키.
+    //   - 신규 등록: 대상 객실에 ACTIVE 계약이 있으면 BLOCK.
+    //   - 수정: 객실키를 "다른 객실로 변경"할 때만 대상 객실 ACTIVE 충돌을 BLOCK.
+    //     (객실키 그대로인 수정은 기존 legacy 중복이 있어도 '새 중복 생성'이 아니므로 평수/임대인 등 보정 저장 허용.)
+    const originalRoomKey = existing
+      ? getDormKey(existing.site, existing.buildingName, existing.dong, existing.roomHo)
+      : null;
+    const roomKeyChanged = !editingDormContractId || originalRoomKey !== roomKey;
+    if (roomKeyChanged) {
+      const conflict = dormContracts.some(
+        (c) =>
+          c.id !== editingDormContractId &&
+          isCanonicalContractCandidate(c) &&
+          getDormKey(c.site, c.buildingName, c.dong, c.roomHo) === roomKey
+      );
+      if (conflict) {
+        void appAlert(
+          "신규계약 등록 불가",
+          "동일한 객실에 진행 중인 계약이 이미 존재합니다.\n기존 계약을 수정하거나 종료/해지 후 새 계약을 등록해주세요."
+        );
+        return;
+      }
+    }
+
     // [요청2] DB 저장값을 계산값으로 덮어쓰지 않는다 — 폼 값(기본 "자동선택" 또는 수동값)을 그대로 저장.
     //   자동선택이면 표시(getContractDisplayStatus/getContractTypeDisplay)에서만 계산하고, 수동 선택 시 그 값이 우선.
     const finalPayload: DormContract = {
@@ -13505,7 +13598,46 @@ export default function App() {
       void appAlert("알림", "기숙사 정원 값에 오류가 있어 업로드를 중단했습니다.\n\n" + capacityErrors.slice(0, 15).join("\n") + (capacityErrors.length > 15 ? `\n… 외 ${capacityErrors.length - 15}건` : ""));
       return;
     }
-    setDormContracts((prev) => [...mapped, ...prev]);
+    // [P1 중복 방지] Excel 각 행을 무조건 새 UUID 로 INSERT 하지 않는다.
+    //   ① 파일 내부 동일 객실키 중복 → 1건만 등록  ② 기존 ACTIVE 계약과 동일 객실키 → 자동 INSERT 안 함(기존 데이터 보존, overwrite 없음).
+    //   ACTIVE 판정 = isCanonicalContractCandidate(삭제/영구삭제/종료/해지 제외) — operationalDorms 대표 규칙과 동일 기준.
+    //   종료/해지/soft-deleted 만 있는 객실은 재계약으로 보고 등록 허용(기존 lifecycle 정책 유지).
+    //   객실 식별값(건물명/주소)이 전혀 없는 행은 dedup 대상에서 제외 → 기존 sanitize(저장 시) 가 처리(검증 우회 없음).
+    const activeRoomKeys = new Set(
+      dormContracts
+        .filter(isCanonicalContractCandidate)
+        .map((c) => getDormKey(c.site, c.buildingName, c.dong, c.roomHo))
+    );
+    const seenKeys = new Set<string>();
+    const toAdd: typeof mapped = [];
+    const dupInFile: string[] = [];
+    const dupExisting: string[] = [];
+    mapped.forEach((c, idx) => {
+      const hasRoomIdentity = hasText(c.buildingName) || hasText(c.address);
+      if (!hasRoomIdentity) { toAdd.push(c); return; } // 식별값 없음 → 기존 흐름대로(저장 시 sanitize 제외)
+      const key = getDormKey(c.site, c.buildingName, c.dong, c.roomHo);
+      const label = `${idx + 2}행: ${[c.site, c.buildingName, c.dong, c.roomHo].filter(Boolean).join(" ")}`;
+      if (seenKeys.has(key)) { dupInFile.push(label); return; }       // 파일 내부 중복
+      if (activeRoomKeys.has(key)) { dupExisting.push(label); return; } // 기존 ACTIVE 계약과 중복
+      seenKeys.add(key);
+      toAdd.push(c);
+    });
+    if (toAdd.length > 0) setDormContracts((prev) => [...toAdd, ...prev]);
+    const skipped = dupInFile.length + dupExisting.length;
+    const detailLines = [
+      ...dupInFile.map((s) => `· (파일 내 중복) ${s}`),
+      ...dupExisting.map((s) => `· (기존 ACTIVE 계약과 중복) ${s}`),
+    ];
+    void appAlert(
+      "신규계약 Excel 업로드 결과",
+      `전체 ${mapped.length}행\n등록 ${toAdd.length}건\n중복 건너뜀 ${skipped}건` +
+        (skipped > 0
+          ? ` (파일 내 ${dupInFile.length} · 기존 ACTIVE ${dupExisting.length})\n\n` +
+            detailLines.slice(0, 15).join("\n") +
+            (detailLines.length > 15 ? `\n… 외 ${detailLines.length - 15}건` : "") +
+            `\n\n※ 중복 객실의 기존 계약은 변경하지 않았습니다(덮어쓰기 없음).`
+          : "")
+    );
   };
 
   const uploadNewHiresExcel = async (file: File) => {
@@ -15065,18 +15197,29 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     const roomKeys = new Set(selectedDorms.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo)));
     const nowIso = new Date().toISOString();
     const todayStr = nowIso.slice(0, 10);
+    // [저장 트리거] 일괄 정원 변경을 "사용자 변경"으로 표시 → dorm autosave 가 변경된 행만 upsert(기존 저장 패턴과 동일).
+    //   (이 신호가 없으면 autosave 가 tick 동일로 조기 종료해 DB 에 반영되지 않음.)
+    userMutationTickRef.current += 1;
     // dorms: 선택 기숙사 id 또는 동일 호실(건물+동+호)만 갱신(다른 기숙사 불변).
     setDorms((prev) => prev.map((dm) =>
       (selDormIdSet.has(dm.id) || roomKeys.has(getDormKey(dm.site, dm.buildingName, dm.dong, dm.roomHo)))
         ? { ...dm, capacity: cap, updatedAt: nowIso }
         : dm
     ));
-    // 연결된 유효(미삭제) 계약만 동일 정원으로 동기화(다른 계약 불변).
-    setDormContracts((prev) => prev.map((c) =>
-      (!c.isDeleted && roomKeys.has(getDormKey(c.site, c.buildingName, c.dong, c.roomHo)))
-        ? { ...c, capacity: cap, updatedAt: todayStr }
-        : c
-    ));
+    // [중복 대표행 전환 방지] 동일 객실키의 모든 계약을 수정하지 않는다.
+    //   선택 객실마다 canonical 계약 1건만 정원 변경 → 나머지 legacy 중복은 untouched(updatedAt 불변) → 대표행 전환/재upsert 유발 안 함.
+    setDormContracts((prev) => {
+      const canonicalByKey = canonicalDormContractsByRoomKey(prev);
+      const targetIds = new Set<string>();
+      roomKeys.forEach((rk) => {
+        const canonical = canonicalByKey.get(rk);
+        if (canonical) targetIds.add(canonical.id);
+      });
+      if (targetIds.size === 0) return prev;
+      return prev.map((c) =>
+        targetIds.has(c.id) ? { ...c, capacity: cap, updatedAt: todayStr } : c
+      );
+    });
     showNetworkToast(`선택한 기숙사 ${selectedDorms.length}곳의 정원을 ${cap}명으로 변경했습니다.`);
     setBulkCapacitySaving(false);
     setBulkCapacityOpen(false);
@@ -23585,8 +23728,17 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                 <div className="mt-2 text-sm text-rose-600">백업 복원 오류: {backupImportError}</div>
               )}
 
-              {/* [P0 DR] 전체 재해복구 백업 + 선택 복원(기존 일반 백업/복원과 별개, 추가형) */}
+              {/* [DR V2] 백업 및 복구 — 목적별 구분(엔진은 유지, 진입점만 한 화면에서 설명) */}
               <div className="mt-6 space-y-4">
+                <div className={`rounded-2xl border p-3 text-xs ${theme.darkMode ? "border-slate-700 bg-slate-900 text-slate-300" : "border-slate-200 bg-white text-slate-600"}`}>
+                  <div className={`mb-1 text-sm font-semibold ${theme.darkMode ? "text-slate-100" : "text-slate-900"}`}>백업 및 복구</div>
+                  <ul className="space-y-0.5">
+                    <li><b>일반 백업</b>(위 버튼): 설정·비민감 운영 데이터만. 로그인/개인정보/군 인사정보 제외.</li>
+                    <li><b>전체 재해복구 백업</b>(아래): 업무·개인정보 포함 전체 재해복구용(관리자 전용).</li>
+                    <li><b>백업 파일 검사 · 선택 복구</b>(아래): 백업을 검사하고 항목을 골라 복구(미리보기 후 실행).</li>
+                    <li>※ 휴지통 메뉴의 "백업/복원"은 앱 내부 스냅샷(수동/자동) 목록으로 별도 보관됩니다.</li>
+                  </ul>
+                </div>
                 <DrBackupPanel darkMode={theme.darkMode} isAdmin={canManageUsers(currentUser)} getLiveData={getLiveDrData} onToast={showNetworkToast} />
                 <RestoreWizard
                   darkMode={theme.darkMode}
