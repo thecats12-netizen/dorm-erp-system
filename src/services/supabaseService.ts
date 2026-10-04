@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import type { MilitaryPersonnel, TrainingRecord, MilitaryNotice, MilitaryReport } from "../types/domain";
+import { collectIdsKeyset } from "./paginateIds";
 
 // 환경변수 앞뒤 공백/개행 제거 — Vercel 등에 값 붙여넣을 때 끼어드는 공백/줄바꿈이
 // 잘못된 URL/키(→ CORS/ERR_FAILED)의 흔한 원인이므로 방어적으로 trim 한다.
@@ -230,21 +231,44 @@ export const deleteRowsByIds = async (table: string, ids: string[]): Promise<voi
 
 // [DR 롤백 전용] 지정 테이블에서 id 목록을 영구 삭제하되, 실패 시 반드시 throw 한다.
 //   · deleteRowsByIds(경고 무시)와 달리, 롤백 삭제 실패를 "조용히 성공"으로 넘기면 안 되므로 분리.
-//   · tenant 조건 없이 id + RLS 로 범위 제한(기존 upsert/삭제 정책과 동일 — 단일 테넌트 + RLS).
-export const deleteRowsByIdsStrict = async (table: string, ids: string[]): Promise<void> => {
+//   · tenantId 를 주면 tenant-scoped 삭제(.eq tenant_id): id 전역 unique 가정만으로 타 tenant row 삭제 금지.
+export const deleteRowsByIdsStrict = async (table: string, ids: string[], tenantId?: string): Promise<void> => {
   if (!isSupabaseAvailable()) throw new Error("Supabase 미구성: 롤백 삭제 불가");
   if (!ids || ids.length === 0) return;
-  const { error } = await supabase!.from(table).delete().in("id", ids);
+  let q = supabase!.from(table).delete().in("id", ids);
+  if (tenantId) q = q.eq("tenant_id", tenantId);
+  const { error } = await q;
   if (error) throw new Error(`[${table}] 롤백 삭제 실패: ${(error as { message?: string })?.message || String(error)}`);
 };
 
-// [DR 롤백 전용] 복원 직전 실제 DB 의 id 목록을 조회(완전 목록). 실패 시 throw(불완전 목록을 []로 오인 금지).
-//   · select("id") 만 — 경량. 호출부가 throw 를 잡아 "삭제 비활성"으로 안전 처리한다.
+// [DR 롤백 전용] 복원 직전 실제 DB 의 id 목록을 조회(단일 응답). 실패 시 throw.
+//   ⚠️ PostgREST max_rows(기본 1000) 상한 때문에 1000행 초과 테이블에서는 불완전할 수 있다
+//      → DR 사전 id 수집에는 fetchAllRowIdsStrict(keyset 완전 수집)를 사용할 것.
 export const fetchRowIdsStrict = async (table: string): Promise<string[]> => {
   if (!isSupabaseAvailable()) throw new Error("Supabase 미구성: id 조회 불가");
   const { data, error } = await supabase!.from(table).select("id");
   if (error) throw new Error(`[${table}] id 조회 실패: ${(error as { message?: string })?.message || String(error)}`);
   return (data || []).map((r) => (r as { id?: unknown }).id).filter((v): v is string => typeof v === "string" && v.length > 0);
+};
+
+// [DR 롤백 전용] tenant 범위의 "모든" id 를 keyset pagination 으로 누락 없이 수집(완전 목록).
+//   · max_rows 상한과 무관하게 끝까지 수집. 중간 실패/중복/상한초과 시 throw(fail-closed → 호출부가 삭제 비활성).
+//   · tenant-scoped(.eq tenant_id) → inserted-id 산출/삭제의 기준을 current tenant 로 한정.
+export const fetchAllRowIdsStrict = async (table: string, tenantId: string): Promise<string[]> => {
+  if (!isSupabaseAvailable()) throw new Error("Supabase 미구성: id 조회 불가");
+  if (!tenantId) throw new Error(`[${table}] tenantId 누락 — 완전 id 수집 불가`);
+  const PAGE = 1000; // = max_rows 상한과 동일하게 잡아 페이지당 최대 수집
+  return collectIdsKeyset({
+    pageSize: PAGE,
+    cap: 500000,
+    fetchAfter: async (afterId, limit) => {
+      let q = supabase!.from(table).select("id").eq("tenant_id", tenantId).order("id", { ascending: true }).limit(limit);
+      if (afterId !== null) q = q.gt("id", afterId);
+      const { data, error } = await q;
+      if (error) throw new Error(`[${table}] id 조회 실패: ${(error as { message?: string })?.message || String(error)}`);
+      return (data || []).map((r) => (r as { id?: unknown }).id).filter((v): v is string => typeof v === "string" && v.length > 0);
+    },
+  });
 };
 
 export const APP_SETTINGS_TABLE = "app_settings";

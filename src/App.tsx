@@ -62,7 +62,7 @@ import {
   saveAppSettings,
   deleteRowsByIds,
   deleteRowsByIdsStrict,
-  fetchRowIdsStrict,
+  fetchAllRowIdsStrict,
   translateSupabaseError,
   type MilitaryModuleState,
 } from "./services/supabaseService";
@@ -4212,28 +4212,29 @@ export default function App() {
       snapshotOperational: () => ({ cleaningReports, defects, inventory, settlementRecords, settlementItems }) as unknown as import("./services/backupService").OperationalModuleData,
       applyOperationalState: (o) => { setCleaningReports(o.cleaningReports as CleaningReport[]); setDefects(o.defects as DefectRequest[]); setInventory(o.inventory as InventoryItem[]); setSettlementRecords(o.settlementRecords as SettlementRecord[]); setSettlementItems(o.settlementItems as SettlementItem[]); },
       saveOperational: (o, uid) => saveOperationalModule({ tenantId, cleaningReports: o.cleaningReports as CleaningReport[], defects: o.defects as DefectRequest[], inventory: o.inventory as InventoryItem[], settlementRecords: o.settlementRecords as SettlementRecord[], settlementItems: o.settlementItems as SettlementItem[], auditLogs: [] }, uid).then(() => undefined),
-      // [P1 INSERT residue] 복원 직전 실제 DB id(삭제 대상 식별). 완전 목록을 보장할 수 있는 dataset 만 포함.
-      //   · 기숙사: loadDormModule 은 4개 테이블 전체 조회에 하나라도 에러면 null → null 이면 undefined 반환(삭제 비활성).
-      fetchPreRestoreDormIds: async () => {
-        const r = await loadDormModule(tenantId);
-        if (!r) return undefined;
-        const ids = (arr: { id: string }[]) => arr.map((x) => x.id).filter((v): v is string => typeof v === "string" && v.length > 0);
-        return { dorms: ids(r.dorms), occupants: ids(r.occupants), newHires: ids(r.newHires), dormContracts: ids(r.dormContracts) };
-      },
-      //   · 운영: cleaningReports 는 지연로딩/limit 로 완전목록 보장 불가 → 제외(삭제 비활성). 나머지 4개는 id 를 strict 조회(실패 시 throw → 삭제 비활성).
-      fetchPreRestoreOperationalIds: async () => {
-        const [defects, inventory, settlementRecords, settlementItems] = await Promise.all([
-          fetchRowIdsStrict("defect_requests"), fetchRowIdsStrict("inventory_items"), fetchRowIdsStrict("settlement_records"), fetchRowIdsStrict("settlement_items"),
-        ]);
-        return { defects, inventory, settlementRecords, settlementItems };
-      },
+      // [P1 INSERT residue] 복원 직전 실제 DB id(삭제 대상 식별) = tenant-scoped keyset 완전 수집(max_rows 상한 무관).
+      //   어느 테이블이든 조회 실패 시 throw → runDrRestore 가 catch 하여 해당 모듈 삭제 비활성(fail-closed).
+      fetchPreRestoreDormIds: async () => ({
+        dorms: await fetchAllRowIdsStrict("dorms", tenantId),
+        occupants: await fetchAllRowIdsStrict("occupants", tenantId),
+        newHires: await fetchAllRowIdsStrict("new_hires", tenantId),
+        dormContracts: await fetchAllRowIdsStrict("dorm_contracts", tenantId),
+      }),
+      //   · cleaningReports 포함: 지연로딩/limit 300 화면 로더 대신 전용 완전 reader 를 쓰므로 rollback delete 활성(KNOWN LIMITATION 해소).
+      fetchPreRestoreOperationalIds: async () => ({
+        cleaningReports: await fetchAllRowIdsStrict("cleaning_reports", tenantId),
+        defects: await fetchAllRowIdsStrict("defect_requests", tenantId),
+        inventory: await fetchAllRowIdsStrict("inventory_items", tenantId),
+        settlementRecords: await fetchAllRowIdsStrict("settlement_records", tenantId),
+        settlementItems: await fetchAllRowIdsStrict("settlement_items", tenantId),
+      }),
       deleteDormRows: async (byDataset) => {
         const tableOf: Record<string, string> = { dorms: "dorms", occupants: "occupants", newHires: "new_hires", dormContracts: "dorm_contracts" };
-        for (const [ds, rowIds] of Object.entries(byDataset)) { const t = tableOf[ds]; if (t && rowIds.length) await deleteRowsByIdsStrict(t, rowIds); }
+        for (const [ds, rowIds] of Object.entries(byDataset)) { const t = tableOf[ds]; if (t && rowIds.length) await deleteRowsByIdsStrict(t, rowIds, tenantId); }
       },
       deleteOperationalRows: async (byDataset) => {
         const tableOf: Record<string, string> = { cleaningReports: "cleaning_reports", defects: "defect_requests", inventory: "inventory_items", settlementRecords: "settlement_records", settlementItems: "settlement_items" };
-        for (const [ds, rowIds] of Object.entries(byDataset)) { const t = tableOf[ds]; if (t && rowIds.length) await deleteRowsByIdsStrict(t, rowIds); }
+        for (const [ds, rowIds] of Object.entries(byDataset)) { const t = tableOf[ds]; if (t && rowIds.length) await deleteRowsByIdsStrict(t, rowIds, tenantId); }
       },
     };
     const r = await runDrRestore(deps, backup, plan);
