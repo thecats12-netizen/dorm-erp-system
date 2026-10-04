@@ -137,6 +137,27 @@ function computeCounts(m: CanonicalModules): Record<string, number> {
   return c;
 }
 
+// ── checksum 정규화(단일 소스) ────────────────────────────────────────────────
+// 생성(buildDrBackup)과 검증(verifyChecksum)이 "완전히 동일한 canonical 표현"을 해시하도록,
+// adaptToCanonical 의 모듈 재구성과 같은 경로(flatten → buildX)를 재사용한다.
+//  · raw 라이브 모듈(military.tenantId 등 여분 키/기본값 주입 전) 과
+//    파일 parse 후 canonical 모듈이 같은 결과로 수렴 → 정상 파일의 오탐 제거.
+//  · idempotent: canonical 입력에 다시 적용해도 동일(이미 canonical → buildX 재적용 시 불변).
+export function canonicalizeModulesForChecksum(modules: CanonicalModules): CanonicalModules {
+  const flat: Record<string, unknown> = {
+    ...asObj(modules.dorm), ...asObj(modules.operational), ...asObj(modules.asset),
+    ...asObj(modules.military), ...asObj(modules.system), ...asObj(modules.audit),
+  };
+  const out: CanonicalModules = {};
+  const dorm = buildDorm(flat); if (dorm) out.dorm = dorm;
+  const operational = buildOperational(flat); if (operational) out.operational = operational;
+  const asset = buildAsset(flat); if (asset) out.asset = asset;
+  const military = buildMilitary(flat); if (military) out.military = military;
+  const system = buildSystem(flat); if (system) out.system = system;
+  const audit = buildAudit(flat); if (audit) out.audit = audit;
+  return out;
+}
+
 // ── 어댑터: 임의 백업 → canonical ─────────────────────────────────────────────
 export function adaptToCanonical(raw: unknown): CanonicalBackup {
   const fmt = detectFormat(raw);
@@ -190,7 +211,7 @@ export function buildDrBackup(input: {
   if (input.military) modules.military = input.military;
   if (input.system) modules.system = input.system;
   if (input.audit) modules.audit = input.audit;
-  const checksum = integrityChecksum(stableStringify(modules));
+  const checksum = integrityChecksum(stableStringify(canonicalizeModulesForChecksum(modules)));
   return {
     formatId: DR_FORMAT_ID, schemaVersion: DR_SCHEMA_VERSION, backupType: DR_BACKUP_TYPE,
     generatedAt: new Date().toISOString(), tenantId: input.tenantId, appVersion: input.appVersion ?? null,
@@ -209,7 +230,7 @@ export function serializeDrBackup(cb: CanonicalBackup): string {
 // 파일 무결성: 저장된 checksum vs 재계산(있을 때만)
 export function verifyChecksum(cb: CanonicalBackup): { checked: boolean; ok: boolean } {
   if (!cb.checksum) return { checked: false, ok: true };
-  return { checked: true, ok: cb.checksum === integrityChecksum(stableStringify(cb.modules)) };
+  return { checked: true, ok: cb.checksum === integrityChecksum(stableStringify(canonicalizeModulesForChecksum(cb.modules))) };
 }
 
 // ── 검증 ─────────────────────────────────────────────────────────────────────
