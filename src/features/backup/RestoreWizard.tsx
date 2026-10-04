@@ -5,6 +5,8 @@ import {
   type CanonicalBackup, type CanonicalModules, type Selection, type PolicyChoice, type RestorePlan, type RestoreTargetKey, type RestorePolicy,
 } from "../../services/backupService";
 import { buildModuleNodes, moduleTriState, toggleModule, toggleKey, type ModuleNode, type NodeStatus } from "./restoreSelectionModel";
+import ExamRestoreSection, { type ExamRestoreExec } from "./ExamRestoreSection";
+import type { ExamBackup } from "../exam-management/services/examDrService";
 
 type ExecResult = { ok: boolean; message: string };
 type Props = {
@@ -14,6 +16,10 @@ type Props = {
   getCurrentModules: () => CanonicalModules;
   onExecuteRestore: (backup: CanonicalBackup, plan: RestorePlan, selection: Selection, policy: PolicyChoice) => Promise<ExecResult>;
   onToast?: (msg: string) => void;
+  // 시험관리(서버 RPC 경계) — 미제공 시 섹션 숨김. 제공 시 백업에 exam 있으면 표시.
+  examProbeAvailable?: () => Promise<boolean>;
+  examGetDbPresentTables?: () => Promise<string[]>;
+  onExamRestore?: (datasetKeys: string[], examBackup: ExamBackup) => Promise<ExamRestoreExec>;
 };
 
 type Step = "idle" | "inspect" | "select" | "plan" | "executing" | "result";
@@ -32,7 +38,7 @@ function TriCheckbox({ state, disabled, onChange }: { state: "all" | "some" | "n
 }
 const statusText: Record<NodeStatus, string> = { selectable: "", preparing: "백업 포함 · 선택 복구 준비 중", missing: "백업에 없음" };
 
-export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getCurrentModules, onExecuteRestore, onToast }: Props) {
+export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getCurrentModules, onExecuteRestore, onToast, examProbeAvailable, examGetDbPresentTables, onExamRestore }: Props) {
   const [step, setStep] = useState<Step>("idle");
   const [backup, setBackup] = useState<CanonicalBackup | null>(null);
   const [fileErr, setFileErr] = useState<string | null>(null);
@@ -143,6 +149,19 @@ export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getC
               </div>
             )}
           </div>
+
+          {/* 시험관리 선택 복원(서버 RPC 경계) — 백업에 exam 이 있고 핸들러가 주입된 경우만 */}
+          {onExamRestore && examProbeAvailable && examGetDbPresentTables && backup.modules.exam && Object.keys(backup.modules.exam).length > 0 && (
+            <ExamRestoreSection
+              darkMode={darkMode}
+              examBackup={backup.modules.exam as ExamBackup}
+              disabled={tenantMismatch}
+              probeAvailable={examProbeAvailable}
+              getDbPresentTables={examGetDbPresentTables}
+              onRestore={onExamRestore}
+              onToast={onToast}
+            />
+          )}
 
           {/* 모듈/세부 선택 — datasetRegistry 기반 트리(V2) */}
           <div className="mb-3 space-y-2">

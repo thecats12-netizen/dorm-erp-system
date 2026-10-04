@@ -22,6 +22,8 @@ export type MilitaryModuleData = {
 };
 export type SystemModuleData = { systemSettings?: unknown; theme?: unknown; customTemplates?: unknown; cleaningSettings?: unknown };
 export type AuditModuleData = { auditLogs: unknown[] };
+// 시험관리 — 서버 다중테이블(FK). 백업은 테이블명→행배열 맵. 복원은 서버 RPC(exam_dr_restore)가 담당.
+export type ExamModuleData = Record<string, unknown[]>;
 
 export type CanonicalModules = {
   dorm?: DormModuleData;
@@ -30,6 +32,7 @@ export type CanonicalModules = {
   military?: MilitaryModuleData;
   system?: SystemModuleData;
   audit?: AuditModuleData;
+  exam?: ExamModuleData;
 };
 
 export type SourceFormat = "dr" | "legacy-flat" | "nested-databackup" | "general" | "unknown";
@@ -126,6 +129,14 @@ function buildAudit(src: Record<string, unknown>): AuditModuleData | undefined {
   if (src.auditLogs === undefined) return undefined;
   return { auditLogs: asArray(src.auditLogs) };
 }
+// 시험관리: exam 객체({table: rows})를 그대로 정규화(키별 배열화). 비어있으면 undefined.
+function buildExam(examObj: Record<string, unknown>): ExamModuleData | undefined {
+  const keys = Object.keys(examObj);
+  if (keys.length === 0) return undefined;
+  const out: ExamModuleData = {};
+  for (const k of keys) out[k] = asArray(examObj[k]);
+  return out;
+}
 
 function computeCounts(m: CanonicalModules): Record<string, number> {
   const c: Record<string, number> = {};
@@ -134,6 +145,7 @@ function computeCounts(m: CanonicalModules): Record<string, number> {
   if (m.asset) { c["임차현황"] = m.asset.leases.length; c["비품매각"] = m.asset.sales.length; }
   if (m.military) for (const k of MILITARY_KEYS) if (Array.isArray((m.military as Record<string, unknown>)[k])) c[MILITARY_KEY_LABELS[k]] = ((m.military as Record<string, unknown>)[k] as unknown[]).length;
   if (m.audit) c["감사로그"] = m.audit.auditLogs.length;
+  if (m.exam) for (const [t, rows] of Object.entries(m.exam)) c["exam:" + t] = Array.isArray(rows) ? rows.length : 0;
   return c;
 }
 
@@ -155,6 +167,7 @@ export function canonicalizeModulesForChecksum(modules: CanonicalModules): Canon
   const military = buildMilitary(flat); if (military) out.military = military;
   const system = buildSystem(flat); if (system) out.system = system;
   const audit = buildAudit(flat); if (audit) out.audit = audit;
+  const exam = buildExam(asObj(modules.exam)); if (exam) out.exam = exam; // exam 은 flatten 대상 아님(테이블맵 그대로)
   return out;
 }
 
@@ -197,6 +210,8 @@ export function adaptToCanonical(raw: unknown): CanonicalBackup {
   const military = buildMilitary(src); if (military) modules.military = military;
   const system = buildSystem(src); if (system) modules.system = system;
   const audit = buildAudit(src); if (audit) modules.audit = audit;
+  // 시험관리: dr 포맷의 modules.exam(테이블맵)만 사용(flatten 안 함). 그 외 포맷엔 exam 없음.
+  if (fmt === "dr") { const exam = buildExam(asObj(asObj(root.modules).exam)); if (exam) modules.exam = exam; }
 
   const included = Object.keys(modules).map((k) => MODULE_LABELS[k] || k);
   return {
@@ -217,13 +232,14 @@ export function adaptToCanonical(raw: unknown): CanonicalBackup {
 // ── DR 백업 생성(라이브 앱 데이터 → canonical → 직렬화) ──────────────────────
 export function buildDrBackup(input: {
   tenantId: string; appVersion?: string;
-  dorm?: DormModuleData; operational?: OperationalModuleData; asset?: AssetModuleData; military?: MilitaryModuleData; system?: SystemModuleData; audit?: AuditModuleData;
+  dorm?: DormModuleData; operational?: OperationalModuleData; asset?: AssetModuleData; military?: MilitaryModuleData; system?: SystemModuleData; audit?: AuditModuleData; exam?: ExamModuleData;
 }): CanonicalBackup {
   const modules: CanonicalModules = {};
   if (input.dorm) modules.dorm = input.dorm;
   if (input.operational) modules.operational = input.operational;
   if (input.asset) modules.asset = input.asset;
   if (input.military) modules.military = input.military;
+  if (input.exam && Object.keys(input.exam).length) modules.exam = input.exam;
   if (input.system) modules.system = input.system;
   if (input.audit) modules.audit = input.audit;
   const checksum = checksumOfModules(modules);

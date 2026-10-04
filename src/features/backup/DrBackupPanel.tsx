@@ -9,24 +9,35 @@ import {
 type LiveData = {
   tenantId: string; appVersion?: string;
   dorm?: DormModuleData; operational?: OperationalModuleData; asset?: AssetModuleData; military?: MilitaryModuleData; system?: SystemModuleData; audit?: AuditModuleData;
+  exam?: Record<string, unknown[]>;
 };
 
 type Props = {
   darkMode: boolean;
   isAdmin: boolean;
   getLiveData: () => LiveData;
+  // 시험관리는 서버 다중테이블 → 다운로드 시점에 비동기 완전조회(fail-closed). 미제공 시 exam 미포함.
+  getExamBackup?: () => Promise<Record<string, unknown[]>>;
   onToast?: (msg: string) => void;
 };
 
-export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, onToast }: Props) {
+export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, getExamBackup, onToast }: Props) {
   const [warnOpen, setWarnOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const card = darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50";
   const btn = `inline-flex items-center gap-2 rounded-2xl border px-4 py-2 text-sm font-semibold ${darkMode ? "border-slate-600 bg-slate-900 text-slate-100 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"}`;
 
-  const doDownload = () => {
+  const doDownload = async () => {
+    setBusy(true);
     try {
       const live = getLiveData();
-      const cb = buildDrBackup(live);
+      // 시험관리: 서버 완전조회(fail-closed) — 하나라도 실패하면 빈 배열로 위장하지 않고 백업 생성 중단.
+      let exam: Record<string, unknown[]> | undefined;
+      if (getExamBackup) {
+        try { exam = await getExamBackup(); }
+        catch { onToast?.("시험관리 백업 데이터를 불러오지 못했습니다. 백업을 생성하지 않았습니다."); setBusy(false); setWarnOpen(false); return; }
+      }
+      const cb = buildDrBackup({ ...live, exam });
       const json = serializeDrBackup(cb);
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -39,6 +50,7 @@ export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, onToast 
     } catch {
       onToast?.("재해복구 백업 생성 중 오류가 발생했습니다.");
     } finally {
+      setBusy(false);
       setWarnOpen(false);
     }
   };
@@ -62,6 +74,7 @@ export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, onToast 
             <li>{MODULE_LABELS.asset}(임차현황·비품매각)</li>
             <li>{MODULE_LABELS.military}: {MILITARY_KEYS.map((k) => MILITARY_KEY_LABELS[k]).join(", ")}</li>
             <li>{MODULE_LABELS.system} · {MODULE_LABELS.audit}</li>
+            <li>시험관리: 기준정보 · 인원 · 규칙/대상 · 신청/결과 · 자격/인증</li>
           </ul>
         </div>
         <div className="rounded-2xl border border-amber-300/60 bg-amber-50/60 p-3 dark:border-amber-800/50 dark:bg-amber-950/30">
@@ -90,10 +103,10 @@ export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, onToast 
           <div className={`w-full max-w-md rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
             <h4 className="mb-2 text-lg font-semibold">개인정보 포함 백업</h4>
             <p className="mb-1 text-sm text-slate-500">이 백업에는 <b>개인정보 및 운영 데이터</b>가 포함됩니다. 외부 유출 시 위험하므로 <b>안전한 장소</b>에만 보관하세요.</p>
-            <p className="mb-5 text-xs text-slate-400">시험관리·사용자 계정/권한·첨부파일 원본은 포함되지 않습니다.</p>
+            <p className="mb-5 text-xs text-slate-400">사용자 계정/권한·첨부파일 원본은 포함되지 않습니다. 시험관리 데이터는 포함됩니다.</p>
             <div className="flex justify-end gap-2">
-              <button type="button" className={btn} onClick={() => setWarnOpen(false)}>취소</button>
-              <button type="button" className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900" onClick={doDownload}>동의하고 다운로드</button>
+              <button type="button" className={btn} disabled={busy} onClick={() => setWarnOpen(false)}>취소</button>
+              <button type="button" className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900" disabled={busy} onClick={() => void doDownload()}>{busy ? "백업 생성 중…" : "동의하고 다운로드"}</button>
             </div>
           </div>
         </div>
