@@ -15171,6 +15171,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
     const roomKeys = new Set(selectedDorms.map((d) => getDormKey(d.site, d.buildingName, d.dong, d.roomHo)));
     const nowIso = new Date().toISOString();
     const todayStr = nowIso.slice(0, 10);
+    // [저장 트리거] 일괄 정원 변경을 "사용자 변경"으로 표시 → dorm autosave 가 변경된 행만 upsert(기존 저장 패턴과 동일).
+    //   (이 신호가 없으면 autosave 가 tick 동일로 조기 종료해 DB 에 반영되지 않음.)
+    userMutationTickRef.current += 1;
     // dorms: 선택 기숙사 id 또는 동일 호실(건물+동+호)만 갱신(다른 기숙사 불변).
     setDorms((prev) => prev.map((dm) =>
       (selDormIdSet.has(dm.id) || roomKeys.has(getDormKey(dm.site, dm.buildingName, dm.dong, dm.roomHo)))
