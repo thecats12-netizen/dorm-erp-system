@@ -56,14 +56,22 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
     const milRows = MILITARY_KEYS.filter((mk) => { const r = rowOf(mk); return r && !r.blocked && r.action !== "skip"; });
     if (bm && milRows.length) {
       const cur = deps.snapshotMilitary() as unknown as Record<string, unknown>;
-      const next: Record<string, unknown> = { ...cur };
+      const next: Record<string, unknown> = { ...cur };            // in-memory 반영용(화면 state): 전체 키 유지
+      // [비선택 불변식] 영속 payload 에는 "선택한 군대 키"만 담는다.
+      //   saveMilitary(=단일 JSONB blob 을 DB 재조회 후 key-merge: {...기존DB, ...payload})가
+      //   payload 에 없는 비선택 키를 "최신 DB 값" 그대로 보존 → 앱 메모리(하이드레이션 기본값)로 덮어쓰는 결함 차단.
+      const savePayload: Record<string, unknown> = {};
+      if (cur.tenantId !== undefined) savePayload.tenantId = cur.tenantId;
       for (const mk of milRows) {
         const r = rowOf(mk)!;
-        if (r.action === "restore-replace") next[mk] = bm[mk];
-        else if (r.action === "restore-merge") { const merged = mergeById(cur[mk] as unknown[], bm[mk] as unknown[]); if (!merged) throw new Error(`${r.label} 병합 불가(ID 누락)`); next[mk] = merged; }
+        let val: unknown;
+        if (r.action === "restore-replace") val = bm[mk];
+        else if (r.action === "restore-merge") { const merged = mergeById(cur[mk] as unknown[], bm[mk] as unknown[]); if (!merged) throw new Error(`${r.label} 병합 불가(ID 누락)`); val = merged; }
+        else continue; // 알 수 없는 action 은 영속하지 않는다(안전)
+        next[mk] = val; savePayload[mk] = val;
       }
       deps.applyMilitaryState(next as unknown as MilitaryModuleData); L("military:apply");
-      await deps.saveMilitary(next as unknown as MilitaryModuleData, uid); L("military:save");
+      await deps.saveMilitary(savePayload as unknown as MilitaryModuleData, uid); L("military:save");
     }
     // 2) 기숙사 — 세부 dataset 단위(선택한 dataset 만). 비선택 dataset: state=현재값 유지, 저장 payload=[](upsert no-op → DB 미변경).
     if (backup.modules.dorm && deps.snapshotDorm) {
@@ -118,7 +126,15 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
     //   ※ upsert 특성상 백업으로 "새로 INSERT 된 id"는 물리 삭제가 불가(기존 한계) → state/기존행은 원복, 신규 id 잔존 가능.
     try {
       deps.applyMilitaryState(snap); L("rollback:apply");
-      await deps.saveMilitary(snap, uid); L("rollback:save");
+      // 롤백도 "복원에서 건드린 군대 키"만 복구 전(snap) 값으로 되돌린다. 비선택 키는 payload 에서 제외 → DB 그대로 보존.
+      const milTouched = MILITARY_KEYS.filter((mk) => { const r = rowOf(mk); return r && !r.blocked && r.action !== "skip"; });
+      if (milTouched.length) {
+        const snapRec = snap as unknown as Record<string, unknown>;
+        const rbPayload: Record<string, unknown> = {};
+        if (snapRec.tenantId !== undefined) rbPayload.tenantId = snapRec.tenantId;
+        for (const mk of milTouched) rbPayload[mk] = snapRec[mk];
+        await deps.saveMilitary(rbPayload as unknown as MilitaryModuleData, uid); L("rollback:save");
+      }
       // 기숙사 dataset 롤백
       if (snapDorm) {
         const touched = DORM_DATASET_KEYS.filter((ds) => { const r = rowOf(`dorm.${ds}`); return r && !r.blocked && r.action !== "skip"; });
