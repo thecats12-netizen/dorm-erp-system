@@ -25,10 +25,43 @@ export type RestoreDeps = {
   snapshotOperational?: () => OperationalModuleData;
   applyOperationalState: (o: OperationalModuleData) => void;
   saveOperational: (o: OperationalModuleData, userId: string) => Promise<void>;
+  // [P1 INSERT residue 방지] 복원 직전 실제 DB id 목록(삭제 대상 식별) + 삽입행 물리 삭제(실패 시 throw).
+  //   · 완전·신뢰 가능한 목록을 줄 수 있는 dataset 만 키로 포함(불가 dataset 은 생략 → 삭제 비활성).
+  //   · fetch 실패/미제공 시 rollback 삭제를 건너뛴다(앱 메모리 기준 destructive delete 금지).
+  fetchPreRestoreDormIds?: () => Promise<Partial<Record<string, string[]>> | undefined>;
+  fetchPreRestoreOperationalIds?: () => Promise<Partial<Record<string, string[]>> | undefined>;
+  deleteDormRows?: (byDataset: Record<string, string[]>) => Promise<void>;
+  deleteOperationalRows?: (byDataset: Record<string, string[]>) => Promise<void>;
   log?: (event: string) => void;
 };
 
 export type RestoreOutcome = { ok: boolean; message: string; steps: string[]; rolledBack?: boolean; rollbackFailed?: boolean };
+
+// row 배열에서 유효한 string id 집합.
+const idSetOf = (arr: unknown): Set<string> => {
+  const s = new Set<string>();
+  if (Array.isArray(arr)) for (const r of arr) { const id = (r as { id?: unknown } | null)?.id; if (typeof id === "string" && id.length > 0) s.add(id); }
+  return s;
+};
+// [P1 INSERT residue] 이번 restore 가 "삽입했을 수 있는" id = forward 로 쓴 id − 복원직전 실제 DB id.
+//   · preIds[ds] 가 배열이 아닌 dataset(불완전/미제공; 예: 지연로딩 cleaningReports)은 삭제에서 제외
+//     → 앱 메모리/불완전 스냅샷 기준의 destructive delete 를 구조적으로 금지(stale-memory 안전).
+const computeInsertedIds = (
+  touched: readonly string[],
+  forward: Record<string, unknown> | undefined,
+  preIds: Partial<Record<string, string[]>> | undefined,
+): Record<string, string[]> => {
+  const out: Record<string, string[]> = {};
+  if (!forward || !preIds) return out;
+  for (const ds of touched) {
+    const pre = preIds[ds];
+    if (!Array.isArray(pre)) continue; // 신뢰 가능한 pre-restore DB id 목록이 없으면 삭제하지 않는다.
+    const before = new Set(pre);
+    const inserted = [...idSetOf(forward[ds])].filter((id) => !before.has(id));
+    if (inserted.length) out[ds] = inserted;
+  }
+  return out;
+};
 
 export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, plan: RestorePlan): Promise<RestoreOutcome> {
   const steps: string[] = [];
@@ -48,6 +81,11 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
   // dataset 단위 롤백용 현재 상태 스냅샷(복원 시작 전).
   const snapDorm = deps.snapshotDorm?.();
   const snapOp = deps.snapshotOperational?.();
+  // [P1] 삽입행 식별용: 복원 직전 실제 DB id + 이번에 forward 로 쓴 payload. rollback 에서 insertedIds 계산.
+  let preDormIds: Partial<Record<string, string[]>> | undefined;
+  let preOpIds: Partial<Record<string, string[]>> | undefined;
+  let dormForwardPayload: Record<string, unknown> | undefined;
+  let opForwardPayload: Record<string, unknown> | undefined;
 
   deps.setLock(true); L("lock:on");
   try {
@@ -77,6 +115,8 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
     if (backup.modules.dorm && deps.snapshotDorm) {
       const touched = DORM_DATASET_KEYS.filter((ds) => { const r = rowOf(`dorm.${ds}`); return r && !r.blocked && r.action !== "skip"; });
       if (touched.length) {
+        // 복원 직전 실제 DB id(삽입행 식별용). 실패/미제공 시 undefined → rollback 삭제 비활성(안전).
+        if (deps.fetchPreRestoreDormIds) { try { preDormIds = await deps.fetchPreRestoreDormIds(); } catch { preDormIds = undefined; } }
         const cur = deps.snapshotDorm() as unknown as Record<string, unknown>;
         const bk = backup.modules.dorm as unknown as Record<string, unknown>;
         const nextState: Record<string, unknown> = { ...cur };           // 비선택 dataset = 현재값 보존
@@ -90,6 +130,7 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
         }
         // 불변식 가드: 비선택 dataset 은 nextState 가 현재값과 동일해야 한다.
         for (const ds of DORM_DATASET_KEYS) if (!touched.includes(ds) && nextState[ds] !== cur[ds]) throw new Error(`비선택 dataset(${ds}) 변경 감지 — 중단`);
+        dormForwardPayload = savePayload;                                // rollback insertedIds 계산용
         deps.applyDormState(nextState as unknown as DormModuleData); L("dorm:apply");
         await deps.saveDorm(savePayload as unknown as DormModuleData, uid); L("dorm:save");
       }
@@ -98,6 +139,7 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
     if (backup.modules.operational && deps.snapshotOperational) {
       const touched = OPERATIONAL_RESTORE_DATASET_KEYS.filter((ds) => { const r = rowOf(`operational.${ds}`); return r && !r.blocked && r.action !== "skip"; });
       if (touched.length) {
+        if (deps.fetchPreRestoreOperationalIds) { try { preOpIds = await deps.fetchPreRestoreOperationalIds(); } catch { preOpIds = undefined; } }
         const cur = deps.snapshotOperational() as unknown as Record<string, unknown>;
         const bk = backup.modules.operational as unknown as Record<string, unknown>;
         const nextState: Record<string, unknown> = { ...cur };
@@ -110,6 +152,7 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
           nextState[ds] = val; savePayload[ds] = val;
         }
         for (const ds of OPERATIONAL_RESTORE_DATASET_KEYS) if (!touched.includes(ds) && nextState[ds] !== cur[ds]) throw new Error(`비선택 dataset(${ds}) 변경 감지 — 중단`);
+        opForwardPayload = savePayload;                                 // rollback insertedIds 계산용
         deps.applyOperationalState(nextState as unknown as OperationalModuleData); L("op:apply");
         await deps.saveOperational(savePayload as unknown as OperationalModuleData, uid); L("op:save");
       }
@@ -143,7 +186,12 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
           const payload: Record<string, unknown> = { dorms: [], occupants: [], newHires: [], dormContracts: [] };
           for (const ds of touched) payload[ds] = cur[ds];
           deps.applyDormState(snapDorm); L("rollback:dorm:apply");
-          await deps.saveDorm(payload as unknown as DormModuleData, uid); L("rollback:dorm:save");
+          await deps.saveDorm(payload as unknown as DormModuleData, uid); L("rollback:dorm:save"); // 1) 기존행 UPDATE 원복
+          // 2) 이번 restore 가 삽입했을 수 있는 id 만 물리 삭제(실패 시 throw → 롤백 실패 처리).
+          if (deps.deleteDormRows) {
+            const del = computeInsertedIds(touched, dormForwardPayload, preDormIds);
+            if (Object.keys(del).length) { await deps.deleteDormRows(del); L("rollback:dorm:delete"); }
+          }
         }
       }
       // 운영 dataset 롤백
@@ -154,7 +202,12 @@ export async function runDrRestore(deps: RestoreDeps, backup: CanonicalBackup, p
           const payload: Record<string, unknown> = { cleaningReports: [], defects: [], inventory: [], settlementRecords: [], settlementItems: [] };
           for (const ds of touched) payload[ds] = cur[ds];
           deps.applyOperationalState(snapOp); L("rollback:op:apply");
-          await deps.saveOperational(payload as unknown as OperationalModuleData, uid); L("rollback:op:save");
+          await deps.saveOperational(payload as unknown as OperationalModuleData, uid); L("rollback:op:save"); // 1) 기존행 UPDATE 원복
+          // 2) 삽입행만 삭제(cleaningReports 등 완전목록 불가 dataset 은 preOpIds 에서 제외되어 자동 skip).
+          if (deps.deleteOperationalRows) {
+            const del = computeInsertedIds(touched, opForwardPayload, preOpIds);
+            if (Object.keys(del).length) { await deps.deleteOperationalRows(del); L("rollback:op:delete"); }
+          }
         }
       }
       const rf = await deps.fetchMilitary(); L("rollback:fetch");

@@ -228,6 +228,25 @@ export const deleteRowsByIds = async (table: string, ids: string[]): Promise<voi
   }
 };
 
+// [DR 롤백 전용] 지정 테이블에서 id 목록을 영구 삭제하되, 실패 시 반드시 throw 한다.
+//   · deleteRowsByIds(경고 무시)와 달리, 롤백 삭제 실패를 "조용히 성공"으로 넘기면 안 되므로 분리.
+//   · tenant 조건 없이 id + RLS 로 범위 제한(기존 upsert/삭제 정책과 동일 — 단일 테넌트 + RLS).
+export const deleteRowsByIdsStrict = async (table: string, ids: string[]): Promise<void> => {
+  if (!isSupabaseAvailable()) throw new Error("Supabase 미구성: 롤백 삭제 불가");
+  if (!ids || ids.length === 0) return;
+  const { error } = await supabase!.from(table).delete().in("id", ids);
+  if (error) throw new Error(`[${table}] 롤백 삭제 실패: ${(error as { message?: string })?.message || String(error)}`);
+};
+
+// [DR 롤백 전용] 복원 직전 실제 DB 의 id 목록을 조회(완전 목록). 실패 시 throw(불완전 목록을 []로 오인 금지).
+//   · select("id") 만 — 경량. 호출부가 throw 를 잡아 "삭제 비활성"으로 안전 처리한다.
+export const fetchRowIdsStrict = async (table: string): Promise<string[]> => {
+  if (!isSupabaseAvailable()) throw new Error("Supabase 미구성: id 조회 불가");
+  const { data, error } = await supabase!.from(table).select("id");
+  if (error) throw new Error(`[${table}] id 조회 실패: ${(error as { message?: string })?.message || String(error)}`);
+  return (data || []).map((r) => (r as { id?: unknown }).id).filter((v): v is string => typeof v === "string" && v.length > 0);
+};
+
 export const APP_SETTINGS_TABLE = "app_settings";
 
 export const loadAppSettings = async (tenantId: string): Promise<Record<string, any> | null> => {
