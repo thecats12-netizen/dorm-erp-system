@@ -25,11 +25,11 @@ export const MODULE_LABELS: Record<string, string> = {
 export const MODULE_ORDER: string[] = ["dorm", "operational", "asset", "military", "system", "audit"];
 
 // P0 에서 이 백업에 담기지 않는 데이터(사용자에게 "백업되지 않음"으로 반드시 표시).
-//  · 시험관리: App state 가 아니라 서버 다중테이블(FK) → 전용 서브시스템 필요(B-2, 미구현).
-//  · 운영시뮬레이션 시나리오: 서버 테이블(App state 아님) → B-2.
+//  · 시험관리: 서버 전용 RPC 로 백업·복원 지원(examDrService). 단 아래 운영/감사성 테이블은 복원 대상 제외.
+//  · 운영시뮬레이션 시나리오: 서버 테이블(App state 아님) → 후속.
 export const P0_EXCLUDED: string[] = [
-  "시험관리(전체) — 서버 다중테이블, 별도 복구 체계 필요",
   "운영시뮬레이션 시나리오 — 서버 테이블",
+  "시험관리 감사로그·Import 로그·시퀀스·사용자 프로세스 권한(복원 대상 아님)",
   "사용자 계정·비밀번호·세션·토큰",
   "첨부파일 원본(사진/증빙/계약서 바이너리) — DB 메타데이터만 일부 모듈에 포함",
 ];

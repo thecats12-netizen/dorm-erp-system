@@ -120,6 +120,7 @@ import FilteredDormSelector from "./components/FilteredDormSelector";
 import ErrorBoundary from "./components/ErrorBoundary";
 import DrBackupPanel from "./features/backup/DrBackupPanel";
 import RestoreWizard from "./features/backup/RestoreWizard";
+import { readExamBackup, callExamDrRestore, postVerifyExam, buildExamRestorePayload, EXAM_BACKUP_TABLES, type ExamBackup } from "./features/exam-management/services/examDrService";
 import {
   type CanonicalBackup as DrCanonicalBackup, type CanonicalModules as DrCanonicalModules,
   type RestorePlan as DrRestorePlan, type Selection as DrSelection, type PolicyChoice as DrPolicyChoice,
@@ -4170,6 +4171,33 @@ export default function App() {
     system: { systemSettings, theme, customTemplates, cleaningSettings },
     audit: { auditLogs },
   });
+  // ── 시험관리 DR(서버 RPC 경계) 핸들러 — examDrService 위임(App 로직 최소화, service_role 미사용) ──
+  const getExamBackupLive = async (): Promise<ExamBackup> => {
+    if (!supabase) throw new Error("Supabase 미구성");
+    return readExamBackup(supabase, tenantId);
+  };
+  const examProbeAvailable = async (): Promise<boolean> => {
+    if (!supabase) return false;
+    try { const { data, error } = await supabase.rpc("exam_dr_available"); return !error && data === true; } catch { return false; }
+  };
+  const examGetDbPresentTables = async (): Promise<string[]> => {
+    if (!supabase) return [];
+    const present: string[] = [];
+    for (const t of EXAM_BACKUP_TABLES) {
+      const { count } = await supabase.from(t).select("id", { count: "exact", head: true }).eq("tenant_id", tenantId);
+      if ((count ?? 0) > 0) present.push(t);
+    }
+    return present;
+  };
+  const onExamRestore = async (datasetKeys: string[], examBackup: ExamBackup) => {
+    if (!supabase) return { ok: false, message: "Supabase 미구성" };
+    const reqId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`);
+    const payload = buildExamRestorePayload(datasetKeys, examBackup);
+    const res = await callExamDrRestore(supabase, reqId, payload);
+    if (!res.ok) return { ok: false, code: res.code, message: res.message };
+    const pv = await postVerifyExam(supabase, tenantId);
+    return { ok: true, idempotent: res.idempotent, message: res.message, postVerifyOk: pv.ok, postVerifyIssues: pv.issues };
+  };
   // 복원 dry-run 비교용 현재 상태(canonical). READ-ONLY.
   const getCurrentModulesCanonical = (): DrCanonicalModules => ({
     dorm: { dorms, occupants, newHires, dormContracts },
@@ -23739,7 +23767,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <li>※ 휴지통 메뉴의 "백업/복원"은 앱 내부 스냅샷(수동/자동) 목록으로 별도 보관됩니다.</li>
                   </ul>
                 </div>
-                <DrBackupPanel darkMode={theme.darkMode} isAdmin={canManageUsers(currentUser)} getLiveData={getLiveDrData} onToast={showNetworkToast} />
+                <DrBackupPanel darkMode={theme.darkMode} isAdmin={canManageUsers(currentUser)} getLiveData={getLiveDrData} getExamBackup={getExamBackupLive} onToast={showNetworkToast} />
                 <RestoreWizard
                   darkMode={theme.darkMode}
                   isAdmin={canManageUsers(currentUser)}
@@ -23747,6 +23775,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   getCurrentModules={getCurrentModulesCanonical}
                   onExecuteRestore={(backup, plan, selection, policy) => executeDrRestore(backup as DrCanonicalBackup, plan as DrRestorePlan, selection as DrSelection, policy as DrPolicyChoice)}
                   onToast={showNetworkToast}
+                  examProbeAvailable={examProbeAvailable}
+                  examGetDbPresentTables={examGetDbPresentTables}
+                  onExamRestore={onExamRestore}
                 />
               </div>
             </div>
