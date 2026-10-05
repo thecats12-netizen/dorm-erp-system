@@ -5,6 +5,7 @@ import {
   type CanonicalBackup, type CanonicalModules, type Selection, type PolicyChoice, type RestorePlan, type RestoreTargetKey, type RestorePolicy,
 } from "../../services/backupService";
 import { buildModuleNodes, moduleTriState, toggleModule, toggleKey, type ModuleNode, type NodeStatus } from "./restoreSelectionModel";
+import { displayRecordCountLabel } from "../../services/datasetRegistry";
 import ExamRestoreSection, { type ExamRestoreExec } from "./ExamRestoreSection";
 import type { ExamBackup } from "../exam-management/services/examDrService";
 import RbacRestoreSection, { type RbacRestoreExec } from "./RbacRestoreSection";
@@ -138,7 +139,7 @@ export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getC
               <div>무결성: <b>{chk.checked ? (chk.ok ? "정상" : "불일치⚠") : "체크섬 없음"}</b></div>
               <div>tenant: <b>{backup.tenantId ?? "-"}</b></div>
             </div>
-            <div className="mt-2">포함: {Object.entries(backup.recordCounts).map(([k, v]) => `${k} ${v}`).join(" · ") || "(없음)"}</div>
+            <div className="mt-2">포함: {Object.entries(backup.recordCounts).map(([k, v]) => `${displayRecordCountLabel(k)} ${v}`).join(" · ") || "(없음)"}</div>
             <div className="mt-1 text-amber-600 dark:text-amber-400">백업되지 않음: {backup.completeness.excluded.join(" / ")}</div>
             {(backup.modules.system || backup.modules.audit) && (
               <div className="mt-1 text-slate-500">기본·설정 / 변경 이력(감사 로그): <b>백업 포함 · 현재 버전 복원 미지원</b></div>

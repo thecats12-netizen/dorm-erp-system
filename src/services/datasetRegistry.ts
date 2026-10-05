@@ -24,6 +24,29 @@ export const MODULE_LABELS: Record<string, string> = {
 };
 export const MODULE_ORDER: string[] = ["dorm", "operational", "asset", "military", "system", "audit"];
 
+// ── 백업 검사 요약의 "사용자 표시 라벨" (렌더 전용) ──────────────────────────
+// computeCounts 가 내는 recordCounts 는 내부 key(exam:<table> / rbac:<table>) 를 쓴다.
+// 저장 형식/키/checksum/payload 는 그대로 두고, 화면에 보일 때만 업무 한글명으로 변환한다.
+// exam 테이블명: examMasterConfigs 등 기존 ERP 용어 재사용(추측 아님).
+const EXAM_TABLE_LABELS: Record<string, string> = {
+  exam_lines: "라인", exam_groups: "그룹", exam_categories: "제품군", exam_parts: "제품/파트",
+  exam_processes: "공정", exam_equipment: "장비 목록", exam_levels: "인증 레벨", exam_rules: "인증 규칙",
+  exam_personnel: "인원", exam_sessions: "시험 회차", exam_applications: "시험 신청", exam_results: "시험 결과",
+  exam_monthly_results: "월별 집계", exam_annual_targets: "연간 목표", exam_equipment_stage_rules: "장비 단계 규칙",
+  exam_equipment_certifications: "장비 인증", exam_certification_history: "인증 이력",
+  dm_certifications: "DM 인증", pm_certifications: "PM 인증", employee_license_plan: "자격 취득 계획",
+};
+const RBAC_TABLE_LABELS: Record<string, string> = {
+  profiles: "사용자 프로필", custom_roles: "사용자 정의 역할", custom_role_permissions: "역할 권한",
+  custom_role_scopes: "데이터 접근 범위", user_custom_roles: "사용자 역할 배정",
+};
+// recordCounts 의 key 하나를 사용자 표시 라벨로 변환(내부 key 는 숨김). 이미 한글인 key 는 그대로 반환.
+export function displayRecordCountLabel(key: string): string {
+  if (key.startsWith("exam:")) { const t = key.slice(5); return "시험관리 · " + (EXAM_TABLE_LABELS[t] || t); }
+  if (key.startsWith("rbac:")) { const t = key.slice(5); return "사용자·권한 · " + (RBAC_TABLE_LABELS[t] || t); }
+  return key;
+}
+
 // P0 에서 이 백업에 담기지 않는 데이터(사용자에게 "백업되지 않음"으로 반드시 표시).
 //  · 시험관리: 서버 전용 RPC 로 백업·복원 지원(examDrService). 단 아래 운영/감사성 테이블은 복원 대상 제외.
 //  · 운영시뮬레이션 시나리오: 서버 테이블(App state 아님) → 후속.
