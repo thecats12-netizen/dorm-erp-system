@@ -120,7 +120,8 @@ import FilteredDormSelector from "./components/FilteredDormSelector";
 import ErrorBoundary from "./components/ErrorBoundary";
 import DrBackupPanel from "./features/backup/DrBackupPanel";
 import StorageDrPanel from "./features/backup/StorageDrPanel";
-import { fetchStorageDrStatus, startStorageDrArchive, startStorageDrRestore } from "./services/storageDr/storageDrClient";
+// 이번 릴리스 UI 는 status + archive 만 사용한다. restore 서버 기능(startStorageDrRestore)은 유지하되 UI 에 연결하지 않는다(승인된 별도 복원 UX 전용).
+import { fetchStorageDrStatus, startStorageDrArchive } from "./services/storageDr/storageDrClient";
 import RestoreWizard from "./features/backup/RestoreWizard";
 import { readExamBackup, callExamDrRestore, postVerifyExam, buildExamRestorePayload, EXAM_BACKUP_TABLES, type ExamBackup } from "./features/exam-management/services/examDrService";
 import { readRbacBackup, callRbacDrRestore, postVerifyRbac, buildRbacRestorePayload, RBAC_BACKUP_TABLES, type RbacBackup } from "./features/role-management/rbacDrService";
@@ -23802,7 +23803,16 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   isAdmin={canManageUsers(currentUser)}
                   probeStatus={fetchStorageDrStatus}
                   onStartBackup={async () => { const r = await startStorageDrArchive(); showNetworkToast(r.message); }}
-                  onPreRestoreCheck={async () => { const r = await startStorageDrRestore(); return r.message; }}
+                  onPreRestoreCheck={async () => {
+                    // READ-ONLY: 서버 status 만 조회해 사람이 읽을 요약을 돌려준다(복원 미실행).
+                    const s = await fetchStorageDrStatus();
+                    const last = s.jobs?.[0];
+                    return [
+                      `파일 백업 저장소: ${s.providerConfigured ? "설정됨(사용 가능)" : "미설정"}`,
+                      last ? `최근 작업 상태: ${last.status ?? "-"} / 보관 ${last.archived ?? 0}·건너뜀 ${last.skipped ?? 0}·실패 ${last.failed ?? 0}` : "최근 작업 기록 없음",
+                      "※ 이 검사는 읽기 전용입니다. 실제 파일 복원은 실행하지 않습니다.",
+                    ].join("\n");
+                  }}
                   onToast={showNetworkToast}
                 />
                 <RestoreWizard

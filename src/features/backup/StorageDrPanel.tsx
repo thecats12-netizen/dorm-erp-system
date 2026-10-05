@@ -44,6 +44,8 @@ export default function StorageDrPanel({ darkMode, isAdmin, providerConfigured, 
   const [report, setReport] = useState<string | null>(null);
   // 서버 질의 결과(null=확인중). probeStatus 가 있으면 이 값이 provider 설정 여부의 정본.
   const [serverProvider, setServerProvider] = useState<boolean | null>(null);
+  // archive 는 실수 방지를 위해 확인 모달을 거친 뒤에만 실행.
+  const [confirmArchive, setConfirmArchive] = useState(false);
 
   useEffect(() => {
     if (!probeStatus || !isAdmin) return;
@@ -115,12 +117,29 @@ export default function StorageDrPanel({ darkMode, isAdmin, providerConfigured, 
       )}
 
       <div className="mt-4 flex flex-wrap gap-2">
-        <button type="button" className={btn} disabled={!isAdmin || !ready || !!busy} onClick={() => void run("backup", onStartBackup)}>{busy === "backup" ? "백업 중…" : "파일 백업 시작"}</button>
+        {/* archive 는 확인 모달을 거쳐 실행(클릭 즉시 실행 금지). */}
+        <button type="button" className={btn} disabled={!isAdmin || !ready || !!busy} onClick={() => setConfirmArchive(true)}>{busy === "backup" ? "백업 중…" : "파일 백업 시작"}</button>
         <button type="button" className={btn} disabled={!isAdmin || !ready || !onRetryFailed || !!busy} onClick={() => void run("retry", onRetryFailed)}>실패 파일 다시 시도</button>
-        <button type="button" className={btn} disabled={!isAdmin || !ready || !onPreRestoreCheck || !!busy} onClick={() => void run("preRestore", onPreRestoreCheck)}>복원 전 검사</button>
+        {/* 복원 전 검사: READ-ONLY 상태 요약만(실제 복원 미실행). */}
+        <button type="button" className={btn} disabled={!isAdmin || !ready || !onPreRestoreCheck || !!busy} onClick={() => void run("preRestore", onPreRestoreCheck)}>복원 전 검사(읽기 전용)</button>
         <button type="button" className={btn} disabled={!isAdmin || !ready || !onMissingCheck || !!busy} onClick={() => void run("missing", onMissingCheck)}>누락 파일 검사</button>
         {getStatus && <button type="button" className={btn} disabled={!!busy} onClick={() => void run("status", getStatus)}>상태 새로고침</button>}
       </div>
+
+      <p className="mt-2 text-[0.7rem] text-slate-400">파일 복원 기능은 관리자 승인 절차를 거쳐 별도로 실행합니다. (이 화면에서는 백업과 읽기 전용 검사만 제공합니다.)</p>
+
+      {confirmArchive && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" onClick={() => setConfirmArchive(false)}>
+          <div className={`w-full max-w-md rounded-3xl p-6 shadow-xl ${darkMode ? "bg-slate-900 text-slate-100" : "bg-white text-slate-900"}`} onClick={(e) => e.stopPropagation()}>
+            <h4 className="mb-2 text-lg font-semibold">파일 재해복구 백업 시작</h4>
+            <p className="mb-5 text-sm text-slate-500">현재 Storage 파일을 재해복구 보관소에 백업합니다. 기존 업무 파일을 삭제하거나 변경하지 않습니다. 파일 수에 따라 시간이 걸릴 수 있습니다.</p>
+            <div className="flex justify-end gap-2">
+              <button type="button" className={btn} disabled={!!busy} onClick={() => setConfirmArchive(false)}>취소</button>
+              <button type="button" className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900" disabled={!!busy} onClick={() => { setConfirmArchive(false); void run("backup", onStartBackup); }}>{busy === "backup" ? "백업 중…" : "백업 시작"}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {report && (
         <pre className={`mt-3 max-h-60 overflow-auto whitespace-pre-wrap rounded-2xl border p-3 text-xs ${darkMode ? "border-slate-700 bg-slate-900 text-slate-200" : "border-slate-200 bg-white text-slate-700"}`}>{report}</pre>
