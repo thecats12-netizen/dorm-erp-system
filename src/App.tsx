@@ -121,6 +121,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import DrBackupPanel from "./features/backup/DrBackupPanel";
 import RestoreWizard from "./features/backup/RestoreWizard";
 import { readExamBackup, callExamDrRestore, postVerifyExam, buildExamRestorePayload, EXAM_BACKUP_TABLES, type ExamBackup } from "./features/exam-management/services/examDrService";
+import { readRbacBackup, callRbacDrRestore, postVerifyRbac, buildRbacRestorePayload, RBAC_BACKUP_TABLES, type RbacBackup } from "./features/role-management/rbacDrService";
 import {
   type CanonicalBackup as DrCanonicalBackup, type CanonicalModules as DrCanonicalModules,
   type RestorePlan as DrRestorePlan, type Selection as DrSelection, type PolicyChoice as DrPolicyChoice,
@@ -4196,6 +4197,32 @@ export default function App() {
     const res = await callExamDrRestore(supabase, reqId, payload);
     if (!res.ok) return { ok: false, code: res.code, message: res.message };
     const pv = await postVerifyExam(supabase, tenantId);
+    return { ok: true, idempotent: res.idempotent, message: res.message, postVerifyOk: pv.ok, postVerifyIssues: pv.issues };
+  };
+  // ── RBAC(사용자·권한) DR 핸들러 — rbacDrService 위임(서버 RPC 경계, service_role 미사용) ──
+  const getRbacBackupLive = async (): Promise<RbacBackup> => {
+    if (!supabase) throw new Error("Supabase 미구성");
+    return readRbacBackup(supabase, tenantId);
+  };
+  const rbacProbeAvailable = async (): Promise<boolean> => {
+    if (!supabase) return false;
+    try { const { data, error } = await supabase.rpc("rbac_dr_available"); return !error && data === true; } catch { return false; }
+  };
+  const rbacGetDbPresentTables = async (): Promise<string[]> => {
+    if (!supabase) return [];
+    const present: string[] = [];
+    for (const t of RBAC_BACKUP_TABLES) {
+      const { count } = await supabase.from(t).select("id", { count: "exact", head: true }).eq("tenant_id", tenantId);
+      if ((count ?? 0) > 0) present.push(t);
+    }
+    return present;
+  };
+  const onRbacRestore = async (datasetKeys: string[], rbacBackup: RbacBackup) => {
+    if (!supabase) return { ok: false, message: "Supabase 미구성" };
+    const reqId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`);
+    const res = await callRbacDrRestore(supabase, reqId, buildRbacRestorePayload(datasetKeys, rbacBackup));
+    if (!res.ok) return { ok: false, code: res.code, message: res.message };
+    const pv = await postVerifyRbac(supabase, tenantId);
     return { ok: true, idempotent: res.idempotent, message: res.message, postVerifyOk: pv.ok, postVerifyIssues: pv.issues };
   };
   // 복원 dry-run 비교용 현재 상태(canonical). READ-ONLY.
@@ -23767,7 +23794,7 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                     <li>※ 휴지통 메뉴의 "백업/복원"은 앱 내부 스냅샷(수동/자동) 목록으로 별도 보관됩니다.</li>
                   </ul>
                 </div>
-                <DrBackupPanel darkMode={theme.darkMode} isAdmin={canManageUsers(currentUser)} getLiveData={getLiveDrData} getExamBackup={getExamBackupLive} onToast={showNetworkToast} />
+                <DrBackupPanel darkMode={theme.darkMode} isAdmin={canManageUsers(currentUser)} getLiveData={getLiveDrData} getExamBackup={getExamBackupLive} getRbacBackup={getRbacBackupLive} onToast={showNetworkToast} />
                 <RestoreWizard
                   darkMode={theme.darkMode}
                   isAdmin={canManageUsers(currentUser)}
@@ -23778,6 +23805,9 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   examProbeAvailable={examProbeAvailable}
                   examGetDbPresentTables={examGetDbPresentTables}
                   onExamRestore={onExamRestore}
+                  rbacProbeAvailable={rbacProbeAvailable}
+                  rbacGetDbPresentTables={rbacGetDbPresentTables}
+                  onRbacRestore={onRbacRestore}
                 />
               </div>
             </div>

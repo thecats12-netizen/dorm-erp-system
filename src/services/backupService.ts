@@ -24,6 +24,8 @@ export type SystemModuleData = { systemSettings?: unknown; theme?: unknown; cust
 export type AuditModuleData = { auditLogs: unknown[] };
 // 시험관리 — 서버 다중테이블(FK). 백업은 테이블명→행배열 맵. 복원은 서버 RPC(exam_dr_restore)가 담당.
 export type ExamModuleData = Record<string, unknown[]>;
+// RBAC(사용자·권한) — 서버 다중테이블. 복원은 서버 RPC(rbac_dr_restore)가 담당(관리자 보호·auth guard).
+export type RbacModuleData = Record<string, unknown[]>;
 
 export type CanonicalModules = {
   dorm?: DormModuleData;
@@ -33,6 +35,7 @@ export type CanonicalModules = {
   system?: SystemModuleData;
   audit?: AuditModuleData;
   exam?: ExamModuleData;
+  rbac?: RbacModuleData;
 };
 
 export type SourceFormat = "dr" | "legacy-flat" | "nested-databackup" | "general" | "unknown";
@@ -137,6 +140,14 @@ function buildExam(examObj: Record<string, unknown>): ExamModuleData | undefined
   for (const k of keys) out[k] = asArray(examObj[k]);
   return out;
 }
+// RBAC: rbac 객체({table: rows}) 정규화. 비어있으면 undefined.
+function buildRbac(rbacObj: Record<string, unknown>): RbacModuleData | undefined {
+  const keys = Object.keys(rbacObj);
+  if (keys.length === 0) return undefined;
+  const out: RbacModuleData = {};
+  for (const k of keys) out[k] = asArray(rbacObj[k]);
+  return out;
+}
 
 function computeCounts(m: CanonicalModules): Record<string, number> {
   const c: Record<string, number> = {};
@@ -146,6 +157,7 @@ function computeCounts(m: CanonicalModules): Record<string, number> {
   if (m.military) for (const k of MILITARY_KEYS) if (Array.isArray((m.military as Record<string, unknown>)[k])) c[MILITARY_KEY_LABELS[k]] = ((m.military as Record<string, unknown>)[k] as unknown[]).length;
   if (m.audit) c["감사로그"] = m.audit.auditLogs.length;
   if (m.exam) for (const [t, rows] of Object.entries(m.exam)) c["exam:" + t] = Array.isArray(rows) ? rows.length : 0;
+  if (m.rbac) for (const [t, rows] of Object.entries(m.rbac)) c["rbac:" + t] = Array.isArray(rows) ? rows.length : 0;
   return c;
 }
 
@@ -168,6 +180,7 @@ export function canonicalizeModulesForChecksum(modules: CanonicalModules): Canon
   const system = buildSystem(flat); if (system) out.system = system;
   const audit = buildAudit(flat); if (audit) out.audit = audit;
   const exam = buildExam(asObj(modules.exam)); if (exam) out.exam = exam; // exam 은 flatten 대상 아님(테이블맵 그대로)
+  const rbac = buildRbac(asObj(modules.rbac)); if (rbac) out.rbac = rbac;
   return out;
 }
 
@@ -211,7 +224,7 @@ export function adaptToCanonical(raw: unknown): CanonicalBackup {
   const system = buildSystem(src); if (system) modules.system = system;
   const audit = buildAudit(src); if (audit) modules.audit = audit;
   // 시험관리: dr 포맷의 modules.exam(테이블맵)만 사용(flatten 안 함). 그 외 포맷엔 exam 없음.
-  if (fmt === "dr") { const exam = buildExam(asObj(asObj(root.modules).exam)); if (exam) modules.exam = exam; }
+  if (fmt === "dr") { const exam = buildExam(asObj(asObj(root.modules).exam)); if (exam) modules.exam = exam; const rbac = buildRbac(asObj(asObj(root.modules).rbac)); if (rbac) modules.rbac = rbac; }
 
   const included = Object.keys(modules).map((k) => MODULE_LABELS[k] || k);
   return {
@@ -232,7 +245,7 @@ export function adaptToCanonical(raw: unknown): CanonicalBackup {
 // ── DR 백업 생성(라이브 앱 데이터 → canonical → 직렬화) ──────────────────────
 export function buildDrBackup(input: {
   tenantId: string; appVersion?: string;
-  dorm?: DormModuleData; operational?: OperationalModuleData; asset?: AssetModuleData; military?: MilitaryModuleData; system?: SystemModuleData; audit?: AuditModuleData; exam?: ExamModuleData;
+  dorm?: DormModuleData; operational?: OperationalModuleData; asset?: AssetModuleData; military?: MilitaryModuleData; system?: SystemModuleData; audit?: AuditModuleData; exam?: ExamModuleData; rbac?: RbacModuleData;
 }): CanonicalBackup {
   const modules: CanonicalModules = {};
   if (input.dorm) modules.dorm = input.dorm;
@@ -240,6 +253,7 @@ export function buildDrBackup(input: {
   if (input.asset) modules.asset = input.asset;
   if (input.military) modules.military = input.military;
   if (input.exam && Object.keys(input.exam).length) modules.exam = input.exam;
+  if (input.rbac && Object.keys(input.rbac).length) modules.rbac = input.rbac;
   if (input.system) modules.system = input.system;
   if (input.audit) modules.audit = input.audit;
   const checksum = checksumOfModules(modules);
