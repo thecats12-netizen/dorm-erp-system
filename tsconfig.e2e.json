@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "node10",
+    "ignoreDeprecations": "6.0",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "types": [
+      "node"
+    ],
+    "outDir": "./.e2e-build",
+    "rootDir": "."
+  },
+  "include": [
+    "src/services/storageDr/**/*.ts",
+    "src/services/backupService.ts",
+    "src/services/datasetRegistry.ts",
+    "src/utils/backupSecurity.ts",
+    "scripts/storageDr/e2e.ts",
+    "scripts/storageDr/rp.ts",
+    "scripts/storageDr/http.ts",
+    "scripts/storageDr/dbdr-check.ts",
+    "scripts/storageDr/wiring.ts"
+  ],
+  "exclude": [
+    ".e2e-build",
+    "src/services/storageDr/storageDrClient.ts"
+  ]
+}

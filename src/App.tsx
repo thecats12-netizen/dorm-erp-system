@@ -119,6 +119,8 @@ import { DateFilter } from "./components";
 import FilteredDormSelector from "./components/FilteredDormSelector";
 import ErrorBoundary from "./components/ErrorBoundary";
 import DrBackupPanel from "./features/backup/DrBackupPanel";
+import StorageDrPanel from "./features/backup/StorageDrPanel";
+import { fetchStorageDrStatus, startStorageDrArchive, startStorageDrRestore } from "./services/storageDr/storageDrClient";
 import RestoreWizard from "./features/backup/RestoreWizard";
 import { readExamBackup, callExamDrRestore, postVerifyExam, buildExamRestorePayload, EXAM_BACKUP_TABLES, type ExamBackup } from "./features/exam-management/services/examDrService";
 import { readRbacBackup, callRbacDrRestore, postVerifyRbac, buildRbacRestorePayload, RBAC_BACKUP_TABLES, type RbacBackup } from "./features/role-management/rbacDrService";
@@ -23795,6 +23797,14 @@ const handleDefectRequestPhotos = async (files: FileList | null) => {
                   </ul>
                 </div>
                 <DrBackupPanel darkMode={theme.darkMode} isAdmin={canManageUsers(currentUser)} getLiveData={getLiveDrData} getExamBackup={getExamBackupLive} getRbacBackup={getRbacBackupLive} onToast={showNetworkToast} />
+                <StorageDrPanel
+                  darkMode={theme.darkMode}
+                  isAdmin={canManageUsers(currentUser)}
+                  probeStatus={fetchStorageDrStatus}
+                  onStartBackup={async () => { const r = await startStorageDrArchive(); showNetworkToast(r.message); }}
+                  onPreRestoreCheck={async () => { const r = await startStorageDrRestore(); return r.message; }}
+                  onToast={showNetworkToast}
+                />
                 <RestoreWizard
                   darkMode={theme.darkMode}
                   isAdmin={canManageUsers(currentUser)}
