@@ -3,6 +3,7 @@ import {
   buildDrBackup, serializeDrBackup, P0_EXCLUDED, MODULE_LABELS, MILITARY_KEY_LABELS, MILITARY_KEYS,
   type DormModuleData, type OperationalModuleData, type AssetModuleData, type MilitaryModuleData, type SystemModuleData, type AuditModuleData,
 } from "../../services/backupService";
+import { displayRecordCountLabel } from "../../services/datasetRegistry";
 
 // DR(재해복구) 백업 생성 패널 — 관리자 전용. 포함/제외를 명확히 표시하고 PII 경고 후 다운로드.
 // 라이브 데이터는 App 이 getLiveData 로 주입(백업서비스는 순수 함수).
@@ -95,7 +96,7 @@ export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, getExamB
       {Object.keys(preview).length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
           {Object.entries(preview).map(([k, v]) => (
-            <span key={k} className={`rounded-full px-2 py-0.5 text-[0.7rem] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-white text-slate-600 ring-1 ring-slate-200"}`}>{k} {v as number}</span>
+            <span key={k} className={`rounded-full px-2 py-0.5 text-[0.7rem] ${darkMode ? "bg-slate-800 text-slate-300" : "bg-white text-slate-600 ring-1 ring-slate-200"}`}>{displayRecordCountLabel(k)} {v as number}</span>
           ))}
         </div>
       )}
