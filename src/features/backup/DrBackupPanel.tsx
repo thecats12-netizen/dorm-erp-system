@@ -16,12 +16,13 @@ type Props = {
   darkMode: boolean;
   isAdmin: boolean;
   getLiveData: () => LiveData;
-  // 시험관리는 서버 다중테이블 → 다운로드 시점에 비동기 완전조회(fail-closed). 미제공 시 exam 미포함.
+  // 시험관리/RBAC는 서버 다중테이블 → 다운로드 시점에 비동기 완전조회(fail-closed). 미제공 시 미포함.
   getExamBackup?: () => Promise<Record<string, unknown[]>>;
+  getRbacBackup?: () => Promise<Record<string, unknown[]>>;
   onToast?: (msg: string) => void;
 };
 
-export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, getExamBackup, onToast }: Props) {
+export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, getExamBackup, getRbacBackup, onToast }: Props) {
   const [warnOpen, setWarnOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const card = darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-slate-50";
@@ -37,7 +38,12 @@ export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, getExamB
         try { exam = await getExamBackup(); }
         catch { onToast?.("시험관리 백업 데이터를 불러오지 못했습니다. 백업을 생성하지 않았습니다."); setBusy(false); setWarnOpen(false); return; }
       }
-      const cb = buildDrBackup({ ...live, exam });
+      let rbac: Record<string, unknown[]> | undefined;
+      if (getRbacBackup) {
+        try { rbac = await getRbacBackup(); }
+        catch { onToast?.("사용자·권한 백업 데이터를 불러오지 못했습니다. 백업을 생성하지 않았습니다."); setBusy(false); setWarnOpen(false); return; }
+      }
+      const cb = buildDrBackup({ ...live, exam, rbac });
       const json = serializeDrBackup(cb);
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -75,6 +81,7 @@ export default function DrBackupPanel({ darkMode, isAdmin, getLiveData, getExamB
             <li>{MODULE_LABELS.military}: {MILITARY_KEYS.map((k) => MILITARY_KEY_LABELS[k]).join(", ")}</li>
             <li>{MODULE_LABELS.system} · {MODULE_LABELS.audit}</li>
             <li>시험관리: 기준정보 · 인원 · 규칙/대상 · 신청/결과 · 자격/인증</li>
+            <li>사용자·권한: 프로필 · 사용자 정의 역할·권한 · 역할 배정 (비밀번호·로그인 인증정보 제외)</li>
           </ul>
         </div>
         <div className="rounded-2xl border border-amber-300/60 bg-amber-50/60 p-3 dark:border-amber-800/50 dark:bg-amber-950/30">

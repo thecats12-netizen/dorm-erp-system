@@ -7,6 +7,8 @@ import {
 import { buildModuleNodes, moduleTriState, toggleModule, toggleKey, type ModuleNode, type NodeStatus } from "./restoreSelectionModel";
 import ExamRestoreSection, { type ExamRestoreExec } from "./ExamRestoreSection";
 import type { ExamBackup } from "../exam-management/services/examDrService";
+import RbacRestoreSection, { type RbacRestoreExec } from "./RbacRestoreSection";
+import type { RbacBackup } from "../role-management/rbacDrService";
 
 type ExecResult = { ok: boolean; message: string };
 type Props = {
@@ -20,6 +22,10 @@ type Props = {
   examProbeAvailable?: () => Promise<boolean>;
   examGetDbPresentTables?: () => Promise<string[]>;
   onExamRestore?: (datasetKeys: string[], examBackup: ExamBackup) => Promise<ExamRestoreExec>;
+  // 사용자·권한(서버 RPC 경계)
+  rbacProbeAvailable?: () => Promise<boolean>;
+  rbacGetDbPresentTables?: () => Promise<string[]>;
+  onRbacRestore?: (datasetKeys: string[], rbacBackup: RbacBackup) => Promise<RbacRestoreExec>;
 };
 
 type Step = "idle" | "inspect" | "select" | "plan" | "executing" | "result";
@@ -38,7 +44,7 @@ function TriCheckbox({ state, disabled, onChange }: { state: "all" | "some" | "n
 }
 const statusText: Record<NodeStatus, string> = { selectable: "", preparing: "백업 포함 · 선택 복구 준비 중", missing: "백업에 없음" };
 
-export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getCurrentModules, onExecuteRestore, onToast, examProbeAvailable, examGetDbPresentTables, onExamRestore }: Props) {
+export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getCurrentModules, onExecuteRestore, onToast, examProbeAvailable, examGetDbPresentTables, onExamRestore, rbacProbeAvailable, rbacGetDbPresentTables, onRbacRestore }: Props) {
   const [step, setStep] = useState<Step>("idle");
   const [backup, setBackup] = useState<CanonicalBackup | null>(null);
   const [fileErr, setFileErr] = useState<string | null>(null);
@@ -159,6 +165,19 @@ export default function RestoreWizard({ darkMode, isAdmin, currentTenantId, getC
               probeAvailable={examProbeAvailable}
               getDbPresentTables={examGetDbPresentTables}
               onRestore={onExamRestore}
+              onToast={onToast}
+            />
+          )}
+
+          {/* 사용자·권한 선택 복원(서버 RPC 경계) */}
+          {onRbacRestore && rbacProbeAvailable && rbacGetDbPresentTables && backup.modules.rbac && Object.keys(backup.modules.rbac).length > 0 && (
+            <RbacRestoreSection
+              darkMode={darkMode}
+              rbacBackup={backup.modules.rbac as RbacBackup}
+              disabled={tenantMismatch}
+              probeAvailable={rbacProbeAvailable}
+              getDbPresentTables={rbacGetDbPresentTables}
+              onRestore={onRbacRestore}
               onToast={onToast}
             />
           )}
